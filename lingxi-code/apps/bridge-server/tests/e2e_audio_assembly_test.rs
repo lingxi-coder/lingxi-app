@@ -42,7 +42,7 @@ use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
-use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 
 const TEST_TOKEN: &str = "audio-asm-token-32chars000000000";
 

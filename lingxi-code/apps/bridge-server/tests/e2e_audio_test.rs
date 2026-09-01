@@ -35,8 +35,8 @@ use client_protocol::events::{AudioOpDto, ClientEvent};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
-use traits::stt::{SpeechToText, SttOpts};
-use traits::voice::{VoiceError, VoiceRecorder};
+use platform_api::stt::{SpeechToText, SttOpts};
+use platform_api::voice::{VoiceError, VoiceRecorder};
 
 const TEST_TOKEN: &str = "audio-e2e-token-32chars000000000";
 

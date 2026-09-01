@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 session = { path = "../../session" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
@@ -36,7 +36,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

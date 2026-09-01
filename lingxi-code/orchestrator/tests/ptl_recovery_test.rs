@@ -23,7 +23,7 @@ use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// A mock API client whose queue is `Result<LlmResponse, LlmError>` so a
 /// test can script `LlmError::ContextOverflow` responses. Captures per-call

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
-use traits::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
+use platform_api::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
 
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]

@@ -17,7 +17,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// A single-text `end_turn` response so each `run_turn` is exactly one API call.
 fn end_turn_response(text: &str) -> llm_client::LlmResponse {

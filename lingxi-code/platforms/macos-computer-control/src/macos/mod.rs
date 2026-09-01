@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
-use traits::computer_control::{AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot};
+use platform_api::computer_control::{AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot};
 
 fn encode_png(img: image::RgbaImage) -> Result<Vec<u8>, ComputerError> {
     let (width, height) = (img.width(), img.height());

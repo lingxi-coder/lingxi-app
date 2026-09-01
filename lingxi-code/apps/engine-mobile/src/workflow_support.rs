@@ -852,7 +852,7 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for MobileWorkflowSta
     }
 }
 
-/// Late-bound [`traits::tool_invoker::ToolInvoker`] resolving the composition
+/// Late-bound [`platform_api::tool_invoker::ToolInvoker`] resolving the composition
 /// cycle: the `LocalWorkflowHandler` is registered into the `TaskRegistry`
 /// (needs `&mut` — BEFORE the registry is `Arc`-wrapped), yet must dispatch
 /// tools through the parent's `Arc<ToolRegistry>`, which is assembled AFTER
@@ -862,7 +862,7 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for MobileWorkflowSta
 /// dispatch a tool before the build returns. Mirror of the desktop
 /// `DeferredToolInvoker`.
 pub(crate) struct DeferredToolInvoker {
-    inner: std::sync::OnceLock<Arc<dyn traits::tool_invoker::ToolInvoker>>,
+    inner: std::sync::OnceLock<Arc<dyn platform_api::tool_invoker::ToolInvoker>>,
 }
 
 impl DeferredToolInvoker {
@@ -874,22 +874,22 @@ impl DeferredToolInvoker {
 
     /// Fill the cell with the real invoker. A second call is a no-op (the
     /// first binding wins), matching the build-once semantics.
-    pub(crate) fn set(&self, invoker: Arc<dyn traits::tool_invoker::ToolInvoker>) {
+    pub(crate) fn set(&self, invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker>) {
         let _ = self.inner.set(invoker);
     }
 }
 
 #[async_trait::async_trait]
-impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
+impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke(
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -908,16 +908,16 @@ impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: traits::tool_invoker::SubagentInvocationContext,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
                     .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -2335,7 +2335,7 @@ mod run_id_tests {
             )
             .unwrap();
 
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
         );
         let output = Arc::new(tasks::output_manager::TaskOutputManager::new(
@@ -3800,7 +3800,7 @@ mod run_id_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&output_dir).expect("task output dir");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(output_dir.clone()),
         );
         let mut registry = tasks::registry::TaskRegistry::new(
@@ -4248,7 +4248,7 @@ mod run_id_tests {
 mod workspace_lease_forwarding_tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     /// Terminal invoker that records the lease token it was dispatched with.
     struct RecordingInvoker {

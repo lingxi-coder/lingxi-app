@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
-use traits::{CostSnapshot, OrchestratorHandle};
+use platform_api::{CostSnapshot, OrchestratorHandle};
 
 const DESCRIPTION: &str = "Show current session usage";
 
@@ -64,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn renders_cost_summary_block() {
-        use traits::orchestrator::ModelUsageRow;
+        use platform_api::orchestrator::ModelUsageRow;
         let rows = vec![ModelUsageRow {
             model: "claude-opus-4-8".into(),
             provider: None,

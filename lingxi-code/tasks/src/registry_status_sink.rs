@@ -74,7 +74,7 @@ impl TaskStatusSink for RegistryStatusSink {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<traits::task_registry::AgentRunUsage>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
         agent_id: Option<protocol::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
@@ -88,7 +88,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::AgentTerminalOutcome,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
         if let Some(reg) = self.registry.get() {
             reg.set_agent_outcome(task_id, outcome).await;
@@ -98,7 +98,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
         if let Some(reg) = self.registry.get() {
             reg.set_workflow_outcome(task_id, outcome).await;
@@ -108,7 +108,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         if let Some(reg) = self.registry.get() {

@@ -40,10 +40,10 @@ use async_trait::async_trait;
 use futures::stream::StreamExt;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use traits::filesystem::FileSystem;
-use traits::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
-use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use traits::{
+use platform_api::filesystem::FileSystem;
+use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
@@ -346,7 +346,7 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
         .or_else(|| opts.get("model_profile"))
         .and_then(Value::as_str)
         .filter(|profile| !profile.is_empty());
-    Some(traits::qualified_model_ref(
+    Some(platform_api::qualified_model_ref(
         agent_model,
         agent_model_profile,
     ))
@@ -850,7 +850,7 @@ pub struct LocalWorkflowHandler {
     /// {isolation:"worktree"})` calls. When wired, each isolated workflow
     /// subagent gets a fresh worktree cwd and the terminal keep/cleanup
     /// judgment runs after the spawn returns.
-    worktree_manager: Option<Arc<dyn traits::worktree::WorktreeManager>>,
+    worktree_manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
     /// `task_id` → live worker-cancel record (removed by the worker on exit, or
     /// by [`Task::kill`] / cleanup).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
@@ -970,7 +970,7 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_worktree_manager(
         mut self,
-        manager: Arc<dyn traits::worktree::WorktreeManager>,
+        manager: Arc<dyn platform_api::worktree::WorktreeManager>,
     ) -> Self {
         self.worktree_manager = Some(manager);
         self
@@ -1059,7 +1059,7 @@ impl LocalWorkflowHandler {
 
 struct WorkflowIsolationSpawner {
     inner: Arc<dyn SubagentSpawner>,
-    worktree: Option<Arc<dyn traits::worktree::WorktreeManager>>,
+    worktree: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
     slug_prefix: String,
     sequence: AtomicU64,
     transcript_subdir: Option<PathBuf>,
@@ -1071,8 +1071,8 @@ impl WorkflowIsolationSpawner {
         mut request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: Option<traits::subagent_spawn::WorkflowQueryWatchdog>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: Option<platform_api::subagent_spawn::WorkflowQueryWatchdog>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let worktree = if request.isolation.as_deref() == Some("worktree") {
             if let Some(manager) = self.worktree.as_ref() {
@@ -1121,7 +1121,7 @@ impl WorkflowIsolationSpawner {
             })
             .await;
         if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
-            let _ = traits::worktree::agent_worktree_result(manager.as_ref(), handle).await;
+            let _ = platform_api::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
         result
     }
@@ -1170,7 +1170,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, None)
             .await
@@ -1181,8 +1181,8 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, Some(watchdog))
             .await
@@ -1223,7 +1223,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<traits::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+    ) -> Result<platform_api::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
         self.inner.spawn_async(request, inherit).await
     }
 }
@@ -1638,10 +1638,10 @@ impl WorkflowAgentLiveObserver {
 }
 
 #[async_trait]
-impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
-    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
+    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
         match event {
-            traits::subagent_spawn::SubagentObservation::Allocated {
+            platform_api::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 model,
@@ -1655,7 +1655,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 self.publish_with(move |state| {
                     state.agent_id = Some(agent_id.to_string());
                     state.agent_type = Some(agent_type);
-                    state.model = Some(traits::qualified_model_ref(
+                    state.model = Some(platform_api::qualified_model_ref(
                         &model,
                         model_profile.as_deref(),
                     ));
@@ -1665,7 +1665,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 })
                 .await;
             }
-            traits::subagent_spawn::SubagentObservation::Progress {
+            platform_api::subagent_spawn::SubagentObservation::Progress {
                 tool_use_count,
                 token_count,
                 ..
@@ -1678,7 +1678,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 })
                 .await;
             }
-            traits::subagent_spawn::SubagentObservation::Retry {
+            platform_api::subagent_spawn::SubagentObservation::Retry {
                 attempt, reason, ..
             } => {
                 let now = unix_time_ms_now();
@@ -1690,7 +1690,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 })
                 .await;
             }
-            traits::subagent_spawn::SubagentObservation::Message { message, .. } => {
+            platform_api::subagent_spawn::SubagentObservation::Message { message, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.last_progress_at_ms = Some(now);
@@ -1705,7 +1705,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 })
                 .await;
             }
-            traits::subagent_spawn::SubagentObservation::Completed {
+            platform_api::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
                 total_duration_ms,
                 usage,
@@ -1732,7 +1732,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                         .record_duration(self.call_index, total_duration_ms);
                 }
             }
-            traits::subagent_spawn::SubagentObservation::Failed { error, .. } => {
+            platform_api::subagent_spawn::SubagentObservation::Failed { error, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -1741,7 +1741,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                 })
                 .await;
             }
-            traits::subagent_spawn::SubagentObservation::Killed { .. } => {
+            platform_api::subagent_spawn::SubagentObservation::Killed { .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -2443,8 +2443,8 @@ async fn run_workflow_script_with_live_updates(
                             request,
                             inherit,
                             None,
-                            Some(observer as Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>),
-                            traits::subagent_spawn::WorkflowQueryWatchdog::default(),
+                            Some(observer as Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>),
+                            platform_api::subagent_spawn::WorkflowQueryWatchdog::default(),
                         )
                         .await
                 } else {
@@ -3111,7 +3111,7 @@ impl Task for LocalWorkflowHandler {
                 let (agents_done, agents_error, agents_skipped, agents_empty_result) =
                     workflow_metrics_snapshot.terminal_counts();
                 let terminal_outcome = match &outcome {
-                    Ok(out) => traits::task_registry::WorkflowTerminalOutcome {
+                    Ok(out) => platform_api::task_registry::WorkflowTerminalOutcome {
                         result: out.result.clone(),
                         failures: out.failures.clone(),
                         agent_count: workflow_metrics_snapshot.call_count,
@@ -3125,7 +3125,7 @@ impl Task for LocalWorkflowHandler {
                         progress_counts_available: true,
                         ..Default::default()
                     },
-                    Err(error) => traits::task_registry::WorkflowTerminalOutcome {
+                    Err(error) => platform_api::task_registry::WorkflowTerminalOutcome {
                         error: Some(error.to_string()),
                         agent_count: workflow_metrics_snapshot.call_count,
                         total_tokens: workflow_metrics_snapshot.total_tokens,

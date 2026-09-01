@@ -1,5 +1,5 @@
 //! Pre-flight symlink guard for the desktop `git worktree`-backed
-//! [`WorktreeManager`](traits::WorktreeManager) create path (posix + windows).
+//! [`WorktreeManager`](platform_api::WorktreeManager) create path (posix + windows).
 //!
 //! Behavioral port of claude-code 2.1.212's `yWi(repoRoot, target)`, called
 //! immediately before the `git worktree add` spawn. It `lstat`s the managed
@@ -18,7 +18,7 @@
 //! only the observable refusal + byte-faithful message, not the telemetry.
 
 use std::path::Path;
-use traits::WorktreeError;
+use platform_api::WorktreeError;
 
 /// Reject worktree creation when a committed symlink at the managed dot-dir
 /// could redirect the checkout outside the repository (CC 2.1.212 `yWi`).

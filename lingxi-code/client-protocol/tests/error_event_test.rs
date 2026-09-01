@@ -5,7 +5,7 @@
 //! plan F1-01):
 //!   - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
 //!     (matches `protocol::ContentBlock` / api-client `StreamEvent`),
-//!   - `#[non_exhaustive]` (mirrors `traits::OutputEvent`),
+//!   - `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`),
 //!   - `snake_case` field names.
 //!
 //! `serde_json` is a DEV-ONLY dep — the contract crate itself never depends on

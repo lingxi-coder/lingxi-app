@@ -355,16 +355,16 @@ impl McpPolicyTool for McpServerToolDecl {
     }
 }
 
-impl McpPolicyTool for traits::McpConfiguredToolPolicyDto {
+impl McpPolicyTool for platform_api::McpConfiguredToolPolicyDto {
     fn policy_tool_name(&self) -> &str {
         &self.name
     }
 
     fn policy_permission(&self) -> Option<McpToolPermissionPolicy> {
         self.permission_policy.map(|policy| match policy {
-            traits::McpToolPermissionPolicy::AlwaysAllow => McpToolPermissionPolicy::AlwaysAllow,
-            traits::McpToolPermissionPolicy::AlwaysAsk => McpToolPermissionPolicy::AlwaysAsk,
-            traits::McpToolPermissionPolicy::AlwaysDeny => McpToolPermissionPolicy::AlwaysDeny,
+            platform_api::McpToolPermissionPolicy::AlwaysAllow => McpToolPermissionPolicy::AlwaysAllow,
+            platform_api::McpToolPermissionPolicy::AlwaysAsk => McpToolPermissionPolicy::AlwaysAsk,
+            platform_api::McpToolPermissionPolicy::AlwaysDeny => McpToolPermissionPolicy::AlwaysDeny,
         })
     }
 }
@@ -618,14 +618,14 @@ mod tests {
         let rules = permission_rules_from_mcp_tool_policies(
             "srv",
             &[
-                traits::McpConfiguredToolPolicyDto {
+                platform_api::McpConfiguredToolPolicyDto {
                     name: "write".into(),
-                    permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysAllow),
+                    permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysAllow),
                     org_max_permission: None,
                 },
-                traits::McpConfiguredToolPolicyDto {
+                platform_api::McpConfiguredToolPolicyDto {
                     name: "write".into(),
-                    permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysDeny),
+                    permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysDeny),
                     org_max_permission: None,
                 },
             ],

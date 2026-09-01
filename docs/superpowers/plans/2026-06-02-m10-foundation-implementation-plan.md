@@ -17,7 +17,7 @@ These come from the FINAL DESIGN and are **not** re-litigated here. They are pin
 3. **Dependency-rule reality** (verified against `lingxi-code/scripts/check_deps.py`): there is NO `engine` key in `FORBIDDEN` (lines 30-35); `API_CRATES` is literally `{tool-api, skill-api, command-api}` (line 21) and does NOT bind `client-protocol`/`client-adapter`. The only rules binding a root-level engine crate are: (a) no edge to an `apps/*`/`examples/*` leaf (line 99); (b) API-crate purity (irrelevant here). **Net: keeping `client-protocol` minimal is a design preference, not a gate. The ONE rule to assert in CI is: no `client-protocol`/`client-adapter` → `apps/*` edge.** `deny.toml` is supply-chain only — no change needed except the new uniffi entry in F3.
 4. **Tool payloads are JSON Strings on the wire** (`input_json`/`result_json`), because `serde_json::Value` is not UniFFI-representable. Same for `effective_json`/`provenance_json`. Locked in F1.
 5. **Session lifecycle**: one transport connection owns ONE engine host that SWAPS its inner `ConversationOrchestrator` in place on New/Resume. `session_id` is a CONNECTION ATTRIBUTE (carried in `SessionStarted`/`SessionResumed`), NOT a per-command param. Adapter sinks (OutputStream/PermissionGate/listener) are connection-scoped and survive the swap. **Locked in F1 before DTO freeze.**
-6. **Permission**: the orchestrator binds `Arc<dyn PermissionGate>` and calls `check(name, &Value) -> PermissionDecision` (verified `tui/src/permission_bridge.rs:64-117`). The adapter implements `traits::PermissionGate` ONLY (no `PromptingGate`). `check()` can source ONLY `ToolUseConfirm`; `ExitPlanMode`/`BypassPermissionsMode` are DTO-reserved, feed-deferred. `default_allow` is derived from `permission::tool_default(name) -> PromptDefault`.
+6. **Permission**: the orchestrator binds `Arc<dyn PermissionGate>` and calls `check(name, &Value) -> PermissionDecision` (verified `tui/src/permission_bridge.rs:64-117`). The adapter implements `platform_api::PermissionGate` ONLY (no `PromptingGate`). `check()` can source ONLY `ToolUseConfirm`; `ExitPlanMode`/`BypassPermissionsMode` are DTO-reserved, feed-deferred. `default_allow` is derived from `permission::tool_default(name) -> PromptDefault`.
 7. **ThinkingDelta + UsageUpdate** have NO live engine source today and CANNOT be tapped without an engine change (`pump_stream` exposes only `output: Arc<dyn OutputStream>`). **§1 binary decision, made here: ship both DTOs as `#[non_exhaustive]`-reserved, feed-deferred (round-trip only, no live source) for the foundation, and DROP live thinking/usage from the §5.2 parity claim.** If/when the surgical additive `emit_thinking`/`emit_usage` engine hooks are funded, they light up without a DTO change. (Recorded as a deferred follow-up, NOT foundation work — keeps F1/F2/F3 free of engine-behavior edits per spec §1.)
 8. **Image input**: `run_turn_streaming_with_images` takes ONLY `&[PathBuf]` and reads from the engine host FS. **Foundation decision: `ImageRefDto` is uniform inline `{media_type, base64}` on the wire (no transport-leaking enum), and the adapter writes inline bytes to a temp file on the engine host for the path transport; mobile inline image input is DEFERRED in §5.12 (no additive engine entry in the foundation).** The sanctioned additive `run_turn_streaming_with_image_sources` is a funded follow-up, not foundation.
 9. **Coordinator/team (§5.6)** is BLOCKED ON ENGINE WIRING (no `TeamRegistry` instance is constructed in any assembled runtime — grep-zero) and is PULLED from the foundation lockstep checklist. DTOs are reserved (`#[non_exhaustive]`) but unfed.
@@ -41,9 +41,9 @@ These come from the FINAL DESIGN and are **not** re-litigated here. They are pin
 | **F1-09** | Structural version-diff guard test | F1-08 | removed/renamed entry ⇒ test forces major bump; addition ⇒ passes |
 | **F1-10** | Scaffold `client-adapter` crate + `ClientEventSink` trait | F1-08 | `cargo build -p client-adapter` |
 | **F1-11** | Pure `From<engine type>` lowering fns (the parity surface) | F1-10 | per-fn unit tests (lowering rules) |
-| **F1-12** | `AdapterOutputStream impl traits::OutputStream` | F1-11 | each `emit_*` → expected `ClientEvent` on the sink |
+| **F1-12** | `AdapterOutputStream impl platform_api::OutputStream` | F1-11 | each `emit_*` → expected `ClientEvent` on the sink |
 | **F1-13** | Live-turn wrapper: `MessageComplete` synthesis + `OrchestratorError` → `Error` mapping | F1-12 | each error variant → correct `Error.kind`; `MessageComplete` from `PumpedTurn` |
-| **F1-14** | `AdapterPermissionGate impl traits::PermissionGate` (id-keyed, fail-closed) | F1-11 | mirror `permission_bridge.rs` 4 tests + concurrent ids + drop/timeout = Deny |
+| **F1-14** | `AdapterPermissionGate impl platform_api::PermissionGate` (id-keyed, fail-closed) | F1-11 | mirror `permission_bridge.rs` 4 tests + concurrent ids + drop/timeout = Deny |
 | **F1-15** | Listing/screen `From` parity tests reusing TUI render fixtures | F1-11 | fixture in → matching DTO out, structural not re-derived |
 | **F1-16** | CI dep-rule assertion test (no `client-protocol`/`client-adapter` → `apps/*`) | F1-10 | `scripts/check-deps.sh` green + explicit assertion test |
 | **F2-00** | `DesktopConfig` struct (F2 deliverable-zero) | F1-13, F1-14 | type compiles; field set frozen |
@@ -89,7 +89,7 @@ These come from the FINAL DESIGN and are **not** re-litigated here. They are pin
 - **Files**: `client-protocol/src/version.rs`, `events.rs`, `commands.rs`, `lib.rs`.
 - **Approach**:
   - `pub const CLIENT_PROTOCOL_VERSION: &str = "1.0.0";`
-  - `ClientEvent` and `ClientCommand` are `#[non_exhaustive]` (mirrors `OutputEvent` at `traits/src/orchestrator.rs:371`).
+  - `ClientEvent` and `ClientCommand` are `#[non_exhaustive]` (mirrors `OutputEvent` at `platform-api/src/orchestrator.rs:371`).
   - Every enum: `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]` + `#[serde(tag = "type", rename_all = "snake_case")]` (matches `protocol::ContentBlock` and api-client `StreamEvent`).
   - Every optional field: `#[serde(default, skip_serializing_if = "Option::is_none")]` (the UsageApi/CostSnapshot forward-compat pattern).
   - `Error { kind: ErrorKindDto, message: String }` with `ErrorKindDto = Transport | Protocol | Server | MaxTurns | Internal`.
@@ -228,11 +228,11 @@ These come from the FINAL DESIGN and are **not** re-litigated here. They are pin
 - **Verify**: `cargo test -p client-adapter lowering`.
 - **depends_on**: F1-10.
 
-#### F1-12 — `AdapterOutputStream impl traits::OutputStream`
+#### F1-12 — `AdapterOutputStream impl platform_api::OutputStream`
 
 - **Goal**: the live-turn feed — the direct analog of `BridgeOutputStream` (`tui/src/events/orchestrator_bridge.rs`), pushing `ClientEvent` DTOs to the `ClientEventSink` instead of an mpsc `TurnEvent`.
 - **Files**: `client-adapter/src/output_stream.rs`.
-- **Approach**: implement the 5 `OutputStream` methods (verified at `traits/src/orchestrator.rs:423-456`): `emit_text` → `TextDelta`; `emit_tool_call` → `ToolUseStarted` (lower input via F1-11); `emit_tool_result` → `ToolUseResult`; `emit_end_turn` → `CostUpdate` + `TurnEnded`; `emit_compaction_completed` → `CompactionCompleted`. Holds an `Arc<dyn ClientEventSink>`.
+- **Approach**: implement the 5 `OutputStream` methods (verified at `platform-api/src/orchestrator.rs:423-456`): `emit_text` → `TextDelta`; `emit_tool_call` → `ToolUseStarted` (lower input via F1-11); `emit_tool_result` → `ToolUseResult`; `emit_end_turn` → `CostUpdate` + `TurnEnded`; `emit_compaction_completed` → `CompactionCompleted`. Holds an `Arc<dyn ClientEventSink>`.
 - **Tests FIRST**: feed each callback with a fixture arg and assert the matching DTO appears on the `MockSink`. `emit_end_turn_produces_cost_then_turn_ended()` (asserts BOTH events, in order).
 - **Verify**: `cargo test -p client-adapter output_stream`.
 - **depends_on**: F1-11.
@@ -249,7 +249,7 @@ These come from the FINAL DESIGN and are **not** re-litigated here. They are pin
 - **Verify**: `cargo test -p client-adapter turn`.
 - **depends_on**: F1-12.
 
-#### F1-14 — `AdapterPermissionGate impl traits::PermissionGate` (id-keyed, fail-closed)
+#### F1-14 — `AdapterPermissionGate impl platform_api::PermissionGate` (id-keyed, fail-closed)
 
 - **Goal**: the hardest mapping — replicate `TuiPermissionGate` but KEYED BY ID to multiplex concurrent worker+main requests, with an explicit fail-closed owner.
 - **Files**: `client-adapter/src/permission_gate.rs`.

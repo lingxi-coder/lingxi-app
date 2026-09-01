@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use permission::bypass_guard::BypassEnv;
 use protocol::transport::{HttpMethod, HttpRequest};
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// Production environment probe for the bypass safety guard.
 pub struct RealBypassEnv {

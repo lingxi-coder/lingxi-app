@@ -22,7 +22,7 @@
 //! [`Effect`] enum grows without needing a churn-per-variant update.
 
 use protocol::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
-use traits::EffectHandler;
+use platform_api::EffectHandler;
 
 /// Run the standard [`EffectHandler`] contract against an impl.
 ///

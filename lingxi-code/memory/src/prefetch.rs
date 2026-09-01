@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use traits::RuntimeSpawner;
+use platform_api::RuntimeSpawner;
 
 /// Side-channel that fires the memory selector concurrently with the
 /// main turn.
@@ -358,9 +358,9 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
             tokio::spawn(task);
-            Ok(traits::BackgroundTaskHandle {
+            Ok(platform_api::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -368,8 +368,8 @@ mod tests {
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }

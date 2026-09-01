@@ -283,7 +283,7 @@ impl SkillTool {
         ) else {
             return Ok(None);
         };
-        let background_tasks_disabled = traits::env::is_env_truthy(
+        let background_tasks_disabled = platform_api::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -296,7 +296,7 @@ impl SkillTool {
         );
 
         let tasks = registry
-            .list(traits::task_registry::TaskListFilter::default())
+            .list(platform_api::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         let frozen_command_denies = frozen_command_denies(&self.ctx.permission_policy);
@@ -314,7 +314,7 @@ impl SkillTool {
             // ahead of whatever is live then.
             frozen_command_denies: frozen_command_denies.clone(),
             depth: ctx.depth as usize + 1,
-            depth_limit: traits::subagent_spawn::max_subagent_spawn_depth() as usize,
+            depth_limit: platform_api::subagent_spawn::max_subagent_spawn_depth() as usize,
             total_spawns: registry.get_total_agent_spawns(),
             spawn_cap,
             tasks: &tasks,
@@ -333,7 +333,7 @@ impl SkillTool {
             }
         };
 
-        let request = traits::subagent_spawn::SubagentSpawnRequest {
+        let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             subagent_type: desc
                 .agent
                 .clone()
@@ -393,7 +393,7 @@ impl SkillTool {
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let inherit = traits::subagent_spawn::SubagentInheritance {
+        let inherit = platform_api::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(invoker_impl),
             budget: self.ctx.budget_enforcer.clone().ok_or_else(|| {
                 ToolError::Internal("Skill: budget enforcer is not configured".into())
@@ -417,7 +417,7 @@ impl SkillTool {
         }
         if crate::fork::has_live_fork(
             &registry
-                .list(traits::task_registry::TaskListFilter::default())
+                .list(platform_api::task_registry::TaskListFilter::default())
                 .await
                 .unwrap_or_default(),
             command_name,
@@ -452,7 +452,7 @@ impl SkillTool {
             // policy clone on every one of its tool calls.
             sync_request.frozen_command_denies = Vec::new();
             let (agent_id, result) = match spawner.spawn(sync_request, inherit).await {
-                Ok(traits::subagent_spawn::SubagentResult::Completed {
+                Ok(platform_api::subagent_spawn::SubagentResult::Completed {
                     agent_id, content, ..
                 }) => {
                     let text = crate::fork::final_text(&content);
@@ -467,14 +467,14 @@ impl SkillTool {
                 }
                 // A failed or killed fork surfaces as a tool error rather than
                 // silently reporting success with an empty result.
-                Ok(traits::subagent_spawn::SubagentResult::Failed { reason, .. }) => {
+                Ok(platform_api::subagent_spawn::SubagentResult::Failed { reason, .. }) => {
                     // The spawn HAPPENED, so the reservation is correctly
                     // consumed — only a fork that never launched releases it.
                     return Err(ToolError::Internal(format!(
                         "Skill {command_name} (forked execution) failed: {reason}"
                     )));
                 }
-                Ok(traits::subagent_spawn::SubagentResult::Killed { .. }) => {
+                Ok(platform_api::subagent_spawn::SubagentResult::Killed { .. }) => {
                     return Err(ToolError::Internal(format!(
                         "Skill {command_name} (forked execution) was stopped"
                     )));

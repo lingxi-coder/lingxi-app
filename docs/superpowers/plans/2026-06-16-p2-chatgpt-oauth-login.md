@@ -68,7 +68,7 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 secret = { path = "../secret" }
 telemetry = { path = "../telemetry" }
 llm-client = { path = "../llm-client" }

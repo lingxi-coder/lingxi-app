@@ -9,7 +9,7 @@
 use platform_posix::sandbox::PosixSandbox;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use traits::{
+use platform_api::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     SandboxedTag,
 };

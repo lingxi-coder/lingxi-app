@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,

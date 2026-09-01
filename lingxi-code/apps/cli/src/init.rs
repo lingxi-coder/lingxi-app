@@ -31,7 +31,7 @@ use orchestrator::ConversationOrchestrator;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use traits::{AuthHandle, OutputStream};
+use platform_api::{AuthHandle, OutputStream};
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
@@ -68,7 +68,7 @@ pub struct Runtime {
     /// refined by the background profile+roles fetch). The TUI mount threads a
     /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
     /// composer reads the live snapshot.
-    pub subscription: traits::subscription::SharedSubscription,
+    pub subscription: platform_api::subscription::SharedSubscription,
     /// (`/sandbox`) Shared bash-sandbox toggle cell, projected straight from
     /// [`engine_desktop::DesktopRuntime::sandbox_toggle`] (the SAME
     /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
@@ -121,7 +121,7 @@ pub struct Runtime {
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned `/web` test-search requests.
-    pub http: std::sync::Arc<dyn traits::HttpTransport>,
+    pub http: std::sync::Arc<dyn platform_api::HttpTransport>,
     /// Structured-output capture slot, projected from
     /// [`engine_desktop::DesktopRuntime::structured_output_slot`]. `Some` only
     /// under `--json-schema`; the print path reads it after each turn to validate
@@ -235,7 +235,7 @@ pub struct TuiBuild {
     /// the composition root and is applied to the mounted composer.
     pub emoji_completion_enabled: bool,
     /// Parsed `--settings` layer retained for TUI-owned command surfaces.
-    pub flag_settings: Option<engine::settings::SettingsJson>,
+    pub flag_settings: Option<lingxi_core::settings::SettingsJson>,
     /// Exact user/project/local source gates for status-line provenance.
     pub status_line_source_scope: (bool, bool, bool),
 }
@@ -414,10 +414,10 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
 fn load_scoped_settings(
     include_user: bool,
     include_project: bool,
-) -> Option<engine::settings::EffectiveSettings> {
+) -> Option<lingxi_core::settings::EffectiveSettings> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     type Key = (std::path::PathBuf, bool, bool, u64);
-    static CACHE: std::sync::Mutex<Option<(Key, engine::settings::EffectiveSettings)>> =
+    static CACHE: std::sync::Mutex<Option<(Key, lingxi_core::settings::EffectiveSettings)>> =
         std::sync::Mutex::new(None);
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let revision = settings_revision(&project_dir, include_user, include_project, &env);
@@ -432,13 +432,13 @@ fn load_scoped_settings(
             }
         }
     }
-    let inputs = engine::settings::LoadInputs {
+    let inputs = lingxi_core::settings::LoadInputs {
         env: &env,
         project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
+        defaults: lingxi_core::settings::schema::SettingsJson::default(),
     };
     let loaded =
-        engine::settings::Settings::load_scoped(inputs, include_user, include_project).ok()?;
+        lingxi_core::settings::Settings::load_scoped(inputs, include_user, include_project).ok()?;
     *CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, loaded.clone()));
@@ -456,17 +456,17 @@ fn settings_revision(
     include_project.hash(&mut hasher);
     if include_user {
         settings_file_revision(
-            engine::settings::loader::user_settings_path().as_deref(),
+            lingxi_core::settings::loader::user_settings_path().as_deref(),
             &mut hasher,
         );
     }
     if include_project {
         settings_file_revision(
-            Some(engine::settings::loader::project_settings_path(project_dir).as_path()),
+            Some(lingxi_core::settings::loader::project_settings_path(project_dir).as_path()),
             &mut hasher,
         );
         settings_file_revision(
-            Some(engine::settings::loader::local_settings_path(project_dir).as_path()),
+            Some(lingxi_core::settings::loader::local_settings_path(project_dir).as_path()),
             &mut hasher,
         );
     }
@@ -659,9 +659,9 @@ pub(crate) fn resolve_desktop_config(
     // subagent inheriting `CLAUDE_CODE_SAFE_MODE`).
     let gates = engine_desktop::CustomizationGates {
         safe_mode: argv.safe_mode
-            || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref()),
+            || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref()),
         bare: argv.bare
-            || traits::env::is_env_truthy(std::env::var("LINGXI_SIMPLE").ok().as_deref()),
+            || platform_api::env::is_env_truthy(std::env::var("LINGXI_SIMPLE").ok().as_deref()),
     };
 
     // `--strict-mcp-config` (claude-code main.tsx:1586): "Only use MCP servers
@@ -1099,7 +1099,7 @@ fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, Strin
 /// validation/error surface continues to be owned by argument initialization.
 pub(crate) fn parse_flag_settings(
     settings: Option<&str>,
-) -> Option<engine::settings::SettingsJson> {
+) -> Option<lingxi_core::settings::SettingsJson> {
     let raw = settings?.trim();
     let text = if raw.starts_with('{') {
         raw.to_string()

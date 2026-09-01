@@ -5,7 +5,7 @@ use session::jsonl::{list_recent_sessions, project_dir_name, LoaderError};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 use uuid::Uuid;
 
 /// Build a tempdir that mimics `<lingxi_home>/projects/<sanitize(cwd)>/` and

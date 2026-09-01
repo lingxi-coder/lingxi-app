@@ -1443,7 +1443,7 @@ pub fn url_matches(url_str: &str, pattern: &str) -> bool {
 // ────────────────────────────────────────────────────────────────────────────
 
 use crate::connection::{ConfigScope, McpServerConfig};
-use traits::McpTransportSpec;
+use platform_api::McpTransportSpec;
 
 /// Project a loaded [`McpTransportSpec`] onto the `{type, command, args, url}`
 /// config view the matchers extract from (claude `oVn`/`iVn` read those keys).

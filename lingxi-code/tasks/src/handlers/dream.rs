@@ -50,7 +50,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use traits::{
+use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
@@ -505,9 +505,9 @@ mod tests {
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use traits::{BudgetError, SubagentSpawnError, SubagentUsage};
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
 
     // ---- In-memory FileSystem (mirrors local_agent test fixture) -----------
 

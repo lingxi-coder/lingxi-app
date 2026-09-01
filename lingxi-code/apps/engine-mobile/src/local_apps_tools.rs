@@ -446,7 +446,7 @@ impl Tool for LocalAppTool {
 /// image content: the unit test that existed covered the MCP transport (the
 /// layer that BUILDS the image block) and not this one (the layer the agent
 /// actually goes through, which threw it away).
-fn envelope_to_tool_result(result: traits::McpToolResultDto) -> ToolCallResult {
+fn envelope_to_tool_result(result: platform_api::McpToolResultDto) -> ToolCallResult {
     // The provider builds an MCP ENVELOPE: `content` is
     // `[{"type":"text","text":"<json>"}]` and `structured_content` carries
     // the real payload. Handing the envelope to `from_data` would make the
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn a_captured_frame_survives_the_envelope_unwrap() {
         const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
-        let out = envelope_to_tool_result(traits::McpToolResultDto {
+        let out = envelope_to_tool_result(platform_api::McpToolResultDto {
             content: serde_json::json!([
                 { "type": "image", "data": DATA, "mimeType": "image/jpeg" }
             ]),
@@ -615,7 +615,7 @@ mod tests {
     /// answers `tool_error` for an empty frame; this layer has to agree.
     #[test]
     fn an_empty_frame_falls_through_to_the_text_path() {
-        let out = envelope_to_tool_result(traits::McpToolResultDto {
+        let out = envelope_to_tool_result(platform_api::McpToolResultDto {
             content: serde_json::json!([{ "type": "image", "data": "", "mimeType": "image/jpeg" }]),
             is_error: true,
             structured_content: Some(serde_json::json!({ "ok": false })),
@@ -636,7 +636,7 @@ mod tests {
     /// them would be a far larger regression than the one it fixes.
     #[test]
     fn a_text_envelope_is_unwrapped_unchanged() {
-        let out = envelope_to_tool_result(traits::McpToolResultDto {
+        let out = envelope_to_tool_result(platform_api::McpToolResultDto {
             content: serde_json::json!([{ "type": "text", "text": "{\"records\":[]}" }]),
             is_error: false,
             structured_content: Some(serde_json::json!({ "records": [] })),

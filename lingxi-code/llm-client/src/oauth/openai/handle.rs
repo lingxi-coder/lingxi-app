@@ -18,7 +18,7 @@
 //!      [`device_code::run_device_code_login`] → same persist steps.
 //!
 //! **Trait note:** we expose INHERENT async methods rather than implementing
-//! `traits::AuthHandle`, because that trait's `LoginInfo` type carries
+//! `platform_api::AuthHandle`, because that trait's `LoginInfo` type carries
 //! `email`+`org_id` (Anthropic-shaped) whereas `ChatGPT` carries `account_id`+
 //! `fedramp`. The engine M8 wrapper (`ChatGptConnectDriver`) will call these
 //! inherent methods directly.
@@ -30,7 +30,7 @@ use crate::oauth::openai::token_data::parse_id_token;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use traits::Clock;
+use platform_api::Clock;
 
 /// Wall-clock source for production use in the device-code path.
 struct RealClock;
@@ -429,7 +429,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use traits::HttpTransport;
+    use platform_api::HttpTransport;
 
     #[allow(dead_code)]
     fn _openai_oauth_handle_is_send_sync() {

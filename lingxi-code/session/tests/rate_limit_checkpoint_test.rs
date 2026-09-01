@@ -11,7 +11,7 @@
 //! fired from the `is_carveout_propagated` arm when a turn ends on
 //! `LlmError::RateLimited`.
 
-use engine::session::{TodoItem, TodoState};
+use lingxi_core::session::{TodoItem, TodoState};
 use session::{
     clear_last_checkpoint_result, last_checkpoint_result, perform_rate_limit_checkpoint,
     CheckpointGates, CheckpointRequest, CheckpointResult, CheckpointSkipReason, CheckpointTrigger,

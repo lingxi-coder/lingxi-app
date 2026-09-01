@@ -1,4 +1,4 @@
-//! Core conversation state machine.
+//! Conversation state machine (cargo package `core`, rust ident `lingxi_core`).
 //!
 //! - `events::Event` — inputs to the reducer
 //! - `state_machine::ConversationState` — the state set

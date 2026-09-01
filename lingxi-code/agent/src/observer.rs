@@ -19,11 +19,11 @@ pub(crate) fn observer_env_lock() -> &'static std::sync::Mutex<()> {
 /// disabled. LingXi mirrors the externally observable gate here.
 #[must_use]
 pub fn observer_agents_enabled() -> bool {
-    let disabled = traits::env::is_env_truthy(
+    let disabled = platform_api::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
-    ) || traits::env::is_env_truthy(
+    ) || platform_api::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
@@ -31,11 +31,11 @@ pub fn observer_agents_enabled() -> bool {
     if disabled {
         return false;
     }
-    traits::env::is_env_truthy(
+    platform_api::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS")
             .ok()
             .as_deref(),
-    ) || traits::env::is_env_truthy(
+    ) || platform_api::env::is_env_truthy(
         std::env::var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS")
             .ok()
             .as_deref(),
@@ -137,7 +137,7 @@ fn validate_observer_chain<'a>(
     let Some(observer) = definition.observer.as_ref() else {
         return Ok(());
     };
-    if observer.schema_version != traits::subagent_spawn::OBSERVER_SCHEMA_VERSION {
+    if observer.schema_version != platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION {
         return Err(ObserverValidationError::UnsupportedSchema {
             owner: definition.agent_type.clone(),
             version: observer.schema_version,
@@ -170,7 +170,7 @@ fn validate_observer_chain<'a>(
         else {
             break;
         };
-        if next.schema_version != traits::subagent_spawn::OBSERVER_SCHEMA_VERSION {
+        if next.schema_version != platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION {
             return Err(ObserverValidationError::UnsupportedSchema {
                 owner: cursor.to_string(),
                 version: next.schema_version,

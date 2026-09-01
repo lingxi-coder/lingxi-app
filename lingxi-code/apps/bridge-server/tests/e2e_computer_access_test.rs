@@ -119,7 +119,7 @@ fn build_connection() -> BridgeConnection {
     let batched = Arc::new(MockApiClient::new(Vec::new())); // unused on streaming path
 
     let connection = BridgeConnection::new();
-    let output: Arc<dyn traits::OutputStream> =
+    let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(AdapterOutputStream::new(connection.event_sink()));
 
     // The SAME channel shape `engine_desktop::build` wires onto

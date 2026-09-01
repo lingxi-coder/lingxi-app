@@ -55,7 +55,7 @@ pub const ENV_AI_AGENT: &str = "AI_AGENT";
 pub fn ai_agent_value() -> String {
     format!(
         "claude-code_{}_agent",
-        traits::CLAUDE_CODE_VERSION.replace('.', "-")
+        platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
     )
 }
 
@@ -189,7 +189,7 @@ mod tests {
             v,
             format!(
                 "claude-code_{}_agent",
-                traits::CLAUDE_CODE_VERSION.replace('.', "-")
+                platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
             )
         );
     }

@@ -8,7 +8,7 @@ use lsp::LspRegistry;
 use protocol::PluginId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 struct DummyTransport;
 
@@ -73,7 +73,7 @@ async fn register_plugin_servers_is_public_and_works() {
 ///
 /// ```compile_fail
 /// use lsp::LspRegistry;
-/// use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+/// use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 /// use std::sync::Arc;
 ///
 /// struct T;

@@ -1,6 +1,6 @@
-# lingxi-traits
+# platform-api
 
-Platform abstraction traits for the LingXi Core engine. The engine depends on these traits; platform crates (`platforms/posix`, `platforms/windows`, etc.) implement them. Provides:
+Platform abstraction traits for LingXi. Library crates depend on these traits; platform crates (`platforms/posix`, `platforms/windows`, etc.) implement them. Provides:
 - `HttpTransport` — provider-neutral HTTP + SSE abstraction.
 - `Clock` — wall-clock time abstraction.
 - `RuntimeSpawner` — background task spawning (the engine never calls `tokio::spawn` directly — see D17).

@@ -5,7 +5,7 @@
 //! under the historical `PosixHttp` name so `platform_posix`'s public API
 //! and behavior are byte-identical to before the extraction.
 //!
-//! `traits::HttpTransport` is implemented on `ReqwestHttp`, so the re-exported
+//! `platform_api::HttpTransport` is implemented on `ReqwestHttp`, so the re-exported
 //! `PosixHttp` satisfies the same trait bound with no wrapper indirection.
 
 /// Production HTTP transport using `reqwest::Client`.

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsSink, LogEventMetadata};
 use tokio::sync::Mutex;
-use traits::http::SseStream;
-use traits::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use platform_api::http::SseStream;
+use platform_api::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct CountingTransport {
     calls: Arc<AtomicU32>,

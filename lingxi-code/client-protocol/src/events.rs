@@ -7,7 +7,7 @@
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
 //!   (matches `protocol::ContentBlock` / api-client `StreamEvent`),
-//! - top-level enum is `#[non_exhaustive]` (mirrors `traits::OutputEvent`),
+//! - top-level enum is `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`),
 //! - every optional field uses
 //!   `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 //!
@@ -537,7 +537,7 @@ pub enum ErrorKindDto {
     Internal,
 }
 
-/// How a turn ended — the lowered analog of `traits::TurnOutcome`. Internally
+/// How a turn ended — the lowered analog of `platform_api::TurnOutcome`. Internally
 /// tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future outcome is
 /// additive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -605,7 +605,7 @@ pub struct TurnRecoverySnapshotDto {
     pub reason: Option<String>,
 }
 
-/// Cumulative cost snapshot — the lowered analog of `traits::CostSnapshot`
+/// Cumulative cost snapshot — the lowered analog of `platform_api::CostSnapshot`
 /// (`Duration` → whole seconds; only the display-relevant fields, decision
 /// §0.4). Carried by [`ClientEvent::TurnEnded`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -630,11 +630,11 @@ pub struct CostDto {
 /// tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future op is
 /// additive.
 ///
-/// Mirrors the argument shapes of `traits::{VoiceRecorder, SpeechToText,
+/// Mirrors the argument shapes of `platform_api::{VoiceRecorder, SpeechToText,
 /// TextToSpeech}` one-to-one, so this contract can carry every call those
 /// traits make without loss: `StartRecording`/`StopRecording`/`IsRecording`
 /// lower `VoiceRecorder::{start_recording, stop_recording, is_recording}`
-/// (`StartRecording`'s fields are `traits::VoiceRecordingOpts`); `Transcribe`
+/// (`StartRecording`'s fields are `platform_api::VoiceRecordingOpts`); `Transcribe`
 /// lowers `SpeechToText::transcribe`'s `SttOpts`; `Synthesize` lowers
 /// `TextToSpeech::synthesize`'s `TtsOpts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

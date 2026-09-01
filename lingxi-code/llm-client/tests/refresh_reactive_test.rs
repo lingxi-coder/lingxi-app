@@ -13,7 +13,7 @@ use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use traits::{Clock, HttpError, HttpTransport};
+use platform_api::{Clock, HttpError, HttpTransport};
 
 /// Counting HTTP transport: every `request()` increments `calls`. Always returns
 /// a fresh token in the JSON body.
@@ -40,7 +40,7 @@ impl HttpTransport for CountingTransport {
             body_bytes: Vec::new(),
         })
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         unimplemented!("not used in refresh tests");
     }
 }

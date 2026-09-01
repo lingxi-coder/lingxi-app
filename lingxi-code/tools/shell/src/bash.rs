@@ -574,10 +574,10 @@ pub fn bash_max_output_length() -> usize {
 /// st(process.env.LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR)}`): when truthy, the
 /// shell cwd is ALWAYS reset to the original (workspace) after a command, even
 /// for an in-workspace `cd`. `st` is the strict env-truthy allowlist
-/// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`traits::env::is_env_truthy`]
+/// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`platform_api::env::is_env_truthy`]
 /// so it cannot drift. DEFAULT FALSE (unset/empty ⇒ false).
 fn tfo_maintain_cwd() -> bool {
-    traits::env::is_env_truthy(
+    platform_api::env::is_env_truthy(
         std::env::var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR")
             .ok()
             .as_deref(),
@@ -1984,7 +1984,7 @@ impl Tool for BashTool {
     /// ENV NOTE: the oracle reads `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR`
     /// with plain JS truthiness (`V.X && BY(e)`), NOT its `isEnvTruthy`
     /// allowlist — so any non-empty value enables it, `"0"` and `"false"`
-    /// included. Reproduced exactly here (a `traits::env::is_env_truthy` call
+    /// included. Reproduced exactly here (a `platform_api::env::is_env_truthy` call
     /// would be the wrong predicate). Under LingXi branding the name is
     /// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`.
     ///
@@ -2224,7 +2224,7 @@ impl Tool for BashTool {
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use traits::sandbox::ProcessCommand as SbxCommand;
+        use platform_api::sandbox::ProcessCommand as SbxCommand;
 
         // PHASE-2: tool-abort `CancellationToken` threaded in by the streaming
         // executor (a child of `tool_abort`). When the turn is discarded
@@ -2570,7 +2570,7 @@ impl Tool for BashTool {
             // the background" note + `backgroundTaskId`/`timedOutAfterMs` (the
             // binary's `l !== void 0` mapper branch), exactly like an explicit
             // background launch except for the message and the extra field.
-            Ok(traits::ForegroundOutcome::MovedToBackground(handle)) => {
+            Ok(platform_api::ForegroundOutcome::MovedToBackground(handle)) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -2617,7 +2617,7 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Ok(traits::ForegroundOutcome::Completed(out)) if out.timed_out => {
+            Ok(platform_api::ForegroundOutcome::Completed(out)) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -2636,7 +2636,7 @@ impl Tool for BashTool {
                     &sandbox_violation_lines,
                 ))
             }
-            Ok(traits::ForegroundOutcome::Completed(out)) => {
+            Ok(platform_api::ForegroundOutcome::Completed(out)) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
                 // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
                 // The main thread has no `agent_id`; a subagent call carries one.
@@ -2972,7 +2972,7 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Err(traits::process::ProcessError::Timeout) => {
+            Err(platform_api::process::ProcessError::Timeout) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -3005,7 +3005,7 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn use_ctx() -> ToolUseContext {
         tool_api::test_support::fresh_ctx()
@@ -3516,7 +3516,7 @@ mod tests {
     }
 
     /// A `ProcessRunner` stub that records the `cwd` field of every spawned
-    /// [`ProcessCommand`](traits::sandbox::ProcessCommand), so a test can
+    /// [`ProcessCommand`](platform_api::sandbox::ProcessCommand), so a test can
     /// assert which directory the (possibly sandbox-wrapped) foreground
     /// command was actually spawned in.
     struct CwdCapturingRunner {
@@ -3524,24 +3524,24 @@ mod tests {
         last_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
     #[async_trait]
-    impl traits::process::ProcessRunner for CwdCapturingRunner {
+    impl platform_api::process::ProcessRunner for CwdCapturingRunner {
         async fn run(
             &self,
-            cmd: &traits::sandbox::SandboxedCommand,
-        ) -> Result<ProcessOutput, traits::process::ProcessError> {
+            cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
             *self.last_cwd.lock().unwrap() = cmd.inner().cwd.clone();
             Ok(self.out.clone())
         }
         async fn spawn_background(
             &self,
-            _: &traits::sandbox::SandboxedCommand,
-        ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+            _: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
             unreachable!()
         }
         async fn kill(
             &self,
-            _: &traits::process::ProcessHandle,
-        ) -> Result<(), traits::process::ProcessError> {
+            _: &platform_api::process::ProcessHandle,
+        ) -> Result<(), platform_api::process::ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -3794,23 +3794,23 @@ mod tests {
         // and drops captured bytes — still an Ok(interrupted) shape, empty stdout.
         struct TimeoutStub;
         #[async_trait]
-        impl traits::process::ProcessRunner for TimeoutStub {
+        impl platform_api::process::ProcessRunner for TimeoutStub {
             async fn run(
                 &self,
-                _: &traits::sandbox::SandboxedCommand,
-            ) -> Result<ProcessOutput, traits::process::ProcessError> {
-                Err(traits::process::ProcessError::Timeout)
+                _: &platform_api::sandbox::SandboxedCommand,
+            ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
+                Err(platform_api::process::ProcessError::Timeout)
             }
             async fn spawn_background(
                 &self,
-                _: &traits::sandbox::SandboxedCommand,
-            ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+                _: &platform_api::sandbox::SandboxedCommand,
+            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
                 unreachable!()
             }
             async fn kill(
                 &self,
-                _: &traits::process::ProcessHandle,
-            ) -> Result<(), traits::process::ProcessError> {
+                _: &platform_api::process::ProcessHandle,
+            ) -> Result<(), platform_api::process::ProcessError> {
                 Ok(())
             }
             fn is_available(&self) -> bool {
@@ -3848,19 +3848,19 @@ mod tests {
         // `timedOutAfterMs` — NOT the interrupted/abort shape.
         struct MovedStub;
         #[async_trait]
-        impl traits::process::ProcessRunner for MovedStub {
+        impl platform_api::process::ProcessRunner for MovedStub {
             async fn run(
                 &self,
-                _: &traits::sandbox::SandboxedCommand,
-            ) -> Result<ProcessOutput, traits::process::ProcessError> {
+                _: &platform_api::sandbox::SandboxedCommand,
+            ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
                 unreachable!("bash foreground uses run_foreground")
             }
             async fn run_foreground(
                 &self,
-                _: &traits::sandbox::SandboxedCommand,
-            ) -> Result<traits::ForegroundOutcome, traits::process::ProcessError> {
-                Ok(traits::ForegroundOutcome::MovedToBackground(
-                    traits::process::ProcessHandle {
+                _: &platform_api::sandbox::SandboxedCommand,
+            ) -> Result<platform_api::ForegroundOutcome, platform_api::process::ProcessError> {
+                Ok(platform_api::ForegroundOutcome::MovedToBackground(
+                    platform_api::process::ProcessHandle {
                         task_id: "local_bash_dead".into(),
                         pid: 4242,
                     },
@@ -3868,14 +3868,14 @@ mod tests {
             }
             async fn spawn_background(
                 &self,
-                _: &traits::sandbox::SandboxedCommand,
-            ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+                _: &platform_api::sandbox::SandboxedCommand,
+            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
                 unreachable!()
             }
             async fn kill(
                 &self,
-                _: &traits::process::ProcessHandle,
-            ) -> Result<(), traits::process::ProcessError> {
+                _: &platform_api::process::ProcessHandle,
+            ) -> Result<(), platform_api::process::ProcessError> {
                 Ok(())
             }
             fn is_available(&self) -> bool {
@@ -4740,8 +4740,8 @@ mod tests {
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----
 
     use std::sync::Arc;
-    use traits::process::{ProcessError, ProcessHandle, ProcessRunner};
-    use traits::sandbox::SandboxedCommand;
+    use platform_api::process::{ProcessError, ProcessHandle, ProcessRunner};
+    use platform_api::sandbox::SandboxedCommand;
 
     struct BgStub;
     #[async_trait]

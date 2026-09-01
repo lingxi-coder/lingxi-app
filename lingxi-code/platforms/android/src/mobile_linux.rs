@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use traits::mobile_linux::LinuxEnforcementReceipt;
-use traits::{
+use platform_api::mobile_linux::LinuxEnforcementReceipt;
+use platform_api::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
@@ -1366,7 +1366,7 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
             .expect("mobile-linux events mutex")
             .iter()
             .filter(|event| event.sequence > after)
-            .take(limit.min(traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH))
+            .take(limit.min(platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH))
             .cloned()
             .collect())
     }
@@ -1487,7 +1487,7 @@ fn validate_isolated_local_app_mounts(
         .iter()
         .filter(|mount| {
             matches!(mount.purpose, MountPurpose::Shared)
-                && mount.guest_path == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+                && mount.guest_path == platform_api::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
         })
         .collect();
     if build_mounts.len() != 1 || mounts.len() != 1 + store_mounts.len() || store_mounts.len() > 1 {
@@ -1570,12 +1570,12 @@ fn local_app_build_host_path_matches(
 
 fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLinuxError> {
     let relative = path
-        .strip_prefix(traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT)
+        .strip_prefix(platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT)
         .and_then(|suffix| suffix.strip_prefix('/'))
         .ok_or_else(|| {
             MobileLinuxError::InvalidRequest(format!(
                 "local-app build guest_path must be {}/<app-id>/<channel>/project",
-                traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
+                platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
             ))
         })?;
     let mut segments = relative.split('/');
@@ -1585,11 +1585,11 @@ fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLi
     if segments.next().is_some()
         || !is_valid_local_app_id(app_id)
         || !matches!(channel, "store" | "full")
-        || project != traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
+        || project != platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
     {
         return Err(MobileLinuxError::InvalidRequest(format!(
             "local-app build guest_path must be {}/<app-id>/<store|full>/project",
-            traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
+            platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
         )));
     }
     Ok((app_id, channel))
@@ -2118,7 +2118,7 @@ fn rootfs_store_error(error: RootfsStoreError) -> MobileLinuxError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use traits::MountPurpose;
+    use platform_api::MountPurpose;
 
     fn runtime() -> (TempDir, AndroidProotRuntime) {
         let temp = tempfile::tempdir().expect("temp");

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-01-llm-providers-v2-design.md` §3.1. Branch `llm-providers-v2` (P1 complete, tag `llm-v2-p1`).
 
-**Blast radius (verified by recon — the P1 lesson: grep the whole workspace).** Adding the `ContentBlock` variant breaks exactly **6 exhaustive matches**: `protocol/src/message_size.rs`, `engine/src/prompt.rs`, and the 4 codec helpers (OpenAI/Gemini `encode_user`/`encode_assistant`). All other references are constructions, `if let`, `matches!`, `_`-arm matches, or matches on the *separate* `api_client::ContentBlockApi` wire type — **0 test sites break.** Tasks below cover all 6.
+**Blast radius (verified by recon — the P1 lesson: grep the whole workspace).** Adding the `ContentBlock` variant breaks exactly **6 exhaustive matches**: `protocol/src/message_size.rs`, `core/src/prompt.rs`, and the 4 codec helpers (OpenAI/Gemini `encode_user`/`encode_assistant`). All other references are constructions, `if let`, `matches!`, `_`-arm matches, or matches on the *separate* `api_client::ContentBlockApi` wire type — **0 test sites break.** Tasks below cover all 6.
 
 **Parity gate:** image-free conversations stay byte-identical (OpenAI text-only user messages keep the string `content` form; Anthropic/Gemini unchanged). The existing `test-harness` parity suite must stay green. Do NOT modify the frozen `traits/` crate.
 
@@ -23,7 +23,7 @@
 | `lingxi-code/protocol/src/messages.rs` | Add `ContentBlock::Image { source: ImageSource }` + `ImageSource` enum |
 | `lingxi-code/protocol/src/lib.rs` | Re-export `ImageSource` (if exports are explicit) |
 | `lingxi-code/protocol/src/message_size.rs` | `content_block_size`: `Image` arm (byte size) |
-| `lingxi-code/engine/src/prompt.rs` | `content_blocks_to_api`: `Image` arm (image JSON) |
+| `lingxi-code/core/src/prompt.rs` | `content_blocks_to_api`: `Image` arm (image JSON) |
 | `lingxi-code/providers/src/openai/encode.rs` | `encode_user` parts-array when image present + `openai_image_url` helper; `encode_assistant` drops `Image` |
 | `lingxi-code/providers/src/gemini/encode.rs` | `encode_user` `inlineData`/`fileData` part; `encode_assistant` drops `Image` |
 | `lingxi-code/providers/src/capabilities.rs` | `openai()` / `gemini()` `vision: true` |
@@ -183,7 +183,7 @@ git commit -m "feat(llm-v2 P2): add canonical ContentBlock::Image + ImageSource 
 
 ## Task 2: `engine/prompt.rs` image arm
 
-**Files:** Modify `lingxi-code/engine/src/prompt.rs`.
+**Files:** Modify `lingxi-code/core/src/prompt.rs`.
 
 The `content_blocks_to_api` match is exhaustive and now fails to compile. Add the `Image` arm.
 
@@ -223,15 +223,15 @@ In `prompt.rs`'s `#[cfg(test)] mod tests`, add (it can call the private `content
 - [ ] **Step 3: Run tests + clippy**
 
 ```bash
-cargo test -p engine prompt
-cargo clippy -p engine --all-targets -- -D warnings
+cargo test -p core prompt
+cargo clippy -p core --all-targets -- -D warnings
 ```
 Expected: pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-code/engine/src/prompt.rs
+git add lingxi-code/core/src/prompt.rs
 git commit -m "feat(llm-v2 P2): encode ContentBlock::Image in engine prompt assembler"
 ```
 
@@ -523,7 +523,7 @@ fn messages_contain_image(msgs: &[ConversationMessage]) -> bool {
 In `messages_create`, after `let resolved = self.router.resolve(model)?;` add:
 ```rust
         if messages_contain_image(&msgs) && !resolved.provider.capabilities().vision {
-            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+            return Err(ApiError::Http(platform_api::HttpError::InvalidRequest(format!(
                 "model {model:?} ({:?}) does not support image input; \
                  select a vision-capable model or remove images",
                 resolved.provider.id()
@@ -533,7 +533,7 @@ In `messages_create`, after `let resolved = self.router.resolve(model)?;` add:
 In `stream`, after `let resolved = self.router.resolve(model)?;` (and alongside the existing tools guardrail) add the same block but referencing `&messages`:
 ```rust
         if messages_contain_image(&messages) && !resolved.provider.capabilities().vision {
-            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+            return Err(ApiError::Http(platform_api::HttpError::InvalidRequest(format!(
                 "model {model:?} ({:?}) does not support image input; \
                  select a vision-capable model or remove images",
                 resolved.provider.id()
@@ -564,7 +564,7 @@ In `provider_adapter.rs`'s test module add (reuse the `NoToolsProvider`/`FixedRo
         assert!(result.is_err(), "image to a non-vision model must fail fast");
         assert!(matches!(
             result,
-            Err(ApiError::Http(traits::HttpError::InvalidRequest(_)))
+            Err(ApiError::Http(platform_api::HttpError::InvalidRequest(_)))
         ));
     }
 
@@ -647,7 +647,7 @@ git commit -m "docs(llm-v2 P2): vision via API path; TUI paste-to-image deferred
 - [ ] **Step 1: Provider + protocol + engine + orchestrator tests**
 
 ```bash
-cargo test -p protocol -p engine -p providers -p orchestrator
+cargo test -p protocol -p core -p providers -p orchestrator
 ```
 Expected: all pass.
 
@@ -668,9 +668,9 @@ Expected: `Finished`.
 - [ ] **Step 4: Per-crate clippy on touched crates**
 
 ```bash
-cargo clippy -p protocol -p engine -p providers -p orchestrator --all-targets -- -D warnings
+cargo clippy -p protocol -p core -p providers -p orchestrator --all-targets -- -D warnings
 ```
-Expected: clean. (Note: a workspace-wide `clippy --all-targets` trips a pre-existing `doc_markdown` lint in the frozen `traits` crate — out of scope; do NOT modify `traits`.)
+Expected: clean. (Note: a workspace-wide `clippy --all-targets` trips a pre-existing `doc_markdown` lint in the frozen `platform-api` crate — out of scope; do NOT modify `traits`.)
 
 - [ ] **Step 5: Dependency-graph gate**
 

@@ -10,15 +10,15 @@ use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use traits::permission_gate::PermissionGate;
-use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use platform_api::permission_gate::PermissionGate;
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Turn fork-time frozen command denies into the `disallowed_tools` permission
 /// layer the fold understands (claude `freezeCommandDenies` → the
 /// `case"disallowed_tools"` arm of `gn(toolUseContext)`).
 ///
 /// Returns an EMPTY vec when `frozen` is empty or nothing survives, which
-/// leaves [`traits::permission_gate::PermissionCheckContext::permission_layers`]
+/// leaves [`platform_api::permission_gate::PermissionCheckContext::permission_layers`]
 /// empty and the fold byte-identical to a spawn that froze nothing.
 ///
 /// ## Entries are CANONICALIZED, not round-trip-tested
@@ -276,7 +276,7 @@ impl ToolInvoker for RegistryToolInvoker {
             let worker = (ctx.can_show_permission_prompts)
                 .then(|| ctx.agent_name.clone())
                 .flatten()
-                .map(|name| traits::permission_gate::PromptWorker {
+                .map(|name| platform_api::permission_gate::PromptWorker {
                     name,
                     team: ctx.team_name.clone(),
                     is_async: ctx.is_async,
@@ -290,7 +290,7 @@ impl ToolInvoker for RegistryToolInvoker {
             // delegates to `check_with_worker` and maps `Allow`→`Allow{None}`, so
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
-            let check_ctx = traits::permission_gate::PermissionCheckContext {
+            let check_ctx = platform_api::permission_gate::PermissionCheckContext {
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
                 requires_user_interaction: tool.requires_user_interaction(),
@@ -327,12 +327,12 @@ impl ToolInvoker for RegistryToolInvoker {
                     .await
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?;
                 match resolution {
-                    traits::permission_gate::PermissionResolution::Deny { reason, .. } => {
+                    platform_api::permission_gate::PermissionResolution::Deny { reason, .. } => {
                         return Err(ToolInvokerError::Internal(reason));
                     }
-                    traits::permission_gate::PermissionResolution::Allow { .. }
-                    | traits::permission_gate::PermissionResolution::Ask
-                    | traits::permission_gate::PermissionResolution::AskWithContext { .. } => {
+                    platform_api::permission_gate::PermissionResolution::Allow { .. }
+                    | platform_api::permission_gate::PermissionResolution::Ask
+                    | platform_api::permission_gate::PermissionResolution::AskWithContext { .. } => {
                         gate.ask_via_transport(name, &input, &check_ctx).await
                     }
                 }
@@ -342,12 +342,12 @@ impl ToolInvoker for RegistryToolInvoker {
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?
             };
             match outcome {
-                traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
+                platform_api::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
                     if let Some(u) = updated_input {
                         input = u;
                     }
                 }
-                traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                     // Only the session-owning main turn can atomically switch the
                     // live permission mode. Subagent dispatch has no such seam,
                     // so `AllowAuto` degrades to a one-shot allow for THIS call
@@ -356,7 +356,7 @@ impl ToolInvoker for RegistryToolInvoker {
                         input = u;
                     }
                 }
-                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
             }
@@ -943,7 +943,7 @@ mod tests {
     }
 
     // ──── enforcement 3b: permission gate before dispatch ──────────────
-    use traits::permission_gate::{PermissionDecision as GateDecision, PermissionGate as Gate};
+    use platform_api::permission_gate::{PermissionDecision as GateDecision, PermissionGate as Gate};
 
     /// Gate that returns a fixed decision and records each tool name it sees.
     struct FixedGate {
@@ -964,7 +964,7 @@ mod tests {
             agent_name: None,
             team_name: None,
             is_async: false,
-            is_non_interactive_session: traits::session_flags::effective_non_interactive_session(),
+            is_non_interactive_session: platform_api::session_flags::effective_non_interactive_session(),
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
@@ -1052,7 +1052,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
 
-        traits::session_flags::scope_non_interactive_session(true, async {
+        platform_api::session_flags::scope_non_interactive_session(true, async {
             invoker
                 .invoke("SessionModeRecordingTool", json!({}), no_ctx())
                 .await
@@ -1120,7 +1120,7 @@ mod tests {
 
     /// Gate that records the [`PromptWorker`] handed to `check_with_worker`.
     struct WorkerRecordingGate {
-        seen: Arc<StdMutex<Option<Option<traits::permission_gate::PromptWorker>>>>,
+        seen: Arc<StdMutex<Option<Option<platform_api::permission_gate::PromptWorker>>>>,
     }
     #[async_trait]
     impl Gate for WorkerRecordingGate {
@@ -1134,7 +1134,7 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            worker: Option<traits::permission_gate::PromptWorker>,
+            worker: Option<platform_api::permission_gate::PromptWorker>,
         ) -> GateDecision {
             *self.seen.lock().unwrap() = Some(worker);
             GateDecision::Allow
@@ -1210,8 +1210,8 @@ mod tests {
     /// (the parity gap the stdio `can_use_tool` flow needs), mirroring the main
     /// loop's Ask arm.
     struct ContextRecordingGate {
-        seen: Arc<StdMutex<Option<traits::permission_gate::PermissionCheckContext>>>,
-        outcome: traits::permission_gate::PermissionOutcome,
+        seen: Arc<StdMutex<Option<platform_api::permission_gate::PermissionCheckContext>>>,
+        outcome: platform_api::permission_gate::PermissionOutcome,
     }
     #[async_trait]
     impl Gate for ContextRecordingGate {
@@ -1223,15 +1223,15 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> traits::permission_gate::PermissionOutcome {
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> platform_api::permission_gate::PermissionOutcome {
             *self.seen.lock().unwrap() = Some(ctx.clone());
             self.outcome.clone()
         }
     }
 
     struct AbortGate {
-        seen: Arc<StdMutex<Option<traits::permission_gate::PermissionCheckContext>>>,
+        seen: Arc<StdMutex<Option<platform_api::permission_gate::PermissionCheckContext>>>,
     }
 
     #[async_trait]
@@ -1244,13 +1244,13 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            ctx: &traits::permission_gate::PermissionCheckContext,
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
         ) -> Result<
-            traits::permission_gate::PermissionOutcome,
-            traits::permission_gate::PermissionAbort,
+            platform_api::permission_gate::PermissionOutcome,
+            platform_api::permission_gate::PermissionAbort,
         > {
             *self.seen.lock().unwrap() = Some(ctx.clone());
-            Err(traits::permission_gate::PermissionAbort {
+            Err(platform_api::permission_gate::PermissionAbort {
                 message: "Agent aborted: too many classifier denials in headless mode".into(),
             })
         }
@@ -1268,9 +1268,9 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            _ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> traits::permission_gate::PermissionOutcome {
-            traits::permission_gate::PermissionOutcome::AllowAuto {
+            _ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> platform_api::permission_gate::PermissionOutcome {
+            platform_api::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: Some(json!({ "rewritten": "auto" })),
             }
         }
@@ -1309,7 +1309,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1369,7 +1369,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1399,7 +1399,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1525,7 +1525,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1557,7 +1557,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1584,7 +1584,7 @@ mod tests {
         // whatever input it received, so we can observe the substitution.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: Some(json!({ "rewritten": true })),
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1611,7 +1611,7 @@ mod tests {
         // Behavior identical when updated_input is None: the original input runs.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: traits::permission_gate::PermissionOutcome::Allow {
+            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1650,7 +1650,7 @@ mod tests {
         // legacy 2-valued path.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: traits::permission_gate::PermissionOutcome::Deny {
+            outcome: platform_api::permission_gate::PermissionOutcome::Deny {
                 reason: "denied via context gate".into(),
             },
         });

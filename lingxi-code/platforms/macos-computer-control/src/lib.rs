@@ -18,7 +18,7 @@ mod macos;
 pub use macos::MacosComputerControl;
 
 use std::sync::Arc;
-use traits::computer_control::ComputerControl;
+use platform_api::computer_control::ComputerControl;
 
 /// Construct the real backend on macOS, or `None` everywhere else — the one
 /// call composition roots need, so `apps/engine-desktop` doesn't need its own

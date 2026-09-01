@@ -9,7 +9,7 @@
 //!   moved to [`crate::SubtaskHandler`] (`/subtask`, `RAd`).
 //!
 //! [`command_core::register_core_batch_8`](crate::register_core_batch_8) selects
-//! the surface with `traits::agent_view::is_enabled()` exactly like the binary
+//! the surface with `platform_api::agent_view::is_enabled()` exactly like the binary
 //! command list `Blr` (`...vO()&&!IS_DEMO ? [vAd,RAd] : [SAd]`).
 //!
 //! ---
@@ -54,12 +54,12 @@
 //!
 //! ## Trait surface (integration pass — now LANDED)
 //!
-//! The two [`traits::OrchestratorHandle`] methods below are now real:
+//! The two [`platform_api::OrchestratorHandle`] methods below are now real:
 //! `is_coordinator_session` (default) + a live `fork_conversation` override on
 //! `ConversationOrchestrator` that spawns the fork via the `SubagentSpawner`.
 //! The historical gap note is retained for design rationale.
 //!
-//! Two [`traits::OrchestratorHandle`] methods this handler calls do not
+//! Two [`platform_api::OrchestratorHandle`] methods this handler calls do not
 //! exist on the trait yet:
 //!
 //!   * `async fn is_coordinator_session(&self) -> bool` — new additive
@@ -73,12 +73,12 @@
 //!     implementations don't need to override"). The concrete override
 //!     belongs in the composition roots (`apps/engine-desktop`,
 //!     `apps/engine-mobile`), delegating to the already-ported
-//!     `traits::fork_subagent::build_forked_messages` /
+//!     `platform_api::fork_subagent::build_forked_messages` /
 //!     `build_child_message` plus the existing `BackgroundAgentSpawner` /
 //!     `SubagentSpawner::spawn_async` lifecycle — this handler intentionally
 //!     does not touch either (composition-root concern, not `commands/core`).
-//!   * `traits::ForkOutcome { name: String, agent_id: String }` — new plain
-//!     struct alongside `HandleError` in `traits::orchestrator`, re-exported
+//!   * `platform_api::ForkOutcome { name: String, agent_id: String }` — new plain
+//!     struct alongside `HandleError` in `platform_api::orchestrator`, re-exported
 //!     from the crate root next to it.
 //!
 //! Until those three land this module will not compile on its own — by
@@ -96,7 +96,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use traits::{ForkOutcome, OrchestratorHandle};
+use platform_api::{ForkOutcome, OrchestratorHandle};
 
 /// `${Hnt}` — the fork-success icon, U+2442 (OCR-FORK control-picture
 /// glyph). Byte-exact with the claude-code v2.1.198 binary.
@@ -210,7 +210,7 @@ impl BuiltinCommandHandler for ForkHandler {
 /// so — unlike the legacy handler — there is no "Usage:" gate on empty input.
 ///
 /// This handler drives that seam via
-/// [`traits::OrchestratorHandle::fork_to_background_session`], which returns the
+/// [`platform_api::OrchestratorHandle::fork_to_background_session`], which returns the
 /// system line to display in the live session (the composition root owns the
 /// exact text, since it knows the newly-minted background session id). Until a
 /// composition root overrides that seam it returns `Unimplemented`, and this

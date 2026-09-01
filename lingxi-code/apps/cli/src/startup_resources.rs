@@ -418,14 +418,14 @@ async fn materialize_files(specs: &[String]) -> Result<(), String> {
 
     let mut committed: Vec<PathBuf> = Vec::new();
     for (relative, bytes) in prepared {
-        let options = traits::rooted_fs::AtomicWriteOptions {
+        let options = platform_api::rooted_fs::AtomicWriteOptions {
             overwrite: false,
             create_parents: true,
-            ..traits::rooted_fs::AtomicWriteOptions::default()
+            ..platform_api::rooted_fs::AtomicWriteOptions::default()
         };
-        if let Err(error) = traits::rooted_fs::atomic_write(&cwd, &relative, &bytes, options) {
+        if let Err(error) = platform_api::rooted_fs::atomic_write(&cwd, &relative, &bytes, options) {
             for path in &committed {
-                let _ = traits::rooted_fs::remove_file(&cwd, path);
+                let _ = platform_api::rooted_fs::remove_file(&cwd, path);
             }
             return Err(format!(
                 "install `{}`: {error}",

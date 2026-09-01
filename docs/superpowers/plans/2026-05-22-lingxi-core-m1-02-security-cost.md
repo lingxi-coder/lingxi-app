@@ -54,7 +54,7 @@ crates/cost/                          ← §17
 crates/protocol/src/secret.rs         ← NEW: Secret<T>, SecureStorageData, RedactableContent
 crates/protocol/src/effects.rs        ← MODIFY: extend Effect with new variants
 crates/core/src/events.rs             ← MODIFY: extend Event with new variants
-crates/traits/src/secure_storage.rs   ← NEW: SecureStorage trait
+crates/platform-api/src/secure_storage.rs   ← NEW: SecureStorage trait
 crates/test-harness/src/mocks/        ← NEW: mock_secure_storage.rs
 ```
 
@@ -239,13 +239,13 @@ git commit -m "feat(protocol): add Secret<T>, SecureStorageData, RedactableConte
 ## Task 2: SecureStorage trait
 
 **Files:**
-- Create: `crates/traits/src/secure_storage.rs`
-- Modify: `crates/traits/src/lib.rs`
+- Create: `crates/platform-api/src/secure_storage.rs`
+- Modify: `crates/platform-api/src/lib.rs`
 
 - [ ] **Step 1: Implement trait + error**
 
 ```rust
-// crates/traits/src/secure_storage.rs
+// crates/platform-api/src/secure_storage.rs
 use async_trait::async_trait;
 use lingxi_protocol::SecureStorageData;
 use serde::{Deserialize, Serialize};
@@ -300,7 +300,7 @@ pub enum SecureStorageError {
 
 - [ ] **Step 2: Re-export + run check**
 
-Add `pub mod secure_storage;` + `pub use secure_storage::*;` to `traits/src/lib.rs`.
+Add `pub mod secure_storage;` + `pub use secure_storage::*;` to `platform-api/src/lib.rs`.
 
 ```bash
 cargo check -p lingxi-traits
@@ -332,7 +332,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde.workspace = true
 thiserror.workspace = true
 regex = "1"
@@ -612,7 +612,7 @@ pub use scanner::{SecretDetection, SecretScanner};
 ```rust
 // crates/secret/src/credential.rs
 use lingxi_protocol::{Secret, SecureStorageData, SecureStorageMetadata};
-use lingxi_traits::{Clock, HttpTransport, SecureStorage, SecureStorageError};
+use lingxi_platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -695,7 +695,7 @@ impl CredentialManager {
 //! Pre-warm the macOS keychain access prompt at startup so it doesn't
 //! interrupt the first interactive moment.
 use lingxi_protocol::SecureStorageData;
-use lingxi_traits::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
+use lingxi_platform_api::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 

@@ -1,13 +1,13 @@
 //! Typed error surface for the local-apps core.
 //!
 //! Follows the repo error convention (`thiserror` enums with `String`
-//! payloads, like `traits::MobileLinuxError`). Every variant maps to exactly
+//! payloads, like `platform_api::MobileLinuxError`). Every variant maps to exactly
 //! one wire-level [`AppErrorCode`] so the engine can surface failures as a
 //! typed `AppOperationFailed { code, message }` client event.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use traits::FsError;
+use platform_api::FsError;
 
 /// Stable machine-readable failure codes carried on `AppOperationFailed`
 /// client events. Extensible in later phases; each [`AppError`] variant maps

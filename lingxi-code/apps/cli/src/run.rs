@@ -28,7 +28,7 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{
+use platform_api::{
     FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
 };
 
@@ -49,7 +49,7 @@ fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static 
 async fn stop_background_agents_at_budget(
     max_budget_usd: Option<f64>,
     orchestrator: &dyn OrchestratorHandle,
-    task_registry: &dyn traits::task_registry::TaskRegistryHandle,
+    task_registry: &dyn platform_api::task_registry::TaskRegistryHandle,
 ) -> usize {
     let Some(max_budget_usd) = max_budget_usd else {
         return 0;
@@ -1041,7 +1041,7 @@ async fn dispatch_control_request(
         }
         "register_repo_root" => {
             let request_value = frame.get("request").cloned().unwrap_or_else(|| json!({}));
-            match serde_json::from_value::<traits::RegisterRepoRootRequest>(request_value) {
+            match serde_json::from_value::<platform_api::RegisterRepoRootRequest>(request_value) {
                 Ok(request) if !request.path.trim().is_empty() => {
                     match orchestrator.register_repo_root(request).await {
                         Ok(outcome) => match serde_json::to_value(outcome) {
@@ -1365,7 +1365,7 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
     match subtype {
         // §2.2 #8: `{version, buildTime}`.
         "get_binary_version" => PureControlReply::Success(Some(json!({
-            "version": traits::CLAUDE_CODE_VERSION,
+            "version": platform_api::CLAUDE_CODE_VERSION,
             "buildTime": ""
         }))),
         // §2.2 #45: telemetry-only; ack with `{}`.
@@ -1472,13 +1472,13 @@ fn orphan_decision_from_payload(
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| match value {
                     "user_temporary" => {
-                        Some(traits::permission_gate::ToolDecisionClassification::UserTemporary)
+                        Some(platform_api::permission_gate::ToolDecisionClassification::UserTemporary)
                     }
                     "user_permanent" => {
-                        Some(traits::permission_gate::ToolDecisionClassification::UserPermanent)
+                        Some(platform_api::permission_gate::ToolDecisionClassification::UserPermanent)
                     }
                     "user_reject" => {
-                        Some(traits::permission_gate::ToolDecisionClassification::UserReject)
+                        Some(platform_api::permission_gate::ToolDecisionClassification::UserReject)
                     }
                     _ => None,
                 });
@@ -2325,7 +2325,7 @@ const MANAGED_CLOUD_PROVIDER_ENV: [&str; 6] = [
 fn env_api_provider_is_first_party() -> bool {
     !MANAGED_CLOUD_PROVIDER_ENV
         .iter()
-        .any(|key| traits::env::is_env_truthy(std::env::var(key).ok().as_deref()))
+        .any(|key| platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref()))
 }
 
 /// `xn()==="firstParty"` for this session: the env-derived provider
@@ -2335,7 +2335,7 @@ fn env_api_provider_is_first_party() -> bool {
 /// `not_first_party`.
 fn session_model_is_first_party(
     env_first_party: bool,
-    listings: &[traits::orchestrator::ModelListing],
+    listings: &[platform_api::orchestrator::ModelListing],
     model: &str,
 ) -> bool {
     if !env_first_party {
@@ -2371,9 +2371,9 @@ fn resolve_fast_mode_state(
     fast_mode_disabled_reason: Option<&str>,
     sdk_fast_mode_opt_in: bool,
 ) -> &'static str {
-    let model_supports_fast_mode = traits::model_capabilities::has_capability(
+    let model_supports_fast_mode = platform_api::model_capabilities::has_capability(
         model,
-        traits::model_capabilities::ModelCapability::FastMode,
+        platform_api::model_capabilities::ModelCapability::FastMode,
     );
     if fast_mode_disabled_reason.is_none() && sdk_fast_mode_opt_in && model_supports_fast_mode {
         "on"
@@ -2427,7 +2427,7 @@ fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bo
     if request_model.eq_ignore_ascii_case("default") {
         return model_capabilities("claude-sonnet-5");
     }
-    let capabilities = traits::model_capabilities::initialization_capabilities_for(request_model);
+    let capabilities = platform_api::model_capabilities::initialization_capabilities_for(request_model);
     (
         capabilities.supports_effort,
         capabilities.supported_effort_levels.to_vec(),
@@ -3125,7 +3125,7 @@ pub(crate) async fn mount_background_resumed_tui(
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
     initial_prompt: Option<String>,
-    handoff: Option<traits::BackgroundingSnapshot>,
+    handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> crate::mode::RunOutcome {
     mount_resumed_tui_inner(
         argv,
@@ -3146,7 +3146,7 @@ async fn mount_resumed_tui_inner(
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
     initial_prompt: Option<String>,
-    handoff: Option<traits::BackgroundingSnapshot>,
+    handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
@@ -3357,7 +3357,7 @@ async fn drive_tui_switch_loop_inner(
     struct InboxShutdown;
     impl Drop for InboxShutdown {
         fn drop(&mut self) {
-            traits::uds_inbox::stop_process_inbox();
+            platform_api::uds_inbox::stop_process_inbox();
         }
     }
     let _inbox = InboxShutdown;
@@ -3632,7 +3632,7 @@ fn recover_from_failed_switch(current: Option<uuid::Uuid>) -> SwitchRecovery {
     }
 }
 
-/// Seed an already-built orchestrator's in-memory [`engine::SessionState`] from
+/// Seed an already-built orchestrator's in-memory [`lingxi_core::SessionState`] from
 /// a resumed transcript.
 ///
 /// The fresh-mount path builds the orchestrator via `engine_desktop::build`,
@@ -4851,7 +4851,7 @@ mod tests {
         else {
             panic!("expected success payload");
         };
-        assert_eq!(payload["version"], traits::CLAUDE_CODE_VERSION);
+        assert_eq!(payload["version"], platform_api::CLAUDE_CODE_VERSION);
         assert!(payload.get("buildTime").is_some());
     }
 
@@ -5565,7 +5565,7 @@ mod tests {
             "xn()'s provider chain, in binary order"
         );
 
-        let listings = vec![traits::orchestrator::ModelListing {
+        let listings = vec![platform_api::orchestrator::ModelListing {
             display_model: "Opus".to_string(),
             request_model: "claude-opus-4-8".to_string(),
             provider_id: "anthropic".to_string(),
@@ -5602,7 +5602,7 @@ mod tests {
     #[test]
     fn session_model_first_party_uses_catalog_provider() {
         let listings = vec![
-            traits::orchestrator::ModelListing {
+            platform_api::orchestrator::ModelListing {
                 display_model: "Opus".to_string(),
                 request_model: "claude-opus-4-8".to_string(),
                 provider_id: "anthropic".to_string(),
@@ -5613,7 +5613,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: true,
             },
-            traits::orchestrator::ModelListing {
+            platform_api::orchestrator::ModelListing {
                 display_model: "GPT-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "openai".to_string(),

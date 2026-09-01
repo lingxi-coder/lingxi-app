@@ -15,7 +15,7 @@ use platform_posix::mcp::PosixMcpTransport;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use traits::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
+use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 mod support;
 
@@ -143,7 +143,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     .await
     .expect("call_tool(unknown) timed out");
     assert!(
-        matches!(not_found, Err(traits::McpError::ToolNotFound(ref t)) if t == "nope"),
+        matches!(not_found, Err(platform_api::McpError::ToolNotFound(ref t)) if t == "nope"),
         "unknown tool must map to ToolNotFound(\"nope\"), got {not_found:?}"
     );
 
@@ -239,7 +239,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(traits::McpError::Connection(_))),
+        matches!(after, Err(platform_api::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }
@@ -252,7 +252,7 @@ async fn ping_unknown_connection_errors() {
     let bogus = protocol::McpConnectionId::new();
     let res = transport.ping(bogus).await;
     assert!(
-        matches!(res, Err(traits::McpError::Connection(_))),
+        matches!(res, Err(platform_api::McpError::Connection(_))),
         "ping on an unknown id should be a connection error, got {res:?}"
     );
 }

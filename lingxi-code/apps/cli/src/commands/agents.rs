@@ -249,13 +249,13 @@ impl NotificationWatcher {
             Arc::new(
                 hooks::HookExecutorImpl::new(
                     Arc::new(tokio::sync::RwLock::new(registry)),
-                    Arc::new(platform_posix::PosixHttp::new()) as Arc<dyn traits::HttpTransport>,
+                    Arc::new(platform_posix::PosixHttp::new()) as Arc<dyn platform_api::HttpTransport>,
                     Arc::new(platform_posix::PosixRuntime::new())
-                        as Arc<dyn traits::RuntimeSpawner>,
+                        as Arc<dyn platform_api::RuntimeSpawner>,
                 )
                 .with_process_runner(
-                    Arc::new(platform_posix::PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
-                    Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+                    Arc::new(platform_posix::PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
+                    Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
                 ),
             )
         });

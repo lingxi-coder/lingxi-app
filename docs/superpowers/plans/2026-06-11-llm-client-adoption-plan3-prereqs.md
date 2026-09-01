@@ -47,7 +47,7 @@ api-client deletion + modelProviders settings). Source: Plan-2 final review.
     rendering (DriveStep::Terminal carries no repeated bit; reconstruct from
     RetryState.consecutive_overloaded + last error == Overloaded).
 11. Plan-1 prereq still open: streaming responses carry no status/headers
-    through LlmTransportBridge (traits::HttpTransport::stream_sse surfaces no
+    through LlmTransportBridge (platform_api::HttpTransport::stream_sse surfaces no
     metadata) — streaming-route rate-limit tracking and streaming-429
     retry-after need a traits-level change first.
 12. Deferred from Plan 2: PricingCatalog population from the cost crate;

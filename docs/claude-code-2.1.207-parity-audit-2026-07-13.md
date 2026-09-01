@@ -341,7 +341,7 @@ Claude Code 2.1.203–2.1.207 连续修复了后台 daemon token 恢复、attach
 | P2 | Hosted WebSearch partial result | 已收到 result/progress block 后发生 stream error，所有 partial blocks 被丢弃。 |
 | P2 | `skipWebFetchPreflight` settings 未接线 | 目前只支持私有环境变量，settings JSON 中的配置不会进入 WebFetch runtime。 |
 | P3 | WebFetch 二进制响应有损 | HTTP transport body 是 `String`，Reqwest 使用 `.text()`；PDF、图片或无效 UTF-8 body 在保存 artifact 前已经损坏。 |
-| P3 | Runtime 版本标识落后 | [`traits/src/lib.rs:11`](../lingxi-code/traits/src/lib.rs#L11) 仍硬编码 `2.1.206`，WebFetch UA 和 child `AI_AGENT` 也使用旧版本。 |
+| P3 | Runtime 版本标识落后 | [`platform-api/src/lib.rs:11`](../lingxi-code/platform-api/src/lib.rs#L11) 仍硬编码 `2.1.206`，WebFetch UA 和 child `AI_AGENT` 也使用旧版本。 |
 | P3 | Parity 证明基线落后 | 唯一集中 parity harness 仍是 [`test-harness/tests/parity_claude_2_1_198.rs`](../lingxi-code/test-harness/tests/parity_claude_2_1_198.rs)；没有覆盖 2.1.199–2.1.207 的 release matrix。 |
 
 ## 5. 已确认关闭或显著改善的旧 Gap

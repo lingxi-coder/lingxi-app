@@ -41,7 +41,7 @@ export function hooksPageModel(effective: Record<string, unknown>): HooksPageMod
 
 /**
  * `hooks` is layered per `nav.ts` (it lives in the settings files, unlike
- * MCP) AND a `DeepMerge` key (`engine/src/settings/schema.rs`'s
+ * MCP) AND a `DeepMerge` key (`core/src/settings/schema.rs`'s
  * `MERGE_STRATEGIES`) — so what actually runs is a cross-layer combination,
  * not any one layer's own list. This page therefore reads
  * `snapshot.effective` (what's actually active), NOT

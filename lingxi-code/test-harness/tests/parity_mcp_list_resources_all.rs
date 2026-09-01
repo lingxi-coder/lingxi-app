@@ -17,7 +17,7 @@ use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use test_harness::mocks::MockMcpTransport;
 use tool_api::BuiltinToolContext;
 use tool_mcp::ListMcpResourcesTool;
-use traits::{McpTransport, McpTransportSpec, ProcessOutput};
+use platform_api::{McpTransport, McpTransportSpec, ProcessOutput};
 
 // ============================================================================
 // Helpers

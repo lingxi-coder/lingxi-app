@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use platform_posix::PosixFileSystem;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 #[tokio::test]
 async fn rapid_writes_collapse_to_single_event() {

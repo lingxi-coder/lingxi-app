@@ -6,7 +6,7 @@
 
 **Architecture:** A new `ModelSpec` parser and `ProviderRegistry<T>` (implementing an object-safe `ModelRouter`) live in the `providers` crate. The orchestrator's `ProviderApiAdapter` (built in P1) evolves to hold `Arc<dyn ModelRouter>` and resolve the provider per call. A `providers` object field is added to the settings schema. `apps/cli/src/init.rs` loads settings, builds the registry, and swaps the live `api_client` from `AnthropicProviderAdapter` to the routed `ProviderApiAdapter`. In P2 only the `anthropic` provider is constructible (P1's `AnthropicLlmProvider`); `openai`/`gemini` resolve to a clear "codec not available until P3/P4" error — no fake codecs.
 
-**Tech Stack:** Rust 1.82.0 (pinned). `async-trait`, `serde_json`, `thiserror`. Builds on P1's `providers` crate (`LlmProvider`, `AnthropicLlmProvider`, `CanonicalRequest`, `Capabilities`, `Auth`) and `orchestrator::ProviderApiAdapter`. Reuses `api_client::ApiError`, `traits::{HttpTransport, HttpError}`, `engine::settings`.
+**Tech Stack:** Rust 1.82.0 (pinned). `async-trait`, `serde_json`, `thiserror`. Builds on P1's `providers` crate (`LlmProvider`, `AnthropicLlmProvider`, `CanonicalRequest`, `Capabilities`, `Auth`) and `orchestrator::ProviderApiAdapter`. Reuses `api_client::ApiError`, `platform_api::{HttpTransport, HttpError}`, `lingxi_core::settings`.
 
 **Spec:** `docs/superpowers/specs/2026-06-01-llm-providers-design.md` (§5 selection, §6 wiring, §12 P2).
 
@@ -34,7 +34,7 @@
 **`orchestrator` crate (modify):**
 - `src/provider_adapter.rs` — evolve `ProviderApiAdapter` to hold `Arc<dyn ModelRouter>`; update tests.
 
-**`engine` crate (modify, 3 files):**
+**`core` crate (modify, 3 files):**
 - `src/settings/schema.rs` — add `providers` field.
 - `src/settings/merger.rs` — deep-merge `providers`.
 - `src/settings/tracer.rs` — add `providers` provenance entry.
@@ -406,7 +406,7 @@ mod tests {
         let r = registry(BTreeMap::new());
         let err = r.resolve("openai/gpt-4o").expect_err("no openai codec in P2");
         match err {
-            api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
+            api_client::ApiError::Http(platform_api::HttpError::InvalidRequest(msg)) => {
                 assert!(msg.contains("openai"), "msg: {msg}");
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
@@ -459,7 +459,7 @@ use crate::provider::LlmProvider;
 use api_client::ApiError;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 
 /// A resolved provider plus the provider-local model id (prefix stripped).
 pub struct Resolved {
@@ -797,13 +797,13 @@ NOTE: `cargo clippy -p orchestrator` fails only on the pre-existing `tool-api` e
 ## Task 5: Settings `providers` field
 
 **Files:**
-- Modify: `lingxi-code/engine/src/settings/schema.rs`
-- Modify: `lingxi-code/engine/src/settings/merger.rs`
-- Modify: `lingxi-code/engine/src/settings/tracer.rs`
+- Modify: `lingxi-code/core/src/settings/schema.rs`
+- Modify: `lingxi-code/core/src/settings/merger.rs`
+- Modify: `lingxi-code/core/src/settings/tracer.rs`
 
 - [ ] **Step 1: Add the field to `SettingsJson`**
 
-In `lingxi-code/engine/src/settings/schema.rs`, the `SettingsJson` struct currently ends with the `model` field:
+In `lingxi-code/core/src/settings/schema.rs`, the `SettingsJson` struct currently ends with the `model` field:
 
 ```rust
     /// Scalar field (later source wins). Default model alias.
@@ -849,7 +849,7 @@ In `schema.rs`'s `#[cfg(test)] mod tests` (add a test function):
 
 - [ ] **Step 3: Deep-merge `providers` in `merger.rs`**
 
-In `lingxi-code/engine/src/settings/merger.rs`, the `merge` function ends with:
+In `lingxi-code/core/src/settings/merger.rs`, the `merge` function ends with:
 
 ```rust
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
@@ -890,7 +890,7 @@ In `merger.rs`'s `#[cfg(test)] mod tests`:
 
 - [ ] **Step 5: Add `providers` to the tracer field list**
 
-In `lingxi-code/engine/src/settings/tracer.rs`, find the field-list array (the `record_layer` body lists `("model", layer.model.is_some())` last):
+In `lingxi-code/core/src/settings/tracer.rs`, find the field-list array (the `record_layer` body lists `("model", layer.model.is_some())` last):
 
 ```rust
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
@@ -909,10 +909,10 @@ Replace with:
 
 - [ ] **Step 6: Test + lint + commit**
 
-Run: `cargo test -p engine settings` → all pass (incl. the 2 new tests).
-Run: `cargo clippy -p engine --all-targets -- -D warnings` → clean (`engine` does not depend on `tool-api`; if it does and the pre-existing errors surface, confirm none are in `engine/src/settings`).
+Run: `cargo test -p core settings` → all pass (incl. the 2 new tests).
+Run: `cargo clippy -p core --all-targets -- -D warnings` → clean (`engine` does not depend on `tool-api`; if it does and the pre-existing errors surface, confirm none are in `core/src/settings`).
 ```bash
-git add engine/src/settings/schema.rs engine/src/settings/merger.rs engine/src/settings/tracer.rs
+git add core/src/settings/schema.rs core/src/settings/merger.rs core/src/settings/tracer.rs
 git commit -m "feat(llm-p2): settings `providers` object field (schema + deep-merge + provenance)"
 ```
 
@@ -998,18 +998,18 @@ fn load_provider_profiles(
     project_dir: &std::path::Path,
 ) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
+    let inputs = lingxi_core::settings::LoadInputs {
         env: &env,
         project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
+        defaults: lingxi_core::settings::schema::SettingsJson::default(),
     };
-    engine::settings::Settings::load(inputs)
+    lingxi_core::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.providers)
 }
 ```
 
-(Confirm the exact paths: `engine::settings::{LoadInputs, Settings}` and `engine::settings::schema::SettingsJson` — match how `engine::settings` is referenced elsewhere; adjust the `use`/path if the crate re-exports them at a shorter path. `argv.cwd` is the `--cwd` flag field seen in the `Argv` struct.)
+(Confirm the exact paths: `lingxi_core::settings::{LoadInputs, Settings}` and `lingxi_core::settings::schema::SettingsJson` — match how `lingxi_core::settings` is referenced elsewhere; adjust the `use`/path if the crate re-exports them at a shorter path. `argv.cwd` is the `--cwd` flag field seen in the `Argv` struct.)
 
 - [ ] **Step 5: Build + test the CLI crate**
 
@@ -1031,7 +1031,7 @@ git commit -m "feat(llm-p2): wire ProviderRegistry into init.rs (anthropic defau
 
 - [ ] **Step 1: Format**
 
-Run: `cargo fmt -p providers -p orchestrator -p engine -p cli`
+Run: `cargo fmt -p providers -p orchestrator -p core -p cli`
 Run: `git status --porcelain` — if files changed, `git add -A && git commit -m "style(llm-p2): cargo fmt"`.
 
 - [ ] **Step 2: Clippy (own crates)**
@@ -1043,7 +1043,7 @@ Run: `cargo build -p orchestrator -p cli --tests 2>&1 | grep -i "warning"` → n
 
 Run: `cargo test -p providers` → all pass.
 Run: `cargo test -p orchestrator` → all pass.
-Run: `cargo test -p engine settings` → all pass.
+Run: `cargo test -p core settings` → all pass.
 Run: `cargo test -p cli` → all pass.
 
 - [ ] **Step 4: Back-compat — the critical gate**

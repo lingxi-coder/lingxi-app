@@ -17,7 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use test_harness::parity::load_fixture;
-use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 #[derive(Deserialize)]
 struct Fixture {

@@ -457,7 +457,7 @@ mod tests {
     use super::*;
     use tool_api::test_support::shell_test_ctx;
     use tool_api::{AndroidGitToolCtx, ToolRegistry};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn ok_output() -> ProcessOutput {
         ProcessOutput {

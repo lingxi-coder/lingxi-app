@@ -69,7 +69,7 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 }
 
 /// Does a persisted task with `id` exist in the project's single tasks file?
-async fn job_exists(fs: &dyn traits::FileSystem, project_root: &Path, id: &str) -> bool {
+async fn job_exists(fs: &dyn platform_api::FileSystem, project_root: &Path, id: &str) -> bool {
     match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(body) => cron::tasks_file::parse_tasks(&body)
             .tasks
@@ -360,7 +360,7 @@ fn cancelled_result(id: &str) -> ToolCallResult {
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

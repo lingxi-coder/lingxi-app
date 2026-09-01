@@ -8,8 +8,8 @@ license.workspace = true
 task-store = { path = "../task-store" }
 branding.workspace = true
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
-engine = { path = "../engine" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 tool-api = { path = "../tool-api" }
 permission = { path = "../permission" }
 agent = { path = "../agent" }

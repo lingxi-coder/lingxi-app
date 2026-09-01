@@ -40,7 +40,7 @@
 //!
 //! LingXi keeps its existing [`crate::ForkHandler`] (the old `SAd`/`/fork`
 //! spawn) and adds this `/subtask` alongside it, reusing the already-ported
-//! [`traits::OrchestratorHandle::fork_conversation`] spawn seam. The
+//! [`platform_api::OrchestratorHandle::fork_conversation`] spawn seam. The
 //! control-flow restructuring (explicit early-exit gates on empty task /
 //! coordinator session / no-first-turn) matches the `ForkHandler` port and is
 //! behavior-preserving; see that module's docs for the rationale.
@@ -50,7 +50,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use traits::{ForkOutcome, OrchestratorHandle};
+use platform_api::{ForkOutcome, OrchestratorHandle};
 
 /// `${V9}` — the subagent-spawn success icon, U+2442 (OCR-FORK
 /// control-picture glyph). Byte-exact with the claude-code v2.1.212 binary

@@ -38,7 +38,7 @@ use command_api::builtin_support::unimplemented::UnimplementedCommandHandler;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::register_all_builtin_commands;
 use tokio::sync::RwLock;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {
     table.iter().map(|(n, _)| *n).collect()

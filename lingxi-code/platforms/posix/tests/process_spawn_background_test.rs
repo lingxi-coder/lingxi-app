@@ -5,7 +5,7 @@
 use platform_posix::process::{task_output_path, PosixProcess};
 use std::collections::HashMap;
 use std::time::Duration;
-use traits::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
+use platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 
 fn mk_sandboxed(command: &str, args: Vec<&str>) -> SandboxedCommand {
     SandboxedCommand::__new_sandboxed(

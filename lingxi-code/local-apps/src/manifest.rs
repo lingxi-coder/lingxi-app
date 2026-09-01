@@ -14,8 +14,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use traits::rooted_fs::{self, AtomicWriteOptions};
-use traits::FsError;
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 
 /// Manifest filename under `workspace/.lingxi`.
 pub const APP_MANIFEST_FILE: &str = "app.manifest.json";
@@ -182,17 +182,17 @@ impl DeviceContext {
     /// names a real platform would be a guess, and an absent context already
     /// carries exactly that meaning.
     #[must_use]
-    pub fn from_host_environment(environment: &traits::MobileHostEnvironment) -> Option<Self> {
+    pub fn from_host_environment(environment: &platform_api::MobileHostEnvironment) -> Option<Self> {
         let (os, form_factor) = match (environment.host_os, environment.device_class) {
-            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone) => ("ios", "iphone"),
-            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet) => ("ios", "ipad"),
-            (traits::MobileHostOs::Android, traits::MobileDeviceClass::Phone) => {
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone) => ("ios", "iphone"),
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet) => ("ios", "ipad"),
+            (platform_api::MobileHostOs::Android, platform_api::MobileDeviceClass::Phone) => {
                 ("android", "phone")
             }
-            (traits::MobileHostOs::Android, traits::MobileDeviceClass::Tablet) => {
+            (platform_api::MobileHostOs::Android, platform_api::MobileDeviceClass::Tablet) => {
                 ("android", "tablet")
             }
-            (_, traits::MobileDeviceClass::Unknown) => return None,
+            (_, platform_api::MobileDeviceClass::Unknown) => return None,
         };
         Some(Self {
             os: os.into(),
@@ -1380,67 +1380,67 @@ mod tests {
     #[test]
     fn the_host_device_class_derives_the_platform_form_factor() {
         let derive = |host_os, device_class| {
-            DeviceContext::from_host_environment(&traits::MobileHostEnvironment::new(
+            DeviceContext::from_host_environment(&platform_api::MobileHostEnvironment::new(
                 host_os,
                 Some("19.0".into()),
                 device_class,
-                traits::MobileExecutionTarget::PhysicalDevice,
-                traits::MobileLaunchMode::Interactive,
+                platform_api::MobileExecutionTarget::PhysicalDevice,
+                platform_api::MobileLaunchMode::Interactive,
             ))
             .map(|context| (context.os, context.form_factor))
         };
         // `Device class: phone` is the ONLY class an iPhone reports, and it
         // must not reach the manifest verbatim.
         assert_eq!(
-            derive(traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone),
+            derive(platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone),
             Some(("ios".into(), "iphone".into()))
         );
         assert_eq!(
-            derive(traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet),
+            derive(platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet),
             Some(("ios".into(), "ipad".into()))
         );
         assert_eq!(
             derive(
-                traits::MobileHostOs::Android,
-                traits::MobileDeviceClass::Phone
+                platform_api::MobileHostOs::Android,
+                platform_api::MobileDeviceClass::Phone
             ),
             Some(("android".into(), "phone".into()))
         );
         assert_eq!(
             derive(
-                traits::MobileHostOs::Android,
-                traits::MobileDeviceClass::Tablet
+                platform_api::MobileHostOs::Android,
+                platform_api::MobileDeviceClass::Tablet
             ),
             Some(("android".into(), "tablet".into()))
         );
         assert_eq!(
             derive(
-                traits::MobileHostOs::Ios,
-                traits::MobileDeviceClass::Unknown
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Unknown
             ),
             None
         );
         // Every pair the derivation can produce must survive validation.
         for (host_os, device_class) in [
-            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone),
-            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet),
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone),
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet),
             (
-                traits::MobileHostOs::Android,
-                traits::MobileDeviceClass::Phone,
+                platform_api::MobileHostOs::Android,
+                platform_api::MobileDeviceClass::Phone,
             ),
             (
-                traits::MobileHostOs::Android,
-                traits::MobileDeviceClass::Tablet,
+                platform_api::MobileHostOs::Android,
+                platform_api::MobileDeviceClass::Tablet,
             ),
         ] {
             let mut manifest = manifest();
             manifest.device_context =
-                DeviceContext::from_host_environment(&traits::MobileHostEnvironment::new(
+                DeviceContext::from_host_environment(&platform_api::MobileHostEnvironment::new(
                     host_os,
                     None,
                     device_class,
-                    traits::MobileExecutionTarget::PhysicalDevice,
-                    traits::MobileLaunchMode::Interactive,
+                    platform_api::MobileExecutionTarget::PhysicalDevice,
+                    platform_api::MobileLaunchMode::Interactive,
                 ));
             manifest
                 .validate()

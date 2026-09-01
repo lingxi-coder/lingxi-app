@@ -207,7 +207,7 @@ pub(crate) fn open_rooted_search_file(
     let relative = candidate
         .strip_prefix(search_root)
         .map_err(|_| SearchResolutionError::SearchRootChanged)?;
-    traits::rooted_fs::open_file_after_permission(search_root, relative, candidate, candidate)
+    platform_api::rooted_fs::open_file_after_permission(search_root, relative, candidate, candidate)
         .map_err(|_| SearchResolutionError::SearchRootChanged)
 }
 

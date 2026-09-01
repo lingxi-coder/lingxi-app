@@ -16,7 +16,7 @@ use jsonrpc::{BrokerError, Connection, ConnectionError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use traits::mcp::McpError;
+use platform_api::mcp::McpError;
 
 /// Header name used by claude-code IDE plugins for the auth token.
 /// LITERAL — must match claude-code byte-for-byte.
@@ -100,7 +100,7 @@ where
 /// `auth_token`, if `Some`, becomes the `X-LingXi-Ide-Authorization`
 /// header on BOTH the GET and the POST. `extra_headers` are applied to both
 /// directions verbatim. It is generic over the map type so both an unordered
-/// `HashMap` and the insertion-ordered [`traits::McpHeaders`] (`IndexMap`)
+/// `HashMap` and the insertion-ordered [`platform_api::McpHeaders`] (`IndexMap`)
 /// the MCP transport specs now carry are accepted (header order is irrelevant
 /// to the emitted HTTP request).
 ///

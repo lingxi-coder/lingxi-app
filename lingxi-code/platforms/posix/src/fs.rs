@@ -12,7 +12,7 @@ use fs2::FileExt;
 use futures_core::stream::Stream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use traits::{FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError};
+use platform_api::{FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError};
 
 /// Concrete [`FileSystem`] backed by `tokio::fs`.
 ///
@@ -39,7 +39,7 @@ async fn read_utf8_windowed(
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| FsError::Io(e.to_string()))?;
-        return Ok(traits::apply_line_window(content, None, None));
+        return Ok(platform_api::apply_line_window(content, None, None));
     }
     use tokio::io::AsyncBufReadExt;
     let file = tokio::fs::File::open(path)
@@ -93,7 +93,7 @@ async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, F
         .read(&mut buf)
         .await
         .map_err(|e| FsError::Io(e.to_string()))?;
-    traits::file_content_from_prefix_bytes(path, buf, n, max_bytes)
+    platform_api::file_content_from_prefix_bytes(path, buf, n, max_bytes)
 }
 
 #[async_trait]
@@ -222,7 +222,7 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<FileContent, FsError> {
-        let content = traits::rooted_fs::read_to_string(root, relative)?;
+        let content = platform_api::rooted_fs::read_to_string(root, relative)?;
         Ok(FileContent {
             total_lines: content.lines().count() as u64,
             content,
@@ -236,11 +236,11 @@ impl FileSystem for PosixFileSystem {
         relative: &Path,
         content: &str,
     ) -> Result<(), FsError> {
-        traits::rooted_fs::atomic_write(
+        platform_api::rooted_fs::atomic_write(
             root,
             relative,
             content.as_bytes(),
-            traits::AtomicWriteOptions::default(),
+            platform_api::AtomicWriteOptions::default(),
         )
     }
 
@@ -249,11 +249,11 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<Box<dyn FlockGuard>, FsError> {
-        traits::rooted_fs::lock_exclusive(
+        platform_api::rooted_fs::lock_exclusive(
             root,
             relative,
-            traits::rooted_fs::PRIVATE_DIR_MODE,
-            traits::rooted_fs::PRIVATE_FILE_MODE,
+            platform_api::rooted_fs::PRIVATE_DIR_MODE,
+            platform_api::rooted_fs::PRIVATE_FILE_MODE,
         )
         .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
     }
@@ -263,7 +263,7 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<(), FsError> {
-        traits::rooted_fs::remove_file(root, relative)
+        platform_api::rooted_fs::remove_file(root, relative)
     }
 
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
@@ -366,7 +366,7 @@ impl FlockGuard for PosixFlockGuard {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use traits::FileSystem;
+    use platform_api::FileSystem;
 
     fn fs_at(root: &std::path::Path) -> PosixFileSystem {
         PosixFileSystem::new(root.to_path_buf())

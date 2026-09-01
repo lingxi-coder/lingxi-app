@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// Tokio-backed spawner. Holds the live `JoinHandle`s keyed by task id so
 /// they can be aborted on demand.

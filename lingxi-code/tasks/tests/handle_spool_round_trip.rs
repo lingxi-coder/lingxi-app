@@ -18,8 +18,8 @@ use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tempfile::tempdir;
 use tokio::sync::Mutex as TokioMutex;
-use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use traits::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 
 struct MapFs {
     files: TokioMutex<HashMap<String, String>>,

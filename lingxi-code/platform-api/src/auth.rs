@@ -1,7 +1,7 @@
 //! Auth surface used by `/login` and `/logout` slash commands.
 //!
 //! Implemented by `lingxi-anthropic-oauth::handle::OAuthHandle`. The trait
-//! lives in `lingxi-traits` so `lingxi-commands` does not take a direct dep
+//! lives in `platform-api` so `lingxi-commands` does not take a direct dep
 //! on the oauth crate (decoupling). See plan M5-11 Task 3.
 
 use async_trait::async_trait;

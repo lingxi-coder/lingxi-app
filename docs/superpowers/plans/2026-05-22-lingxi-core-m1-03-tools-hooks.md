@@ -43,7 +43,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-permission = { path = "../permission" }
 serde.workspace = true
@@ -426,7 +426,7 @@ pub struct ReplacementRecord {
 
 ```rust
 use lingxi_protocol::ToolUseId;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::sync::Arc;
 use std::path::PathBuf;
 
@@ -440,7 +440,7 @@ impl ToolResultStorage {
         Self { storage_dir, fs }
     }
 
-    pub async fn store(&self, tool_use_id: &ToolUseId, content: &str) -> Result<PathBuf, lingxi_traits::FsError> {
+    pub async fn store(&self, tool_use_id: &ToolUseId, content: &str) -> Result<PathBuf, lingxi_platform_api::FsError> {
         let path = self.storage_dir.join(format!("{tool_use_id}.txt"));
         self.fs.write_file(path.to_str().unwrap(), content).await?;
         Ok(path)
@@ -627,7 +627,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
@@ -985,7 +985,7 @@ use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookOutcome, HookResponse, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
-use lingxi_traits::{HttpTransport, ProcessRunner, RuntimeSpawner};
+use lingxi_platform_api::{HttpTransport, ProcessRunner, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -1077,7 +1077,7 @@ use crate::events::HookEvent;
 use crate::registry::HookContext;
 use crate::response::HookResult;
 use lingxi_protocol::HookId;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};

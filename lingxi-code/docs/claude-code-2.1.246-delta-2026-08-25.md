@@ -70,7 +70,7 @@ rather than source-string tripwires.
 
 ## Related port update
 
-The live parity constant is `traits::CLAUDE_CODE_VERSION = "2.1.246"`; the
+The live parity constant is `platform_api::CLAUDE_CODE_VERSION = "2.1.246"`; the
 version-facing test is `test-harness/tests/parity_claude_2_1_246.rs`. Runtime
 regressions live beside their owning orchestrator, session, CLI, and MCP code.
 

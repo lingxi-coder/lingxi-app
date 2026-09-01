@@ -2,7 +2,7 @@
 //!
 //! Owns the per-connection state machine (`connection.rs`), the
 //! [`registry::McpRegistry`] that drives transitions through a
-//! platform-supplied [`traits::McpTransport`], the OAuth 2.1
+//! platform-supplied [`platform_api::McpTransport`], the OAuth 2.1
 //! handshake skeleton (`oauth.rs`), the per-project MCP-server enable/
 //! disable and project-`.mcp.json`-approval gate (`server_gate.rs`), and the
 //! `client::McpClient` JSON-RPC client built on top of `lingxi-jsonrpc`
@@ -123,5 +123,5 @@ pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,
     McpServerBlockReason, McpServerDecision, BUILTIN_COMPUTER_USE_SERVER,
 };
-pub use traits::{McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpProtocolEra};
+pub use platform_api::{McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpProtocolEra};
 pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

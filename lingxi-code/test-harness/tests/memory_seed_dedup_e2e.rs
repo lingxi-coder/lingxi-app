@@ -33,7 +33,7 @@ use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
 use tool_api::test_support::{fresh_ctx, fresh_tx};
 use tool_api::tool_trait::Tool;
-use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct UnusedHttp;
 #[async_trait]
@@ -41,7 +41,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -52,11 +52,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }

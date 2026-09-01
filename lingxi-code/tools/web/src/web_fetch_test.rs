@@ -318,7 +318,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     use telemetry::AnalyticsBus;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
     use tool_api::test_support::{fresh_ctx, fresh_tx};
-    use traits::http::HttpTransport;
+    use platform_api::http::HttpTransport;
 
     /// Serializes every test that touches the process-global
     /// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var. The skip test *sets* it; the
@@ -645,7 +645,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             ua_value,
             &format!(
                 "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-                traits::CLAUDE_CODE_VERSION
+                platform_api::CLAUDE_CODE_VERSION
             ),
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
@@ -1201,7 +1201,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<traits::http::SseStream, HttpError> {
+        ) -> Result<platform_api::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest(
                 "sse not used in this mock".into(),
             ))

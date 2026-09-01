@@ -18,7 +18,7 @@ execution rather than re-derivation.
 > |---|---|
 > | **`--resume <title>`** | ✅ **DONE 2026-08-02** (`d1d5779d1`). Was deferred because nothing wrote `custom-title`; three write paths had since landed, which dissolved the reason. `OEe` ported as `session::jsonl::search_sessions_by_custom_title` (lowercase+trim both sides, `customTitle ?? aiTitle`, EXACT for `--resume`, newest-first); wired at `run.rs::resolve_resume_title`. ⚠️ It matches a NEW `custom_or_ai_title` field, **not** `SessionMetadata::title` — that one folds in agentName/summary/first-message and is truncated, so searching it would resume a session because its SUMMARY matched. Both error strings verified fragment-by-fragment against the binary with a control string. |
 > | "8 unprobed CLI surfaces" | **It is 6, and it is a TEST-COVERAGE gap, not a feature gap.** `install` + `update` are deliberate NOT-APPLICABLE divergences (source build, no auto-update channel): they parse the byte-faithful clap surface, then return `NOT_IMPLEMENTED` rather than fake success. The other 6 are really implemented (74–3420 lines each). Their stated blocker still stands — probing them for real reaches third-party IdP/registry. |
-> | `--version` shape | Confirmed a **branding decision**, not work. `traits::CLAUDE_CODE_VERSION` already carries the Claude-compat identifier separately. |
+> | `--version` shape | Confirmed a **branding decision**, not work. `platform_api::CLAUDE_CODE_VERSION` already carries the Claude-compat identifier separately. |
 > | `--bare` / `lingxiMdExcludes` | ❌ **STALE — both shipped long ago.** `--bare` is WIRED at `argv.rs:294` (exports `LINGXI_SIMPLE=1`); excludes have their own module (`memory/src/lingxi_md/excludes.rs`), are wired into `prompt/memory_block.rs`, and are registered in the settings schema. Delete this entry, do not re-derive it. |
 > | `N-env-3` / `N-protocol-8` | Already adjudicated **DIVERGENCE** (Anthropic private first-party backend), and the two are ONE item — `N-protocol-8` is marked DUPLICATE. The 2.1.220 backlog is **25 CLOSED + 1 DIVERGENCE**. |
 >
@@ -138,7 +138,7 @@ differently-named product.
 - **`--version` shape**: oracle `2.1.220 (Claude Code)` vs port
   `lingxi-cli 0.12.0`. The VALUE difference is correct — LingXi is its own
   product, and Claude-compat identifiers derive separately from
-  `traits::CLAUDE_CODE_VERSION`. The SHAPE is a branding call not yet made.
+  `platform_api::CLAUDE_CODE_VERSION`. The SHAPE is a branding call not yet made.
 - **Remote-session client** (`useRemoteSession`, `tengu_refusal_retraction_*`)
   is an accepted divergence: no Anthropic private relay / auth contract. If that
   changes, note `fzf` applies a retraction signal ONLY when

@@ -25,7 +25,7 @@ use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
-use traits::{AuthHandle, OrchestratorHandle};
+use platform_api::{AuthHandle, OrchestratorHandle};
 
 // F3-03: the shared mobile session-host module — `MobileConfig` +
 // `build_mobile(MobileConfig, Platform, listener, sink) -> MobileRuntime`. It
@@ -652,8 +652,8 @@ impl Default for MobileEngineConfig {
             // The host's boot default for the Anthropic route. Keep it
             // provider-qualified so the shared Claude model ids exposed by
             // Copilot cannot make the fresh-session default ambiguous.
-            default_model: traits::qualified_model_ref(
-                traits::provider_default_model("anthropic").unwrap_or("claude-sonnet-5"),
+            default_model: platform_api::qualified_model_ref(
+                platform_api::provider_default_model("anthropic").unwrap_or("claude-sonnet-5"),
                 Some("anthropic"),
             ),
         }
@@ -790,7 +790,7 @@ pub fn mobile_tool_registry_with_skill_loader_and_ask_resolver(
 /// share the host; its in-memory active-session grants remain the security gate.
 pub fn register_android_ui_automation(
     reg: &mut ToolRegistry,
-    automation: Option<Arc<dyn traits::AndroidUiAutomation>>,
+    automation: Option<Arc<dyn platform_api::AndroidUiAutomation>>,
 ) {
     #[cfg(feature = "android-computer-use")]
     if let Some(automation) = automation {
@@ -805,7 +805,7 @@ mod android_ui_registration_tests {
     use super::register_android_ui_automation;
     use async_trait::async_trait;
     use std::sync::Arc;
-    use traits::{
+    use platform_api::{
         AndroidAccessRequest, AndroidAction, AndroidActionResult, AndroidAppInfo,
         AndroidAutomationError, AndroidAutomationStatus, AndroidNodeQuery, AndroidScreenshot,
         AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
@@ -944,7 +944,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
     let cron_enabled =
-        !traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
+        !platform_api::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(reg, cron_enabled);
 }
 
@@ -955,7 +955,7 @@ mod tests {
     use std::collections::HashMap;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::tool_trait::{ToolError, ToolStaticContext};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     struct NoopSkillLoader;
 

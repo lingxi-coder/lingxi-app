@@ -11,7 +11,7 @@
 //! on — `AppContainer` / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
-use traits::{
+use platform_api::{
     ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -68,7 +68,7 @@ impl Sandbox for WindowsSandbox {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use traits::{
+    use platform_api::{
         NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     };
 
@@ -108,7 +108,7 @@ mod tests {
         let err = WindowsSandbox::new()
             .prepare(empty_cmd(), &empty_policy())
             .unwrap_err();
-        assert!(matches!(err, traits::SandboxError::Unsupported));
+        assert!(matches!(err, platform_api::SandboxError::Unsupported));
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         // on unsupported platforms an explicit audit grant must still produce
         // a usable command.
         let wrapped = WindowsSandbox::new().bypass_with_audit(empty_cmd(), "explicit override");
-        let _: traits::SandboxedCommand = wrapped;
+        let _: platform_api::SandboxedCommand = wrapped;
     }
 
     #[tokio::test]

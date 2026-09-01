@@ -22,7 +22,7 @@
   - `claude-code/src/utils/swarm/backends/registry.ts` (465 lines — backend selection logic)
   - `claude-code/src/utils/swarm/backends/detection.ts` — env probes
   - `claude-code/src/utils/swarm/constants.ts` — `SWARM_SESSION_NAME = 'claude-swarm'`, `getSwarmSocketName()`
-- Trait definitions: `lingxi-code/crates/traits/src/filesystem.rs` (`FileSystem::watch`, `FileEvent`, `FileEventKind`), `lingxi-code/crates/traits/src/swarm.rs` (`SwarmBackend`, `SwarmLayout`, `PanePosition`, `SwarmHandle`, `PaneId`, `SwarmError`)
+- Trait definitions: `lingxi-code/crates/platform-api/src/filesystem.rs` (`FileSystem::watch`, `FileEvent`, `FileEventKind`), `lingxi-code/crates/platform-api/src/swarm.rs` (`SwarmBackend`, `SwarmLayout`, `PanePosition`, `SwarmHandle`, `PaneId`, `SwarmError`)
 - Existing code state:
   - `lingxi-code/platforms/posix/src/fs.rs` — Linux inotify works, macOS empty stream stub (`TODO(M2-followup): FSEvents`)
   - `lingxi-code/platforms/windows/src/fs.rs` — empty stream stub (`TODO(M2-followup): ReadDirectoryChangesW`)
@@ -234,7 +234,7 @@ Create `lingxi-code/platforms/posix/tests/fs_watch_git_filter_test.rs`:
 
 use futures_util::StreamExt;
 use lingxi_platform_posix::PosixFileSystem;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -308,7 +308,7 @@ Create `lingxi-code/platforms/posix/src/watch_helper.rs`:
 //! `src/utils/hooks/fileChangedWatcher.ts:69-77`.
 
 use futures_core::stream::Stream;
-use lingxi_traits::{FileEvent, FileEventKind, FsError};
+use lingxi_platform_api::{FileEvent, FileEventKind, FsError};
 use notify::{EventKind, RecursiveMode};
 use notify_debouncer_mini::{
     new_debouncer, DebouncedEvent, DebouncedEventKind, Debouncer,
@@ -531,7 +531,7 @@ This is the parity check for chokidar's `awaitWriteFinish.stabilityThreshold`. M
 
 use futures_util::StreamExt;
 use lingxi_platform_posix::PosixFileSystem;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -739,7 +739,7 @@ Create `lingxi-code/platforms/windows/tests/fs_watch_smoke_test.rs`:
 
 use futures_util::StreamExt;
 use lingxi_platform_windows::WindowsFileSystem;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -1271,7 +1271,7 @@ Replace `lingxi-code/platforms/posix/src/swarm/tmux.rs`:
 
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
@@ -1633,7 +1633,7 @@ A real end-to-end check that requires `tmux` ≥ 3.2 on the host. Marked `#[igno
 
 use lingxi_platform_posix::swarm::TmuxBackend;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{PanePosition, SwarmBackend, SwarmLayout};
+use lingxi_platform_api::{PanePosition, SwarmBackend, SwarmLayout};
 
 #[tokio::test]
 #[ignore = "requires real tmux >= 3.2 on host"]
@@ -1704,7 +1704,7 @@ Replace `lingxi-code/platforms/posix/src/swarm/iterm.rs`:
 
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 use std::sync::OnceLock;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -1878,7 +1878,7 @@ Replace `lingxi-code/platforms/posix/src/swarm/inprocess.rs`:
 
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1966,7 +1966,7 @@ Replace `lingxi-code/platforms/posix/src/swarm/registry.rs`:
 
 use std::sync::OnceLock;
 
-use lingxi_traits::SwarmBackend;
+use lingxi_platform_api::SwarmBackend;
 
 use super::detection::{detect_terminal_env, pick_backend, BackendChoice, TerminalEnv};
 use super::inprocess::InProcessSwarmBackend;

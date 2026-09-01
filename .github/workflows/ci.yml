@@ -26,9 +26,9 @@ jobs:
       - name: Zero-OS-deps check
         working-directory: lingxi-code
         run: |
-          cargo check -p lingxi-protocol --no-default-features
-          cargo check -p lingxi-core --no-default-features
-          cargo check -p lingxi-traits
+          cargo check -p protocol --no-default-features
+          cargo check -p core --no-default-features
+          cargo check -p platform-api
 
   # The mobile clients are the only consumers that turn `client-protocol`'s
   # `uniffi` feature on, and NOTHING else in this file builds with it: the
@@ -38,7 +38,7 @@ jobs:
   # `unit-tests` runs `cargo test --workspace --all-features`, and
   # `--all-features` turns on `client-protocol`'s own `uniffi` feature, so CI
   # WOULD have gone red. What was blind was per-package local verification
-  # (`cargo test -p bridge-server`, `-p engine`, the electron suites) — none of
+  # (`cargo test -p bridge-server`, `-p core`, the electron suites) — none of
   # which enables the feature — so the break survived a whole 21-task run and
   # two rounds of review before any workspace-wide build ran.
   #

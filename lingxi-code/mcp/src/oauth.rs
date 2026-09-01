@@ -17,7 +17,7 @@
 //!    RFC 6749 / the MCP SDK).
 //! 7. **Refresh** — `refresh_token` grant, run on token expiry / a 401.
 //!
-//! Tokens are persisted via `lingxi-secret`'s [`traits::SecureStorage`] seam
+//! Tokens are persisted via `lingxi-secret`'s [`platform_api::SecureStorage`] seam
 //! keyed by a `getServerKey`-equivalent (`name|sha256({type,url,headers})[..16]`,
 //! auth.ts:325-341), the inner access/refresh strings wrapped in
 //! [`protocol::Secret`].
@@ -59,7 +59,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
-use traits::{Clock, HttpTransport, McpTransportSpec};
+use platform_api::{Clock, HttpTransport, McpTransportSpec};
 
 pub mod callback;
 
@@ -146,9 +146,9 @@ pub enum OAuthError {
     RefreshRejected(String),
 }
 
-impl From<OAuthError> for traits::McpError {
+impl From<OAuthError> for platform_api::McpError {
     fn from(e: OAuthError) -> Self {
-        traits::McpError::OAuth(e.to_string())
+        platform_api::McpError::OAuth(e.to_string())
     }
 }
 
@@ -986,7 +986,7 @@ fn authorize_url_scope(
 pub async fn perform_oauth_flow(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &traits::McpOAuthConfigDto,
+    oauth: &platform_api::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1014,7 +1014,7 @@ pub async fn perform_oauth_flow(
 pub async fn perform_oauth_flow_with_manual_input(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &traits::McpOAuthConfigDto,
+    oauth: &platform_api::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1044,7 +1044,7 @@ pub async fn perform_oauth_flow_with_manual_input(
 pub(crate) async fn perform_oauth_flow_for_reauth(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &traits::McpOAuthConfigDto,
+    oauth: &platform_api::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1069,7 +1069,7 @@ pub(crate) async fn perform_oauth_flow_for_reauth(
 async fn perform_oauth_flow_inner(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &traits::McpOAuthConfigDto,
+    oauth: &platform_api::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1253,7 +1253,7 @@ pub const MCP_OAUTH_SERVICE: &str = "mcp-oauth";
 /// headers}` (headers default to `{}`), hex, first 16 chars.
 #[must_use]
 pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
-    let empty: traits::McpHeaders = traits::McpHeaders::new();
+    let empty: platform_api::McpHeaders = platform_api::McpHeaders::new();
     let (kind, url, headers) = match spec {
         McpTransportSpec::Sse { url, headers, .. } => ("sse", url.as_str(), headers),
         McpTransportSpec::Http { url, headers, .. } => ("http", url.as_str(), headers),
@@ -1356,7 +1356,7 @@ impl StoredTokens {
 /// # Errors
 /// [`OAuthError::Token`] on a storage backend error.
 pub async fn load_tokens(
-    storage: &Arc<dyn traits::SecureStorage>,
+    storage: &Arc<dyn platform_api::SecureStorage>,
     key: &str,
 ) -> Result<Option<StoredTokens>, OAuthError> {
     let data = storage
@@ -1378,7 +1378,7 @@ pub(crate) fn discovery_cache_refresh_grant_token(refresh_token: &str) -> String
 }
 
 pub(crate) async fn discovery_cache_grant_token(
-    storage: &Arc<dyn traits::SecureStorage>,
+    storage: &Arc<dyn platform_api::SecureStorage>,
     key: &str,
 ) -> Result<Option<String>, OAuthError> {
     let Some(stored) = load_tokens(storage, key).await? else {
@@ -1397,7 +1397,7 @@ pub(crate) async fn discovery_cache_grant_token(
 /// # Errors
 /// [`OAuthError::Token`] on encode or a storage backend error.
 pub async fn store_tokens(
-    storage: &Arc<dyn traits::SecureStorage>,
+    storage: &Arc<dyn platform_api::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     stored: &StoredTokens,
@@ -1422,7 +1422,7 @@ pub async fn store_tokens(
 /// # Errors
 /// [`OAuthError::Token`] on encode or a storage backend error.
 pub async fn save_tokens(
-    storage: &Arc<dyn traits::SecureStorage>,
+    storage: &Arc<dyn platform_api::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     tokens: &Tokens,
@@ -1599,11 +1599,11 @@ pub async fn revoke_token(
 /// `preserveStepUpState` (auth.ts:578-617) is a re-auth-only variant — not the
 /// logout/disconnect path wired here — and is a noted residual.
 pub async fn revoke_server_tokens(
-    storage: &Arc<dyn traits::SecureStorage>,
+    storage: &Arc<dyn platform_api::SecureStorage>,
     http: &Arc<dyn HttpTransport>,
     key: &str,
     server_url: &str,
-    oauth_cfg: &traits::McpOAuthConfigDto,
+    oauth_cfg: &platform_api::McpOAuthConfigDto,
 ) {
     let stored = match load_tokens(storage, key).await {
         Ok(Some(s)) => Some(s),
@@ -1640,7 +1640,7 @@ pub async fn revoke_server_tokens(
 async fn revoke_at_endpoint(
     http: &Arc<dyn HttpTransport>,
     server_url: &str,
-    oauth_cfg: &traits::McpOAuthConfigDto,
+    oauth_cfg: &platform_api::McpOAuthConfigDto,
     stored: &StoredTokens,
 ) -> Result<(), OAuthError> {
     let meta = discover_auth_server_metadata(
@@ -1757,7 +1757,7 @@ mod tests {
         // name|sha256({type,url,headers})[..16]; headers default {}.
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -1772,7 +1772,7 @@ mod tests {
         assert_eq!(key, key2);
         let spec_other = McpTransportSpec::Http {
             url: "https://mcp.example.com/v2".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -1982,7 +1982,7 @@ mod tests {
     /// hash the BTreeMap path produced.
     #[test]
     fn server_key_uses_insertion_order_not_sorted() {
-        let mut headers = traits::McpHeaders::new();
+        let mut headers = platform_api::McpHeaders::new();
         headers.insert("Z-Header".to_string(), "z".to_string());
         headers.insert("A-Header".to_string(), "a".to_string());
         let spec = McpTransportSpec::Http {
@@ -2004,7 +2004,7 @@ mod tests {
     fn server_key_empty_headers_matches_reference() {
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -2074,13 +2074,13 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl traits::SecureStorage for DiscoveryCacheTestStorage {
+    impl platform_api::SecureStorage for DiscoveryCacheTestStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
             data: protocol::SecureStorageData,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.rows
                 .lock()
                 .unwrap()
@@ -2092,9 +2092,9 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             if self.fail_retrieve.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(traits::SecureStorageError::BackendUnavailable(
+                return Err(platform_api::SecureStorageError::BackendUnavailable(
                     "storage failed".to_string(),
                 ));
             }
@@ -2110,7 +2110,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.rows
                 .lock()
                 .unwrap()
@@ -2118,7 +2118,7 @@ mod tests {
             Ok(())
         }
 
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .rows
                 .lock()
@@ -2133,8 +2133,8 @@ mod tests {
             false
         }
 
-        fn backend(&self) -> traits::SecureStorageBackend {
-            traits::SecureStorageBackend::PlainText
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::PlainText
         }
     }
 
@@ -2143,7 +2143,7 @@ mod tests {
         let storage = Arc::new(DiscoveryCacheTestStorage::default());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         store_tokens(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2162,7 +2162,7 @@ mod tests {
             "grant:0eb17643d4e92611"
         );
         let first = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             "key",
         )
         .await
@@ -2171,7 +2171,7 @@ mod tests {
         assert_eq!(first, "grant:0eb17643d4e92611");
 
         store_tokens(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2186,7 +2186,7 @@ mod tests {
         .await
         .expect("overwrite tokens");
         let second = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             "key",
         )
         .await
@@ -2200,7 +2200,7 @@ mod tests {
         let storage = Arc::new(DiscoveryCacheTestStorage::default());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         store_tokens(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2215,7 +2215,7 @@ mod tests {
         .await
         .expect("store tokens");
         let first = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             "key",
         )
         .await
@@ -2223,7 +2223,7 @@ mod tests {
         .expect("grant token present");
 
         store_tokens(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2238,7 +2238,7 @@ mod tests {
         .await
         .expect("rotate refresh");
         let second = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             "key",
         )
         .await
@@ -2253,7 +2253,7 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         assert_eq!(
             discovery_cache_grant_token(
-                &(storage.clone() as Arc<dyn traits::SecureStorage>),
+                &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
                 "key"
             )
             .await
@@ -2262,7 +2262,7 @@ mod tests {
         );
 
         store_tokens(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2278,7 +2278,7 @@ mod tests {
         .expect("store access-only");
         assert_eq!(
             discovery_cache_grant_token(
-                &(storage.clone() as Arc<dyn traits::SecureStorage>),
+                &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
                 "key"
             )
             .await
@@ -2290,7 +2290,7 @@ mod tests {
             .fail_retrieve
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
             "key"
         )
         .await
@@ -2464,7 +2464,7 @@ mod tests {
         async fn request(
             &self,
             req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             self.requested.lock().unwrap().push(req.url.clone());
             for (pat, status, body) in &self.routes {
                 if req.url == *pat {
@@ -2486,8 +2486,8 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::Connection("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::Connection("unused".into()))
         }
     }
 
@@ -2651,7 +2651,7 @@ mod tests {
         async fn request(
             &self,
             req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             self.seen.lock().unwrap().push(req);
             Ok(protocol::HttpResponse {
                 status: 200,
@@ -2663,8 +2663,8 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::Connection("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::Connection("unused".into()))
         }
     }
 

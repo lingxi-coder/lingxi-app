@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use traits::http::SseStream;
-use traits::{
+use platform_api::http::SseStream;
+use platform_api::{
     BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
     SecureStorage, SecureStorageBackend, SecureStorageError,
 };

@@ -626,7 +626,7 @@ impl StdioControlPermissionGate {
                                 updated_input,
                                 permission_updates: Vec::new(),
                                 decision_classification: Some(
-                                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
                                 ),
                             }
                         }
@@ -648,10 +648,10 @@ impl StdioControlPermissionGate {
                         permission_updates.clear();
                         if matches!(
                             decision_classification,
-                            Some(traits::permission_gate::ToolDecisionClassification::UserPermanent)
+                            Some(platform_api::permission_gate::ToolDecisionClassification::UserPermanent)
                         ) {
                             *decision_classification = Some(
-                                traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
                             );
                         }
                     }
@@ -753,13 +753,13 @@ impl StdioControlPermissionGate {
                             .and_then(Value::as_str)
                             .and_then(|value| match value {
                                 "user_temporary" => Some(
-                                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
                                 ),
                                 "user_permanent" => Some(
-                                    traits::permission_gate::ToolDecisionClassification::UserPermanent,
+                                    platform_api::permission_gate::ToolDecisionClassification::UserPermanent,
                                 ),
                                 "user_reject" => Some(
-                                    traits::permission_gate::ToolDecisionClassification::UserReject,
+                                    platform_api::permission_gate::ToolDecisionClassification::UserReject,
                                 ),
                                 _ => None,
                             });
@@ -1774,7 +1774,7 @@ mod tests {
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({"command": "echo hi"});
         let ctx = PermissionCheckContext {
-            auto_mode_prompt: Some(traits::permission_gate::AutoModePrompt::WorkflowBash),
+            auto_mode_prompt: Some(platform_api::permission_gate::AutoModePrompt::WorkflowBash),
             ..PermissionCheckContext::default()
         };
         let check =
@@ -2093,7 +2093,7 @@ mod tests {
             check.await.unwrap(),
             PermissionOutcome::Allow {
                 decision_classification: Some(
-                    traits::permission_gate::ToolDecisionClassification::UserPermanent
+                    platform_api::permission_gate::ToolDecisionClassification::UserPermanent
                 ),
                 ..
             }

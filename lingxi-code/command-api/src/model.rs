@@ -150,7 +150,7 @@ pub enum SlashCommandKind {
         prompt_name: String,
         /// Server-declared named arguments, in wire order.
         #[serde(default)]
-        arguments: Vec<traits::McpPromptArgumentDto>,
+        arguments: Vec<platform_api::McpPromptArgumentDto>,
     },
     /// Programmatically-registered bundled skill (port of the reference
     /// `registerBundledSkill`, `bundledSkills.ts`). Unlike [`Self::Markdown`],

@@ -1096,13 +1096,13 @@ fn read_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(traits::rooted_fs::RootedFsError::Fs(
-            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(platform_api::rooted_fs::RootedFsError::Fs(
+            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
 fn symlink_resolution_changed_message(path: &str) -> String {
@@ -1858,7 +1858,7 @@ impl Tool for FileReadTool {
         // symlink retarget window.
         let snapshot = match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => snapshot,
-            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => {
+            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
                 // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
                 // tries the macOS-screenshot AM/PM space variant (regular space ⇄
                 // thin space, U+202F), then reports the friendly message if that
@@ -1870,8 +1870,8 @@ impl Tool for FileReadTool {
                                 canon = alt_canon;
                                 snapshot
                             }
-                            Err(traits::rooted_fs::RootedFsError::Fs(
-                                traits::FsError::NotFound(_),
+                            Err(platform_api::rooted_fs::RootedFsError::Fs(
+                                platform_api::FsError::NotFound(_),
                             )) => {
                                 let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                                 return self
@@ -1896,15 +1896,15 @@ impl Tool for FileReadTool {
                         .await;
                 }
             }
-            Err(traits::rooted_fs::RootedFsError::SymlinkResolutionChanged)
-            | Err(traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
+            Err(platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged)
+            | Err(platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
                 self.emit_failed(&invocation_id, "symlink_resolution_changed")
                     .await;
                 return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
                     file_path,
                 )));
             }
-            Err(traits::rooted_fs::RootedFsError::NotRegularFile)
+            Err(platform_api::rooted_fs::RootedFsError::NotRegularFile)
                 if std::path::Path::new(file_path)
                     .extension()
                     .and_then(|extension| extension.to_str())

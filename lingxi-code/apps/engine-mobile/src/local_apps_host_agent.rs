@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use traits::{CostSnapshot, OutputStream};
+use platform_api::{CostSnapshot, OutputStream};
 
 const REASON_AGENT_NOTIFY: &str = "应用请求向你的对话助手发送事件与数据。";
 
@@ -1118,7 +1118,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
-    use traits::OutputStream;
+    use platform_api::OutputStream;
 
     struct Harness {
         _root: TempDir,

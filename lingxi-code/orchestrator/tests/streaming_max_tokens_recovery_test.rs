@@ -15,7 +15,7 @@ use protocol::{ContentBlock, ConversationMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// The byte-exact nudge string (TS `query.ts:1226-1227`), duplicated here as a
 /// black-box expectation so the integration test does not depend on a crate

@@ -158,7 +158,7 @@ async fn assert_finalizes(err: LlmError, expected_cause: &str, expected_notice: 
     assert!(
         output.snapshot().await.iter().any(|e| matches!(
             e,
-            traits::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "finalize ends the turn with stop_reason model_error"
     );

@@ -88,7 +88,7 @@ types — no orchestrator helpers needed. The split-formatter's own unit tests m
 ## 5. Dependency analysis (cycle-free)
 - `split_system_blocks_with` is self-contained (llm-client types + its const) → moves cleanly.
 - `ApiService`'s drive path uses `llm_client::{model, convert, prompt_format, Transport, …}` +
-  `protocol` + `traits::subscription` + `telemetry` — all already llm-client deps (Plans A/B).
+  `protocol` + `platform_api::subscription` + `telemetry` — all already llm-client deps (Plans A/B).
   No orchestrator-internal reference remains in the drive path.
 - The thin adapter (orchestrator) holds `Arc<ApiService>` + the trait impls — orchestrator → llm-client (existing).
 

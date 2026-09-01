@@ -313,7 +313,7 @@ mod read_file_state_tests {
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
     };
-    use traits::OrchestratorHandle;
+    use platform_api::OrchestratorHandle;
 
     /// Minimal Read/Edit/Write-shaped stub. Resolves `file_path` against
     /// `cwd` (mirroring how the real `FileReadTool` resolves against
@@ -543,7 +543,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input: Some(json!({"file_path":"real.txt"})),
                     permission_updates: vec![],
                     decision_classification: None,
@@ -607,7 +607,7 @@ mod read_file_state_tests {
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![update.clone()],
                     decision_classification: None,
@@ -657,7 +657,7 @@ mod read_file_state_tests {
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
-                traits::permission_gate::PermissionOutcome::AllowAuto {
+                platform_api::permission_gate::PermissionOutcome::AllowAuto {
                     updated_input: Some(json!({"file_path":"real.txt"})),
                 },
             )
@@ -702,7 +702,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                traits::permission_gate::PermissionOutcome::Deny {
+                platform_api::permission_gate::PermissionOutcome::Deny {
                     reason: "Permission to use Read has been denied.".into(),
                 },
             )
@@ -758,7 +758,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -785,7 +785,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &ToolUseId::new(),
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -820,7 +820,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -869,7 +869,7 @@ mod read_file_state_tests {
                 json!({"file_path":"b.txt"}),
             ));
         }
-        let allow = || traits::permission_gate::PermissionOutcome::Allow {
+        let allow = || platform_api::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
             decision_classification: None,
@@ -923,7 +923,7 @@ mod read_file_state_tests {
                 json!({"file_path":"real.txt"}),
             ));
         }
-        let allow = || traits::permission_gate::PermissionOutcome::Allow {
+        let allow = || platform_api::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
             decision_classification: None,
@@ -1164,7 +1164,7 @@ mod read_file_state_tests {
             permission::PermissionMode::Default,
             rules,
         ));
-        let gate: Arc<dyn traits::permission_gate::PermissionGate> = Arc::new(
+        let gate: Arc<dyn platform_api::permission_gate::PermissionGate> = Arc::new(
             PolicyPermissionGate::new(policy, Arc::new(NoOpPermissionGate)),
         );
         ConversationOrchestrator::new(
@@ -1444,7 +1444,7 @@ mod read_file_state_tests {
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_clears_read_state() {
         use protocol::{ConversationMessage, MessageId};
-        use traits::OrchestratorHandle;
+        use platform_api::OrchestratorHandle;
 
         // Compaction with a tiny threshold so a small seeded history compacts.
         let (compactor, slot) = wired_compaction(10);
@@ -1609,7 +1609,7 @@ mod read_file_state_tests {
         // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
         // always empty in production.
         use protocol::{ConversationMessage, MessageId};
-        use traits::OrchestratorHandle;
+        use platform_api::OrchestratorHandle;
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
         let shared = tool_api::read_file_state::new_read_file_state_map();
@@ -1854,7 +1854,7 @@ mod max_output_tokens_recovery_tests {
     async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
             dir.path().to_path_buf(),
         ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -2761,35 +2761,35 @@ mod pre_tool_hook_tests {
     // ----- unused transport/runtime stubs for the builtin-only executor -----
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
+    impl platform_api::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -2989,7 +2989,7 @@ mod pre_tool_hook_tests {
         // context, dispatch a tool, and assert the fields are populated.
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
             dir.path().to_path_buf(),
         ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -3246,8 +3246,8 @@ mod pre_tool_hook_tests {
             &self,
             _t: &str,
             _i: &serde_json::Value,
-            _ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            _ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
             Ok(PermissionResolution::Deny {
                 reason: "via-plan-mode".into(),
                 source: PermissionDecisionSource::Unspecified,
@@ -3286,9 +3286,9 @@ mod pre_tool_hook_tests {
     }
 
     struct PlanAskProbeGate {
-        saw_ctx: std::sync::Mutex<Option<traits::permission_gate::PermissionCheckContext>>,
+        saw_ctx: std::sync::Mutex<Option<platform_api::permission_gate::PermissionCheckContext>>,
         transport_calls: std::sync::atomic::AtomicUsize,
-        transport_outcome: traits::permission_gate::PermissionOutcome,
+        transport_outcome: platform_api::permission_gate::PermissionOutcome,
     }
 
     #[async_trait]
@@ -3301,8 +3301,8 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            _ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> traits::permission_gate::PermissionOutcome {
+            _ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> platform_api::permission_gate::PermissionOutcome {
             self.transport_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.transport_outcome.clone()
@@ -3312,8 +3312,8 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
             *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
             Ok(PermissionResolution::Ask)
         }
@@ -3333,13 +3333,13 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
             self.saw_non_interactive.store(
                 ctx.is_non_interactive_session,
                 std::sync::atomic::Ordering::SeqCst,
             );
-            Err(traits::permission_gate::PermissionAbort {
+            Err(platform_api::permission_gate::PermissionAbort {
                 message: "Agent aborted: too many classifier denials in headless mode".into(),
             })
         }
@@ -4723,7 +4723,7 @@ mod pre_tool_hook_tests {
         let gate = Arc::new(PlanAskProbeGate {
             saw_ctx: std::sync::Mutex::new(None),
             transport_calls: std::sync::atomic::AtomicUsize::new(0),
-            transport_outcome: traits::permission_gate::PermissionOutcome::Allow {
+            transport_outcome: platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -4769,7 +4769,7 @@ mod pre_tool_hook_tests {
         let gate = Arc::new(PlanAskProbeGate {
             saw_ctx: std::sync::Mutex::new(None),
             transport_calls: std::sync::atomic::AtomicUsize::new(0),
-            transport_outcome: traits::permission_gate::PermissionOutcome::Deny {
+            transport_outcome: platform_api::permission_gate::PermissionOutcome::Deny {
                 reason: "transport should not be consulted".into(),
             },
         });
@@ -5646,14 +5646,14 @@ mod memdir_index_cap_tests {
     struct InlineRuntime;
 
     #[async_trait]
-    impl traits::RuntimeSpawner for InlineRuntime {
+    impl platform_api::RuntimeSpawner for InlineRuntime {
         async fn spawn(
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
             tokio::spawn(task);
-            Ok(traits::BackgroundTaskHandle {
+            Ok(platform_api::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -5663,8 +5663,8 @@ mod memdir_index_cap_tests {
 
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }

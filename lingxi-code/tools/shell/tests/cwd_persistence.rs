@@ -20,8 +20,8 @@ use tempfile::TempDir;
 use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 use tool_api::Tool;
 use tool_shell::BashTool;
-use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
-use traits::sandbox::SandboxedCommand;
+use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+use platform_api::sandbox::SandboxedCommand;
 
 /// Serializes EVERY test whose correctness depends on
 /// `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` (TFo) having a fixed value. The

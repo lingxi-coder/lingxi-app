@@ -28,8 +28,8 @@ members = [
     "tools/computer-use",
     "tools/android-use",
     "tools/ios-use",
-    "engine",
-    "traits",
+    "core",
+    "platform-api",
     "test-harness",
     "secret",
     "cost",
@@ -122,8 +122,8 @@ default-members = [
     "tools/computer-use",
     "tools/android-use",
     "tools/ios-use",
-    "engine",
-    "traits",
+    "core",
+    "platform-api",
     "secret",
     "cost",
     "permission",
@@ -195,7 +195,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `indexmap` gives an insertion-order-preserving map. Used for MCP transport
 # `headers` so the `getServerKey` config hash byte-matches claude-code, whose
 # `JSON.stringify({type,url,headers})` serializes header keys in the config's
-# insertion order (not sorted). See `traits::McpHeaders` / `oauth::server_key`.
+# insertion order (not sorted). See `platform_api::McpHeaders` / `oauth::server_key`.
 # Capped below 2.8: newer indexmap releases require the `edition2024` Cargo
 # feature, which the workspace's pinned toolchain (rust-toolchain.toml,
 # 1.82.0) cannot parse.

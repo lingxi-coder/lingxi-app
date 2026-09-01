@@ -4,7 +4,7 @@
 //! are NOT accepted.
 
 use async_trait::async_trait;
-use engine::{TodoItem, TodoState};
+use lingxi_core::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -478,7 +478,7 @@ impl Tool for TodoWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::SessionState;
+    use lingxi_core::SessionState;
     use protocol::SessionId;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};

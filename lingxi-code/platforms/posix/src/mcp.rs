@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
@@ -984,7 +984,7 @@ impl McpTransport for PosixMcpTransport {
                 arguments: p
                     .arguments
                     .into_iter()
-                    .map(|argument| traits::McpPromptArgumentDto {
+                    .map(|argument| platform_api::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,
@@ -1091,7 +1091,7 @@ impl McpTransport for PosixMcpTransport {
         conn: &McpRawConnection,
         uri: &str,
         output_dir: &std::path::Path,
-    ) -> Result<Vec<traits::McpResourceContentsRich>, McpError> {
+    ) -> Result<Vec<platform_api::McpResourceContentsRich>, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.read_resource_rich(conn, uri, output_dir).await;
         }
@@ -1556,7 +1556,7 @@ mod error_mapping_tests {
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
     use serde_json::json;
     use std::time::Duration;
-    use traits::McpError;
+    use platform_api::McpError;
 
     /// Example seconds value for the Display-format assertion below. The
     /// production timeout is resolved at call time via

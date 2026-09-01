@@ -33,7 +33,7 @@ migrations = { path = "../../migrations" }
 # F2-08: the full command-routing seam reaches the engine handles (in `traits`)
 # and the slash-command dispatcher (`command-api`). engine-desktop wires the
 # production runtime the router is built from (F2-05 binary path).
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 command-api = { path = "../../command-api" }
 # S1: the production TurnDriver (`src/driver.rs`) drives a real
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
@@ -48,7 +48,7 @@ platform-posix = { path = "../../platforms/posix" }
 uuid = "1.10"
 # `AudioResultDto` carries recorded/synthesized audio as base64 (the same
 # convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
-# the `traits::{VoiceRecording, TtsAudio}` structs hold.
+# the `platform_api::{VoiceRecording, TtsAudio}` structs hold.
 base64 = "0.22"
 # Input message queue (spec §27). The connection's SendPrompt path enqueues a
 # prompt that arrives while a turn is in flight and the spawned run loop drains
@@ -70,7 +70,7 @@ tui-core = { path = "../../tui-core" }
 telemetry = { path = "../../telemetry" }
 # S2: `boot::load_settings_blocks` reads the layered settings `providers` /
 # `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"

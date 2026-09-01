@@ -7,9 +7,9 @@
 //! The filesystem loader remains only as an embedding/test fallback when no
 //! live registry was supplied.
 //!
-//! ## Why this handler bypasses [`traits::OrchestratorHandle`]
+//! ## Why this handler bypasses [`platform_api::OrchestratorHandle`]
 //!
-//! `OrchestratorHandle` (see `traits/src/orchestrator.rs`) has no
+//! `OrchestratorHandle` (see `platform-api/src/orchestrator.rs`) has no
 //! command-dispatch-history or skill-invocation-history surface — nothing
 //! resembling claude-code's `t.options.commands` (the live, already-merged
 //! command list with per-command `source`/`pluginInfo`) or its usage-tracking

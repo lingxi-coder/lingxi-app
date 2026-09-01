@@ -1,5 +1,5 @@
 //! `PollerFeed` — the live [`MultiAgentFeed`], reading the production task
-//! registry through the narrow `traits::task_registry::TaskRegistryHandle`
+//! registry through the narrow `platform_api::task_registry::TaskRegistryHandle`
 //! trait (no dependency on the concrete `tasks` crate). (M9-01)
 
 use crate::multiagent::adapter::MultiAgentFeed;
@@ -7,7 +7,7 @@ use crate::multiagent::event::MultiAgentEvent;
 use crate::multiagent::state::{TaskRow, WorkflowRow};
 use async_trait::async_trait;
 use std::sync::Arc;
-use traits::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord};
+use platform_api::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord};
 
 /// Maps a `TaskRecord` (the trait's wire shape) onto a `TaskRow` (the TUI's
 /// presentation shape). Total — every `TaskRecord` field has a `TaskRow` home.
@@ -100,7 +100,7 @@ impl MultiAgentFeed for PollerFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         TaskCreateInput, TaskOutputChunk, TaskRegistryError, TaskUpdatePatch,
     };
 

@@ -144,10 +144,10 @@ mod tests {
         // The ctx is unused by TE(); the gate is purely the LINGXI_ENABLE_TASKS
         // defined-falsy check. Default (unset env) → enabled. We don't mutate the
         // global env here (to avoid races); the defined-falsy truth table is
-        // covered by `todo_v2_enabled_inner` + `traits::env::is_env_defined_falsy`.
+        // covered by `todo_v2_enabled_inner` + `platform_api::env::is_env_defined_falsy`.
         let ctx = ToolStaticContext::default();
         // Holds whenever LINGXI_ENABLE_TASKS is NOT a defined-falsy value.
-        if !traits::env::is_env_defined_falsy(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref())
+        if !platform_api::env::is_env_defined_falsy(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref())
         {
             assert!(is_todo_v2_enabled(&ctx));
         } else {
@@ -418,7 +418,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
-        use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+        use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 
         /// Restore-on-drop guard for the swarm + store env vars; also removes the
         /// throwaway store dir. Runs even on assertion panic.
@@ -1045,7 +1045,7 @@ mod tests {
                     Some(v) => std::env::set_var("LINGXI_TEAM_NAME", v),
                     None => std::env::remove_var("LINGXI_TEAM_NAME"),
                 }
-                traits::team_registry::clear_leader_team_name();
+                platform_api::team_registry::clear_leader_team_name();
             }
         }
 
@@ -1061,7 +1061,7 @@ mod tests {
             // Start from a clean slate for every level.
             std::env::remove_var("LINGXI_TASK_LIST_ID");
             std::env::remove_var("LINGXI_TEAM_NAME");
-            traits::team_registry::clear_leader_team_name();
+            platform_api::team_registry::clear_leader_team_name();
             g
         }
 
@@ -1071,7 +1071,7 @@ mod tests {
             std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
             // Even with every lower level set, the explicit env wins.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            traits::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name("leader-team");
             let mut ctx = tool_api::test_support::fresh_ctx();
             ctx.team_name = Some("teammate-team".into());
             assert_eq!(resolve_task_list_id(&ctx).await, "explicit-list");
@@ -1082,7 +1082,7 @@ mod tests {
             let _g = guard();
             // No env override; teammate ctx team_name wins over env + leader.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            traits::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name("leader-team");
             let mut ctx = tool_api::test_support::fresh_ctx();
             ctx.team_name = Some("teammate-team".into());
             assert_eq!(resolve_task_list_id(&ctx).await, "teammate-team");
@@ -1092,7 +1092,7 @@ mod tests {
         async fn level3_env_team_name() {
             let _g = guard();
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            traits::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name("leader-team");
             // No teammate ctx team_name ⇒ LINGXI_TEAM_NAME wins over leader.
             let ctx = tool_api::test_support::fresh_ctx();
             assert_eq!(resolve_task_list_id(&ctx).await, "env-team");
@@ -1101,7 +1101,7 @@ mod tests {
         #[tokio::test]
         async fn level4_leader_team_name() {
             let _g = guard();
-            traits::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name("leader-team");
             // No env / teammate ctx ⇒ leader team name wins over the session.
             let ctx = tool_api::test_support::fresh_ctx();
             assert_eq!(resolve_task_list_id(&ctx).await, "leader-team");
@@ -1121,7 +1121,7 @@ mod tests {
             // Leader (no teammate ctx) resolves to the leader team name; an
             // in-process teammate (ctx.team_name set to the SAME team) resolves
             // to the same on-disk dir — the goal of T1.
-            traits::team_registry::set_leader_team_name("alpha-team");
+            platform_api::team_registry::set_leader_team_name("alpha-team");
             let leader_ctx = tool_api::test_support::fresh_ctx();
             let mut teammate_ctx = tool_api::test_support::fresh_ctx();
             teammate_ctx.team_name = Some("alpha-team".into());
@@ -1829,7 +1829,7 @@ mod tests {
         use tool_api::test_support::{
             ctx_for_file_tools, fresh_ctx, fresh_ctx_cancelled, fresh_tx, make_dummy_fs,
         };
-        use traits::task_registry::{
+        use platform_api::task_registry::{
             TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
             TaskUpdatePatch,
         };

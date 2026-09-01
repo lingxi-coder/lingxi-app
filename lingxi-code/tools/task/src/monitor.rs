@@ -30,7 +30,7 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
-use traits::task_registry::MonitorRegistration;
+use platform_api::task_registry::MonitorRegistration;
 
 /// Binary `IA` — the tool name.
 pub const MONITOR_TOOL_NAME: &str = "Monitor";
@@ -140,7 +140,7 @@ fn shell_available() -> bool {
 /// monitor is capped to a 30-minute timeout (persistent→false); otherwise the
 /// requested `(timeout_ms, persistent)` pass through unchanged.
 fn apply_ccr_timeout_cap(timeout_ms: u64, persistent: bool) -> (u64, bool) {
-    let remote = traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref());
+    let remote = platform_api::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref());
     if !remote {
         return (timeout_ms, persistent);
     }
@@ -386,8 +386,8 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
-    use traits::task_registry::{
+    use platform_api::process::ProcessOutput;
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
@@ -465,7 +465,7 @@ mod tests {
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        traits::session_flags::set_agent_push_notif_enabled(false);
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
         g
     }
     fn tool() -> MonitorTool {
@@ -515,7 +515,7 @@ mod tests {
         // Yke() = push flag && agentPushNotifEnabled.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(!cron::is_push_notif_enabled(), "Yke needs the setting too");
-        traits::session_flags::set_agent_push_notif_enabled(true);
+        platform_api::session_flags::set_agent_push_notif_enabled(true);
         assert!(cron::is_push_notif_enabled());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
@@ -529,7 +529,7 @@ mod tests {
         // (Directly exercise the format to lock the string.)
         let splice = "\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a PushNotification. Not every event is worth a push; the ones that change what they'd do next are.";
         assert!(splice.contains("send a PushNotification"));
-        traits::session_flags::set_agent_push_notif_enabled(false);
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 

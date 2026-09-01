@@ -65,8 +65,8 @@ use tool_api::builtin_context::BuiltinToolContext;
 /// the BASH.4 persistent-cwd `pwd -P` readback is omitted (one-shot expansion
 /// keeps no shell-cwd state).
 pub struct PromptShellRunner {
-    process: Arc<dyn traits::process::ProcessRunner>,
-    sandbox: Arc<dyn traits::sandbox::Sandbox>,
+    process: Arc<dyn platform_api::process::ProcessRunner>,
+    sandbox: Arc<dyn platform_api::sandbox::Sandbox>,
     workspace: std::path::PathBuf,
     // ===== Sandbox-decision inputs, captured from the `BuiltinToolContext`
     // (mirrors what `BashTool::call` reads off `self.ctx`). 1:1 with claude-code
@@ -128,11 +128,11 @@ impl ShellSnapshot {
     async fn ensure(
         &self,
         shell_path: &str,
-        process: &dyn traits::process::ProcessRunner,
-        sandbox: &dyn traits::sandbox::Sandbox,
+        process: &dyn platform_api::process::ProcessRunner,
+        sandbox: &dyn platform_api::sandbox::Sandbox,
         workspace: &Path,
     ) -> Option<&Path> {
-        use traits::sandbox::ProcessCommand;
+        use platform_api::sandbox::ProcessCommand;
 
         let ready = self
             .initialized
@@ -268,7 +268,7 @@ impl ShellRunner for PromptShellRunner {
         _shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use traits::sandbox::ProcessCommand;
+        use platform_api::sandbox::ProcessCommand;
 
         if self.mobile_shell && !self.shell_enabled {
             return Err(ShellRunError {
@@ -373,12 +373,12 @@ impl ShellRunner for PromptShellRunner {
             stdin: None,
         };
         let sandboxed = if self.force_platform_sandbox {
-            let policy = traits::sandbox::SandboxPolicy {
-                network: traits::sandbox::NetworkPolicy::Disabled,
+            let policy = platform_api::sandbox::SandboxPolicy {
+                network: platform_api::sandbox::NetworkPolicy::Disabled,
                 writable_paths: vec![],
                 denied_paths: vec![],
                 allow_subprocess: true,
-                limits: traits::sandbox::ResourceLimits::default(),
+                limits: platform_api::sandbox::ResourceLimits::default(),
             };
             self.sandbox
                 .prepare(pcmd, &policy)
@@ -450,7 +450,7 @@ struct PolicyShellPermissionGate {
     mode: PermissionMode,
     /// The session's enforcing gate. When present and rule-aware, this is the
     /// source of truth for the LIVE mode and `updatedPermissions` overlay.
-    live_gate: Option<Arc<dyn traits::permission_gate::PermissionGate>>,
+    live_gate: Option<Arc<dyn platform_api::permission_gate::PermissionGate>>,
     /// Frontmatter allow rules injected only for this prompt command.
     transient_allow_rules: Vec<String>,
     /// Actual registered command tool name (`Shell` on mobile, otherwise the
@@ -490,10 +490,10 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
             )
         }) {
             return match decision {
-                traits::permission_gate::NonInteractivePermissionDecision::Allow => {
+                platform_api::permission_gate::NonInteractivePermissionDecision::Allow => {
                     ShellPermissionDecision::Allow
                 }
-                traits::permission_gate::NonInteractivePermissionDecision::Deny { reason } => {
+                platform_api::permission_gate::NonInteractivePermissionDecision::Deny { reason } => {
                     ShellPermissionDecision::Deny { message: reason }
                 }
             };
@@ -664,8 +664,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use telemetry::AnalyticsBus;
     use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
-    use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
-    use traits::sandbox::{
+    use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+    use platform_api::sandbox::{
         Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
         SandboxedCommand, SandboxedTag,
     };
@@ -682,7 +682,7 @@ mod tests {
     struct RecordingSandbox {
         prepare_calls: AtomicUsize,
         bypass_calls: AtomicUsize,
-        last_network: Mutex<Option<traits::sandbox::NetworkPolicy>>,
+        last_network: Mutex<Option<platform_api::sandbox::NetworkPolicy>>,
     }
 
     #[async_trait]
@@ -695,7 +695,7 @@ mod tests {
         }
         fn prepare(
             &self,
-            cmd: traits::sandbox::ProcessCommand,
+            cmd: platform_api::sandbox::ProcessCommand,
             policy: &SandboxPolicy,
         ) -> Result<SandboxedCommand, SandboxError> {
             self.prepare_calls.fetch_add(1, Ordering::SeqCst);
@@ -709,7 +709,7 @@ mod tests {
         }
         fn bypass_with_audit(
             &self,
-            cmd: traits::sandbox::ProcessCommand,
+            cmd: platform_api::sandbox::ProcessCommand,
             reason: &str,
         ) -> SandboxedCommand {
             let _ = reason;
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(sandbox.bypass_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             *sandbox.last_network.lock().unwrap(),
-            Some(traits::sandbox::NetworkPolicy::Disabled)
+            Some(platform_api::sandbox::NetworkPolicy::Disabled)
         );
     }
 
@@ -948,13 +948,13 @@ mod tests {
     fn mobile_prompt_commands_authorize_as_shell_not_bash() {
         struct RecordingGate(Mutex<Vec<String>>);
         #[async_trait]
-        impl traits::permission_gate::PermissionGate for RecordingGate {
+        impl platform_api::permission_gate::PermissionGate for RecordingGate {
             async fn check(
                 &self,
                 _tool_name: &str,
                 _input: &serde_json::Value,
-            ) -> traits::permission_gate::PermissionDecision {
-                traits::permission_gate::PermissionDecision::Allow
+            ) -> platform_api::permission_gate::PermissionDecision {
+                platform_api::permission_gate::PermissionDecision::Allow
             }
 
             fn check_noninteractive_with_allow_rules(
@@ -962,9 +962,9 @@ mod tests {
                 tool_name: &str,
                 _input: &serde_json::Value,
                 _allow_rules: &[String],
-            ) -> Option<traits::permission_gate::NonInteractivePermissionDecision> {
+            ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision> {
                 self.0.lock().unwrap().push(tool_name.to_string());
-                Some(traits::permission_gate::NonInteractivePermissionDecision::Allow)
+                Some(platform_api::permission_gate::NonInteractivePermissionDecision::Allow)
             }
         }
 

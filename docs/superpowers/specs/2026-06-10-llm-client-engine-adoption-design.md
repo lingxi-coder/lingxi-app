@@ -17,7 +17,7 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
   `routing.retry` keys parsed but inert, documented in the settings schema);
   `LlmResponse.cost` live via a cost-crate-derived `CostEstimator` in `ProviderApiAdapter`;
   streaming responses carry real status/headers via the additive
-  `traits::HttpTransport::stream_sse_with_meta`. llm-client adoption COMPLETE end-to-end.
+  `platform_api::HttpTransport::stream_sse_with_meta`. llm-client adoption COMPLETE end-to-end.
   Remaining future work: wire `routing.fallback`/`routing.retry` to the fallback/retry
   drivers; `AwsSigV4`/`GcpToken`/`AzureToken` auth signing; streaming error-path headers
   (reqwest error arm carries none); per-profile pricing overrides from settings.
@@ -74,7 +74,7 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
     (status / resets_at / utilization / claim_resets_at / overage_resets_at /
     fallback_available; per-claim 5h|7d|overage abbrevs ONLY — the TS has no
     opus/sonnet per-claim headers; claudeAiLimits.ts-pinned); additive
-    `traits::OutputEvent::RateLimit` (9 fields) + `OutputStream::emit_rate_limit`
+    `platform_api::OutputEvent::RateLimit` (9 fields) + `OutputStream::emit_rate_limit`
     default no-op; orchestrator emit-on-change (dedupe Mutex, both batched and
     streaming seams); TUI composer port of `getRateLimitMessage`
     (WARNING_THRESHOLD 0.7, byte-locked copy — straight ASCII apostrophes per
@@ -98,7 +98,7 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
   granularity not plumbed" and "upload polling convenience" remaining items are
   closed.
   - **Subscription plumbing end-to-end** (7e75e17d, 5ffaf761, 66151c80, cad57380):
-    `traits::subscription::SubscriptionSnapshot` (frozen-additive new module) with
+    `platform_api::subscription::SubscriptionSnapshot` (frozen-additive new module) with
     the TS-ported billing/upsell predicates; `anthropic_oauth::fetch_user_roles`
     (`claude_cli/roles`; error-swallowing read-side divergence from TS's throwing
     `fetchAndStoreUserRoles`, documented); engine-desktop background profile+roles
@@ -166,7 +166,7 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
     orchestrator `RawWindow`/`RawUtilization` (port of `extractRawUtilization`;
     atomic both-headers-per-window rule, ts:174); the adapter cache is assigned
     unconditionally on recorded responses; emit-on-change via the additive
-    `traits::OutputEvent::RawUtilization` at both the batched and streaming
+    `platform_api::OutputEvent::RawUtilization` at both the batched and streaming
     seams (streaming seam pinned by test). Documented divergence: TS updates its
     store unconditionally (ts:476/:500) while we change-gate the event; recording
     happens on success paths only — raw extraction from 429-response headers is a
@@ -197,7 +197,7 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
     per-attempt snapshot recording vs TS terminal-only (terminal-only recording
     is a tracked follow-up).
   - **`is_env_truthy` consolidation** (bdd8f14d, 361845be):
-    `traits::env::is_env_truthy` is the shared TS-faithful copy; 7 private
+    `platform_api::env::is_env_truthy` is the shared TS-faithful copy; 7 private
     copies switched onto it (tui, tool-skill, tool-meta, tool-task wrapper,
     compaction ×2 wrappers, engine-desktop wrapper). Kept-divergent with notes:
     tools/shell `prompt.rs` and orchestrator `conversation.rs` (they port the
@@ -305,7 +305,7 @@ orchestrator wire adapter (production SubagentApiClient impl)
 llm-client  (codecs, auth, error taxonomy, RetryPolicy classification,
              CostEstimator, execute / execute_stream orchestration)
     │  llm_client::Transport
-platforms/common  LlmTransportBridge<T: traits::HttpTransport>
+platforms/common  LlmTransportBridge<T: platform_api::HttpTransport>
     (one generic adapter shared by ReqwestHttp and native mobile impls)
 
 tui rate-limit panel ── reads the rate-limit status type from the shared
@@ -345,7 +345,7 @@ HTTP client; `llm-client` stays free of repo-internal dependencies.
 
 ### 2. Adapters at their endpoints
 
-- **platforms/common**: `LlmTransportBridge<T: traits::HttpTransport>`
+- **platforms/common**: `LlmTransportBridge<T: platform_api::HttpTransport>`
   implements `llm_client::Transport`. `execute` maps `ProviderRequest` →
   `protocol::HttpRequest`; `open_stream` uses `stream_sse`
   (`SseEvent.data` → `RawStreamFrame`);
@@ -443,7 +443,7 @@ same templates.
 
 - llm-client additions: red-green codec tests (reasoning, cache_control,
   system blocks, count_tokens) in the existing per-provider test files.
-- platforms/common: adapter tests with a fake `traits::HttpTransport`
+- platforms/common: adapter tests with a fake `platform_api::HttpTransport`
   (request mapping, SSE event mapping, raw-bytes + splitter fallback, error
   mapping).
 - orchestrator: ported api-client tests with identical assertions where

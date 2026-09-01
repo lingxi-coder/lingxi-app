@@ -17,20 +17,20 @@ use tool_api::registry::ToolRegistry;
 /// instantaneous.
 struct InlineRuntime;
 #[async_trait]
-impl traits::RuntimeSpawner for InlineRuntime {
+impl platform_api::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
         tokio::spawn(task);
-        Ok(traits::BackgroundTaskHandle {
+        Ok(platform_api::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
     }
     async fn sleep(&self, _d: std::time::Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), traits::RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), platform_api::RuntimeError> {
         Ok(())
     }
 }
@@ -73,7 +73,7 @@ async fn maybe_extract_session_memory_is_noop_without_handle() {
 
 /// Build an orchestrator whose prefetch resolves to `seed`.
 fn orch_with_seed(seed: Vec<SurfacedMemory>) -> ConversationOrchestrator {
-    let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(InlineRuntime);
+    let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(InlineRuntime);
     let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::with_fixed_result(
         runtime, seed,
     ));

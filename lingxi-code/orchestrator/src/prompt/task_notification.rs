@@ -57,7 +57,7 @@
 //! separate, deferred surface — this module is completion-only.
 
 use async_trait::async_trait;
-use traits::task_registry::TaskNotification;
+use platform_api::task_registry::TaskNotification;
 
 /// Supplies the terminal background tasks not yet surfaced to the model since
 /// the previous call.
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn agent_worktree_section_with_branch_rides_after_usage() {
         let mut n = base("a12345678", "local_agent", "completed", "audit");
-        n.usage = Some(traits::task_registry::AgentRunUsage {
+        n.usage = Some(platform_api::task_registry::AgentRunUsage {
             subagent_tokens: 5,
             tool_uses: 0,
             duration_ms: 1,
@@ -769,7 +769,7 @@ mod tests {
     fn agent_result_and_usage_sections_when_present() {
         let mut n = base("a12345678", "local_agent", "completed", "audit");
         n.result = Some("Found 2 bugs in <auth>".to_string());
-        n.usage = Some(traits::task_registry::AgentRunUsage {
+        n.usage = Some(platform_api::task_registry::AgentRunUsage {
             subagent_tokens: 1234,
             tool_uses: 7,
             duration_ms: 4200,
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn agent_usage_without_result() {
         let mut n = base("a12345678", "local_agent", "completed", "audit");
-        n.usage = Some(traits::task_registry::AgentRunUsage {
+        n.usage = Some(platform_api::task_registry::AgentRunUsage {
             subagent_tokens: 5,
             tool_uses: 0,
             duration_ms: 1,

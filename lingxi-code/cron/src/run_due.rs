@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use traits::{Clock, FileSystem};
+use platform_api::{Clock, FileSystem};
 
 use crate::schedule::parse_cron;
 use crate::scheduler::{
@@ -342,7 +342,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Mutex as TokioMutex;
-    use traits::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
 
     // ---- Minimal in-memory FileSystem (only read/write/delete are exercised) ----
     struct MemFs {

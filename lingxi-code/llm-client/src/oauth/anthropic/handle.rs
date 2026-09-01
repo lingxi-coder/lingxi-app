@@ -24,7 +24,7 @@ use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use traits::{AuthError, AuthHandle, LoginInfo};
+use platform_api::{AuthError, AuthHandle, LoginInfo};
 
 /// Login-flow deadline (trait contract: §login docs).
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -340,7 +340,7 @@ impl OAuthHandle {
         // persist it into the stored credential (claude-code keeps
         // `subscriptionType`/`rateLimitTier` INSIDE `claudeAiOauth`, so a fresh
         // process has correct enterprise/tier state on its FIRST request) and
-        // publish it to the process-global `traits::subscription` cache for
+        // publish it to the process-global `platform_api::subscription` cache for
         // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate).
         // Best-effort + scope-gated (`hasProfileScope`): a token without
         // `user:profile`, or any fetch failure, leaves both unchanged.
@@ -364,7 +364,7 @@ impl OAuthHandle {
             {
                 tracing::warn!(%error, "could not persist subscription tier into the credential store");
             }
-            traits::subscription::set_current_subscription(Some(snapshot));
+            platform_api::subscription::set_current_subscription(Some(snapshot));
         }
 
         // (7) Return the resolved identity.
@@ -519,7 +519,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use traits::HttpTransport;
+    use platform_api::HttpTransport;
 
     #[allow(dead_code)]
     fn _oauth_handle_is_send_sync() {
@@ -861,7 +861,7 @@ mod tests {
             tokens.rate_limit_tier.as_deref(),
             Some("default_claude_max_20x")
         );
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
     }
 
     /// M8: with NO manual channel and a dead opener the flow still waits on

@@ -7,7 +7,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
     AgentDefinition {

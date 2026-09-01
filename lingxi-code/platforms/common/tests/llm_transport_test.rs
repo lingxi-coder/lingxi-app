@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use http_client::ReqwestHttp;
 use llm_client::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::{
+use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, WebSocketMessageStreamWithMeta,
 };
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 
 type ScriptedSse = Mutex<Option<Result<Vec<Result<SseEvent, HttpError>>, HttpError>>>;
 type ScriptedRaw = Mutex<Option<Result<RawByteStreamWithMeta, HttpError>>>;

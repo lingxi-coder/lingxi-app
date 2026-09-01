@@ -40,8 +40,8 @@ use tool_api::tool_trait::{
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
-use traits::process::ProcessError;
-use traits::sandbox::{NetworkPolicy, ProcessCommand, ResourceLimits, SandboxError, SandboxPolicy};
+use platform_api::process::ProcessError;
+use platform_api::sandbox::{NetworkPolicy, ProcessCommand, ResourceLimits, SandboxError, SandboxPolicy};
 
 /// Tool name byte-lock — the model-facing name for the mobile shell.
 pub const TOOL_NAME: &str = "Shell";
@@ -497,8 +497,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::AndroidShellToolCtx;
-    use traits::process::{ProcessHandle, ProcessOutput, ProcessRunner};
-    use traits::sandbox::{
+    use platform_api::process::{ProcessHandle, ProcessOutput, ProcessRunner};
+    use platform_api::sandbox::{
         Sandbox, SandboxBackend, SandboxCapability, SandboxFeatures, SandboxedCommand, SandboxedTag,
     };
 

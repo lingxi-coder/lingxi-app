@@ -49,7 +49,7 @@ fn installed_path(plugins_dir: &Path) -> PathBuf {
 /// Load the v2 installed DB (`{version:2, plugins:{...}}`); missing/malformed ⇒
 /// a fresh empty v2 doc.
 pub(crate) fn load_installed(plugins_dir: &Path) -> Value {
-    traits::rooted_fs::read_to_string_limited(
+    platform_api::rooted_fs::read_to_string_limited(
         plugins_dir,
         Path::new("installed_plugins.json"),
         16 * 1024 * 1024,
@@ -64,11 +64,11 @@ pub(crate) fn load_installed(plugins_dir: &Path) -> Value {
 pub(crate) fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
     std::fs::create_dir_all(plugins_dir).map_err(|error| error.to_string())?;
     let serialized = serde_json::to_string_pretty(doc).map_err(|error| error.to_string())?;
-    traits::rooted_fs::atomic_write(
+    platform_api::rooted_fs::atomic_write(
         plugins_dir,
         Path::new("installed_plugins.json"),
         serialized.as_bytes(),
-        traits::AtomicWriteOptions::default(),
+        platform_api::AtomicWriteOptions::default(),
     )
     .map_err(|error| error.to_string())
 }
@@ -929,7 +929,7 @@ pub fn run_install(
     let parsed_scope = parse_scope(scope)?;
     let settings_path = parsed_scope.path(home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
-    let previous_installed = traits::rooted_fs::read_to_string_limited(
+    let previous_installed = platform_api::rooted_fs::read_to_string_limited(
         plugins_dir,
         Path::new("installed_plugins.json"),
         16 * 1024 * 1024,
@@ -1077,18 +1077,18 @@ fn rollback_install_transaction(
     restore_file(settings_path, previous_settings);
     match previous_installed {
         Some(bytes) => {
-            if let Err(error) = traits::rooted_fs::atomic_write(
+            if let Err(error) = platform_api::rooted_fs::atomic_write(
                 plugins_dir,
                 Path::new("installed_plugins.json"),
                 bytes,
-                traits::AtomicWriteOptions::default(),
+                platform_api::AtomicWriteOptions::default(),
             ) {
                 tracing::warn!(%error, "failed to restore installed plugin registry");
             }
         }
         None => {
             let _ =
-                traits::rooted_fs::remove_file(plugins_dir, Path::new("installed_plugins.json"));
+                platform_api::rooted_fs::remove_file(plugins_dir, Path::new("installed_plugins.json"));
         }
     }
 }

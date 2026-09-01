@@ -30,7 +30,7 @@ use session::jsonl::writer::JsonlWriter;
 use session::jsonl::JsonlMessage;
 use std::sync::Arc;
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// The (kind, text) shape used to compare hot vs cold history — message ids
 /// differ across a persist/reload cycle (assistant turns are persisted

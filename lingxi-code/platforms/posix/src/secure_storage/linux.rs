@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Linux Secret Service backend (`GNOME` Keyring / `KWallet` via
 /// `libsecret`).

@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
-use traits::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
+use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 
 async fn wait_for_prewarm_capture(
     api: &MockApiClient,
@@ -143,7 +143,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _r: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _r: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -154,11 +154,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _n: &str,
         _t: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -912,7 +912,7 @@ async fn system_prompt_model_identity_follows_switch_model() {
         "launch identity present: {before}"
     );
 
-    <ConversationOrchestrator as traits::OrchestratorHandle>::switch_model(
+    <ConversationOrchestrator as platform_api::OrchestratorHandle>::switch_model(
         &orch,
         "claude-fable-5",
         None,
@@ -953,7 +953,7 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     );
-    <ConversationOrchestrator as traits::OrchestratorHandle>::switch_model(
+    <ConversationOrchestrator as platform_api::OrchestratorHandle>::switch_model(
         &orch,
         "deepseek-v4-pro",
         Some("deepseek"),
@@ -1101,7 +1101,7 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
 
 #[tokio::test]
 async fn interactive_session_flag_drives_prompt_and_session_flags() {
-    let prior = traits::session_flags::is_non_interactive_session();
+    let prior = platform_api::session_flags::is_non_interactive_session();
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig {
             interactive_permissions: false,
@@ -1118,7 +1118,7 @@ async fn interactive_session_flag_drives_prompt_and_session_flags() {
     );
 
     assert!(
-        !traits::session_flags::is_non_interactive_session(),
+        !platform_api::session_flags::is_non_interactive_session(),
         "interactive-session composition must publish interactive session flags even when permission prompting stays headless"
     );
 
@@ -1128,7 +1128,7 @@ async fn interactive_session_flag_drives_prompt_and_session_flags() {
         "interactive CLI prompt guidance must follow the explicit interactive-session flag: {prompt}"
     );
 
-    traits::session_flags::set_non_interactive_session(prior);
+    platform_api::session_flags::set_non_interactive_session(prior);
 }
 
 #[tokio::test]
@@ -1231,7 +1231,7 @@ async fn clear_session_aborts_startup_prewarm_and_closes_responses_websocket_ses
         },
     );
     orch.spawn_startup_responses_websocket_prewarm();
-    <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&*orch)
+    <ConversationOrchestrator as platform_api::OrchestratorHandle>::clear_session(&*orch)
         .await
         .expect("clear session");
 
@@ -1487,7 +1487,7 @@ async fn stop_prevent_continuation_persists_a_stopped_continuation_attachment() 
     );
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
         dir.path().to_path_buf(),
     ));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));

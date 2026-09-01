@@ -290,7 +290,7 @@ fn path_for_read(path: &Path) -> String {
 pub fn read_script_path_after_permission(
     approval: &WorkflowScriptPathApproval,
 ) -> Result<String, WorkflowLaunchError> {
-    let snapshot = traits::rooted_fs::read_file_after_permission(
+    let snapshot = platform_api::rooted_fs::read_file_after_permission(
         &approval.root,
         &approval.relative,
         &approval.requested,
@@ -552,22 +552,22 @@ pub fn save_dynamic_workflow(
     let relative = relative_dir.join(format!("{sanitized}.js"));
     let lock_relative = relative_dir.join(".save.lock");
     let io_error =
-        |error: traits::FsError| WorkflowSaveError::Io(std::io::Error::other(error.to_string()));
-    let _lock = traits::rooted_fs::lock_exclusive(
+        |error: platform_api::FsError| WorkflowSaveError::Io(std::io::Error::other(error.to_string()));
+    let _lock = platform_api::rooted_fs::lock_exclusive(
         &root,
         &lock_relative,
-        traits::rooted_fs::PRIVATE_DIR_MODE,
-        traits::rooted_fs::PRIVATE_FILE_MODE,
+        platform_api::rooted_fs::PRIVATE_DIR_MODE,
+        platform_api::rooted_fs::PRIVATE_FILE_MODE,
     )
     .map_err(io_error)?;
-    let options = traits::AtomicWriteOptions {
+    let options = platform_api::AtomicWriteOptions {
         overwrite,
-        ..traits::AtomicWriteOptions::default()
+        ..platform_api::AtomicWriteOptions::default()
     };
     if let Err(error) =
-        traits::rooted_fs::atomic_write(&root, &relative, script.as_bytes(), options)
+        platform_api::rooted_fs::atomic_write(&root, &relative, script.as_bytes(), options)
     {
-        if matches!(error, traits::FsError::AlreadyExists(_)) {
+        if matches!(error, platform_api::FsError::AlreadyExists(_)) {
             return Err(WorkflowSaveError::AlreadyExists {
                 name: sanitized,
                 path,
@@ -616,7 +616,7 @@ pub struct WorkflowTool {
     /// `Read` operation before the launcher is allowed to read it. Hosts that
     /// do not have a live gate may provide the boot policy instead; the
     /// no-policy fallback is an explicit `Ask`, never an unconditional allow.
-    permission_gate: Option<Arc<dyn traits::permission_gate::PermissionGate>>,
+    permission_gate: Option<Arc<dyn platform_api::permission_gate::PermissionGate>>,
     permission_policy: Option<Arc<permission::PermissionPolicy>>,
     /// Approval snapshots keyed by the originating tool-use id and lexical
     /// path. `check_permissions` runs before the main call, so this shared
@@ -642,11 +642,11 @@ pub struct WorkflowTool {
     /// Session-owned dynamic-workflow gate shared with the orchestrator
     /// handle. When absent, tests and lightweight hosts fall back to the
     /// construction-time snapshot in `session_enabled`.
-    dynamic_workflows_gate: Option<traits::session_flags::DynamicWorkflowsGate>,
+    dynamic_workflows_gate: Option<platform_api::session_flags::DynamicWorkflowsGate>,
     /// Session-owned workflow-size setting shared with the orchestrator
     /// handle. When absent, tests and lightweight hosts fall back to the
     /// legacy process-global compatibility snapshot.
-    size_guideline_state: Option<traits::session_flags::WorkflowSizeGuidelineState>,
+    size_guideline_state: Option<platform_api::session_flags::WorkflowSizeGuidelineState>,
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
@@ -689,7 +689,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_permission_gate(
         mut self,
-        gate: Arc<dyn traits::permission_gate::PermissionGate>,
+        gate: Arc<dyn platform_api::permission_gate::PermissionGate>,
     ) -> Self {
         self.permission_gate = Some(gate);
         self
@@ -839,8 +839,8 @@ impl WorkflowTool {
             let managed = state.managed();
             let _ = state.set(size.as_wire(), managed);
         } else {
-            let managed = traits::session_flags::workflow_size_guideline_is_managed();
-            let _ = traits::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
+            let managed = platform_api::session_flags::workflow_size_guideline_is_managed();
+            let _ = platform_api::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
         }
         self
     }
@@ -859,7 +859,7 @@ impl WorkflowTool {
         if let Some(state) = self.size_guideline_state.as_ref() {
             let _ = state.set_with_source(size.as_wire(), managed, is_default);
         } else {
-            let _ = traits::session_flags::set_workflow_size_guideline_with_source(
+            let _ = platform_api::session_flags::set_workflow_size_guideline_with_source(
                 size.as_wire(),
                 managed,
                 is_default,
@@ -872,7 +872,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_size_guideline_state(
         mut self,
-        state: traits::session_flags::WorkflowSizeGuidelineState,
+        state: platform_api::session_flags::WorkflowSizeGuidelineState,
     ) -> Self {
         self.size_guideline = WorkflowSizeGuideline::from_wire(state.value());
         self.size_guideline_state = Some(state);
@@ -896,7 +896,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_dynamic_workflows_gate(
         mut self,
-        gate: traits::session_flags::DynamicWorkflowsGate,
+        gate: platform_api::session_flags::DynamicWorkflowsGate,
     ) -> Self {
         self.dynamic_workflows_gate = Some(gate);
         self
@@ -921,7 +921,7 @@ impl WorkflowTool {
             .as_ref()
             .map(|state| WorkflowSizeGuideline::from_wire(state.value()))
             .unwrap_or_else(|| {
-                WorkflowSizeGuideline::from_wire(traits::session_flags::workflow_size_guideline())
+                WorkflowSizeGuideline::from_wire(platform_api::session_flags::workflow_size_guideline())
             })
     }
 
@@ -1143,7 +1143,7 @@ impl Tool for WorkflowTool {
         // canonical file-read tool/input shape, not about Workflow, so a
         // `Read(...)` rule has the same scope and symlink behavior as FileRead.
         if let Some(gate) = &self.permission_gate {
-            let check_ctx = traits::permission_gate::PermissionCheckContext {
+            let check_ctx = platform_api::permission_gate::PermissionCheckContext {
                 tool_use_id: ctx.tool_use_id.as_ref().map(|id| id.as_str().to_string()),
                 is_non_interactive_session: ctx.options.is_non_interactive_session,
                 ..Default::default()
@@ -1152,15 +1152,15 @@ impl Tool for WorkflowTool {
                 .resolve_detailed_or_abort("Read", &read_input, &check_ctx)
                 .await
             {
-                Ok(traits::permission_gate::PermissionResolution::Allow { .. }) => {
+                Ok(platform_api::permission_gate::PermissionResolution::Allow { .. }) => {
                     Self::allow_script_path_permission(&path)
                 }
-                Ok(traits::permission_gate::PermissionResolution::Deny { reason, .. })
-                | Err(traits::permission_gate::PermissionAbort { message: reason }) => {
+                Ok(platform_api::permission_gate::PermissionResolution::Deny { reason, .. })
+                | Err(platform_api::permission_gate::PermissionAbort { message: reason }) => {
                     Self::deny_script_path_permission(&path, reason)
                 }
-                Ok(traits::permission_gate::PermissionResolution::Ask)
-                | Ok(traits::permission_gate::PermissionResolution::AskWithContext { .. }) => {
+                Ok(platform_api::permission_gate::PermissionResolution::Ask)
+                | Ok(platform_api::permission_gate::PermissionResolution::AskWithContext { .. }) => {
                     Self::ask_script_path_permission(&path)
                 }
             };
@@ -1580,16 +1580,16 @@ mod tests {
 
     struct RecordingPermissionGate {
         calls: Arc<StdMutex<Vec<(String, Value)>>>,
-        decision: traits::permission_gate::PermissionDecision,
+        decision: platform_api::permission_gate::PermissionDecision,
     }
 
     #[async_trait]
-    impl traits::permission_gate::PermissionGate for RecordingPermissionGate {
+    impl platform_api::permission_gate::PermissionGate for RecordingPermissionGate {
         async fn check(
             &self,
             name: &str,
             input: &Value,
-        ) -> traits::permission_gate::PermissionDecision {
+        ) -> platform_api::permission_gate::PermissionDecision {
             self.calls
                 .lock()
                 .unwrap()
@@ -1600,16 +1600,16 @@ mod tests {
 
     struct ContextAwarePermissionGate {
         calls: Arc<StdMutex<Vec<(String, Value)>>>,
-        contexts: Arc<StdMutex<Vec<traits::permission_gate::PermissionCheckContext>>>,
+        contexts: Arc<StdMutex<Vec<platform_api::permission_gate::PermissionCheckContext>>>,
     }
 
     #[async_trait]
-    impl traits::permission_gate::PermissionGate for ContextAwarePermissionGate {
+    impl platform_api::permission_gate::PermissionGate for ContextAwarePermissionGate {
         async fn check(
             &self,
             _name: &str,
             _input: &Value,
-        ) -> traits::permission_gate::PermissionDecision {
+        ) -> platform_api::permission_gate::PermissionDecision {
             panic!("Workflow scriptPath must use resolve_detailed_or_abort")
         }
 
@@ -1617,10 +1617,10 @@ mod tests {
             &self,
             name: &str,
             input: &Value,
-            ctx: &traits::permission_gate::PermissionCheckContext,
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
         ) -> Result<
-            traits::permission_gate::PermissionResolution,
-            traits::permission_gate::PermissionAbort,
+            platform_api::permission_gate::PermissionResolution,
+            platform_api::permission_gate::PermissionAbort,
         > {
             self.calls
                 .lock()
@@ -1628,9 +1628,9 @@ mod tests {
                 .push((name.to_string(), input.clone()));
             self.contexts.lock().unwrap().push(ctx.clone());
             if ctx.is_non_interactive_session {
-                return Ok(traits::permission_gate::PermissionResolution::Deny {
+                return Ok(platform_api::permission_gate::PermissionResolution::Deny {
                     reason: permission::headless_gate::headless_deny_message(name),
-                    source: traits::permission_gate::PermissionDecisionSource::Unspecified,
+                    source: platform_api::permission_gate::PermissionDecisionSource::Unspecified,
                     rule_source: None,
                     decision_reason_type: None,
                     decision_reason: None,
@@ -1638,7 +1638,7 @@ mod tests {
                     content_blocks: Vec::new(),
                 });
             }
-            Ok(traits::permission_gate::PermissionResolution::Ask)
+            Ok(platform_api::permission_gate::PermissionResolution::Ask)
         }
     }
 
@@ -1957,8 +1957,8 @@ mod tests {
     #[test]
     fn session_owned_gate_is_live_and_isolated() {
         let ctx = ToolStaticContext::default();
-        let first_gate = traits::session_flags::DynamicWorkflowsGate::new(true, false);
-        let second_gate = traits::session_flags::DynamicWorkflowsGate::new(false, true);
+        let first_gate = platform_api::session_flags::DynamicWorkflowsGate::new(true, false);
+        let second_gate = platform_api::session_flags::DynamicWorkflowsGate::new(false, true);
         let first = WorkflowTool::new(None).with_dynamic_workflows_gate(first_gate.clone());
         let second = WorkflowTool::new(None).with_dynamic_workflows_gate(second_gate.clone());
 
@@ -1975,7 +1975,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_owned_gate_rejects_after_live_toggle() {
-        let gate = traits::session_flags::DynamicWorkflowsGate::new(true, false);
+        let gate = platform_api::session_flags::DynamicWorkflowsGate::new(true, false);
         let tool = WorkflowTool::new(None).with_dynamic_workflows_gate(gate.clone());
         let ctx = tool_api::test_support::fresh_ctx();
 
@@ -2059,7 +2059,7 @@ mod tests {
         // `/config` updates the session snapshot after construction; the next
         // prompt must reflect it without rebuilding the tool registry.
         let live = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Medium);
-        let _ = traits::session_flags::set_workflow_size_guideline("small", false);
+        let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             live.prompt(&opts).await,
             format!(
@@ -2068,14 +2068,14 @@ mod tests {
                 WorkflowSizeGuideline::Small.prompt_appendix()
             )
         );
-        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
+        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
 
         let session_state =
-            traits::session_flags::WorkflowSizeGuidelineState::new("large", false, false).unwrap();
+            platform_api::session_flags::WorkflowSizeGuidelineState::new("large", false, false).unwrap();
         let session_owned = WorkflowTool::new(None)
             .with_size_guideline_state(session_state.clone())
             .with_size_guideline_source(WorkflowSizeGuideline::Large, false, false);
-        let _ = traits::session_flags::set_workflow_size_guideline("small", false);
+        let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             session_owned.prompt(&opts).await,
             format!(
@@ -2086,7 +2086,7 @@ mod tests {
             "session-owned state must win over the process-global compatibility snapshot"
         );
         let _ = session_state.set("medium", false);
-        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
+        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
     }
 
     #[test]
@@ -2180,7 +2180,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls: calls.clone(),
-            decision: traits::permission_gate::PermissionDecision::Allow,
+            decision: platform_api::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -2284,7 +2284,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: traits::permission_gate::PermissionDecision::Deny {
+            decision: platform_api::permission_gate::PermissionDecision::Deny {
                 reason: "Read denied by policy".into(),
             },
         });
@@ -2321,7 +2321,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls: calls.clone(),
-            decision: traits::permission_gate::PermissionDecision::Allow,
+            decision: platform_api::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -2384,7 +2384,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: traits::permission_gate::PermissionDecision::Allow,
+            decision: platform_api::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -2427,7 +2427,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: traits::permission_gate::PermissionDecision::Allow,
+            decision: platform_api::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))

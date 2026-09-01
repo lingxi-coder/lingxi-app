@@ -56,7 +56,7 @@ pub struct StatusLineData {
     /// Cumulative output tokens across model calls.
     pub total_output_tokens: u64,
     /// Most recent successful model response usage.
-    pub current_usage: Option<traits::CurrentUsageSnapshot>,
+    pub current_usage: Option<platform_api::CurrentUsageSnapshot>,
     /// Context-window used fraction (0-1), from `TurnEvent::ContextPressure`.
     pub context_pct: f32,
     /// Raw context token estimate behind the fraction

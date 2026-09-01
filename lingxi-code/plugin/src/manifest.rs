@@ -19,7 +19,7 @@ use protocol::PluginId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use traits::LspServerConfig;
+use platform_api::LspServerConfig;
 
 fn default_plugin_enabled() -> bool {
     true

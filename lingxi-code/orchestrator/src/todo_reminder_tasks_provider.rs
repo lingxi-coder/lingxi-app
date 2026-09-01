@@ -11,7 +11,7 @@
 //! 2. in-process teammate `teamName` — N/A at the orchestrator seam (no tool
 //!    `ToolUseContext` here), so skipped;
 //! 3. `LINGXI_TEAM_NAME` env (`zp()`, process-based teammate);
-//! 4. leader team name ([`traits::team_registry::leader_team_name`]);
+//! 4. leader team name ([`platform_api::team_registry::leader_team_name`]);
 //! 5. live orchestrator session id fallback.
 //!
 //! This is the SAME resolution the V2 `Task*` tools use ([`tool_task`]
@@ -63,7 +63,7 @@ impl TodoStoreReminderTasks {
             }
         }
         // 4. Leader team name (set by `TeamCreate`).
-        if let Some(team) = traits::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
+        if let Some(team) = platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
             return team;
         }
         // 5. Standalone session fallback.
@@ -101,7 +101,7 @@ impl TodoReminderTaskProvider for TodoStoreReminderTasks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::TodoState;
+    use lingxi_core::TodoState;
     use tool_task::todo_store::{TodoStore, TodoTask};
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -114,7 +114,7 @@ mod tests {
         let prev_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
         std::env::remove_var("LINGXI_TASK_LIST_ID");
         std::env::remove_var("LINGXI_TEAM_NAME");
-        traits::team_registry::clear_leader_team_name();
+        platform_api::team_registry::clear_leader_team_name();
 
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var(branding::CONFIG_DIR_ENV, temp.path());
@@ -155,7 +155,7 @@ mod tests {
         } else {
             std::env::remove_var(branding::CONFIG_DIR_ENV);
         }
-        traits::team_registry::clear_leader_team_name();
+        platform_api::team_registry::clear_leader_team_name();
     }
 
     #[tokio::test]
@@ -165,7 +165,7 @@ mod tests {
         let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
         std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
         std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-        traits::team_registry::set_leader_team_name("leader-team");
+        platform_api::team_registry::set_leader_team_name("leader-team");
 
         assert_eq!(
             TodoStoreReminderTasks::resolve_list_id(protocol::SessionId::new()),
@@ -182,6 +182,6 @@ mod tests {
         } else {
             std::env::remove_var("LINGXI_TEAM_NAME");
         }
-        traits::team_registry::clear_leader_team_name();
+        platform_api::team_registry::clear_leader_team_name();
     }
 }

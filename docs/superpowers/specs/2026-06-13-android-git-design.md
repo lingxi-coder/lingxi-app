@@ -338,5 +338,5 @@ real HTTPS clone" layer.
 - Codebase anchors: `tool-api/src/builtin_context.rs` (`AndroidShellToolCtx`),
   `tools/shell-mobile/` (the mirror crate), `apps/android-aar/src/lib.rs`
   (`android_shell_gate` + eager probe), `third_party/libcap/` (vendoring
-  precedent), `traits/src/sandbox.rs` (`ExecTarget::BundledHelper` — the
+  precedent), `platform-api/src/sandbox.rs` (`ExecTarget::BundledHelper` — the
   bundled-binary path P4 deliberately does NOT take).

@@ -89,10 +89,10 @@ mod register_audio_tests {
 
     use async_trait::async_trait;
     use tool_api::{BuiltinToolContext, ToolRegistry};
-    use traits::process::ProcessOutput;
-    use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-    use traits::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-    use traits::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+    use platform_api::process::ProcessOutput;
+    use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+    use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
+    use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 
     /// One object implementing all three audio traits — the shape the desktop
     /// injects (`bridge_server::audio_bridge::AudioBridge`). Never called: these

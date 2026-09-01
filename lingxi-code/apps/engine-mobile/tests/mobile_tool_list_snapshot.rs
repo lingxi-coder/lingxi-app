@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use engine_mobile::mobile_tool_registry;
-use traits::process::ProcessOutput;
+use platform_api::process::ProcessOutput;
 
 #[test]
 fn mobile_tool_list_snapshot() {

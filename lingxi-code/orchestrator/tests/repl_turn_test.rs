@@ -7,7 +7,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn build_orch_with_response(
     response: llm_client::LlmResponse,

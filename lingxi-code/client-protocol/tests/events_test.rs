@@ -1033,7 +1033,7 @@ fn audio_request_round_trips_on_the_wire() {
 
 /// Enumerate every `AudioOpDto` variant and assert the `snake_case` wire tag
 /// plus a byte-stable round trip. These mirror
-/// `traits::{VoiceRecorder, SpeechToText, TextToSpeech}`'s argument shapes:
+/// `platform_api::{VoiceRecorder, SpeechToText, TextToSpeech}`'s argument shapes:
 /// `StartRecording`/`StopRecording`/`IsRecording` <- `VoiceRecordingOpts` /
 /// bare calls; `Transcribe` <- `SttOpts`; `Synthesize` <- `TtsOpts`.
 #[test]

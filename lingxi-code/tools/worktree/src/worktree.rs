@@ -28,7 +28,7 @@ use telemetry::tengu::tool::{
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED, WORKTREE_CREATED,
     WORKTREE_ENTERED_EXISTING, WORKTREE_KEPT, WORKTREE_REMOVED,
 };
-use traits::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
+use platform_api::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 use unicode_normalization::UnicodeNormalization;
 
 use tool_api::context::ToolUseContext;
@@ -1062,7 +1062,7 @@ fn build_worktree_tmux_kill_argv(session_name: &str) -> Vec<String> {
 }
 
 /// Run `tmux kill-session -t <session_name>` through the
-/// [`traits::ProcessRunner`]/[`traits::Sandbox`] seam (mirrors
+/// [`platform_api::ProcessRunner`]/[`platform_api::Sandbox`] seam (mirrors
 /// `platforms/posix::worktree_tmux::create_worktree_tmux_session`'s pattern
 /// for the kill side — see that module for why `bypass_with_audit` is used
 /// instead of the internal `SandboxedCommand::__new_sandboxed` constructor).
@@ -1072,11 +1072,11 @@ fn build_worktree_tmux_kill_argv(session_name: &str) -> Vec<String> {
 /// rPe(s)`) never inspects `rPe`'s return value before proceeding to remove
 /// the worktree, so a tmux hiccup must never block removal.
 async fn kill_worktree_tmux_session(
-    process: &dyn traits::ProcessRunner,
-    sandbox: &dyn traits::Sandbox,
+    process: &dyn platform_api::ProcessRunner,
+    sandbox: &dyn platform_api::Sandbox,
     session_name: &str,
 ) -> Result<(), String> {
-    let pcmd = traits::ProcessCommand {
+    let pcmd = platform_api::ProcessCommand {
         command: "tmux".to_string(),
         args: build_worktree_tmux_kill_argv(session_name),
         cwd: None,
@@ -1767,7 +1767,7 @@ mod tests {
     use tool_api::test_support::{
         ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
     };
-    use traits::worktree::WorktreeManager;
+    use platform_api::worktree::WorktreeManager;
 
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
@@ -2963,7 +2963,7 @@ mod tests {
 
     /// Records the `tmux` argv (if any) [`ExitWorktreeTool`] runs through
     /// `ctx.process`, and returns a canned exit code — a hermetic double for
-    /// the [`traits::ProcessRunner`] seam (mirrors the `MockRunner` pattern
+    /// the [`platform_api::ProcessRunner`] seam (mirrors the `MockRunner` pattern
     /// in `platforms/posix/src/worktree_tmux.rs`'s tests).
     struct RecordingProcess {
         exit_code: i32,
@@ -2986,16 +2986,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl traits::ProcessRunner for RecordingProcess {
+    impl platform_api::ProcessRunner for RecordingProcess {
         async fn run(
             &self,
-            cmd: &traits::SandboxedCommand,
-        ) -> Result<traits::ProcessOutput, traits::ProcessError> {
+            cmd: &platform_api::SandboxedCommand,
+        ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
             self.recorded
                 .lock()
                 .unwrap()
                 .push((cmd.inner().command.clone(), cmd.inner().args.clone()));
-            Ok(traits::ProcessOutput {
+            Ok(platform_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: self.stderr.clone(),
                 exit_code: self.exit_code,
@@ -3005,12 +3005,12 @@ mod tests {
 
         async fn spawn_background(
             &self,
-            _cmd: &traits::SandboxedCommand,
-        ) -> Result<traits::ProcessHandle, traits::ProcessError> {
-            Err(traits::ProcessError::Unsupported)
+            _cmd: &platform_api::SandboxedCommand,
+        ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
+            Err(platform_api::ProcessError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+        async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
             Ok(())
         }
 

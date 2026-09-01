@@ -14,11 +14,11 @@
 //! ## Why kill rides on the runtime handle, not a process handle
 //!
 //! Unlike [`crate::handlers::local_bash::LocalBashHandler`] (which can recover
-//! a [`traits::ProcessHandle`] for a true OS kill), [`SubagentSpawner::spawn`]
+//! a [`platform_api::ProcessHandle`] for a true OS kill), [`SubagentSpawner::spawn`]
 //! is *await-to-completion*: it returns the terminal [`SubagentResult`] and
 //! hands back no live handle while the subagent runs. The only cancellation
 //! primitive available is therefore cooperative cancellation of the worker
-//! future via [`RuntimeSpawner::cancel`] on the [`traits::BackgroundTaskHandle`]
+//! future via [`RuntimeSpawner::cancel`] on the [`platform_api::BackgroundTaskHandle`]
 //! returned by [`RuntimeSpawner::spawn`]. The handler records that handle (plus
 //! the `runtime` Arc that minted it, since [`TaskContext`] is per-call and the
 //! synchronous cleanup path has no `ctx`) in a map keyed by `task_id`, so both
@@ -48,7 +48,7 @@ use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-use traits::{
+use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
@@ -117,7 +117,7 @@ pub struct LocalAgentHandler {
     /// `task_id` → the carried isolation worktree for a live PERSISTENT agent.
     /// A kill/cleanup that cancels the outer event-pump still must run the
     /// terminal keep/cleanup judgment before publishing `Killed`.
-    persistent_worktrees: Arc<Mutex<HashMap<String, traits::worktree::WorktreeHandle>>>,
+    persistent_worktrees: Arc<Mutex<HashMap<String, platform_api::worktree::WorktreeHandle>>>,
     /// `task_id` → the SKILL this agent is, when a `context: fork` skill
     /// launched it. The fork identity the resume gate corroborates against the
     /// on-disk scoping record. Kept beside [`Self::agent_ids`] and torn down
@@ -126,19 +126,19 @@ pub struct LocalAgentHandler {
     /// `task_id` → the LAST rest payload for a persistent agent. If the agent
     /// is killed after coming to rest, cancelling the outer worker still leaves
     /// enough terminal payload to match the normal completion path.
-    persistent_outcomes: Arc<Mutex<HashMap<String, traits::task_registry::AgentTerminalOutcome>>>,
+    persistent_outcomes: Arc<Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>>,
     /// Consulted before a parked agent is resumed: a forked skill whose
     /// permission scoping cannot be re-established must NOT resume under the
     /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
     /// host that also cannot launch a forked skill.
-    fork_resume_gate: Option<Arc<dyn traits::fork_resume_gate::ForkResumeGate>>,
+    fork_resume_gate: Option<Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>>,
     /// Records a parked agent so a LATER process can restore it. Written each
     /// time the agent comes to rest, erased when it terminates. `None` ⇒ no
     /// durable record, which is correct for a host that also cannot restore.
-    parked_store: Option<Arc<dyn traits::parked_agent_store::ParkedAgentStore>>,
+    parked_store: Option<Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>>,
     /// Parent's tool invoker — passed through *unchanged* in
     /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
-    tool_invoker: Arc<dyn traits::ToolInvoker>,
+    tool_invoker: Arc<dyn platform_api::ToolInvoker>,
     /// Parent's budget enforcer — passed through *unchanged* so budget charges
     /// aggregate across the whole agent tree (`Arc::ptr_eq` invariant).
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -158,11 +158,11 @@ pub struct LocalAgentHandler {
     /// isolation worktree (`SubagentSpawnRequest::worktree`) — claude-code
     /// hands its `getWorktreeResult` closure to the detached async lifecycle,
     /// so the worker here judges via
-    /// [`traits::worktree::agent_worktree_result`] when the agent reaches a
+    /// [`platform_api::worktree::agent_worktree_result`] when the agent reaches a
     /// terminal state (keep when dirty/ahead, else auto-remove). `None`
     /// (default) ⇒ no worktree handling: a carried worktree is left in place,
     /// the conservative direction.
-    worktree_manager: Option<Arc<dyn traits::worktree::WorktreeManager>>,
+    worktree_manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
 }
 
 impl LocalAgentHandler {
@@ -178,7 +178,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn new(
         spawner: Arc<dyn SubagentSpawner>,
-        tool_invoker: Arc<dyn traits::ToolInvoker>,
+        tool_invoker: Arc<dyn platform_api::ToolInvoker>,
         budget: Arc<dyn BudgetEnforcerHandle>,
         output_manager: Arc<TaskOutputManager>,
     ) -> Self {
@@ -210,7 +210,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_worktree_manager(
         mut self,
-        manager: Arc<dyn traits::worktree::WorktreeManager>,
+        manager: Arc<dyn platform_api::worktree::WorktreeManager>,
     ) -> Self {
         self.worktree_manager = Some(manager);
         self
@@ -238,7 +238,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_parked_agent_store(
         mut self,
-        store: Arc<dyn traits::parked_agent_store::ParkedAgentStore>,
+        store: Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>,
     ) -> Self {
         self.parked_store = Some(store);
         self
@@ -250,7 +250,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_fork_resume_gate(
         mut self,
-        gate: Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+        gate: Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
     ) -> Self {
         self.fork_resume_gate = Some(gate);
         self
@@ -353,7 +353,7 @@ impl LocalAgentHandler {
 
         if let (Some(mgr), Some(handle)) = (&self.worktree_manager, worktree.as_ref()) {
             if let Some((path, branch)) =
-                traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
             {
                 outcome.worktree_path = Some(path);
                 outcome.worktree_branch = Some(branch);
@@ -527,7 +527,7 @@ impl Task for LocalAgentHandler {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
                                 let _ =
-                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
                                         .await;
                             }
                             workers.lock().await.remove(&worker_task_id);
@@ -554,7 +554,7 @@ impl Task for LocalAgentHandler {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
                                 let _ =
-                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
                                         .await;
                             }
                             workers.lock().await.remove(&worker_task_id);
@@ -583,7 +583,7 @@ impl Task for LocalAgentHandler {
                     // lifecycle passes `finalMessage: Vpr(y)` — the accumulated
                     // messages' final text — on every terminal branch, not only
                     // the clean one).
-                    let mut outcome = traits::task_registry::AgentTerminalOutcome::default();
+                    let mut outcome = platform_api::task_registry::AgentTerminalOutcome::default();
                     // Published once, after the outcome, below. A channel close
                     // (the runner went away without a terminal event) IS the
                     // completed case, so that is the initial value; the
@@ -618,7 +618,7 @@ impl Task for LocalAgentHandler {
                                     .get("text")
                                     .and_then(serde_json::Value::as_str)
                                     .map(str::to_owned);
-                                let rest_usage = Some(traits::task_registry::AgentRunUsage {
+                                let rest_usage = Some(platform_api::task_registry::AgentRunUsage {
                                     subagent_tokens: total,
                                     tool_uses: total_tool_use_count,
                                     duration_ms: total_duration_ms,
@@ -703,7 +703,7 @@ impl Task for LocalAgentHandler {
                     // status publish.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
                         {
                             outcome.worktree_path = Some(path);
                             outcome.worktree_branch = Some(branch);
@@ -736,7 +736,7 @@ impl Task for LocalAgentHandler {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
                                 let _ =
-                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
                                         .await;
                             }
                             workers.lock().await.remove(&worker_task_id);
@@ -784,7 +784,7 @@ impl Task for LocalAgentHandler {
                     // nothing carried it into the notification, so the model was
                     // told a background agent finished without being told what
                     // it found.
-                    let mut outcome = traits::task_registry::AgentTerminalOutcome::default();
+                    let mut outcome = platform_api::task_registry::AgentTerminalOutcome::default();
                     match &result {
                         Ok(SubagentResult::Completed {
                             content,
@@ -798,7 +798,7 @@ impl Task for LocalAgentHandler {
                             // (`s ? "<result>…" : ""`), so an empty answer omits
                             // `<result>` rather than rendering an empty one.
                             outcome.result = (!text.is_empty()).then_some(text);
-                            outcome.usage = Some(traits::task_registry::AgentRunUsage {
+                            outcome.usage = Some(platform_api::task_registry::AgentRunUsage {
                                 subagent_tokens: *total_tokens,
                                 tool_uses: *total_tool_use_count,
                                 duration_ms: *total_duration_ms,
@@ -831,7 +831,7 @@ impl Task for LocalAgentHandler {
                     // after it as a fire-and-forget cleanup.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
                         {
                             outcome.worktree_path = Some(path);
                             outcome.worktree_branch = Some(branch);
@@ -1006,9 +1006,9 @@ mod tests {
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use traits::{BudgetError, SubagentSpawnError, SubagentUsage};
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
 
     // ---- In-memory FileSystem (mirrors local_bash test fixture) ------------
 
@@ -1215,11 +1215,11 @@ mod tests {
     /// worktrees (AgentTool does, before dispatch); it only judges the one
     /// carried on `SubagentSpawnRequest::worktree`.
     struct RecordingWorktree {
-        summary: Option<traits::worktree::WorktreeChangeSummary>,
-        removed: StdMutex<Vec<traits::worktree::WorktreeHandle>>,
+        summary: Option<platform_api::worktree::WorktreeChangeSummary>,
+        removed: StdMutex<Vec<platform_api::worktree::WorktreeHandle>>,
     }
     impl RecordingWorktree {
-        fn new(summary: Option<traits::worktree::WorktreeChangeSummary>) -> Arc<Self> {
+        fn new(summary: Option<platform_api::worktree::WorktreeChangeSummary>) -> Arc<Self> {
             Arc::new(Self {
                 summary,
                 removed: StdMutex::new(Vec::new()),
@@ -1230,31 +1230,31 @@ mod tests {
         }
     }
     #[async_trait]
-    impl traits::worktree::WorktreeManager for RecordingWorktree {
+    impl platform_api::worktree::WorktreeManager for RecordingWorktree {
         async fn create_worktree(
             &self,
             _slug: &str,
             _base_branch: Option<&str>,
             _copy_includes: &[PathBuf],
-        ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
-            Err(traits::worktree::WorktreeError::Unsupported)
+        ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
+            Err(platform_api::worktree::WorktreeError::Unsupported)
         }
         async fn remove_worktree(
             &self,
-            handle: &traits::worktree::WorktreeHandle,
-        ) -> Result<(), traits::worktree::WorktreeError> {
+            handle: &platform_api::worktree::WorktreeHandle,
+        ) -> Result<(), platform_api::worktree::WorktreeError> {
             self.removed.lock().unwrap().push(handle.clone());
             Ok(())
         }
         async fn list_worktrees(
             &self,
-        ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
+        ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError> {
             Ok(Vec::new())
         }
         async fn cleanup_stale(
             &self,
             _max_age: std::time::Duration,
-        ) -> Result<Vec<PathBuf>, traits::worktree::WorktreeError> {
+        ) -> Result<Vec<PathBuf>, platform_api::worktree::WorktreeError> {
             Ok(Vec::new())
         }
         fn is_supported(&self) -> bool {
@@ -1262,8 +1262,8 @@ mod tests {
         }
         async fn worktree_change_summary(
             &self,
-            _handle: &traits::worktree::WorktreeHandle,
-        ) -> Result<Option<traits::worktree::WorktreeChangeSummary>, traits::worktree::WorktreeError>
+            _handle: &platform_api::worktree::WorktreeHandle,
+        ) -> Result<Option<platform_api::worktree::WorktreeChangeSummary>, platform_api::worktree::WorktreeError>
         {
             Ok(self.summary)
         }
@@ -1275,7 +1275,7 @@ mod tests {
         unparked: StdMutex<Vec<AgentId>>,
     }
     #[async_trait]
-    impl traits::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
+    impl platform_api::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
         async fn park(
             &self,
             task_id: &str,
@@ -1295,8 +1295,8 @@ mod tests {
         }
     }
 
-    fn isolation_worktree_handle() -> traits::worktree::WorktreeHandle {
-        traits::worktree::WorktreeHandle {
+    fn isolation_worktree_handle() -> platform_api::worktree::WorktreeHandle {
+        platform_api::worktree::WorktreeHandle {
             path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
             branch_name: "worktree-agent-1".into(),
             base_commit: None,
@@ -1367,7 +1367,7 @@ mod tests {
         last_rest: StdMutex<
             Option<(
                 Option<String>,
-                Option<traits::task_registry::AgentRunUsage>,
+                Option<platform_api::task_registry::AgentRunUsage>,
                 Option<protocol::AgentId>,
                 Option<String>,
                 Option<String>,
@@ -1376,7 +1376,7 @@ mod tests {
         /// The terminal notification payload, and the call ORDER relative to the
         /// terminal `set_status` — the drain is terminal-gated, so the payload
         /// must land first.
-        outcome: StdMutex<Option<traits::task_registry::AgentTerminalOutcome>>,
+        outcome: StdMutex<Option<platform_api::task_registry::AgentTerminalOutcome>>,
         calls: StdMutex<Vec<&'static str>>,
     }
     #[async_trait]
@@ -1397,7 +1397,7 @@ mod tests {
         async fn set_agent_outcome(
             &self,
             _task_id: &str,
-            outcome: traits::task_registry::AgentTerminalOutcome,
+            outcome: platform_api::task_registry::AgentTerminalOutcome,
         ) {
             self.calls.lock().unwrap().push("outcome");
             *self.outcome.lock().unwrap() = Some(outcome);
@@ -1406,7 +1406,7 @@ mod tests {
             &self,
             _task_id: &str,
             result: Option<String>,
-            usage: Option<traits::task_registry::AgentRunUsage>,
+            usage: Option<platform_api::task_registry::AgentRunUsage>,
             agent_id: Option<protocol::AgentId>,
             agent_name: Option<String>,
             team_name: Option<String>,
@@ -1432,7 +1432,7 @@ mod tests {
         fn rest_count(&self) -> usize {
             *self.rest_count.lock().unwrap()
         }
-        fn outcome(&self) -> traits::task_registry::AgentTerminalOutcome {
+        fn outcome(&self) -> platform_api::task_registry::AgentTerminalOutcome {
             self.outcome.lock().unwrap().clone().unwrap_or_default()
         }
         fn calls(&self) -> Vec<&'static str> {
@@ -1947,12 +1947,12 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -1977,12 +1977,12 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 2,
             commits: 1,
         }));
         let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -2127,12 +2127,12 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 2,
             commits: 1,
         }));
         let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -2159,12 +2159,12 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -2194,13 +2194,13 @@ mod tests {
             tx_slot.clone(),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
             .with_streaming_spawner(streaming)
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -2432,16 +2432,16 @@ mod tests {
             tx_slot.clone(),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let parked = Arc::new(RecordingParkedStore::default());
         let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
             .with_streaming_spawner(streaming.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>)
+            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>)
             .with_parked_agent_store(
-                parked.clone() as Arc<dyn traits::parked_agent_store::ParkedAgentStore>
+                parked.clone() as Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>
             );
         let ctx = make_ctx(fs);
 
@@ -2921,7 +2921,7 @@ mod tests {
         seen: StdMutex<Vec<Option<String>>>,
     }
     #[async_trait]
-    impl traits::fork_resume_gate::ForkResumeGate for RefusingGate {
+    impl platform_api::fork_resume_gate::ForkResumeGate for RefusingGate {
         async fn check_resume(
             &self,
             _agent_id: protocol::AgentId,
@@ -2939,7 +2939,7 @@ mod tests {
         seen: StdMutex<Vec<Option<String>>>,
     }
     #[async_trait]
-    impl traits::fork_resume_gate::ForkResumeGate for AllowingGate {
+    impl platform_api::fork_resume_gate::ForkResumeGate for AllowingGate {
         async fn check_resume(
             &self,
             _agent_id: protocol::AgentId,
@@ -2958,7 +2958,7 @@ mod tests {
         fs: Arc<dyn FileSystem>,
         mgr: Arc<TaskOutputManager>,
         sink: Arc<RecordingSink>,
-        gate: Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+        gate: Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
         fork_name: Option<&str>,
     ) -> (
         LocalAgentHandler,
@@ -3010,7 +3010,7 @@ mod tests {
             fs.clone(),
             mgr,
             sink,
-            gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+            gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
             Some("review"),
         )
         .await;
@@ -3050,7 +3050,7 @@ mod tests {
             fs.clone(),
             mgr,
             sink,
-            gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+            gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
             None,
         )
         .await;

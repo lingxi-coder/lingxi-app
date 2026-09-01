@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use traits::{RuntimeError, RuntimeSpawner};
+use platform_api::{RuntimeError, RuntimeSpawner};
 
 /// Run the standard [`RuntimeSpawner`] contract against an impl.
 ///

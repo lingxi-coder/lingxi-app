@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use traits::{RuntimeError, RuntimeSpawner};
+use platform_api::{RuntimeError, RuntimeSpawner};
 
 // ── Synchronous GrowthBook-style flag reader (binary `nt`) ───────────────────
 //

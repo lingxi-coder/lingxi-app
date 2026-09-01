@@ -17,7 +17,7 @@ permission = { path = "../permission" }
 # (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
 # banner + subscription types the bridge events carry. Already in the graph via
 # tui-core (promoted from dev-dependencies; no new external dependency).
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 # (fix round 1) `rate_limit_messages` reuses the existing 1:1
 # `formatResetTime` port instead of duplicating it (the old iocraft `tui`
 # reaches the SAME function through its `orchestrator` dependency).

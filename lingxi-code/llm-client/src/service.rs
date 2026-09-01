@@ -252,7 +252,7 @@ pub struct ApiService {
     /// by the composition root's background profile/roles fetch (batch 4);
     /// `None` when the host has no OAuth profile fetch (mobile) or predates
     /// the wiring. Read via [`Self::effective_subscriber`].
-    subscription: Option<traits::subscription::SharedSubscription>,
+    subscription: Option<platform_api::subscription::SharedSubscription>,
     /// Forced `tool_choice` for every request this adapter drives, set by
     /// [`Self::with_forced_tool_choice`]. Used by `--json-schema` structured
     /// output to COMPEL the `StructuredOutput` tool (1:1 with claude-code forcing
@@ -801,7 +801,7 @@ impl ApiService {
     /// resolved, the drive loops read subscriber/enterprise state from it at
     /// call time instead of the build-time [`SubscriberState`] copy.
     #[must_use]
-    pub fn with_subscription(mut self, slot: traits::subscription::SharedSubscription) -> Self {
+    pub fn with_subscription(mut self, slot: platform_api::subscription::SharedSubscription) -> Self {
         self.subscription = Some(slot);
         self
     }
@@ -1077,7 +1077,7 @@ impl ApiService {
         // branch — emitting "[…tools no longer available]" rather than the
         // disabled branch's "[…tool search not enabled]". The request's `tools`
         // remain the availability set (`a`) below.
-        let tool_search_enabled = traits::session_flags::tool_search_enabled();
+        let tool_search_enabled = platform_api::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
@@ -1368,10 +1368,10 @@ impl ApiService {
             });
         let interactive = self
             .interactive_session
-            .unwrap_or_else(|| !traits::session_flags::effective_non_interactive_session());
+            .unwrap_or_else(|| !platform_api::session_flags::effective_non_interactive_session());
         BetaContext::for_model(model)
             .with_interactive(interactive)
-            .with_show_thinking_summaries(traits::session_flags::show_thinking_summaries())
+            .with_show_thinking_summaries(platform_api::session_flags::show_thinking_summaries())
             .with_fast_mode(fast_mode)
             .with_effort(has_effort)
             .with_tool_search(has_tool_search)
@@ -1387,7 +1387,7 @@ impl ApiService {
     #[cfg(test)]
     fn interactive_session_for_test(&self) -> bool {
         self.interactive_session
-            .unwrap_or_else(|| !traits::session_flags::effective_non_interactive_session())
+            .unwrap_or_else(|| !platform_api::session_flags::effective_non_interactive_session())
     }
 
     /// Return host-validated CLI betas only for the first-party Anthropic
@@ -1425,9 +1425,9 @@ impl ApiService {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&prepared.route.resolved_route.request_model);
         let allowed = Self::direct_anthropic_api_route(prepared)
-            && traits::model_capabilities::has_capability(
+            && platform_api::model_capabilities::has_capability(
                 model,
-                traits::model_capabilities::ModelCapability::FastMode,
+                platform_api::model_capabilities::ModelCapability::FastMode,
             );
         if allowed {
             return;

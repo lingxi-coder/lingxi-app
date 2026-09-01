@@ -108,13 +108,13 @@ mod tests {
         >,
     }
     #[async_trait::async_trait]
-    impl traits::SecureStorage for MemStorage {
+    impl platform_api::SecureStorage for MemStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
             data: protocol::SecureStorageData,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -125,7 +125,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -137,14 +137,14 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -157,29 +157,29 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> traits::SecureStorageBackend {
-            traits::SecureStorageBackend::PlainText
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::PlainText
         }
     }
     struct FixedClock;
-    impl traits::Clock for FixedClock {
+    impl platform_api::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
         }
     }
     struct NoHttp;
     #[async_trait::async_trait]
-    impl traits::HttpTransport for NoHttp {
+    impl platform_api::HttpTransport for NoHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("availability tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("availability tests must not perform HTTP");
         }
     }

@@ -7,7 +7,7 @@ use crate::catalog::models_dev::ProviderSlice;
 use crate::{
     AuthStrategy, CredentialConfig, PricingCatalog, ProtocolFamily, ProviderId, ProviderProfile,
 };
-use traits::{ModelBillingMode, ModelPricing};
+use platform_api::{ModelBillingMode, ModelPricing};
 
 /// Built-in catalog: provider profiles plus a matching pricing catalog.
 #[derive(Debug, Clone)]

@@ -21,14 +21,14 @@ crates/coordinator/
 ├── Cargo.toml
 └── src/{lib, mode, internal_tools, team_registry, mailbox, swarm}.rs
 
-crates/traits/src/swarm.rs  ← NEW: SwarmBackend trait
+crates/platform-api/src/swarm.rs  ← NEW: SwarmBackend trait
 ```
 
 ---
 
 ## Task 1: SwarmBackend trait
 
-**Files:** `crates/traits/src/swarm.rs`
+**Files:** `crates/platform-api/src/swarm.rs`
 
 ```rust
 use async_trait::async_trait;
@@ -65,7 +65,7 @@ pub enum SwarmError {
 }
 ```
 
-Add to `traits/src/lib.rs`. Commit:
+Add to `platform-api/src/lib.rs`. Commit:
 ```bash
 cargo check -p lingxi-traits
 git add crates/traits
@@ -89,7 +89,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-agent = { path = "../agent" }
 lingxi-tools = { path = "../tools" }
@@ -278,7 +278,7 @@ pub struct DreamTaskState {
 ```rust
 use crate::state::{TaskState, TaskStatus};
 use async_trait::async_trait;
-use lingxi_traits::{FileSystem, RuntimeSpawner};
+use lingxi_platform_api::{FileSystem, RuntimeSpawner};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -372,7 +372,7 @@ git commit -m "feat(tasks): TaskType + TaskState (7 variants) + Task trait"
 - [ ] **Step 1: output_manager.rs**
 
 ```rust
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -473,7 +473,7 @@ use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
-use lingxi_traits::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
+use lingxi_platform_api::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -632,7 +632,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-tools = { path = "../tools" }
 lingxi-agent = { path = "../agent" }
@@ -868,7 +868,7 @@ pub fn coordinator_internal_tools(_team: Arc<TeamRegistry>) -> Vec<Arc<dyn Tool>
 - [ ] **Step 6: swarm.rs (delegates to trait — no impl in core)**
 
 ```rust
-pub use lingxi_traits::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+pub use lingxi_platform_api::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 ```
 
 - [ ] **Step 7: lib.rs + commit**

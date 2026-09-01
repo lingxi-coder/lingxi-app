@@ -155,7 +155,7 @@ Expected: each group prints `PASS:` lines and a final `=== ALL-PASS ===`. (The `
 ```rust
     #[test]
     fn loopback_and_disabled_do_not_request_full_egress() {
-        use traits::NetworkPolicy;
+        use platform_api::NetworkPolicy;
         let mut p = crate::sandbox::default_policy_for_test(); // or construct a SandboxPolicy
         p.network = NetworkPolicy::LoopbackOnly;
         let cfg = runtime_config_from_policy(&p);

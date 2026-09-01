@@ -32,7 +32,7 @@
 
 use std::env;
 
-use traits::env::is_env_truthy;
+use platform_api::env::is_env_truthy;
 
 /// Resolve `skill_model` against `current_model`, carrying `[1m]` over when the
 /// target family supports it. 1:1 with `resolveSkillModelOverride`

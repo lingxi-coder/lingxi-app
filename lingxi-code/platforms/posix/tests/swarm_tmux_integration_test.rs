@@ -4,7 +4,7 @@
 
 use platform_posix::swarm::TmuxBackend;
 use protocol::AgentId;
-use traits::{PanePosition, SwarmBackend, SwarmLayout};
+use platform_api::{PanePosition, SwarmBackend, SwarmLayout};
 
 #[tokio::test]
 #[ignore = "requires real tmux >= 3.2 on host"]

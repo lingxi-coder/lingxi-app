@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-pub use traits::subagent_spawn::ObserverSpec;
+pub use platform_api::subagent_spawn::ObserverSpec;
 
 /// Self-contained description of an agent type used by
 /// [`crate::context::SubagentContext`] and [`crate::pool::StateMachinePool`].

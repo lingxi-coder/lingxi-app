@@ -28,7 +28,7 @@
 | L1 | **CLOSED** | fallback model 按有序列表解析、trim/空项拒绝/稳定去重；仅 print mode 生效，每个新 user turn 从 primary 重开并记录实际 model。 |
 | I1 | **CLOSED** | plugin config 写入只允许 runtime 真正消费的 user scope；project/local 写入前拒绝，`doctor` 只告警历史遗留而不自动搬运可能含密钥的值。 |
 | P1、P2 | **CLOSED** | main-thread agent 版本化快照进入 JSONL/runtime metadata，resume 遵守 explicit override > snapshot > legacy name；ToolHeartbeat 由 TUI/plain/stream-json 消费并在 result/cancel/turn end 停止。 |
-| 版本对外标识 | **CLOSED** | `traits::CLAUDE_CODE_VERSION` 已从 2.1.208 升到 2.1.216，WebFetch `User-Agent` 与子进程 `AI_AGENT` 由同一常量派生；2.1.208 测试已降为历史 fixture，不再锁死 live 标识。 |
+| 版本对外标识 | **CLOSED** | `platform_api::CLAUDE_CODE_VERSION` 已从 2.1.208 升到 2.1.216，WebFetch `User-Agent` 与子进程 `AI_AGENT` 由同一常量派生；2.1.208 测试已降为历史 fixture，不再锁死 live 标识。 |
 
 实施过程还修复了五个由全 workspace 门禁暴露的独立 bug：POSIX/Windows watcher 在 native watch 真正 armed 前返回导致首个事件丢失；bridge `/loop` keepalive 使用进程全局状态导致跨连接互相清除；POSIX env 测试并发修改进程环境且失败时泄露完整 env；macOS Keychain 测试 ID 可碰撞；`DesktopConfig` doctest 没有跟上新字段。这些均已有定向回归并被 workspace test 覆盖。
 
@@ -367,7 +367,7 @@ orchestrator 会发 tool heartbeat；client adapter 会转发，但 primary TUI 
 源码证据：
 
 - `orchestrator/src/turn_loop.rs:2949-2973`
-- `traits/src/orchestrator.rs:1529-1543`
+- `platform-api/src/orchestrator.rs:1529-1543`
 - `client-adapter/src/output_stream.rs:128-136`
 - `tui-core/src/orchestrator_bridge.rs:252-330`
 - `apps/cli/src/output_adapter.rs:28-64`

@@ -19,7 +19,7 @@ use protocol::ContentBlock;
 use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader as ToolSkillLoader};
-use traits::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
+use platform_api::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
 
 /// Project a registered [`SlashCommand`] onto the [`SkillDescriptor`] subset the
 /// `Skill` tool surfaces (verbatim with engine-desktop's `skill_loader::to_descriptor`).

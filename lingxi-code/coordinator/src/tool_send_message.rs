@@ -53,7 +53,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
-use traits::team_spawn::TeamSpawnSeam;
+use platform_api::team_spawn::TeamSpawnSeam;
 
 use crate::mailbox::{MailboxError, MessageSender, TeammateMessage};
 use crate::team_registry::TeamRegistry;
@@ -276,32 +276,32 @@ impl SendMessageTool {
         summary: Option<&str>,
         ctx: &ToolUseContext,
     ) -> Result<(), ToolError> {
-        if traits::live_sessions::process_session_id().as_deref() == Some(session_id) {
+        if platform_api::live_sessions::process_session_id().as_deref() == Some(session_id) {
             return Err(ToolError::InvalidInput(
                 "SendMessage: cannot send a message to the current session".into(),
             ));
         }
-        let dir = traits::live_sessions::process_dir()
-            .unwrap_or_else(traits::live_sessions::LiveSessionDir::process_default);
+        let dir = platform_api::live_sessions::process_dir()
+            .unwrap_or_else(platform_api::live_sessions::LiveSessionDir::process_default);
         let peer = dir
             .find_by_session_id(
                 session_id,
-                traits::live_sessions::process_session_id().as_deref(),
+                platform_api::live_sessions::process_session_id().as_deref(),
             )
             .ok_or_else(|| ToolError::InvalidInput("SendMessage: no such live session".into()))?;
         let from_name = self.sender_name(ctx).await;
-        let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+        let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
         let message =
-            traits::live_sessions::outbound_peer_message(&from_name, &from_sid, content, summary);
+            platform_api::live_sessions::outbound_peer_message(&from_name, &from_sid, content, summary);
         let socket = peer
             .messaging_socket_path
             .as_deref()
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from)
-            .filter(|path| traits::uds_inbox::is_canonical_inbox_sock(path));
+            .filter(|path| platform_api::uds_inbox::is_canonical_inbox_sock(path));
         let uds_error = socket
             .as_deref()
-            .map(|path| traits::uds_inbox::send_peer_message(path, &message))
+            .map(|path| platform_api::uds_inbox::send_peer_message(path, &message))
             .and_then(Result::err);
         if socket.is_none() || uds_error.is_some() {
             dir.send_inbox(peer.sid(), &message).map_err(|error| {
@@ -785,7 +785,7 @@ impl Tool for SendMessageTool {
             ));
         }
         if let Address::SessionId(session_id) = &addr {
-            if traits::live_sessions::process_session_id().as_deref() == Some(session_id) {
+            if platform_api::live_sessions::process_session_id().as_deref() == Some(session_id) {
                 return Err(ToolError::InvalidInput(
                     "SendMessage: cannot send a message to the current session".into(),
                 ));
@@ -1292,13 +1292,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         let self_session = "22222222-3333-4444-8555-666666666666";
         let target_session = "11111111-2222-4333-8444-555555555555";
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id(self_session);
-        traits::live_sessions::set_process_name("team-lead");
-        let stale_socket = traits::uds_inbox::default_socket_path(424_242);
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id(self_session);
+        platform_api::live_sessions::set_process_name("team-lead");
+        let stale_socket = platform_api::uds_inbox::default_socket_path(424_242);
         dir.upsert_identity(
             424_242,
             target_session,
@@ -1325,7 +1325,7 @@ mod tests {
         let messages = dir.drain_inbox(target_session).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            traits::live_sessions::extract_cross_session_inner(&messages[0].content),
+            platform_api::live_sessions::extract_cross_session_inner(&messages[0].content),
             "hello after stale UDS"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1414,10 +1414,10 @@ mod tests {
                 _name: String,
                 _team_name: String,
                 _description: String,
-            ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+            ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
                 Ok(String::new())
             }
-            async fn kill(&self, task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            async fn kill(&self, task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
                 self.killed.store(true, Ordering::SeqCst);
                 *self.killed_task.lock().unwrap() = Some(task_id.to_string());
                 Ok(())
@@ -1541,7 +1541,7 @@ mod tests {
             None,
             serde_json::Map::new(),
         );
-        owned.status = engine::TodoState::InProgress;
+        owned.status = lingxi_core::TodoState::InProgress;
         owned.owner = Some("nova".into());
         let tid = store.create(owned).await.unwrap();
 
@@ -1560,7 +1560,7 @@ mod tests {
         // RSr: the task is ownerless-pending again.
         let t = store.get(&tid).await.unwrap();
         assert_eq!(t.owner, None);
-        assert_eq!(t.status, engine::TodoState::Pending);
+        assert_eq!(t.status, lingxi_core::TodoState::Pending);
 
         // Qyt frame in the lead's inbox, after the shutdown_approved frame.
         let frames = lead_mailbox.drain();

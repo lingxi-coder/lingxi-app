@@ -21,14 +21,14 @@
 
 | 现有模块 | 当前职责 | 本方案用法 |
 |---|---|---|
-| `engine/src/settings` | 4 层 settings 加载、merge、typed schema | 新增 `multiAgent` LingXi-only 配置字段 |
+| `core/src/settings` | 4 层 settings 加载、merge、typed schema | 新增 `multiAgent` LingXi-only 配置字段 |
 | `provider-config` | 从 settings.providers / routing 组装 `llm_client::ClientConfig` | 复用 provider profile / routing，不重新造 provider 配置 |
 | `llm-client` | provider-neutral LLM client，支持 Anthropic/OpenAI/Gemini/OpenAI-compatible 等 | 给用户配置的候选 agent 和 arbiter 发起模型调用 |
 | `orchestrator` | 主会话 turn loop、tool dispatch、cost/hooks/memory wiring | 增加执行策略路由入口，决定是否进入 dual-LLM path |
 | `agent` | subagent multi-turn loop，`StateMachinePool` | 用于模型内 agent loop；候选实现可以复用 subagent loop 能力 |
 | `tasks` / `coordinator` | background work、team/multi-agent、task registry | 记录候选实现、review、revision、verification 阶段状态 |
 | `sidequery` | side LLM 和单轮 forked-agent helper | 适合 reviewer/arbiter 的结构化单轮判断，不适合执行型代码修改 |
-| `traits::worktree::WorktreeManager` | disposable git worktree 抽象 | 创建 candidate A / candidate B 隔离候选工作区 |
+| `platform_api::worktree::WorktreeManager` | disposable git worktree 抽象 | 创建 candidate A / candidate B 隔离候选工作区 |
 | `tool-worktree` | 用户可调用 EnterWorktree/ExitWorktree 工具 | 不直接暴露给候选流程；host/orchestrator 直接调用 trait |
 | `telemetry` / `cost` | 事件与成本统计 | 记录 multi-agent 阶段、provider、token、耗时、winner |
 
@@ -164,7 +164,7 @@ pub struct MultiAgentConfig {
 
 Settings merge：
 
-- `merge()`（`engine/src/settings/merger.rs`）是**逐字段手写**的：新字段只加进 `SettingsJson` struct 而不在 `merge()` 里加一行，默认行为是 “`next` 整体覆盖 `prev`”——project 层一个 `multiAgent` 会把 user 层整块吃掉。
+- `merge()`（`core/src/settings/merger.rs`）是**逐字段手写**的：新字段只加进 `SettingsJson` struct 而不在 `merge()` 里加一行，默认行为是 “`next` 整体覆盖 `prev`”——project 层一个 `multiAgent` 会把 user 层整块吃掉。
 - 因此 `multi_agent`（`Option<Value>`，与 `routing` 同型）**必须在 `merge()` 里显式走 `deep_merge_value_opt`**，与 `routing` 一致：
 
 ```rust
@@ -317,7 +317,7 @@ pub enum DualLlmPhase {
 
 ## Worktree 隔离
 
-复用 `traits::worktree::WorktreeManager`，不要让两个候选 agent 在主工作区写代码。
+复用 `platform_api::worktree::WorktreeManager`，不要让两个候选 agent 在主工作区写代码。
 
 ⚠️ **不要复用 `agent::worktree_policy::create_worktree_or_degrade`。** 该 helper 在无法创建 worktree 时**降级返回 `None`（= 不用 worktree，在当前 cwd 就地跑）**。对单 agent 这是合理回退；对 dual-LLM 则等于“两个候选同时写主工作区”，正好踩穿隔离保证。multi-agent 必须直接调用 `WorktreeManager::create_worktree`，把 `None` / 失败一律当 **fatal**（`MultiAgentError::Worktree`），绝不就地跑。
 
@@ -918,10 +918,10 @@ cost_nano_usd
 改动：
 
 - `docs/multi-agent-dual-llm-design.md`：本设计文档。
-- `lingxi-code/engine/src/settings/schema.rs`：新增 `multi_agent: Option<Value>`。
-- `lingxi-code/engine/src/settings/merger.rs`：新增 `multiAgent` deep-merge。
-- `lingxi-code/engine/src/settings/tracer.rs`：记录 `multiAgent` provenance。
-- `lingxi-code/engine/src/settings/env_parser.rs`：解析 `LINGXI_MULTI_AGENT*`。
+- `lingxi-code/core/src/settings/schema.rs`：新增 `multi_agent: Option<Value>`。
+- `lingxi-code/core/src/settings/merger.rs`：新增 `multiAgent` deep-merge。
+- `lingxi-code/core/src/settings/tracer.rs`：记录 `multiAgent` provenance。
+- `lingxi-code/core/src/settings/env_parser.rs`：解析 `LINGXI_MULTI_AGENT*`。
 
 测试：
 

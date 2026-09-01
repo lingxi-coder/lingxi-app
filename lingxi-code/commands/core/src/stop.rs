@@ -29,7 +29,7 @@
 //!    `JobState` doesn't model, e.g. `backend`/`routine`) round-trips
 //!    untouched.
 //! 4. **`job_stop_self` marker** — telemetry only.
-//! 5. **Exit** — [`traits::OrchestratorHandle::request_exit`] (exists,
+//! 5. **Exit** — [`platform_api::OrchestratorHandle::request_exit`] (exists,
 //!    used as-is), then `CommandResult::Done` with the locked
 //!    `"Session stopped."` literal so the REPL loop observes
 //!    `current_should_exit() == true` and exits with code 0.
@@ -57,7 +57,7 @@ use command_api::parser::ParsedSlashCommand;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// The ported `isEnabled` predicate: `true` iff the process is running as a
 /// background session (`LINGXI_SESSION_KIND=bg`). Identical condition to

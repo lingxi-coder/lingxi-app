@@ -34,7 +34,7 @@ use telemetry::tengu::tool::{
     READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use traits::{McpPermissionCeiling, McpTransportSpec};
+use platform_api::{McpPermissionCeiling, McpTransportSpec};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::{ToolProgress, ToolProgressSender};
@@ -728,7 +728,7 @@ impl MCPTool {
     /// crate while allowing a registry/client integration to pass through the
     /// resolved `allow`/`ask`/`deny` value directly.
     #[must_use]
-    pub fn with_mcp_permission_ceiling(self, ceiling: traits::McpPermissionCeiling) -> Self {
+    pub fn with_mcp_permission_ceiling(self, ceiling: platform_api::McpPermissionCeiling) -> Self {
         self.with_effective_max_permission(max_permission_from_ceiling(ceiling))
     }
 
@@ -873,7 +873,7 @@ async fn process_mcp_call_result(
     tool_use_id: Option<protocol::ToolUseId>,
     progress: ToolProgressSender,
     started: Instant,
-    res: Result<traits::McpToolResultDto, McpClientError>,
+    res: Result<platform_api::McpToolResultDto, McpClientError>,
 ) -> Result<ToolCallResult, ToolError> {
     match res {
         Ok(dto) => {
@@ -1213,7 +1213,7 @@ impl Tool for MCPTool {
     /// row to be missing from.
     ///
     /// `suppressAlwaysAllowRule` is not a field here — the port carries it as
-    /// [`traits::permission_gate::PermissionCheckContext::requires_user_interaction`],
+    /// [`platform_api::permission_gate::PermissionCheckContext::requires_user_interaction`],
     /// which `turn_loop` fills from [`Self::requires_user_interaction`] and
     /// `TuiPermissionGate` reads to hide the persistent-grant row.
     ///
@@ -1594,7 +1594,7 @@ impl Tool for MCPTool {
         // (already threaded into the call task above) is handed to the registry
         // so `TaskStop` fires it (the port equivalent of the state's
         // `abortController`), which now genuinely cancels the in-flight call.
-        let registration = traits::task_registry::McpTaskRegistration {
+        let registration = platform_api::task_registry::McpTaskRegistration {
             server_name: server.clone(),
             tool_name: tool.clone(),
             tool_use_id: tool_use_id_str.clone(),
@@ -2419,12 +2419,12 @@ async fn resource_capable_server_names(registry: &McpRegistry) -> Vec<String> {
     names
 }
 
-/// Shape one [`traits::McpResourceDto`] into the output row, adding the
+/// Shape one [`platform_api::McpResourceDto`] into the output row, adding the
 /// `server` tag. In-tool JSON shaping (NOT a `traits` DTO widen) so the
 /// frozen `McpResourceDto` is untouched. Field names mirror
 /// `ListMcpResourcesTool.ts:26-34` (`uri`, `name`, `mimeType`, `server`); a
 /// `None` `mime_type` is omitted (the TS field is `optional`).
-fn tag_resource_with_server(r: &traits::McpResourceDto, server: &str) -> Value {
+fn tag_resource_with_server(r: &platform_api::McpResourceDto, server: &str) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("uri".into(), json!(r.uri));
     obj.insert("name".into(), json!(r.name));
@@ -2744,7 +2744,7 @@ impl Tool for ReadMcpResourceTool {
 /// [`tool_api::ToolRegistry::register_mcp_tools`] (and drop them en masse on
 /// disconnect via the matching `conn_id`).
 ///
-/// For each `Connected` server we map each [`traits::McpToolDto`] →
+/// For each `Connected` server we map each [`platform_api::McpToolDto`] →
 /// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
 /// dto.input_schema, dto.search_hint, dto.always_load,
 /// dto.requires_user_interaction))`. The resulting tool's wire `name()` is the real
@@ -2781,7 +2781,7 @@ impl Tool for ReadMcpResourceTool {
 pub fn configured_permission_ceiling(
     config: &mcp::McpServerConfig,
     tool_name: &str,
-) -> Option<traits::McpPermissionCeiling> {
+) -> Option<platform_api::McpPermissionCeiling> {
     let mut ceiling = config.tool_permissions.get(tool_name).copied();
     for configured in config
         .tools
@@ -2790,9 +2790,9 @@ pub fn configured_permission_ceiling(
     {
         if let Some(policy) = configured.permission_policy {
             let policy_ceiling = match policy {
-                traits::McpToolPermissionPolicy::AlwaysAllow => traits::McpPermissionCeiling::Allow,
-                traits::McpToolPermissionPolicy::AlwaysAsk => traits::McpPermissionCeiling::Ask,
-                traits::McpToolPermissionPolicy::AlwaysDeny => traits::McpPermissionCeiling::Deny,
+                platform_api::McpToolPermissionPolicy::AlwaysAllow => platform_api::McpPermissionCeiling::Allow,
+                platform_api::McpToolPermissionPolicy::AlwaysAsk => platform_api::McpPermissionCeiling::Ask,
+                platform_api::McpToolPermissionPolicy::AlwaysDeny => platform_api::McpPermissionCeiling::Deny,
             };
             ceiling =
                 Some(ceiling.map_or(policy_ceiling, |current| current.strictest(policy_ceiling)));
@@ -2804,11 +2804,11 @@ pub fn configured_permission_ceiling(
     ceiling
 }
 
-fn max_permission_from_ceiling(ceiling: traits::McpPermissionCeiling) -> McpToolMaxPermission {
+fn max_permission_from_ceiling(ceiling: platform_api::McpPermissionCeiling) -> McpToolMaxPermission {
     match ceiling {
-        traits::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
-        traits::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
-        traits::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
+        platform_api::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
+        platform_api::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
+        platform_api::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
     }
 }
 
@@ -3025,7 +3025,7 @@ mod tests {
             false,
             false,
         )
-        .with_mcp_permission_ceiling(traits::McpPermissionCeiling::Deny);
+        .with_mcp_permission_ceiling(platform_api::McpPermissionCeiling::Deny);
         assert!(matches!(
             tool.check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
                 .await,
@@ -3187,9 +3187,9 @@ mod tests {
     fn auth_kind_sse_with_oauth() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
-            oauth: Some(traits::McpOAuthConfigDto {
+            oauth: Some(platform_api::McpOAuthConfigDto {
                 client_id: Some("cid".into()),
                 callback_port: Some(8080),
                 auth_server_metadata_url: Some("https://m".into()),
@@ -3204,7 +3204,7 @@ mod tests {
     fn auth_kind_sse_headers_helper() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: Some("/usr/bin/h".into()),
             oauth: None,
         };
@@ -3213,7 +3213,7 @@ mod tests {
 
     #[test]
     fn auth_kind_sse_static_headers() {
-        let mut h = traits::McpHeaders::new();
+        let mut h = platform_api::McpHeaders::new();
         h.insert("Authorization".into(), "Bearer x".into());
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
@@ -3228,9 +3228,9 @@ mod tests {
     fn auth_kind_http_with_oauth() {
         let spec = McpTransportSpec::Http {
             url: "https://x".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
-            oauth: Some(traits::McpOAuthConfigDto {
+            oauth: Some(platform_api::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,
                 auth_server_metadata_url: None,
@@ -3243,7 +3243,7 @@ mod tests {
 
     #[test]
     fn auth_kind_websocket_static_headers() {
-        let mut h = traits::McpHeaders::new();
+        let mut h = platform_api::McpHeaders::new();
         h.insert("X-Token".into(), "abc".into());
         let spec = McpTransportSpec::WebSocket {
             url: "wss://x".into(),
@@ -3643,7 +3643,7 @@ pub(crate) mod cached_resource_test_support {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
@@ -4060,8 +4060,8 @@ pub(crate) mod cached_resource_test_support {
                 config: cached_server_config(name),
                 connection_id: McpConnectionId::new(),
                 capabilities: behavior.cached_capabilities,
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -4097,11 +4097,11 @@ mod auto_background_race_tests {
     use jsonrpc::{Connection, Mode};
     use std::sync::Mutex as StdMutex;
     use tokio::sync::mpsc;
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         McpTaskRegistration, TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
         McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -4140,7 +4140,7 @@ mod auto_background_race_tests {
             _c: &McpRawConnection,
             _t: &str,
             _i: Value,
-        ) -> Result<traits::McpToolResultDto, McpError> {
+        ) -> Result<platform_api::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
@@ -4258,7 +4258,7 @@ mod auto_background_race_tests {
             &self,
             _id: &str,
             _o: Option<u64>,
-        ) -> Result<traits::task_registry::TaskOutputChunk, TaskRegistryError> {
+        ) -> Result<platform_api::task_registry::TaskOutputChunk, TaskRegistryError> {
             unreachable!()
         }
         async fn register_mcp_task(
@@ -4864,7 +4864,7 @@ mod auto_background_race_tests {
 mod resource_tool_gating_tests {
     use super::*;
     use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpConfiguredToolPolicyDto, McpError,
         McpNotificationStream, McpPermissionCeiling, McpPromptDto, McpRawConnection,
         McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport, McpTransportKind,
@@ -4901,7 +4901,7 @@ mod resource_tool_gating_tests {
             _c: &McpRawConnection,
             _t: &str,
             _i: Value,
-        ) -> Result<traits::McpToolResultDto, McpError> {
+        ) -> Result<platform_api::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
@@ -5015,8 +5015,8 @@ mod resource_tool_gating_tests {
                 config: server_config,
                 connection_id,
                 capabilities: caps(false),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("srv", "allow"), dto("srv", "ask"), dto("srv", "deny")],
@@ -5066,7 +5066,7 @@ mod resource_tool_gating_tests {
         server_config.tools = vec![
             McpConfiguredToolPolicyDto {
                 name: "write".into(),
-                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysAllow),
+                permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysAllow),
                 org_max_permission: Some(McpPermissionCeiling::Ask),
             },
             McpConfiguredToolPolicyDto {
@@ -5085,8 +5085,8 @@ mod resource_tool_gating_tests {
                 config: server_config,
                 connection_id,
                 capabilities: caps(false),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("srv", "write"), interactive],
@@ -5178,8 +5178,8 @@ mod resource_tool_gating_tests {
                 config: config("srv"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: caps(resources),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -5215,8 +5215,8 @@ mod resource_tool_gating_tests {
                 config: connected_config,
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: caps(false),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("connected", "send")],
@@ -5232,8 +5232,8 @@ mod resource_tool_gating_tests {
                 config: cached_config,
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: caps(false),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("cached", "send")],
@@ -5305,8 +5305,8 @@ mod resource_tool_gating_tests {
                     config: config(name),
                     connection_id: protocol::McpConnectionId::new(),
                     capabilities: caps(true),
-                    negotiated: traits::McpNegotiatedProtocol {
-                        era: traits::McpProtocolEra::Legacy,
+                    negotiated: platform_api::McpNegotiatedProtocol {
+                        era: platform_api::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: vec![],
@@ -5354,8 +5354,8 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: scoped_connection_id,
                 capabilities: caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("shared", "scoped_only")],
@@ -5371,8 +5371,8 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: shared_connection_id,
                 capabilities: caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("shared", "shared_only")],
@@ -5416,8 +5416,8 @@ mod resource_tool_gating_tests {
                 config: config("a"),
                 connection_id: a_id,
                 capabilities: caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("a", "a_only")],
@@ -5433,8 +5433,8 @@ mod resource_tool_gating_tests {
                 config: config("b"),
                 connection_id: b_id,
                 capabilities: caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("b", "b_only")],
@@ -5551,7 +5551,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my.server",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://guide".into(),
                     name: "guide.md".into(),
                     mime_type: Some("text/markdown".into()),
@@ -5565,7 +5565,7 @@ mod cached_resource_tool_tests {
             &transport,
             "claude.ai Linear",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://linear".into(),
                     name: "linear.md".into(),
                     mime_type: None,
@@ -5660,7 +5660,7 @@ mod cached_resource_tool_tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: traits::ServerCapabilitiesDto {
+                live_capabilities: platform_api::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },
@@ -5689,7 +5689,7 @@ mod cached_resource_tool_tests {
             &transport,
             "alpha",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
                     mime_type: None,
@@ -5703,7 +5703,7 @@ mod cached_resource_tool_tests {
             &transport,
             "beta",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://b".into(),
                     name: "beta.txt".into(),
                     mime_type: None,
@@ -5762,7 +5762,7 @@ mod cached_resource_tool_tests {
             &transport,
             "alpha",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
                     mime_type: None,
@@ -5777,7 +5777,7 @@ mod cached_resource_tool_tests {
             "beta",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: traits::ServerCapabilitiesDto {
+                live_capabilities: platform_api::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },
@@ -5812,8 +5812,8 @@ mod cached_resource_tool_tests {
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -5847,7 +5847,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my.server",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://dot".into(),
                     name: "dot.md".into(),
                     mime_type: None,
@@ -5861,7 +5861,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my_server",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://underscore".into(),
                     name: "underscore.md".into(),
                     mime_type: None,
@@ -5928,7 +5928,7 @@ mod cached_resource_tool_tests {
             &transport,
             "shared",
             CachedServerBehavior {
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://shared".into(),
                     name: "shared.md".into(),
                     mime_type: Some("text/markdown".into()),
@@ -5945,12 +5945,12 @@ mod cached_resource_tool_tests {
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
-                resources: vec![traits::McpResourceDto {
+                resources: vec![platform_api::McpResourceDto {
                     uri: "cached://scoped".into(),
                     name: "scoped.md".into(),
                     mime_type: None,
@@ -6143,7 +6143,7 @@ mod cached_resource_tool_tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: traits::ServerCapabilitiesDto {
+                live_capabilities: platform_api::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },

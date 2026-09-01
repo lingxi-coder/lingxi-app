@@ -6,7 +6,7 @@
 
 **Architecture:** `ConversationOrchestrator` grows an `Arc<CompactionOrchestrator>` field (defaults via `CompactionOrchestrator::new(autocompact_threshold)` — same threshold M3 uses). `force_compact()` snapshots the current `session.history`, runs `compactor.process_iteration(history, 0).await`, swaps the result back under the same `session` lock, appends a `SystemTextMessage("[Compacted N → M messages]")` to the history (so the next turn carries the boundary marker), and returns a `CompactionSummary { messages_before, messages_after, bytes_saved }`. Cancellation is racing the `process_iteration` future against a `CancellationToken` via `tokio::select!`. The CLI `build_runtime` constructs the `CompactionOrchestrator` once (same default config M3 ships) and shares it with the orchestrator via a new `with_compaction` builder. The TUI's `app.rs` translates the `CompactionCompleted` orchestrator event into a `SystemTextMessage` push onto the scrollback buffer — proper `CompactBoundaryMessage` lands in M7.
 
-**Tech Stack:** Rust 2021, `lingxi-compaction = { path = "../compaction" }` (M3-05), `tokio-util = "0.7"` (CancellationToken — already in workspace), `async-trait = "0.1"`, `lingxi-traits::CompactionSummary` (locked since M5-02).
+**Tech Stack:** Rust 2021, `lingxi-compaction = { path = "../compaction" }` (M3-05), `tokio-util = "0.7"` (CancellationToken — already in workspace), `async-trait = "0.1"`, `lingxi-platform_api::CompactionSummary` (locked since M5-02).
 
 ---
 
@@ -32,7 +32,7 @@
 - Trait surface: `CompactionSummary { messages_before: u32, messages_after: u32, bytes_saved: u64 }` — unchanged from M5-02; **no `summary_id`** in v0.7.0 (deferred to M7 when `CompactBoundaryMessage` ships with a real summary content reference).
 - New `OrchestratorError::Compaction(lingxi_compaction::CompactionError)` and `OrchestratorError::CompactionCancelled` — projected to `HandleError::ActionFailed("compaction failed: <reason>")` / `"compaction cancelled"`.
 
-**Deviation from prompt's "LOCKED TYPES" line:** The prompt listed `CompactionOutcome { messages_before, messages_after, summary_id: SummaryId }` and `OrchestratorHandle::force_compact -> Result<CompactionOutcome, CompactError>`. The **actual** trait surface in `lingxi-traits::orchestrator::OrchestratorHandle` (locked since M5-02 and shipped in v0.6.0) is `force_compact() -> Result<CompactionSummary, HandleError>` where `CompactionSummary { messages_before: u32, messages_after: u32, bytes_saved: u64 }` — no `summary_id`. This plan KEEPS the v0.6.0 trait surface unchanged (zero parity-fixture regression) and surfaces real numbers via the existing fields. A real summary identifier is M7's concern when `CompactBoundaryMessage` arrives.
+**Deviation from prompt's "LOCKED TYPES" line:** The prompt listed `CompactionOutcome { messages_before, messages_after, summary_id: SummaryId }` and `OrchestratorHandle::force_compact -> Result<CompactionOutcome, CompactError>`. The **actual** trait surface in `lingxi-platform_api::orchestrator::OrchestratorHandle` (locked since M5-02 and shipped in v0.6.0) is `force_compact() -> Result<CompactionSummary, HandleError>` where `CompactionSummary { messages_before: u32, messages_after: u32, bytes_saved: u64 }` — no `summary_id`. This plan KEEPS the v0.6.0 trait surface unchanged (zero parity-fixture regression) and surfaces real numbers via the existing fields. A real summary identifier is M7's concern when `CompactBoundaryMessage` arrives.
 
 ---
 
@@ -235,7 +235,7 @@ Append to `crates/orchestrator/src/error.rs` `#[cfg(test)] mod tests`:
 ```rust
 #[test]
 fn compaction_variant_projects_to_string() {
-    let api_err = lingxi_api_client::ApiError::Http(lingxi_traits::HttpError::Connection("nope".into()));
+    let api_err = lingxi_api_client::ApiError::Http(lingxi_platform_api::HttpError::Connection("nope".into()));
     let compact_err = lingxi_compaction::CompactionError::Api(api_err);
     let e = OrchestratorError::Compaction(compact_err);
     let s = e.to_string();
@@ -379,13 +379,13 @@ git commit -m "feat(orchestrator): add Compaction field + with_compaction builde
 ## Task 4: Add a `CompactionCompleted` `OutputEvent` variant
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/output_stream.rs` (variant lives wherever `OutputEvent` is defined — check `crates/traits/src/`)
+- Modify: `lingxi-code/crates/platform-api/src/output_stream.rs` (variant lives wherever `OutputEvent` is defined — check `crates/platform-api/src/`)
 - Test: `lingxi-code/crates/orchestrator/src/test_support.rs` (`MockOutputStream` already records events)
 
 - [ ] **Step 1: Locate the `OutputEvent` enum.**
 
 ```bash
-rg -n "pub enum OutputEvent" lingxi-code/crates/traits/src/
+rg -n "pub enum OutputEvent" lingxi-code/crates/platform-api/src/
 ```
 
 Expected: one definition. Read the file and identify existing variant style (likely `Text { ... }`, `ToolCall { ... }`, `TurnEnd { ... }`).
@@ -401,7 +401,7 @@ async fn mock_output_records_compaction_completed() {
     m.emit_compaction_completed(42, 7, 1234).await;
     let events = m.events().await;
     let last = events.last().expect("at least one event");
-    assert!(matches!(last, lingxi_traits::OutputEvent::CompactionCompleted { messages_before: 42, messages_after: 7, bytes_saved: 1234 }), "got: {last:?}");
+    assert!(matches!(last, lingxi_platform_api::OutputEvent::CompactionCompleted { messages_before: 42, messages_after: 7, bytes_saved: 1234 }), "got: {last:?}");
 }
 ```
 
@@ -413,7 +413,7 @@ cargo test -p lingxi-orchestrator mock_output_records_compaction_completed --no-
 
 - [ ] **Step 4: Add the variant and helper.**
 
-In `crates/traits/src/output_stream.rs` (or wherever `OutputEvent` lives), add:
+In `crates/platform-api/src/output_stream.rs` (or wherever `OutputEvent` lives), add:
 
 ```rust
     /// Emitted once a successful `force_compact` finishes. M6-08.
@@ -428,7 +428,7 @@ In `crates/traits/src/output_stream.rs` (or wherever `OutputEvent` lives), add:
     },
 ```
 
-In `crates/traits/src/output_stream.rs` (the `OutputStream` trait), add an emitter method (default impl = no-op so existing impls compile):
+In `crates/platform-api/src/output_stream.rs` (the `OutputStream` trait), add an emitter method (default impl = no-op so existing impls compile):
 
 ```rust
     /// Emit a compaction-completed event. Default no-op for adapters
@@ -452,7 +452,7 @@ cargo test -p lingxi-orchestrator mock_output_records_compaction_completed
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-code/crates/traits/src/output_stream.rs lingxi-code/crates/orchestrator/src/test_support.rs
+git add lingxi-code/crates/platform-api/src/output_stream.rs lingxi-code/crates/orchestrator/src/test_support.rs
 git commit -m "feat(traits): add OutputEvent::CompactionCompleted variant + default emitter"
 ```
 
@@ -480,7 +480,7 @@ use lingxi_orchestrator::test_support::{
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use lingxi_protocol::{ConversationMessage, MessageId};
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
@@ -1011,7 +1011,7 @@ Create `crates/tui/tests/behavior_compact_marker.rs`:
 //! M6-08 — TUI handles CompactionCompleted by appending a
 //! `[Compacted N → M messages]` SystemTextMessage to scrollback.
 
-use lingxi_traits::OutputEvent;
+use lingxi_platform_api::OutputEvent;
 use lingxi_tui::test_support::TuiHarness;
 
 #[tokio::test]
@@ -1159,7 +1159,7 @@ Append to `crates/commands/src/builtin/compact.rs` `#[cfg(test)] mod tests`:
             }
         }
 
-        let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch.clone();
+        let handle: Arc<dyn lingxi_platform_api::OrchestratorHandle> = orch.clone();
         let h = CompactHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
@@ -1232,7 +1232,7 @@ async fn parity_force_compact_50_messages() {
     };
     use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
     use lingxi_protocol::{ConversationMessage, MessageId};
-    use lingxi_traits::OrchestratorHandle;
+    use lingxi_platform_api::OrchestratorHandle;
     use std::sync::Arc;
 
     let orch = Arc::new(

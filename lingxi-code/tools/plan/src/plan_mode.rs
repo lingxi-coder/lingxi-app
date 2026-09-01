@@ -496,7 +496,7 @@ impl Tool for ExitPlanModeTool {
             .get("plan")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let permission_ctx = traits::permission_gate::PermissionCheckContext {
+        let permission_ctx = platform_api::permission_gate::PermissionCheckContext {
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             is_agent_context: ctx.agent_id.is_some(),
             is_non_interactive_session: ctx.options.is_non_interactive_session,
@@ -505,13 +505,13 @@ impl Tool for ExitPlanModeTool {
         };
         let outcome = gate.check_exit_plan_mode(plan, &permission_ctx).await;
         match outcome {
-            traits::permission_gate::PermissionOutcome::Allow { updated_input, .. }
-            | traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+            platform_api::permission_gate::PermissionOutcome::Allow { updated_input, .. }
+            | platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                 if let Some(updated) = updated_input {
                     input = updated;
                 }
             }
-            traits::permission_gate::PermissionOutcome::Deny { reason } => {
+            platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
                 let dur = started_at.elapsed().as_millis() as u64;
                 self.emit_failed(&invocation_id, "permission_denied", dur)
                     .await;
@@ -584,7 +584,7 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::SessionState;
+    use lingxi_core::SessionState;
     use protocol::{AgentId, SessionId};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
@@ -593,25 +593,25 @@ mod tests {
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
 
     struct ScriptedExitGate {
-        seen: Arc<StdMutex<Vec<(String, traits::permission_gate::PermissionCheckContext)>>>,
-        outcome: traits::permission_gate::PermissionOutcome,
+        seen: Arc<StdMutex<Vec<(String, platform_api::permission_gate::PermissionCheckContext)>>>,
+        outcome: platform_api::permission_gate::PermissionOutcome,
     }
 
     #[async_trait]
-    impl traits::permission_gate::PermissionGate for ScriptedExitGate {
+    impl platform_api::permission_gate::PermissionGate for ScriptedExitGate {
         async fn check(
             &self,
             _name: &str,
             _input: &Value,
-        ) -> traits::permission_gate::PermissionDecision {
-            traits::permission_gate::PermissionDecision::Allow
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
         }
 
         async fn check_exit_plan_mode(
             &self,
             plan: &str,
-            ctx: &traits::permission_gate::PermissionCheckContext,
-        ) -> traits::permission_gate::PermissionOutcome {
+            ctx: &platform_api::permission_gate::PermissionCheckContext,
+        ) -> platform_api::permission_gate::PermissionOutcome {
             self.seen
                 .lock()
                 .unwrap()
@@ -620,10 +620,10 @@ mod tests {
         }
     }
 
-    fn allowing_exit_gate() -> Arc<dyn traits::permission_gate::PermissionGate> {
+    fn allowing_exit_gate() -> Arc<dyn platform_api::permission_gate::PermissionGate> {
         Arc::new(ScriptedExitGate {
             seen: Arc::new(StdMutex::new(Vec::new())),
-            outcome: traits::permission_gate::PermissionOutcome::AllowAuto {
+            outcome: platform_api::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: None,
             },
         })
@@ -969,7 +969,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
             seen: seen.clone(),
-            outcome: traits::permission_gate::PermissionOutcome::AllowAuto {
+            outcome: platform_api::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: None,
             },
         }));
@@ -991,7 +991,7 @@ mod tests {
         session.lock().await.plan_mode = true;
         bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
             seen: Arc::new(StdMutex::new(Vec::new())),
-            outcome: traits::permission_gate::PermissionOutcome::Deny {
+            outcome: platform_api::permission_gate::PermissionOutcome::Deny {
                 reason: "user denied".to_string(),
             },
         }));

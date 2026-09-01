@@ -103,7 +103,7 @@ Claude Code 的 agent view 是可观察、可 attach 的后台会话面；官方
 | P3-03 | file read/edit cache 仍为 25 MB，而非 2.1.208 的 16 MB | 常量和 constructor：[`tool-api/src/read_file_state.rs#L44`](../lingxi-code/tool-api/src/read_file_state.rs#L44)、[`#L222`](../lingxi-code/tool-api/src/read_file_state.rs#L222)。 |
 | P3-04 | 缺少 `vimInsertModeRemaps` | settings/schema/TUI 全局无对应字段或 two-key insert remap state machine。 |
 | P3-05 | workflow user-scope save UX 缺失 | loader 只加载项目相对 workflow 路径：[`tools/workflow/src/lib.rs#L119`](../lingxi-code/tools/workflow/src/lib.rs#L119)；当前 `/workflows` 是运行浏览器，没有 Claude 2.1.208 对应的 user-scope save dialog。目录名差异不计，缺少能力本身计入。 |
-| P3-06 | parity target/harness 仍停在 2.1.207 | 常量：[`traits/src/lib.rs#L11`](../lingxi-code/traits/src/lib.rs#L11)；测试仅有 [`test-harness/tests/parity_claude_2_1_207.rs`](../lingxi-code/test-harness/tests/parity_claude_2_1_207.rs)。 |
+| P3-06 | parity target/harness 仍停在 2.1.207 | 常量：[`platform-api/src/lib.rs#L11`](../lingxi-code/platform-api/src/lib.rs#L11)；测试仅有 [`test-harness/tests/parity_claude_2_1_207.rs`](../lingxi-code/test-harness/tests/parity_claude_2_1_207.rs)。 |
 | P3-07 | OAuth callback test 存在并行竞态 | 测试先探测 ephemeral port、drop 后再 bind，并自述 race acceptable：[`llm-client/src/oauth/anthropic/callback.rs#L269`](../lingxi-code/llm-client/src/oauth/anthropic/callback.rs#L269)。全 crate 运行稳定失败，单测独立运行通过，说明 test isolation/ready handshake 不足。 |
 
 ## 6. 上一版 P1 的复核状态

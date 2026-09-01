@@ -43,10 +43,10 @@ command-core = { path = "../../commands/core" }
 client-protocol = { path = "../../client-protocol" }
 client-adapter = { path = "../../client-adapter" }
 protocol = { path = "../../protocol" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 # Orphaned-permission recovery: the stdio control-plane forwards an
 # `OrphanedPermission` command to the run loop, which re-runs the tool.
 msgqueue = { path = "../../msgqueue" }

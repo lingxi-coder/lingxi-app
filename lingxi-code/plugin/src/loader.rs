@@ -96,7 +96,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::SystemTime;
-    use traits::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
+    use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
 
     #[derive(Default)]
     struct MemStorage {
@@ -167,13 +167,13 @@ mod tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("no http");
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("no http");
         }
     }

@@ -61,7 +61,7 @@ fn is_repl_enabled_from(
         return false;
     }
     // `ut(CLAUDE_CODE_REPL)`: a truthy value enables.
-    if traits::env::is_env_truthy(repl_env) {
+    if platform_api::env::is_env_truthy(repl_env) {
         return true;
     }
     // Entrypoint `cli`/`remote` → the `tengu_slate_harbor` flag (default `false`).
@@ -194,7 +194,7 @@ impl Tool for REPLTool {
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use traits::sandbox::ProcessCommand as SbxCommand;
+        use platform_api::sandbox::ProcessCommand as SbxCommand;
 
         let lang = input
             .get("language")
@@ -270,7 +270,7 @@ impl Tool for REPLTool {
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     #[test]
     fn lang_exec_python_routes_via_stdin() {

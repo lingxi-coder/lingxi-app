@@ -73,7 +73,7 @@ mod tests {
             "stop_reason": "end_turn",
         });
         let line = serde_json::to_string(&serde_json::json!({
-            traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
+            platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
         }))
         .unwrap();
         assert_eq!(decode_forward_subagent_message(&line), Some(message));
@@ -157,8 +157,8 @@ mod tests {
     use tool_api::context::{ToolUseContext, ToolUseOptions};
     use tool_api::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
     use tool_api::ToolRegistry;
-    use traits::budget::BudgetEnforcerHandle;
-    use traits::subagent_spawn::SubagentSpawner;
+    use platform_api::budget::BudgetEnforcerHandle;
+    use platform_api::subagent_spawn::SubagentSpawner;
 
     /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
     /// tests whose `build_prompt`/`prompt` output depends on the
@@ -180,8 +180,8 @@ mod tests {
             vec![PathBuf::from("/tmp")],
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
-        bctx.task_registry = Some(registry as Arc<dyn traits::task_registry::TaskRegistryHandle>);
-        bctx.mailbox_router = Some(mailbox as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+        bctx.task_registry = Some(registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+        bctx.mailbox_router = Some(mailbox as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
         bctx
     }
@@ -289,9 +289,9 @@ mod tests {
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
-            Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+            Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(parent_budget.clone());
 
         let tool = AgentTool::new(bctx);
@@ -329,9 +329,9 @@ mod tests {
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         let registry = arc_mock_task_registry();
         bctx.task_registry =
-            Some(registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+            Some(registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
-            Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+            Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
 
         let tool = AgentTool::new(bctx);
@@ -358,7 +358,7 @@ mod tests {
             "spawner must not be invoked once budget gate trips"
         );
         assert_eq!(
-            traits::task_registry::TaskRegistryHandle::get_total_agent_spawns(registry.as_ref()),
+            platform_api::task_registry::TaskRegistryHandle::get_total_agent_spawns(registry.as_ref()),
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn nested_spawn_rejects_at_configured_depth_with_exact_message() {
-        use traits::task_registry::TaskRegistryHandle;
+        use platform_api::task_registry::TaskRegistryHandle;
 
         let spawner = arc_mock_spawner();
         let registry = arc_mock_task_registry();
@@ -382,7 +382,7 @@ mod tests {
         );
         let tool = AgentTool::new(bctx);
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
-        let limit = traits::subagent_spawn::max_subagent_spawn_depth();
+        let limit = platform_api::subagent_spawn::max_subagent_spawn_depth();
         ctx.depth = limit;
         let err = tool
             .call(
@@ -408,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_spawn_cap_rejects_before_consuming_session_slot() {
-        use traits::task_registry::TaskRegistryHandle;
+        use platform_api::task_registry::TaskRegistryHandle;
 
         let spawner = arc_mock_spawner();
         spawner.set_concurrent_subagents(usize::MAX);
@@ -421,7 +421,7 @@ mod tests {
         );
         let tool = AgentTool::new(bctx);
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
-        let cap = traits::subagent_spawn::max_concurrent_subagents();
+        let cap = platform_api::subagent_spawn::max_concurrent_subagents();
         let err = tool
             .call(
                 serde_json::json!({
@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn pool_full_races_roll_back_session_spawn_reservations() {
-        use traits::task_registry::TaskRegistryHandle;
+        use platform_api::task_registry::TaskRegistryHandle;
 
         for run_in_background in [false, true] {
             let spawner = arc_mock_spawner();
@@ -503,7 +503,7 @@ mod tests {
     // bumped on a rejected spawn.
     #[tokio::test]
     async fn spawn_cap_rejects_once_session_limit_reached() {
-        use traits::task_registry::TaskRegistryHandle;
+        use platform_api::task_registry::TaskRegistryHandle;
         let spawner = arc_mock_spawner();
         let registry = arc_mock_task_registry();
         registry.set_total_agent_spawns(1000); // already past the default 200 cap
@@ -548,7 +548,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // is cumulative across successive `AgentTool::call` invocations.
     #[tokio::test]
     async fn spawn_increments_session_counter_cumulatively() {
-        use traits::task_registry::TaskRegistryHandle;
+        use platform_api::task_registry::TaskRegistryHandle;
         let spawner = arc_mock_spawner();
         let registry = arc_mock_task_registry();
         let bctx = wired_ctx(
@@ -1196,11 +1196,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        traits::subscription::set_current_subscription(Some(
-            traits::subscription::SubscriptionSnapshot {
+        platform_api::subscription::set_current_subscription(Some(
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("pro".into()),
-                ..traits::subscription::SubscriptionSnapshot::default()
+                ..platform_api::subscription::SubscriptionSnapshot::default()
             },
         ));
         let tool = AgentTool::new(wired_ctx(
@@ -1212,7 +1212,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let present = tool.input_schema()["properties"]
             .get("run_in_background")
             .is_some();
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         match saved {
             Some(v) => std::env::set_var("LINGXI_FORK_SUBAGENT", v),
             None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
@@ -1233,11 +1233,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
-        traits::subscription::set_current_subscription(Some(
-            traits::subscription::SubscriptionSnapshot {
+        platform_api::subscription::set_current_subscription(Some(
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("pro".into()),
-                ..traits::subscription::SubscriptionSnapshot::default()
+                ..platform_api::subscription::SubscriptionSnapshot::default()
             },
         ));
         let tool = AgentTool::new(wired_ctx(
@@ -1260,7 +1260,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             )
             .await
             .expect("dispatch ok");
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         assert_eq!(
             result.data["status"], "async_launched",
             "a pro plan must not force a background agent to run synchronously"
@@ -1347,10 +1347,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let spawner = arc_mock_spawner();
-        spawner.script_selection(traits::subagent_spawn::SelectedAgentMeta {
+        spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
             agent_type: "general-purpose".into(),
             isolation: Some("worktree".into()),
-            ..traits::subagent_spawn::SelectedAgentMeta::default()
+            ..platform_api::subagent_spawn::SelectedAgentMeta::default()
         });
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -1398,10 +1398,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let spawner = arc_mock_spawner();
-        spawner.script_selection(traits::subagent_spawn::SelectedAgentMeta {
+        spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
             agent_type: "general-purpose".into(),
             isolation: Some("worktree".into()),
-            ..traits::subagent_spawn::SelectedAgentMeta::default()
+            ..platform_api::subagent_spawn::SelectedAgentMeta::default()
         });
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -1455,7 +1455,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_budget(u64::MAX),
         );
         let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        wt.script_create_error(traits::worktree::WorktreeError::Git("boom".into()));
+        wt.script_create_error(platform_api::worktree::WorktreeError::Git("boom".into()));
         bctx.worktree = wt;
         let tool = AgentTool::new(bctx);
         let err = tool
@@ -1533,7 +1533,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     // P1-01: the SYNC path still owns its keep/cleanup judgment (now via the
-    // shared `traits::worktree::agent_worktree_result` helper): a DIRTY
+    // shared `platform_api::worktree::agent_worktree_result` helper): a DIRTY
     // worktree is KEPT (worktreePath/worktreeBranch spread into data), a CLEAN
     // one is REMOVED (no worktree keys).
     #[tokio::test]
@@ -1552,7 +1552,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 arc_mock_budget(u64::MAX),
             );
             let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-            wt.script_change_summary(Some(traits::worktree::WorktreeChangeSummary {
+            wt.script_change_summary(Some(platform_api::worktree::WorktreeChangeSummary {
                 changed_files: usize::from(dirty),
                 commits: 0,
             }));
@@ -1863,7 +1863,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let boilerplate = protocol::ConversationMessage::User {
             id: protocol::MessageId::new(),
             content: vec![protocol::ContentBlock::Text {
-                text: traits::fork_subagent::build_child_message("prior directive"),
+                text: platform_api::fork_subagent::build_child_message("prior directive"),
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -2026,13 +2026,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // Agent(type)-restriction filter tests (claude-code `Pxe` / `getDenyRuleForAgent`).
     struct DenyExploreGate;
     #[async_trait::async_trait]
-    impl traits::permission_gate::PermissionGate for DenyExploreGate {
+    impl platform_api::permission_gate::PermissionGate for DenyExploreGate {
         async fn check(
             &self,
             _name: &str,
             _input: &serde_json::Value,
-        ) -> traits::permission_gate::PermissionDecision {
-            traits::permission_gate::PermissionDecision::Allow
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
         }
         async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
             (agent_type == "Explore").then(|| "localSettings".to_string())
@@ -2117,7 +2117,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// SINGLE normalized match when the exact name is absent.
     #[test]
     fn general_purpose_probe_matches_exact_then_single_normalized() {
-        let entry = |t: &str| traits::subagent_spawn::SubagentListingEntry {
+        let entry = |t: &str| platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: t.into(),
             when_to_use: "x".into(),
             tools_description: "All tools".into(),
@@ -2139,14 +2139,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(!general_purpose_is_available(&[]));
     }
 
-    fn prompt_agents() -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+    fn prompt_agents() -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
         vec![
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "use for anything".into(),
                 tools_description: "All tools".into(),
             },
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
                 tools_description: "All tools except Edit".into(),
@@ -2238,7 +2238,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // Binary `g = DZ()==="default"` gates the `## When to use` LEAD sentence
     // (@292441984): a non-default steer keeps the heading but drops "Reach for
     // this when…", leaving `R` alone. The port already has the gate
-    // (`traits::live_sessions::subagent_steer_is_default`, used by the system
+    // (`platform_api::live_sessions::subagent_steer_is_default`, used by the system
     // prompt) — it just wasn't consulted here.
     #[test]
     fn build_prompt_steer_gate_drops_the_reach_lead() {
@@ -2277,7 +2277,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "Explore".into(),
             when_to_use: "search".into(),
             tools_description: "All tools except Edit".into(),
@@ -2321,12 +2321,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         let spawner = arc_mock_spawner();
         spawner.set_agent_listing(vec![
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
                 tools_description: "All tools except Edit".into(),
             },
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Plan".into(),
                 when_to_use: "plan".into(),
                 tools_description: "All tools except Edit".into(),
@@ -2369,12 +2369,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let spawner = arc_mock_spawner();
         spawner.set_tools_denied_agent_types(vec!["statusline-setup".to_string()]);
         spawner.set_agent_listing(vec![
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
                 tools_description: "All tools".into(),
             },
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
                 tools_description: "Read, Edit".into(),
@@ -2417,12 +2417,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let spawner = arc_mock_spawner();
         spawner.set_tools_denied_agent_types(vec!["statusline-setup".to_string()]);
         spawner.set_agent_listing(vec![
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
                 tools_description: "All tools".into(),
             },
-            traits::subagent_spawn::SubagentListingEntry {
+            platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
                 tools_description: "Read, Edit".into(),
@@ -2494,7 +2494,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap_or_else(|e| e.into_inner());
         // Force the legacy inline path so the catalog line is in the description.
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2521,7 +2521,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2549,7 +2549,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2557,21 +2557,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
 
         // Default (unknown plan): no pro-block, `## When to use` present.
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         let p_default = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         assert!(!p_default.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p_default.contains("## When to use"));
 
         // Pro plan: pro-block present, `## When to use` SUPPRESSED, bullets kept.
-        traits::subscription::set_current_subscription(Some(
-            traits::subscription::SubscriptionSnapshot {
+        platform_api::subscription::set_current_subscription(Some(
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("pro".into()),
-                ..traits::subscription::SubscriptionSnapshot::default()
+                ..platform_api::subscription::SubscriptionSnapshot::default()
             },
         ));
         let p_pro = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
@@ -2600,20 +2600,20 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        traits::subscription::set_current_subscription(Some(
-            traits::subscription::SubscriptionSnapshot {
+        platform_api::subscription::set_current_subscription(Some(
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("max".into()),
-                ..traits::subscription::SubscriptionSnapshot::default()
+                ..platform_api::subscription::SubscriptionSnapshot::default()
             },
         ));
         let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         assert!(!p.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p.contains("## When to use"));
     }
@@ -2628,7 +2628,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2645,7 +2645,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(!p_off.contains("A fork runs in the background"));
 
         // Fork ON: env truthy + interactive (non_interactive=false) + non-coordinator.
-        traits::session_flags::set_non_interactive_session(false);
+        platform_api::session_flags::set_non_interactive_session(false);
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         let p_on = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -2681,18 +2681,18 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        traits::session_flags::set_non_interactive_session(true);
+        platform_api::session_flags::set_non_interactive_session(true);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         let p_unset = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         let p_env = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        traits::session_flags::set_non_interactive_session(false);
+        platform_api::session_flags::set_non_interactive_session(false);
         assert!(
             !p_unset.contains("forks yourself"),
             "unset + headless disables fork text"
@@ -2711,21 +2711,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let prior_global = traits::session_flags::is_non_interactive_session();
+        let prior_global = platform_api::session_flags::is_non_interactive_session();
         let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
-        traits::session_flags::set_non_interactive_session(true);
+        platform_api::session_flags::set_non_interactive_session(true);
         // Unset env: interactive defaults ON, headless defaults OFF (2.1.232).
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
-        let interactive = traits::session_flags::scope_non_interactive_session(false, async {
+        let interactive = platform_api::session_flags::scope_non_interactive_session(false, async {
             AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
-        let headless = traits::session_flags::scope_non_interactive_session(true, async {
+        let headless = platform_api::session_flags::scope_non_interactive_session(true, async {
             AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
         let (interactive, headless) = tokio::join!(interactive, headless);
@@ -2736,7 +2736,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
             None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
         }
-        traits::session_flags::set_non_interactive_session(prior_global);
+        platform_api::session_flags::set_non_interactive_session(prior_global);
     }
 
     // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent
@@ -2747,7 +2747,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2777,7 +2777,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
 
-        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+        let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
@@ -2882,7 +2882,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "text": "the answer",
                 "stop_reason": "end_turn",
             }),
-            traits::subagent_spawn::SubagentUsage {
+            platform_api::subagent_spawn::SubagentUsage {
                 total_tokens: 42,
                 input_tokens: 10,
                 output_tokens: 5,
@@ -2984,7 +2984,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "text": "…",
                 "stop_reason": "end_turn",
             }),
-            traits::subagent_spawn::SubagentUsage::default(),
+            platform_api::subagent_spawn::SubagentUsage::default(),
             0,
             0,
             0,
@@ -3059,7 +3059,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "text": "a perfectly ordinary answer",
                 "stop_reason": "end_turn",
             }),
-            traits::subagent_spawn::SubagentUsage::default(),
+            platform_api::subagent_spawn::SubagentUsage::default(),
             0,
             0,
             0,
@@ -3102,7 +3102,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "text": "explored",
                 "stop_reason": "end_turn",
             }),
-            traits::subagent_spawn::SubagentUsage::default(),
+            platform_api::subagent_spawn::SubagentUsage::default(),
             1,
             5,
             99,
@@ -3145,7 +3145,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             child_id,
             // Runner max-turns / stub shape: no `content` key at all.
             json!({ "reason": "max_turns_exhausted" }),
-            traits::subagent_spawn::SubagentUsage::default(),
+            platform_api::subagent_spawn::SubagentUsage::default(),
             0,
             0,
             0,
@@ -3323,9 +3323,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let mut bctx = ctx_for_file_tools(make_dummy_fs(), bus, vec![PathBuf::from("/tmp")]);
         bctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
-            Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+            Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(arc_mock_budget(u64::MAX) as Arc<dyn BudgetEnforcerHandle>);
         bctx
     }
@@ -3338,7 +3338,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         let spawner = arc_mock_spawner();
         // Script a completed result that carries the G11 rollups.
-        spawner.script_selection(traits::subagent_spawn::SelectedAgentMeta {
+        spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
             agent_type: "Explore".into(),
             resolved_model: "claude-sonnet".into(),
             source: "built-in".into(),
@@ -3351,7 +3351,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         spawner.script_completed_full(
             protocol::AgentId::new(),
             json!({ "content": [{ "type": "text", "text": "hi there" }] }),
-            traits::subagent_spawn::SubagentUsage::default(),
+            platform_api::subagent_spawn::SubagentUsage::default(),
             3,   // total_tool_use_count
             42,  // total_duration_ms
             123, // total_tokens

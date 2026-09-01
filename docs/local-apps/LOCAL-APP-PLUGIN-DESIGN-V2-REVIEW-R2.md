@@ -33,7 +33,7 @@
 | receipt 10 分钟 TTL、recovery journal 已存在 | `local_apps_host.rs:45 RUNTIME_PROFILE_RECEIPT_TTL`、`:139/:149 Pending*Receipt`、`storage.rs:140 ScaffoldRecoveryJournal` |
 | `LATEST_PROTOCOL_VERSION = "2025-11-25"` | `mcp/src/initialize_params.rs:9` |
 | 上一轮 §1.7 翻转的残留 | `0–16`、`ready_without_mcp`、`no_exposable_capability` 全文零命中，翻转干净 |
-| Monitor substrate 存在（我第一稿说不存在，错） | `tools/task/src/monitor.rs:198 MonitorTool`、`tasks/src/handlers/monitor.rs:21,317-326`（`bypass_with_audit("monitor_task")` 即 unsandboxed runner）、`traits/src/task_registry.rs:42 MonitorRegistration`、`permission/src/policy.rs:559-565` Monitor→Bash 规则门 |
+| Monitor substrate 存在（我第一稿说不存在，错） | `tools/task/src/monitor.rs:198 MonitorTool`、`tasks/src/handlers/monitor.rs:21,317-326`（`bypass_with_audit("monitor_task")` 即 unsandboxed runner）、`platform-api/src/task_registry.rs:42 MonitorRegistration`、`permission/src/policy.rs:559-565` Monitor→Bash 规则门 |
 | libssh2 已在移动端（我第一稿说是新引入，错） | `tools/git-mobile/Cargo.toml:26-30` git2 features 含 `"ssh"`（`adcce399e`，2026-06-13）；iOS xcframework 与 Android `.so` 里已有 `libssh2_*` 符号 |
 
 ## 2. 成立的 finding（对抗验证后收窄）

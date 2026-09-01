@@ -17,7 +17,7 @@ use session::jsonl::LoaderError;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 use uuid::Uuid;
 
 // ── helpers ──────────────────────────────────────────────────────────────────

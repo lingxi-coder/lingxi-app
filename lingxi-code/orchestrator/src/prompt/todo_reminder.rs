@@ -26,7 +26,7 @@
 //! a meta user message appended to
 //! the per-turn OUTGOING snapshot only (never `session.history` / JSONL), and
 //! `turns_since_last_reminder` is reset to `0`. The counters themselves are
-//! tracked as explicit [`engine::SessionState`] fields
+//! tracked as explicit [`lingxi_core::SessionState`] fields
 //! (`turns_since_last_todo_write` / `turns_since_last_reminder`), incremented
 //! once per assistant turn and reset on the relevant tool call — the binary
 //! recomputes them by scanning the message log, but this engine never persists
@@ -34,7 +34,7 @@
 //! the counter directly.
 
 use async_trait::async_trait;
-use engine::TodoState;
+use lingxi_core::TodoState;
 
 /// One V2 task surfaced to the `task_reminder`: `(id, status, subject)`,
 /// mirroring the binary's `#${o.id}. [${o.status}] ${o.subject}` formatter.

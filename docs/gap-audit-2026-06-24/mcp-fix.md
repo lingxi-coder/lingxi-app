@@ -50,7 +50,7 @@ Date: 2026-06-24
 - Previously the tool segment was left raw; the registry's `connect()` site already normalized both, but `McpClient::list_tools()` called directly (e.g. `servers_with_tools()`) produced un-normalized tool names
 
 ### [P1] `searchHint` / `alwaysLoad` forwarded to `McpToolDto`
-**Files:** `traits/src/mcp.rs`, `mcp/src/client.rs`, `platforms/posix/src/mcp.rs`, `mcp/src/registry.rs`, `test-harness/src/mocks/mock_mcp.rs`
+**Files:** `platform-api/src/mcp.rs`, `mcp/src/client.rs`, `platforms/posix/src/mcp.rs`, `mcp/src/registry.rs`, `test-harness/src/mocks/mock_mcp.rs`
 
 - Added `search_hint: Option<String>` and `always_load: Option<bool>` fields to `McpToolDto` (both `#[serde(default, skip_serializing_if = "Option::is_none")]`)
 - `list_tools` forwards `t.meta.search_hint` and `t.meta.always_load` — the `ToolMeta` fields parsed from `_meta` are no longer dead code

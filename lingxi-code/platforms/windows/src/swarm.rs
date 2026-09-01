@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use protocol::AgentId;
-use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 /// Windows-side [`SwarmBackend`] — always reports unsupported.
 #[derive(Default)]
@@ -53,7 +53,7 @@ impl SwarmBackend for WindowsSwarmBackend {
 mod tests {
     use super::*;
     use protocol::AgentId;
-    use traits::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+    use platform_api::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
     #[test]
     fn is_available_returns_false() {

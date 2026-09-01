@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use protocol::AgentId;
 use std::sync::atomic::{AtomicU64, Ordering};
-use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 

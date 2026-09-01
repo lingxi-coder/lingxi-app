@@ -527,7 +527,7 @@ async fn run_config_startup(command: Option<&crate::commands::Commands>) {
         if let Err(error) = migrations::global_config::ensure_first_start_metadata(
             &global_config_path,
             &first_start_time,
-            traits::CLAUDE_CODE_VERSION,
+            platform_api::CLAUDE_CODE_VERSION,
         ) {
             tracing::warn!(%error, "first-start metadata write failed");
         }
@@ -653,7 +653,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // runtime/auth work. Safe mode deliberately ignores the flag without
     // parsing it; bare mode still validates it.
     let safe_mode = parsed.safe_mode
-        || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref());
+        || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref());
     if !safe_mode {
         if let Some(raw) = parsed.agents.as_deref() {
             if let Err(error) = agent::parse_agents_from_flag_json_checked(raw) {
@@ -689,7 +689,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // existing LINGXI.md kill-switch (`orchestrator::prompt::memory_block`),
     // so subagents/children inherit the disable too.
     if parsed.safe_mode
-        || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
+        || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
     {
         std::env::set_var("LINGXI_SAFE_MODE", "1");
         std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
@@ -839,8 +839,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             .as_ref()
             .map(crate::commands::Commands::top_level_name);
         let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
-        let policy = engine::settings::enterprise::managed_version_policy(&managed_tiers);
-        if let Some(msg) = engine::settings::enterprise::version_gate(
+        let policy = lingxi_core::settings::enterprise::managed_version_policy(&managed_tiers);
+        if let Some(msg) = lingxi_core::settings::enterprise::version_gate(
             env!("CARGO_PKG_VERSION"),
             policy.required_minimum_version.as_deref(),
             policy.required_maximum_version.as_deref(),
@@ -1111,7 +1111,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::ARGV_ERROR;
         }
         let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
-        traits::OutputStream::set_thinking_display(
+        platform_api::OutputStream::set_thinking_display(
             stream.as_ref(),
             parsed.thinking_display.as_deref(),
         );
@@ -1126,7 +1126,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         stream.set_forward_subagent_text(
             parsed.forward_subagent_text_effective() && parsed.print && parsed.is_stream_json(),
         );
-        let adapter: Arc<dyn traits::OutputStream> = stream.clone();
+        let adapter: Arc<dyn platform_api::OutputStream> = stream.clone();
 
         // P5 Phase 2: for the bidirectional `--input-format stream-json` path,
         // build the shared control plane BEFORE `build_runtime` (its outbound
@@ -1222,7 +1222,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         .map_or(false, |p| !p.trim_start().starts_with('/'));
     if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
         let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
-        let adapter: Arc<dyn traits::OutputStream> = stream.clone();
+        let adapter: Arc<dyn platform_api::OutputStream> = stream.clone();
         let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
@@ -1327,7 +1327,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn traits::OutputStream> =
+        let adapter: Arc<dyn platform_api::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
         let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
@@ -1349,7 +1349,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn traits::OutputStream> =
+        let adapter: Arc<dyn platform_api::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
         let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
@@ -1377,7 +1377,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
         mode::Mode::Print(_) => {
             let sink = make_sink();
-            let adapter: Arc<dyn traits::OutputStream> =
+            let adapter: Arc<dyn platform_api::OutputStream> =
                 Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
             let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
                 Ok(r) => r,
@@ -1422,7 +1422,7 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     // permission mode to `default` — a hardened / scrubbed subprocess must not
     // inherit a requested bypass/plan/etc.
     let env_scrub_active =
-        traits::env::is_env_truthy(std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref());
+        platform_api::env::is_env_truthy(std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref());
     // MODE-FRONTMATTER-04: the selected main-thread agent's frontmatter
     // `permissionMode` sits between the CLI override and the settings
     // `defaultMode`. The agent catalog is resolved later in

@@ -4,7 +4,7 @@
 
 **Goal:** Replace the three `OrchestratorHandle::list_mcp_servers / list_hooks / list_agents` stubs (which currently return `vec![]`) with real reads off `Arc<lingxi_mcp::McpRegistry>` / `Arc<RwLock<lingxi_hooks::HookRegistry>>` / `Arc<RwLock<Vec<lingxi_agent::AgentDefinition>>>`, plumb startup loaders for `.mcp.json` + project-local `.claude/agents/` + global `~/.claude/agents/`, and lock the empty-state literals so `/mcp`, `/hooks`, `/agents` show real configured items end-to-end through both the v0.6.0 stdio REPL and the M6-02+ TUI.
 
-**Architecture:** `ConversationOrchestrator` grows three optional `Arc`-shared registry fields (`mcp_registry`, `hook_registry`, `agent_catalog`), each defaulting to `None` (so the v0.6.0 trait surface stays infallible and the parity fixtures keep passing). Three builder methods (`with_mcp_registry`, `with_hook_registry`, `with_agent_catalog`) attach them. `handle_impl.rs` reads each registry inside the existing `list_*` methods and projects into the locked `McpServerInfo` / `HookInfo` / `AgentInfo` shapes from `lingxi_traits::orchestrator`. The CLI binary (`lingxi-cli::init::build_runtime`) constructs all three registries by reading `.mcp.json` (project precedence over `~/.config/lingxi/mcp.json`), settings.json hooks (M3-01 carries the parsed `hooks` map already), and the union of `~/.claude/agents/*.md` + `<cwd>/.claude/agents/*.md`. Empty-state rendering is moved out of the handlers' generic `render_list` helper into a per-command empty-state literal (`"No MCP servers configured"` / `"No hooks configured"` / `"No subagents configured"`), keeping the non-empty layout unchanged.
+**Architecture:** `ConversationOrchestrator` grows three optional `Arc`-shared registry fields (`mcp_registry`, `hook_registry`, `agent_catalog`), each defaulting to `None` (so the v0.6.0 trait surface stays infallible and the parity fixtures keep passing). Three builder methods (`with_mcp_registry`, `with_hook_registry`, `with_agent_catalog`) attach them. `handle_impl.rs` reads each registry inside the existing `list_*` methods and projects into the locked `McpServerInfo` / `HookInfo` / `AgentInfo` shapes from `lingxi_platform_api::orchestrator`. The CLI binary (`lingxi-cli::init::build_runtime`) constructs all three registries by reading `.mcp.json` (project precedence over `~/.config/lingxi/mcp.json`), settings.json hooks (M3-01 carries the parsed `hooks` map already), and the union of `~/.claude/agents/*.md` + `<cwd>/.claude/agents/*.md`. Empty-state rendering is moved out of the handlers' generic `render_list` helper into a per-command empty-state literal (`"No MCP servers configured"` / `"No hooks configured"` / `"No subagents configured"`), keeping the non-empty layout unchanged.
 
 **Tech Stack:** Rust 2021, `lingxi-mcp = { path = "../mcp" }` (M2-02b — already a workspace dep), `lingxi-hooks = { path = "../hooks" }` (M5-06), `lingxi-agent = { path = "../agent" }` (M4-05), `serde_json` for `.mcp.json` parsing, `gray_matter` for agent frontmatter (already in `lingxi-skills` deps), `tokio::sync::RwLock` for the hook + agent registries (mutated rarely, read often), `tokio::fs::read_dir` for the agent loader.
 
@@ -35,7 +35,7 @@
 - `lingxi-code/crates/test-harness/src/parity/fixtures/tui_listings.json` — parity fixture locking the three empty-state literals.
 - `lingxi-code/crates/test-harness/tests/parity_tui_listings.rs` — driver for the new fixture.
 
-**Key types (locked — unchanged from `lingxi_traits::orchestrator`):**
+**Key types (locked — unchanged from `lingxi_platform_api::orchestrator`):**
 - `McpServerInfo { name: String, status: McpStatus, transport: String }` — `McpStatus` ∈ `{ Connected, Disconnected, Error(String) }`.
 - `HookInfo { name: String, event: String, matcher: Option<String>, timeout_ms: u64 }` — `timeout_ms` defaults to `60_000` when `HookDefinition::timeout` is `None`.
 - `AgentInfo { name: String, description: String, tools_allowed: Vec<String> }` — `name` maps to `AgentDefinition::agent_type`; `description` maps to `AgentDefinition::when_to_use`.
@@ -57,7 +57,7 @@
 - Read: `lingxi-code/crates/mcp/src/registry.rs:17-86` — confirm `McpRegistry` API (`connections: RwLock<HashMap<String, McpConnectionState>>`).
 - Read: `lingxi-code/crates/hooks/src/registry.rs:50-101` — confirm `HookRegistry::sources` + `plugin` shape.
 - Read: `lingxi-code/crates/agent/src/definition.rs:14-48` — confirm `AgentDefinition` field shape.
-- Read: `lingxi-code/crates/traits/src/orchestrator.rs:97-141` — re-confirm `McpServerInfo`, `HookInfo`, `AgentInfo` are unchanged.
+- Read: `lingxi-code/crates/platform-api/src/orchestrator.rs:97-141` — re-confirm `McpServerInfo`, `HookInfo`, `AgentInfo` are unchanged.
 - Read: `claude-code/src/cli/handlers/mcp.tsx:151` — confirm `"No MCP servers configured"` is the production string.
 - Read: `claude-code/src/components/hooks/SelectMatcherMode.tsx:70` — confirm `"No hooks configured for this event"`.
 
@@ -233,7 +233,7 @@ git commit -m "feat(commands): render_list takes an empty_state literal"
 **Files:**
 - Modify: `lingxi-code/crates/mcp/src/registry.rs`
 - Modify: `lingxi-code/crates/mcp/src/connection.rs` — add `pub fn name(&self) -> &str` on `McpConnectionState` if missing; add `pub fn transport_kind(&self) -> &'static str` on `McpTransportSpec` (or wherever the variant lives).
-- Modify: `lingxi-code/crates/mcp/Cargo.toml` — add `lingxi-traits = { path = "../traits" }` to `[dependencies]` (already a transitive dep; the `McpServerInfo` import needs the explicit declaration).
+- Modify: `lingxi-code/crates/mcp/Cargo.toml` — add `lingxi-platform-api = { path = "../platform-api" }` to `[dependencies]` (already a transitive dep; the `McpServerInfo` import needs the explicit declaration).
 - Test: `lingxi-code/crates/mcp/src/registry.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
@@ -245,7 +245,7 @@ Append to `crates/mcp/src/registry.rs`:
 mod snapshot_tests {
     use super::*;
     use crate::connection::{ConfigScope, McpServerConfig};
-    use lingxi_traits::{McpServerInfo, McpStatus, McpTransportSpec};
+    use lingxi_platform_api::{McpServerInfo, McpStatus, McpTransportSpec};
     use std::sync::Arc;
 
     fn stdio_cfg(name: &str) -> McpServerConfig {
@@ -300,19 +300,19 @@ If no in-crate mock exists, replace the two-test module above with:
 mod snapshot_tests {
     use super::*;
     use crate::connection::{ConfigScope, McpServerConfig};
-    use lingxi_traits::{McpServerInfo, McpStatus, McpTransportSpec};
+    use lingxi_platform_api::{McpServerInfo, McpStatus, McpTransportSpec};
     use std::sync::Arc;
 
     // Minimal mock — only `connections` matters for snapshot.
     struct StubTransport;
     #[async_trait::async_trait]
-    impl lingxi_traits::McpTransport for StubTransport {
-        async fn connect(&self, _spec: &McpTransportSpec) -> Result<lingxi_traits::McpConnection, lingxi_traits::McpError> { unreachable!() }
-        async fn initialize(&self, _c: &lingxi_traits::McpConnection) -> Result<lingxi_traits::ServerCapabilitiesDto, lingxi_traits::McpError> { unreachable!() }
-        async fn list_tools(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpToolDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn list_resources(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpResourceDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn list_prompts(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpPromptDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_traits::McpError> { unreachable!() }
+    impl lingxi_platform_api::McpTransport for StubTransport {
+        async fn connect(&self, _spec: &McpTransportSpec) -> Result<lingxi_platform_api::McpConnection, lingxi_platform_api::McpError> { unreachable!() }
+        async fn initialize(&self, _c: &lingxi_platform_api::McpConnection) -> Result<lingxi_platform_api::ServerCapabilitiesDto, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_tools(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpToolDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_resources(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpResourceDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_prompts(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpPromptDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_platform_api::McpError> { unreachable!() }
     }
 
     #[tokio::test]
@@ -352,7 +352,7 @@ mod snapshot_tests {
 }
 ```
 
-(If the actual `McpTransport` trait signature in `lingxi_traits` differs, run `rg -n "pub trait McpTransport" lingxi-code/crates/traits/src/` and adjust.)
+(If the actual `McpTransport` trait signature in `lingxi_traits` differs, run `rg -n "pub trait McpTransport" lingxi-code/crates/platform-api/src/` and adjust.)
 
 - [ ] **Step 2: Run; expect FAIL (`snapshot` method missing).**
 
@@ -363,7 +363,7 @@ Expected: COMPILE FAIL — `no method named 'snapshot'`.
 
 - [ ] **Step 3: Add the transport-kind helper if missing.**
 
-In `crates/traits/src/` (find the file declaring `McpTransportSpec`):
+In `crates/platform-api/src/` (find the file declaring `McpTransportSpec`):
 
 ```rust
 impl McpTransportSpec {
@@ -387,10 +387,10 @@ In `crates/mcp/src/registry.rs`, append to `impl McpRegistry`:
 
 ```rust
     /// Project every known connection into the trait-facing
-    /// [`lingxi_traits::McpServerInfo`] shape. Used by
+    /// [`lingxi_platform_api::McpServerInfo`] shape. Used by
     /// `OrchestratorHandle::list_mcp_servers` (M6-07).
-    pub async fn snapshot(&self) -> Vec<lingxi_traits::McpServerInfo> {
-        use lingxi_traits::{McpServerInfo, McpStatus};
+    pub async fn snapshot(&self) -> Vec<lingxi_platform_api::McpServerInfo> {
+        use lingxi_platform_api::{McpServerInfo, McpStatus};
         let conns = self.connections.read().await;
         let mut out: Vec<McpServerInfo> = conns
             .values()
@@ -408,8 +408,8 @@ In `crates/mcp/src/registry.rs`, append to `impl McpRegistry`:
 And below the impl block, add the projector + a `transport_kind` helper on `McpConnectionState`:
 
 ```rust
-fn project_status(state: &McpConnectionState) -> lingxi_traits::McpStatus {
-    use lingxi_traits::McpStatus;
+fn project_status(state: &McpConnectionState) -> lingxi_platform_api::McpStatus {
+    use lingxi_platform_api::McpStatus;
     match state {
         McpConnectionState::Connected { .. } => McpStatus::Connected,
         McpConnectionState::Disconnected { last_error: Some(e), .. } => McpStatus::Error(e.clone()),
@@ -456,7 +456,7 @@ Expected: 2 passing.
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-code/crates/mcp/src/registry.rs lingxi-code/crates/mcp/Cargo.toml lingxi-code/crates/traits/src/
+git add lingxi-code/crates/mcp/src/registry.rs lingxi-code/crates/mcp/Cargo.toml lingxi-code/crates/platform-api/src/
 git commit -m "feat(mcp): McpRegistry::snapshot projects state into McpServerInfo"
 ```
 
@@ -799,7 +799,7 @@ Create `crates/mcp/src/json_config.rs`:
 //! entries are accepted too via the `url` field.
 
 use crate::connection::{ConfigScope, McpServerConfig};
-use lingxi_traits::McpTransportSpec;
+use lingxi_platform_api::McpTransportSpec;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -972,7 +972,7 @@ mod tests {
 }
 ```
 
-(If `McpTransportSpec::Sse { url, headers }` / `Http { url, headers }` field names differ, run `rg -n "pub enum McpTransportSpec" lingxi-code/crates/traits/src/` and adjust. `tempfile` is already a workspace dev-dep.)
+(If `McpTransportSpec::Sse { url, headers }` / `Http { url, headers }` field names differ, run `rg -n "pub enum McpTransportSpec" lingxi-code/crates/platform-api/src/` and adjust. `tempfile` is already a workspace dev-dep.)
 
 - [ ] **Step 2: Run; expect FAIL.**
 
@@ -1051,7 +1051,7 @@ Create `crates/agent/src/catalog.rs`:
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
-use gray_matter::engine::YAML;
+use gray_matter::lingxi_core::YAML;
 use gray_matter::Matter;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -1270,7 +1270,7 @@ mod tests {
 }
 ```
 
-(If `gray_matter::engine::YAML` import path differs in the version pinned in workspace `Cargo.toml`, run `cargo doc -p gray_matter --no-deps --open` or check `lingxi-skills/Cargo.toml` for the existing version. `Matter::<YAML>::new` is the v0.2 API. If using a different version, adjust per `lingxi-skills/src/frontmatter.rs` which already exercises this dep.)
+(If `gray_matter::lingxi_core::YAML` import path differs in the version pinned in workspace `Cargo.toml`, run `cargo doc -p gray_matter --no-deps --open` or check `lingxi-skills/Cargo.toml` for the existing version. `Matter::<YAML>::new` is the v0.2 API. If using a different version, adjust per `lingxi-skills/src/frontmatter.rs` which already exercises this dep.)
 
 - [ ] **Step 2: Run; expect FAIL.**
 
@@ -1352,13 +1352,13 @@ async fn with_mcp_hook_agent_builders_store_fields() {
     // Construct empty registries — only the wiring is under test.
     struct StubTransport;
     #[async_trait::async_trait]
-    impl lingxi_traits::McpTransport for StubTransport {
-        async fn connect(&self, _s: &lingxi_traits::McpTransportSpec) -> Result<lingxi_traits::McpConnection, lingxi_traits::McpError> { unreachable!() }
-        async fn initialize(&self, _c: &lingxi_traits::McpConnection) -> Result<lingxi_traits::ServerCapabilitiesDto, lingxi_traits::McpError> { unreachable!() }
-        async fn list_tools(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpToolDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn list_resources(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpResourceDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn list_prompts(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpPromptDto>, lingxi_traits::McpError> { unreachable!() }
-        async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_traits::McpError> { unreachable!() }
+    impl lingxi_platform_api::McpTransport for StubTransport {
+        async fn connect(&self, _s: &lingxi_platform_api::McpTransportSpec) -> Result<lingxi_platform_api::McpConnection, lingxi_platform_api::McpError> { unreachable!() }
+        async fn initialize(&self, _c: &lingxi_platform_api::McpConnection) -> Result<lingxi_platform_api::ServerCapabilitiesDto, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_tools(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpToolDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_resources(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpResourceDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn list_prompts(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpPromptDto>, lingxi_platform_api::McpError> { unreachable!() }
+        async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_platform_api::McpError> { unreachable!() }
     }
     let mcp = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
     let hook_reg = Arc::new(RwLock::new(HookRegistry::new()));
@@ -1484,18 +1484,18 @@ use lingxi_orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_traits::{McpStatus, McpTransportSpec, OrchestratorHandle};
+use lingxi_platform_api::{McpStatus, McpTransportSpec, OrchestratorHandle};
 use std::sync::Arc;
 
 struct StubTransport;
 #[async_trait::async_trait]
-impl lingxi_traits::McpTransport for StubTransport {
-    async fn connect(&self, _s: &McpTransportSpec) -> Result<lingxi_traits::McpConnection, lingxi_traits::McpError> { unreachable!() }
-    async fn initialize(&self, _c: &lingxi_traits::McpConnection) -> Result<lingxi_traits::ServerCapabilitiesDto, lingxi_traits::McpError> { unreachable!() }
-    async fn list_tools(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpToolDto>, lingxi_traits::McpError> { unreachable!() }
-    async fn list_resources(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpResourceDto>, lingxi_traits::McpError> { unreachable!() }
-    async fn list_prompts(&self, _c: &lingxi_traits::McpConnection) -> Result<Vec<lingxi_traits::McpPromptDto>, lingxi_traits::McpError> { unreachable!() }
-    async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_traits::McpError> { unreachable!() }
+impl lingxi_platform_api::McpTransport for StubTransport {
+    async fn connect(&self, _s: &McpTransportSpec) -> Result<lingxi_platform_api::McpConnection, lingxi_platform_api::McpError> { unreachable!() }
+    async fn initialize(&self, _c: &lingxi_platform_api::McpConnection) -> Result<lingxi_platform_api::ServerCapabilitiesDto, lingxi_platform_api::McpError> { unreachable!() }
+    async fn list_tools(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpToolDto>, lingxi_platform_api::McpError> { unreachable!() }
+    async fn list_resources(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpResourceDto>, lingxi_platform_api::McpError> { unreachable!() }
+    async fn list_prompts(&self, _c: &lingxi_platform_api::McpConnection) -> Result<Vec<lingxi_platform_api::McpPromptDto>, lingxi_platform_api::McpError> { unreachable!() }
+    async fn disconnect(&self, _id: lingxi_protocol::McpConnectionId) -> Result<(), lingxi_platform_api::McpError> { unreachable!() }
 }
 
 fn stdio_cfg(name: &str) -> McpServerConfig {
@@ -1589,7 +1589,7 @@ use lingxi_orchestrator::test_support::{
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use lingxi_protocol::HookId;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -1692,7 +1692,7 @@ use lingxi_orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1995,7 +1995,7 @@ In `crates/cli/src/init.rs`, replace the section between step (5) and step (6) (
     // `Disconnected` state so `/mcp` can list them. Real connect happens
     // when M7 wires the auto-connect loop, OR when a tool invokes the MCP
     // dispatch path.
-    let mcp_transport: Arc<dyn lingxi_traits::McpTransport> = http.clone();
+    let mcp_transport: Arc<dyn lingxi_platform_api::McpTransport> = http.clone();
     let mcp_registry = Arc::new(lingxi_mcp::McpRegistry::new(mcp_transport));
     {
         // Pre-populate `Disconnected` entries so `/mcp` can list them
@@ -2146,7 +2146,7 @@ use lingxi_commands::builtin::{
 use lingxi_commands::model::{BuiltinCommandHandler, CommandResult};
 use lingxi_commands::parser::ParsedSlashCommand;
 use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
+use lingxi_platform_api::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -2428,7 +2428,7 @@ git show --stat m6.7 | head -20
 
 **2. Placeholder scan:** searched for `TBD`, `TODO`, `implement later`, `fill in details`, `add appropriate`, `similar to Task` — none present. Every step lists the exact code or command to run.
 
-**3. Type consistency:** every reference uses `McpRegistry` (not `ClientRegistry`), `Arc<RwLock<HookRegistry>>` (not `Arc<HookRegistry>` since `register` takes `&mut`), `Arc<RwLock<Vec<AgentDefinition>>>` (not the non-existent `AgentCatalog`). `McpServerInfo` / `HookInfo` / `AgentInfo` field names exactly match `lingxi_traits::orchestrator` definitions. Empty-state literals are uniform across the three handlers, the fixture, and the smoke output.
+**3. Type consistency:** every reference uses `McpRegistry` (not `ClientRegistry`), `Arc<RwLock<HookRegistry>>` (not `Arc<HookRegistry>` since `register` takes `&mut`), `Arc<RwLock<Vec<AgentDefinition>>>` (not the non-existent `AgentCatalog`). `McpServerInfo` / `HookInfo` / `AgentInfo` field names exactly match `lingxi_platform_api::orchestrator` definitions. Empty-state literals are uniform across the three handlers, the fixture, and the smoke output.
 
 ## Unresolved questions / deferred
 

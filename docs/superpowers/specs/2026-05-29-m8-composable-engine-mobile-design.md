@@ -159,7 +159,7 @@ lingxi-code/                              ← repo root (renamed from lingxi-cor
 │
 │  # ─── Engine subsystems (flat at root, no `crates/` wrapper) ──────────
 ├── protocol/                             ← name = "protocol"
-├── traits/                               ← name = "traits"
+├── traits/                               ← name = "platform-api"
 ├── tool-api/                             ← name = "tool-api"          ★ NEW
 ├── skill-api/                            ← name = "skill-api"         ★ NEW
 ├── command-api/                          ← name = "command-api"       ★ NEW
@@ -388,7 +388,7 @@ pub trait Tool: Send + Sync + 'static {
 ```rust
 // tool-api/src/context.rs
 use std::sync::Arc;
-use traits::*;
+use platform_api::*;
 
 /// Per-call context injected by the orchestrator. Contains all platform
 /// handles the tool might need plus per-call session info.
@@ -486,7 +486,7 @@ Each has a `Registry` mirror of `ToolRegistry`.
 Today's 23 individual traits remain. We add an aggregate so composition roots pass one handle:
 
 ```rust
-// traits/src/platform.rs
+// platform-api/src/platform.rs
 use std::sync::Arc;
 
 pub trait Platform: Send + Sync {
@@ -526,7 +526,7 @@ Each `platforms/<os>/` crate exports one `pub struct PosixPlatform` (or `IosPlat
 ```rust
 // core/src/engine.rs
 use std::sync::Arc;
-use traits::Platform;
+use platform_api::Platform;
 use tool_api::ToolRegistry;
 use skill_api::SkillRegistry;
 use command_api::CommandRegistry;
@@ -596,7 +596,7 @@ UniFFI callback interfaces flip the relationship: Rust declares the contract, fo
 #### Trait surface (defined in `traits/`)
 
 ```rust
-// traits/src/camera.rs
+// platform-api/src/camera.rs
 #[uniffi::export(callback_interface)]
 #[async_trait]
 pub trait CameraControl: Send + Sync {
@@ -627,7 +627,7 @@ pub enum CameraError {
 }
 ```
 
-Similar traits live in `traits/src/voice.rs` (`VoiceRecorder`), `traits/src/share.rs` (`SharingService`), and the existing `traits/src/secure_storage.rs` gets a mobile-impl-via-callback variant.
+Similar traits live in `platform-api/src/voice.rs` (`VoiceRecorder`), `platform-api/src/share.rs` (`SharingService`), and the existing `platform-api/src/secure_storage.rs` gets a mobile-impl-via-callback variant.
 
 #### Swift / Kotlin implementations (in app crates)
 
@@ -724,7 +724,7 @@ Three tools let the AI drive an external target. All three run on the **desktop*
 #### `ComputerControl` trait (new in `traits/`)
 
 ```rust
-// traits/src/computer_control.rs
+// platform-api/src/computer_control.rs
 #[async_trait]
 pub trait ComputerControl: Send + Sync {
     async fn screenshot(&self) -> Result<Screenshot, ComputerError>;
@@ -950,11 +950,11 @@ workspace = true
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
-use core::Engine;
+use lingxi_core::Engine;
 use tool_api::ToolRegistry;
 use skill_api::SkillRegistry;
 use command_api::CommandRegistry;
-use traits::Platform;
+use platform_api::Platform;
 
 pub fn build(
     platform: Arc<dyn Platform>,
@@ -1088,7 +1088,7 @@ platforms/ios/
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
-use traits::*;
+use platform_api::*;
 
 pub struct IosPlatform {
     // Rust-implemented (in this crate)
@@ -1253,7 +1253,7 @@ Each phase is independently buildable + testable. Estimated calendar with one fu
 | **P1** Drop `crates/` wrapper | `git mv crates/* .` for engine crates. Update workspace `Cargo.toml` `members` paths. | 0.5d | `cargo build --workspace` |
 | **P2** Drop `lingxi-` prefix | Rename `lingxi-protocol` → `protocol`, `lingxi-core` → `core`, etc. Update all `Cargo.toml` `[dependencies]` blocks. | 0.5d | `cargo build --workspace` |
 | **P3** Extract `tool-api` | New `tool-api/` crate at root; move `Tool` trait, `ToolCtx`, `ToolRegistry` from existing `tools/src/` (now at root after P1). Re-export from `tools/` to keep callers building. | 0.5d | `cargo build --workspace` + existing tests |
-| **P4** Migrate engine deps | Change `orchestrator`, `agent`, `core` to import from `tool_api` instead of `tools`. Delete `traits/src/tool_invoker.rs`. | 1d | parity tests |
+| **P4** Migrate engine deps | Change `orchestrator`, `agent`, `core` to import from `tool_api` instead of `tools`. Delete `platform-api/src/tool_invoker.rs`. | 1d | parity tests |
 | **P5** First two `tools/*` crates | Move `tools/src/builtin/file_*.rs` etc. to `tools/file/`, and `tools/src/builtin/bash.rs` etc. to `tools/shell/`. Empty old paths. | 1d | tool unit tests, parity tests |
 | **P6** Composition root + CLI move | Create `apps/engine-desktop/`. Move `cli/` (was `crates/cli`) to `apps/cli/`. CLI goes through `engine_desktop::build()`. | 1d | `cargo run -p cli` works |
 | **P7** Remaining tool crates | Split `tools/task`, `web`, `skill`, `ui`, `meta`, `cron`, `plan`, `agent`, `mcp`, `lsp`, `team`, `worktree`. Delete old monolithic `tools/`. | 2-3d | parity test matrix |
@@ -1406,7 +1406,7 @@ claude-code today only supports Configuration B. M8 keeps B open (via `bridge/`)
 | DELETE | `crates/tools/src/registry.rs` | Replaced by `tool-api/src/registry.rs` (P3) |
 | DELETE | `crates/tools/src/dispatcher.rs` | Orchestrator calls `ToolRegistry` directly (P4) |
 | DELETE | `crates/tools/src/tool_invoker_impl.rs` | `ToolInvoker` trait removed (P4) |
-| DELETE | `crates/traits/src/tool_invoker.rs` | Trait removed (P4) |
+| DELETE | `crates/platform-api/src/tool_invoker.rs` | Trait removed (P4) |
 | MOVE | `crates/tools/src/tool_trait.rs` → `tool-api/src/lib.rs` | re-shaped (P3) |
 | MOVE | `crates/tools/src/context.rs` → `tool-api/src/context.rs` | re-shaped; now gets full Platform handles (P3) |
 | MOVE | `crates/tools/src/builtin/file_read.rs` → `tools/file/src/read.rs` | + other file_*, glob, grep, notebook_edit (P5) |
@@ -1424,16 +1424,16 @@ claude-code today only supports Configuration B. M8 keeps B open (via `bridge/`)
 | CREATE | `tools/<14 cross-OS dirs>/` | Per-category cross-OS / desktop-only tool crates (P5 + P7) |
 | CREATE | `tools/camera/`, `tools/voice/`, `tools/share/` | Cross-mobile tool crates (P11); Rust calls `Arc<dyn CameraControl>` etc., Swift/Kotlin impl via UniFFI callback |
 | CREATE | `tools/computer-use/`, `tools/android-use/`, `tools/ios-use/` | Device-control tool crates (P11b); skeletons in M8, real impl in M9 |
-| CREATE | `traits/src/camera.rs`, `traits/src/voice.rs`, `traits/src/share.rs` | Mobile-capability traits with `#[uniffi::export(callback_interface)]` (P11) |
-| CREATE | `traits/src/computer_control.rs` (`ComputerControl` trait) | P10 |
+| CREATE | `platform-api/src/camera.rs`, `platform-api/src/voice.rs`, `platform-api/src/share.rs` | Mobile-capability traits with `#[uniffi::export(callback_interface)]` (P11) |
+| CREATE | `platform-api/src/computer_control.rs` (`ComputerControl` trait) | P10 |
 | CREATE | `apps/ios-framework/swift/Sources/LingxiCode/CameraImpl.swift`, `VoiceImpl.swift`, `ShareImpl.swift`, `KeychainImpl.swift` | Swift implementations of UniFFI callback protocols (P12); M8 ships skeletons |
 | CREATE | `apps/android-aar/kotlin/src/main/kotlin/com/lingxi/code/CameraImpl.kt`, `VoiceImpl.kt`, `ShareImpl.kt`, `KeystoreImpl.kt` | Kotlin implementations (P12); M8 ships skeletons |
 | CREATE | `skills/builtin/` | Single skill crate with mobile/desktop register entry points (P8) |
 | CREATE | `commands/core/`, `commands/desktop/`, `commands/mobile/` | Per-domain command crates (P9) |
 | CREATE | `platforms/ios/`, `platforms/android/` | New platform crates with `Unsupported*` impls (P10) |
 | CREATE | `apps/engine-desktop/`, `apps/engine-mobile/`, `apps/bridge-server/`, `apps/ios-framework/`, `apps/android-aar/` | New composition + binary crates (P6, P11, P12, P13) |
-| CREATE | `traits/src/platform.rs` (aggregate trait) | P3 |
-| CREATE | `traits/src/mobile.rs` (`MobileSurface` trait) | P10 |
+| CREATE | `platform-api/src/platform.rs` (aggregate trait) | P3 |
+| CREATE | `platform-api/src/mobile.rs` (`MobileSurface` trait) | P10 |
 | UPDATE | workspace `Cargo.toml` | Members list grows from 37 to 71; all paths flat |
 | UPDATE | `docs/ARCHITECTURE.md` | New crate map section |
 | UPDATE | `CHANGELOG.md` | "v0.9.0: M8 — composable engine restructure" with BREAKING note |

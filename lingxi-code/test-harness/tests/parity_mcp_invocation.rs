@@ -28,7 +28,7 @@ use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
-use traits::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
+use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
 
 // ============================================================================
 // Helpers

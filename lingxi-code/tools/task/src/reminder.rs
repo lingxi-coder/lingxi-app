@@ -36,7 +36,7 @@
 //! is NO `<system-reminder>` wrapper (unlike the skill-/task-notification
 //! reminders). The exact texts are locked in [`V1_BASE`] / [`V2_BASE`] below.
 
-use engine::TodoState;
+use lingxi_core::TodoState;
 
 /// `rqt.TURNS_SINCE_WRITE` — assistant turns since the last TodoWrite/Task call
 /// before a reminder is eligible. (binary offset ~203118638)

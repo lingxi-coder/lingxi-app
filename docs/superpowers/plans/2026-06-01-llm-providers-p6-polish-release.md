@@ -45,7 +45,7 @@ In `lingxi-code/orchestrator/src/provider_adapter.rs`, in the `StreamingApiClien
 
 ```rust
         if !tools.is_empty() && !resolved.provider.capabilities().native_tools {
-            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+            return Err(ApiError::Http(platform_api::HttpError::InvalidRequest(format!(
                 "model {model:?} ({:?}) does not support tool use; \
                  select a tool-capable model or run without tools",
                 resolved.provider.id()
@@ -53,7 +53,7 @@ In `lingxi-code/orchestrator/src/provider_adapter.rs`, in the `StreamingApiClien
         }
 ```
 
-(If `traits` isn't already imported in this file, use the fully-qualified `traits::HttpError` as shown — no new `use` needed. `ApiError` is already in scope.)
+(If `traits` isn't already imported in this file, use the fully-qualified `platform_api::HttpError` as shown — no new `use` needed. `ApiError` is already in scope.)
 
 - [ ] **Step 2: Add a test**
 
@@ -114,7 +114,7 @@ In `provider_adapter.rs`'s `#[cfg(test)] mod tests`, the existing `StubProvider`
             .stream("custom/no-tool-model", None, Vec::new(), tools)
             .await
             .expect_err("must reject tools on a non-tool-capable model");
-        assert!(matches!(err, ApiError::Http(traits::HttpError::InvalidRequest(_))));
+        assert!(matches!(err, ApiError::Http(platform_api::HttpError::InvalidRequest(_))));
     }
 
     #[tokio::test]

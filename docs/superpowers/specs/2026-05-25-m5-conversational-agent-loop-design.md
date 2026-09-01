@@ -460,7 +460,7 @@ M3-01 settings.json schema 在 v0.4.0 锁定 143 字段。M5 可能需要新增:
 - `cli.color: bool`(TTY auto-detect)
 - `cli.json_output: bool`
 
-新字段需在 M5-12 / M5-13 加入 `lingxi-core::settings::SettingsJson` + bump settings schema test counter(152 → 157)。
+新字段需在 M5-12 / M5-13 加入 `lingxi_core::settings::SettingsJson` + bump settings schema test counter(152 → 157)。
 
 ### 6.6 文档更新
 

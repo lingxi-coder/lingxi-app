@@ -18,7 +18,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 struct CaptureCompactClient {
     seen: std::sync::Mutex<Option<sidequery::SideQueryRequest>>,

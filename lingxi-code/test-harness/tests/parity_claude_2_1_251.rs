@@ -5,14 +5,14 @@
 
 #[test]
 fn version_const_is_2_1_251() {
-    assert_eq!(traits::CLAUDE_CODE_VERSION, "2.1.251");
+    assert_eq!(platform_api::CLAUDE_CODE_VERSION, "2.1.251");
 }
 
 #[test]
 fn ai_agent_env_value_is_2_1_251() {
     let derived = format!(
         "claude-code_{}_agent",
-        traits::CLAUDE_CODE_VERSION.replace('.', "-")
+        platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
     );
     assert_eq!(derived, "claude-code_2-1-251_agent");
 }
@@ -21,7 +21,7 @@ fn ai_agent_env_value_is_2_1_251() {
 fn web_fetch_user_agent_is_2_1_251() {
     let derived = format!(
         "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        traits::CLAUDE_CODE_VERSION
+        platform_api::CLAUDE_CODE_VERSION
     );
     assert_eq!(
         derived,
@@ -31,7 +31,7 @@ fn web_fetch_user_agent_is_2_1_251() {
 
 #[test]
 fn version_facing_identifiers_share_one_source() {
-    let version = traits::CLAUDE_CODE_VERSION;
+    let version = platform_api::CLAUDE_CODE_VERSION;
     assert!(format!("claude-code_{}_agent", version.replace('.', "-"))
         .contains(&version.replace('.', "-")));
     assert!(

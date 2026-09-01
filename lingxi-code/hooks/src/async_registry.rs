@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// Default async-hook timeout (15s) — matches claude-code
 /// `registerPendingAsyncHook` (`utils/hooks/AsyncHookRegistry.ts:51`):

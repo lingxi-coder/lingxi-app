@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 /// Build an orchestrator wired with a `JsonlWriter` backed by `path`.
 fn orch_with_writer(dir: &std::path::Path, path: std::path::PathBuf) -> ConversationOrchestrator {
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),

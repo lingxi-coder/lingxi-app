@@ -4,7 +4,7 @@
 
 **Goal:** Close the last three spec rev2.7 future-work items: an OpenAiResponses codec (the only protocol family without one), a Gemini File API upload flow (raw-byte channel + request builders + client driver), and TUI rate-limit rendering via an additive `OutputEvent` variant. The fourth candidate (streaming-path `LlmResponse.cost`) is **closed as a decision, not code** — see "Closed item" below.
 
-**Architecture:** All codec work stays inside `llm-client` (no repo-internal deps). The raw-byte upload channel threads additively through `protocol::HttpRequest` → `traits::HttpTransport` impls → `LlmTransportBridge` → `ProviderRequest`. Rate-limit flows orchestrator (header parse, already live) → additive `traits::OutputEvent::RateLimit` → TUI bridge → ported claude-code message composer (copy strings already byte-locked in `tui/src/components/messages/rate_limit.rs`).
+**Architecture:** All codec work stays inside `llm-client` (no repo-internal deps). The raw-byte upload channel threads additively through `protocol::HttpRequest` → `platform_api::HttpTransport` impls → `LlmTransportBridge` → `ProviderRequest`. Rate-limit flows orchestrator (header parse, already live) → additive `platform_api::OutputEvent::RateLimit` → TUI bridge → ported claude-code message composer (copy strings already byte-locked in `tui/src/components/messages/rate_limit.rs`).
 
 **Tech stack:** Rust workspace `lingxi-code/`. TDD, observed RED. clippy pedantic `-D warnings --all-targets --no-deps`.
 
@@ -136,7 +136,7 @@ TDD; clippy; commit.
 Port `parseClaudeAiLimits` from `claude-code/src/services/claudeAiLimits.ts` (READ IT FIRST — header names at lines ~160-200 and ~380-445):
 - [ ] Add fields to `RateLimitInfo` (orchestrator-local, NOT frozen): `status: Option<String>` (unified-status), `resets_at: Option<u64>` (unified-reset, unix seconds), `utilization: Option<f64>` (per-claim `anthropic-ratelimit-unified-{abbrev}-utilization` where abbrev derives from representative-claim exactly as the TS maps it — read the TS abbrev function and pin it), `claim_resets_at: Option<u64>` (per-claim `-reset`), `overage_resets_at: Option<u64>`, `fallback_available: Option<bool>` (`unified-fallback == "available"`).
 - [ ] `from_headers` parses all of the above tolerantly (absent → None, malformed numbers → None). Existing three fields and their parsing MUST be untouched (additive within the struct).
-- [ ] Snapshot conversion to `traits::RateLimitSnapshot` unchanged (3 fields — do NOT touch traits here).
+- [ ] Snapshot conversion to `platform_api::RateLimitSnapshot` unchanged (3 fields — do NOT touch traits here).
 - [ ] Tests: full header set, partial, malformed utilization, abbrev mapping per claim type (five_hour / seven_day / seven_day_opus / seven_day_sonnet).
 
 TDD; commit.
@@ -144,7 +144,7 @@ TDD; commit.
 ## Task 8: additive `OutputEvent::RateLimit` + orchestrator emit-on-change
 
 **Files:**
-- Modify (FROZEN-ADDITIVE): `lingxi-code/traits/src/orchestrator.rs` — append new variant to `OutputEvent` (it is `#[non_exhaustive]`): `RateLimit { status: Option<String>, rate_limit_type: Option<String>, utilization: Option<f64>, resets_at: Option<u64>, overage_status: Option<String>, overage_resets_at: Option<u64>, overage_disabled_reason: Option<String>, fallback_available: Option<bool>, is_using_overage: bool }` + default trait method `emit_rate_limit(...)` on `OutputStream` (default: no-op) following the exact pattern of `emit_usage`. ONLY appended lines.
+- Modify (FROZEN-ADDITIVE): `lingxi-code/platform-api/src/orchestrator.rs` — append new variant to `OutputEvent` (it is `#[non_exhaustive]`): `RateLimit { status: Option<String>, rate_limit_type: Option<String>, utilization: Option<f64>, resets_at: Option<u64>, overage_status: Option<String>, overage_resets_at: Option<u64>, overage_disabled_reason: Option<String>, fallback_available: Option<bool>, is_using_overage: bool }` + default trait method `emit_rate_limit(...)` on `OutputStream` (default: no-op) following the exact pattern of `emit_usage`. ONLY appended lines.
 - Modify: `lingxi-code/orchestrator/src/` turn loop (find where `emit_usage`/`emit_end_turn` are called — conversation/streaming loop): after each completed API call, read `self.api.last_rate_limit_info()`; if `Some` and DIFFERENT from the last-emitted snapshot (store `last_emitted: Mutex<Option<RateLimitInfo>>` or in loop state), call `emit_rate_limit`. `is_using_overage` = `overage_status.is_some()` && status indicates overage in TS terms — read rateLimitMessages.ts `isUsingOverage` derivation and mirror it.
 - Tests: orchestrator test with a MockOutputStream capturing emit_rate_limit (extend existing mock — it gets the default no-op for free; add a recording override), proving (a) emit on first snapshot, (b) NO duplicate emit on identical snapshot, (c) re-emit on change.
 

@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use traits::http::SseStream;
-use traits::{
+use platform_api::http::SseStream;
+use platform_api::{
     Clock, ElicitRequestDto, ElicitResultDto, HttpError, HttpTransport, McpError,
     McpNotificationStream, McpOAuthConfigDto, McpPromptDto, McpRawConnection,
     McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto, McpTransport,
@@ -386,7 +386,7 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         name: name.into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth,
         },
@@ -561,7 +561,7 @@ async fn static_token_server_spec_is_unchanged() {
             xaa_config: None,
         });
 
-    let mut headers = traits::McpHeaders::new();
+    let mut headers = platform_api::McpHeaders::new();
     headers.insert("X-Static".to_string(), "preset".to_string());
     let config = McpServerConfig {
         name: "static".into(),
@@ -930,7 +930,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
     let clock = TestClock::new(1_000);
     let (on_url, _rx) = url_capture();
 
-    let mut headers = traits::McpHeaders::new();
+    let mut headers = platform_api::McpHeaders::new();
     headers.insert(
         "Authorization".to_string(),
         "Bearer configured-static".into(),
@@ -985,7 +985,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
 #[tokio::test]
 async fn static_authorization_header_rejection_is_classified() {
     let transport = RecordingTransport::new(usize::MAX);
-    let mut headers = traits::McpHeaders::new();
+    let mut headers = platform_api::McpHeaders::new();
     headers.insert(
         "Authorization".to_string(),
         "Bearer configured-static".into(),
@@ -1039,7 +1039,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         name: "helper-with-oauth".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: Some(oauth_block(Some("client-x"))),
         },
@@ -1063,7 +1063,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
     // never-driven interactive OAuth flow when the §19 gate is missing.
     let post_helper_spec = McpTransportSpec::Http {
         url: "https://mcp.example.com/v1".into(),
-        headers: traits::McpHeaders::from_iter([(
+        headers: platform_api::McpHeaders::from_iter([(
             "Authorization".to_string(),
             "Bearer helper-minted".to_string(),
         )]),
@@ -1108,7 +1108,7 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         name: "helper-rejected".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: None,
         },
@@ -1159,7 +1159,7 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         name: "helper-other-header".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
             oauth: Some(oauth_block(Some("client-x"))),
         },
@@ -1177,7 +1177,7 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
     // are `{X-Api-Key: "helper-key"}` when `resolve_oauth_spec` hashes it.
     let post_helper_spec = McpTransportSpec::Http {
         url: "https://mcp.example.com/v1".into(),
-        headers: traits::McpHeaders::from_iter([(
+        headers: platform_api::McpHeaders::from_iter([(
             "X-Api-Key".to_string(),
             "helper-key".to_string(),
         )]),

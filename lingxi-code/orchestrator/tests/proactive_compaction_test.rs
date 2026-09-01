@@ -20,7 +20,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// Build an orchestrator with a `MockApiClient` (single `end_turn` response)
 /// and an optional compactor at `threshold`. Returns the orch + the api mock so

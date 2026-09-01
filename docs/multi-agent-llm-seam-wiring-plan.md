@@ -13,7 +13,7 @@ produce a git diff of what changed*:
 2. `revision::TodoLlmReviser` (impl `Reviser`)
 3. `verification::NoopFixer` (impl `VerificationFixer`)
 
-## Key finding: the right driver is `traits::SubagentSpawner`, not `agent::run_subagent`
+## Key finding: the right driver is `platform_api::SubagentSpawner`, not `agent::run_subagent`
 
 `run_subagent`/`run_subagent_loop` (agent/src/runner.rs) is a LOW-level future
 the pool hands to the runtime. Driving it directly would mean reconstructing the
@@ -23,7 +23,7 @@ renderer, …) plus a `StateMachinePool` slot and an event-pump loop — exactly
 plumbing `agent::handle::PoolSubagentSpawner` already encapsulates.
 
 `PoolSubagentSpawner` already exposes the precise surface we need via the
-cross-crate `traits::subagent_spawn::SubagentSpawner` trait:
+cross-crate `platform_api::subagent_spawn::SubagentSpawner` trait:
 
 ```rust
 async fn spawn(&self, request: SubagentSpawnRequest, inherit: SubagentInheritance)
@@ -54,7 +54,7 @@ git diff + logs 生成"). The `git` CLI pattern is already in this crate:
 
 ## (a) Build a cwd-pinned file-editing agent
 
-The adapter holds an injected `Arc<dyn traits::SubagentSpawner>` +
+The adapter holds an injected `Arc<dyn platform_api::SubagentSpawner>` +
 `SubagentInheritance { tool_invoker, budget }` (the same Arcs the main session
 holds — recursion-lock + budget inheritance). Per candidate:
 
@@ -140,7 +140,7 @@ NOT take a token. Two compatible mechanisms, both already in place:
    in-flight stream future is cancel-safe (runner.rs drops the API future on the
    termination arm).
 2. **In-loop UserExit (best-effort, runtime-only).** The runner's loop races
-   `engine::Event::UserExit/UserInterrupt` on its event channel → `Killed`. A
+   `lingxi_core::Event::UserExit/UserInterrupt` on its event channel → `Killed`. A
    future enhancement could bridge `cancel` → a `UserExit` on the slot's event
    channel, but `SubagentSpawner::spawn` does not expose the channel, so the
    select-drop in (1) is the achievable cancellation for this seam.
@@ -158,7 +158,7 @@ Justification:
   agent") and (b) drag the whole pool/runner/hook surface into a crate that is
   meant to stay thin and trait-driven (same discipline as review.rs taking
   `Arc<dyn SideQueryClient>`, finalizer taking `Arc<dyn PatchApplier>`).
-- The adapter only needs the CROSS-CRATE `traits::SubagentSpawner` (not `agent`
+- The adapter only needs the CROSS-CRATE `platform_api::SubagentSpawner` (not `agent`
   internals). `engine-desktop` is where `subagent_spawner_arc:
   Arc<PoolSubagentSpawner>` is already assembled with its real api_client, tool
   registry, permission policy, hook executor, env renderer

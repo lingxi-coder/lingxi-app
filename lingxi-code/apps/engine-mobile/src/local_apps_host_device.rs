@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use traits::{
+use platform_api::{
     CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
     ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
     HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
@@ -1210,7 +1210,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::time::timeout;
-    use traits::{
+    use platform_api::{
         CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
         CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
         ContactsProvider, ContactsQuery, LocationError, LocationFix, LocationProvider,
@@ -2195,12 +2195,12 @@ mod tests {
     struct FakeStt(String);
 
     #[async_trait]
-    impl traits::SpeechToText for FakeStt {
+    impl platform_api::SpeechToText for FakeStt {
         async fn transcribe(
             &self,
-            _opts: traits::SttOpts,
-        ) -> Result<traits::SttTranscript, traits::SttError> {
-            Ok(traits::SttTranscript {
+            _opts: platform_api::SttOpts,
+        ) -> Result<platform_api::SttTranscript, platform_api::SttError> {
+            Ok(platform_api::SttTranscript {
                 text: self.0.clone(),
                 language: Some("zh-CN".into()),
                 confidence: Some(0.9),

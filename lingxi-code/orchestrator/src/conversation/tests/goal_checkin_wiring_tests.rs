@@ -36,7 +36,7 @@ fn task(id: &str, kind: &str, agent_type: Option<&str>) -> hooks::HookBackground
 
 async fn set_goal(orch: &ConversationOrchestrator, condition: &str) {
     let mut s = orch.session.lock().await;
-    s.active_goal = Some(engine::session::ActiveGoalState {
+    s.active_goal = Some(lingxi_core::session::ActiveGoalState {
         condition: condition.into(),
         set_at: std::time::SystemTime::now(),
         last_reason: None,

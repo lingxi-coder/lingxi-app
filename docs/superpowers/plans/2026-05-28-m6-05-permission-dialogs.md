@@ -4,9 +4,9 @@
 
 **Goal:** Land the 3 permission modal dialogs the TUI must support — `ToolUseConfirm`, `ExitPlanMode`, `BypassPermissionsMode` — backed by a `PermissionResponse` orchestrator event channel, with strict focus-trap discipline (when a dialog is open, keystrokes never reach `PromptInput`). After this plan, the REPL screen can route a real `PermissionRequest` from `ConversationOrchestrator` → render dialog → collect `(PermissionResponse, persist: bool)` → forward to orchestrator. `1` / `2` / `N` / `Esc` / `Enter` resolve `ToolUseConfirm` and `ExitPlanMode`; `BypassPermissionsMode` adds a literal-input step (user must type `yes` to enable). 2 new telemetry events + 1 new parity fixture.
 
-**Architecture:** A new `permissions/` component subtree under `crates/tui/src/components/` provides three iocraft components — each takes a `PermissionRequest` variant + an `on_resolve` callback. `screens/repl.rs` overlays the active dialog above `PromptInput` whenever `AppState.pending_permission.is_some()`, and the keymap routes ALL keys to the dialog handler in that case (focus-trap). `AppState` grows two fields — `pending_permission: Option<PermissionRequest>` and `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>` — set when the orchestrator bridge yields a `TuiEvent::OrchestratorPermissionRequest { request, resp_tx }`. A new `PermissionResponse { decision: PermissionDecisionKind, persist: bool }` enum is defined in `lingxi-traits::prompting_gate` and re-exported from `lingxi-permission`. Variants: `AllowOnce` (persist=false), `AllowAlways` (persist=true), `Deny` (persist=false).
+**Architecture:** A new `permissions/` component subtree under `crates/tui/src/components/` provides three iocraft components — each takes a `PermissionRequest` variant + an `on_resolve` callback. `screens/repl.rs` overlays the active dialog above `PromptInput` whenever `AppState.pending_permission.is_some()`, and the keymap routes ALL keys to the dialog handler in that case (focus-trap). `AppState` grows two fields — `pending_permission: Option<PermissionRequest>` and `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>` — set when the orchestrator bridge yields a `TuiEvent::OrchestratorPermissionRequest { request, resp_tx }`. A new `PermissionResponse { decision: PermissionDecisionKind, persist: bool }` enum is defined in `lingxi-platform_api::prompting_gate` and re-exported from `lingxi-permission`. Variants: `AllowOnce` (persist=false), `AllowAlways` (persist=true), `Deny` (persist=false).
 
-**Tech Stack:** Rust 2021. New deps: NONE (uses existing `iocraft = "=0.6"` from M6-01, `tokio` workspace, `serde 1`, `serde_json 1`, `insta` for snapshots). New types live in `lingxi-traits::prompting_gate` (already exists from M5-05). The `PermissionRequest` enum gets new variants — see "Type extension" below.
+**Tech Stack:** Rust 2021. New deps: NONE (uses existing `iocraft = "=0.6"` from M6-01, `tokio` workspace, `serde 1`, `serde_json 1`, `insta` for snapshots). New types live in `lingxi-platform_api::prompting_gate` (already exists from M5-05). The `PermissionRequest` enum gets new variants — see "Type extension" below.
 
 **References:**
 
@@ -16,7 +16,7 @@
   - M6-02: `crates/tui/src/screens/repl.rs` exists with 3-zone layout (StatusLine / Scrollback / PromptInput); `AppState` defined in `crates/tui/src/app.rs`
   - M6-03: streaming + spinner integrated; `streaming: Option<{turn_id, partial}>` field on AppState
   - M6-04: tool-use rendering complete; `AssistantToolUseMessage` and `UserToolResultMessage` exist; the orchestrator emits `ToolUseStart` / `ToolUseResult` events
-- M5-05 (Permission UX precedent): `docs/superpowers/plans/2026-05-25-m5-05-permission-ux.md` — defined `PermissionRequest` + `PromptDecision` types in `lingxi-traits::prompting_gate`; established the stdin/stderr scripted-I/O test pattern. M6-05 extends those types with `PermissionRequest` variants + adds `PermissionResponse`.
+- M5-05 (Permission UX precedent): `docs/superpowers/plans/2026-05-25-m5-05-permission-ux.md` — defined `PermissionRequest` + `PromptDecision` types in `lingxi-platform_api::prompting_gate`; established the stdin/stderr scripted-I/O test pattern. M6-05 extends those types with `PermissionRequest` variants + adds `PermissionResponse`.
 - claude-code byte-locks (verified at plan-writing time via direct reads):
   - `claude-code/src/components/permissions/PermissionRequest.tsx:128-143` — `getNotificationMessage` returns:
     - `"Claude needs your permission to use ${toolName}"` (generic)
@@ -32,7 +32,7 @@
   - Body literal: `"In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged."` + `"By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode."` (lines 53-57).
   - Telemetry literals (in claude-code): `"tengu_bypass_permissions_mode_dialog_shown"` (line 85), `"tengu_bypass_permissions_mode_dialog_accept"` (line 31). LingXi tracks these as `tengu_tui_permission_dialog_shown` / `tengu_tui_permission_dialog_resolved` with `kind = "bypass_permissions"` discriminant.
 - Existing surfaces consumed by this plan:
-  - `lingxi-code/crates/traits/src/prompting_gate.rs` — already exports `PermissionRequest { tool_name, tool_input, default_decision }` (M5-05). Task 2 step 1 of this plan **REPLACES the existing struct with an enum** (preserves stdio path via a `ToolUseConfirm { tool_name, tool_input, default_decision }` variant — bit-identical to the M5-05 struct's three fields).
+  - `lingxi-code/crates/platform-api/src/prompting_gate.rs` — already exports `PermissionRequest { tool_name, tool_input, default_decision }` (M5-05). Task 2 step 1 of this plan **REPLACES the existing struct with an enum** (preserves stdio path via a `ToolUseConfirm { tool_name, tool_input, default_decision }` variant — bit-identical to the M5-05 struct's three fields).
   - `lingxi-code/crates/orchestrator/src/conversation.rs` — orchestrator currently consults `Arc<dyn PermissionGate>` synchronously (M5-05). Task 7 adds an out-of-band `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field; when set, the orchestrator uses a `TuiPermissionGate` that sends the request to the TUI and awaits the response via oneshot.
   - `lingxi-code/crates/tui/src/events/mod.rs` — `TuiEvent` enum (M6-01). Task 7 step 2 adds an `OrchestratorPermissionRequest { request: PermissionRequest, resp_tx: oneshot::Sender<PermissionResponse> }` variant.
   - `lingxi-code/crates/tui/src/app.rs` — `AppState` (M6-02). Task 7 step 4 adds `pending_permission: Option<PermissionRequest>` + `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>`.
@@ -117,7 +117,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
       Deny,
   }
   ```
-  Stored in `lingxi-traits::prompting_gate`. Re-exported from `lingxi-permission::gate` (the existing M5-05 shim).
+  Stored in `lingxi-platform_api::prompting_gate`. Re-exported from `lingxi-permission::gate` (the existing M5-05 shim).
 
 - **Orchestrator → TUI bridge** uses a `tokio::sync::oneshot::Sender<PermissionResponse>` paired with each request. When the orchestrator's `TuiPermissionGate::check` is called, it:
   1. Builds a `PermissionRequest` variant.
@@ -164,8 +164,8 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 **Modifies:**
 
-- `lingxi-code/crates/traits/src/prompting_gate.rs` — REPLACE struct `PermissionRequest` with enum (3 variants) + ADD `PermissionResponse` enum.
-- `lingxi-code/crates/permission/src/gate.rs` — re-export `PermissionResponse` (1-line addition to the `pub use lingxi_traits::prompting_gate::{..}` list).
+- `lingxi-code/crates/platform-api/src/prompting_gate.rs` — REPLACE struct `PermissionRequest` with enum (3 variants) + ADD `PermissionResponse` enum.
+- `lingxi-code/crates/permission/src/gate.rs` — re-export `PermissionResponse` (1-line addition to the `pub use lingxi_platform_api::prompting_gate::{..}` list).
 - `lingxi-code/crates/permission/src/prompting_gate.rs` — update `InteractivePromptingGate::prompt_user` to construct `PermissionRequest::ToolUseConfirm { .. }` (M5-05 stdio path). Pattern-match on the enum to keep behavior identical; the other two variants return `PromptError::Cancelled { reason: "unsupported in stdio".into() }` because the M5-05 stdio gate doesn't know how to render multiline plans or warnings — the TUI gate is the only consumer for those.
 - `lingxi-code/crates/orchestrator/src/conversation.rs` — ADD `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field + `session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>` field; update `ConversationOrchestrator::new` + `new_with_perms` to accept them.
 - `lingxi-code/crates/orchestrator/src/handle_impl.rs` — ADD `TuiPermissionGate { event_tx, session_allow_rules }` struct + `impl PermissionGate for TuiPermissionGate` that consults session rules first, then sends the request to the TUI and awaits the oneshot.
@@ -190,17 +190,17 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 1: Extend `PermissionRequest` to an enum + add `PermissionResponse`
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/platform-api/src/prompting_gate.rs`
 - Modify: `lingxi-code/crates/permission/src/gate.rs`
 - Modify: `lingxi-code/crates/permission/src/lib.rs`
 
 **Steps:**
 
-- [ ] **Step 1: Read current state.** Open `lingxi-code/crates/traits/src/prompting_gate.rs`. Confirm `pub struct PermissionRequest { tool_name, tool_input, default_decision }` exists (M5-05). If it doesn't, STOP — M5-05 prerequisite missing.
+- [ ] **Step 1: Read current state.** Open `lingxi-code/crates/platform-api/src/prompting_gate.rs`. Confirm `pub struct PermissionRequest { tool_name, tool_input, default_decision }` exists (M5-05). If it doesn't, STOP — M5-05 prerequisite missing.
 
 - [ ] **Step 2: Write failing tests for the new enum + response.**
 
-  Append to `lingxi-code/crates/traits/src/prompting_gate.rs` `#[cfg(test)] mod tests`:
+  Append to `lingxi-code/crates/platform-api/src/prompting_gate.rs` `#[cfg(test)] mod tests`:
   ```rust
   #[test]
   fn permission_request_enum_tool_use_confirm_variant() {
@@ -250,7 +250,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 4: Replace the struct with the enum + add response.**
 
-  In `lingxi-code/crates/traits/src/prompting_gate.rs`, REPLACE the existing `pub struct PermissionRequest { .. }` (lines 26-35 in the M5-05 file) with:
+  In `lingxi-code/crates/platform-api/src/prompting_gate.rs`, REPLACE the existing `pub struct PermissionRequest { .. }` (lines 26-35 in the M5-05 file) with:
   ```rust
   /// A single permission prompt — three variants:
   /// - `ToolUseConfirm` is the M5-05 stdio-prompt case (preserved).
@@ -305,15 +305,15 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 6: Update permission re-export.**
 
-  In `lingxi-code/crates/permission/src/gate.rs`, extend the existing `pub use lingxi_traits::prompting_gate::{..}` block to include `PermissionResponse`. Specifically, the existing line:
+  In `lingxi-code/crates/permission/src/gate.rs`, extend the existing `pub use lingxi_platform_api::prompting_gate::{..}` block to include `PermissionResponse`. Specifically, the existing line:
   ```rust
-  pub use lingxi_traits::prompting_gate::{
+  pub use lingxi_platform_api::prompting_gate::{
       PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
   };
   ```
   becomes:
   ```rust
-  pub use lingxi_traits::prompting_gate::{
+  pub use lingxi_platform_api::prompting_gate::{
       PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,
       PromptingGate,
   };
@@ -331,7 +331,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 9: Commit.**
 
   ```bash
-  git add lingxi-code/crates/traits/src/prompting_gate.rs lingxi-code/crates/permission/src/gate.rs lingxi-code/crates/permission/src/lib.rs
+  git add lingxi-code/crates/platform-api/src/prompting_gate.rs lingxi-code/crates/permission/src/gate.rs lingxi-code/crates/permission/src/lib.rs
   git commit -m "feat(m6-05 task 1): PermissionRequest enum + PermissionResponse"
   ```
 
@@ -1213,7 +1213,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
   #[cfg(test)]
   mod tui_permission_gate_tests {
       use super::*;
-      use lingxi_traits::permission_gate::{PermissionDecision, PermissionGate};
+      use lingxi_platform_api::permission_gate::{PermissionDecision, PermissionGate};
       use serde_json::json;
 
       #[tokio::test]
@@ -1283,7 +1283,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
   Add to `lingxi-code/crates/orchestrator/src/handle_impl.rs`:
   ```rust
   use async_trait::async_trait;
-  use lingxi_traits::permission_gate::{PermissionDecision, PermissionGate};
+  use lingxi_platform_api::permission_gate::{PermissionDecision, PermissionGate};
 
   /// Orchestrator-side permission gate that forwards requests to the TUI.
   ///

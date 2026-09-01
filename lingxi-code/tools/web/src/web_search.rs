@@ -28,7 +28,7 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
-use traits::http::HttpError;
+use platform_api::http::HttpError;
 
 /// Wire `type` field on the WebSearch tool block. Spec §7 lock; matches
 /// `claude-code/src/tools/WebSearchTool/WebSearchTool.ts:78`.
@@ -1390,7 +1390,7 @@ impl WebSearchTool {
     /// appended (CC 2.1.207 partial preservation), so the search result survives.
     /// An error before ANY block is received is surfaced as `Err(HttpError)`.
     async fn consume_stream(
-        mut stream: traits::http::SseStream,
+        mut stream: platform_api::http::SseStream,
         query: &str,
         ctx: &ToolUseContext,
         tx: &ToolProgressSender,
@@ -2168,7 +2168,7 @@ mod tests {
     use telemetry::AnalyticsBus;
     use tool_api::progress::{progress_channel, ToolProgress, ToolProgressReceiver};
     use tool_api::test_support::fresh_ctx;
-    use traits::http::HttpTransport;
+    use platform_api::http::HttpTransport;
 
     /// A streaming-aware mock `HttpTransport` with INDEPENDENT queues for
     /// `stream_sse` (SSE event frames) and `request` (blocking responses), so a
@@ -2227,7 +2227,7 @@ mod tests {
         async fn stream_sse(
             &self,
             req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, HttpError> {
+        ) -> Result<platform_api::http::SseStream, HttpError> {
             self.received.lock().unwrap().push(req);
             if self.fail_stream.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(HttpError::InvalidRequest(
@@ -2294,12 +2294,12 @@ mod tests {
 
     #[derive(Clone)]
     struct StaticWebSearchConfig {
-        cfg: traits::WebSearchRuntimeConfig,
+        cfg: platform_api::WebSearchRuntimeConfig,
     }
 
     #[async_trait]
-    impl traits::WebSearchConfigProvider for StaticWebSearchConfig {
-        async fn load_web_search_config(&self) -> traits::WebSearchRuntimeConfig {
+    impl platform_api::WebSearchConfigProvider for StaticWebSearchConfig {
+        async fn load_web_search_config(&self) -> platform_api::WebSearchRuntimeConfig {
             self.cfg.clone()
         }
     }
@@ -2333,7 +2333,7 @@ mod tests {
             Some("https://api.openai.example".into()),
         ));
         ctx.web_search_config = Some(Arc::new(StaticWebSearchConfig {
-            cfg: traits::WebSearchRuntimeConfig {
+            cfg: platform_api::WebSearchRuntimeConfig {
                 provider: Some("auto".into()),
                 searxng_url: None,
                 tavily_key: Some("bad-key".into()),
@@ -2608,7 +2608,7 @@ mod tests {
             async fn stream_sse(
                 &self,
                 _req: protocol::HttpRequest,
-            ) -> Result<traits::http::SseStream, HttpError> {
+            ) -> Result<platform_api::http::SseStream, HttpError> {
                 struct S(u8);
                 impl futures_util::Stream for S {
                     type Item = Result<protocol::SseEvent, HttpError>;
@@ -2676,7 +2676,7 @@ mod tests {
             async fn stream_sse(
                 &self,
                 _req: protocol::HttpRequest,
-            ) -> Result<traits::http::SseStream, HttpError> {
+            ) -> Result<platform_api::http::SseStream, HttpError> {
                 struct S(u8);
                 impl futures_util::Stream for S {
                     type Item = Result<protocol::SseEvent, HttpError>;
@@ -2779,7 +2779,7 @@ mod tests {
             async fn stream_sse(
                 &self,
                 _req: protocol::HttpRequest,
-            ) -> Result<traits::http::SseStream, HttpError> {
+            ) -> Result<platform_api::http::SseStream, HttpError> {
                 struct S(u8);
                 impl futures_util::Stream for S {
                     type Item = Result<protocol::SseEvent, HttpError>;
@@ -2981,7 +2981,7 @@ mod tests {
             async fn stream_sse(
                 &self,
                 _req: protocol::HttpRequest,
-            ) -> Result<traits::http::SseStream, HttpError> {
+            ) -> Result<platform_api::http::SseStream, HttpError> {
                 let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if n == 0 {
                     // First connect: transient capacity 529 (== overloaded).
@@ -3096,7 +3096,7 @@ mod tests {
 
     // `AnalyticsValue` is already in scope via `use super::*` (the module's
     // top-level `telemetry::sink` import); the metadata asserts below use it.
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };

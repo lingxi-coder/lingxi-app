@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 branding.workspace = true
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

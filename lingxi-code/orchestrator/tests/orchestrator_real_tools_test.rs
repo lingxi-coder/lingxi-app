@@ -23,7 +23,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// Real-fs tool: reads a UTF-8 file from the path argument, returns its
 /// content as a JSON `{"content": "..."}` payload. Exercises the orchestrator

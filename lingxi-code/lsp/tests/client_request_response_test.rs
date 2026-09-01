@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{BytesCodec, FramedWrite};
 use tokio_util::io::ReaderStream;
-use traits::LspServerConfig;
+use platform_api::LspServerConfig;
 
 const FRAME_BUFFER: usize = 64 * 1024;
 
@@ -264,7 +264,7 @@ async fn notify_surfaces_closed_connection_error() {
         .await
         .expect_err("closed connection should reject notifications");
     assert!(
-        matches!(error, traits::LspError::Transport(ref message) if message.contains("LSP notification 'initialized' failed") && message.contains("writer closed")),
+        matches!(error, platform_api::LspError::Transport(ref message) if message.contains("LSP notification 'initialized' failed") && message.contains("writer closed")),
         "expected closed-notify transport error, got {error:?}"
     );
 }
@@ -429,7 +429,7 @@ async fn shutdown_timeout_does_not_send_exit() {
         .expect("client task")
         .expect_err("shutdown must time out");
     assert!(
-        matches!(error, traits::LspError::Transport(ref message) if message.contains("shutdown")),
+        matches!(error, platform_api::LspError::Transport(ref message) if message.contains("shutdown")),
         "expected transport shutdown timeout, got {error:?}"
     );
     peer.await.expect("peer task");
@@ -468,7 +468,7 @@ async fn shutdown_server_error_does_not_send_exit() {
         .await
         .expect_err("shutdown server error must surface");
     assert!(
-        matches!(error, traits::LspError::ServerError(ref message) if message.contains("shutdown failed")),
+        matches!(error, platform_api::LspError::ServerError(ref message) if message.contains("shutdown failed")),
         "expected server shutdown failure, got {error:?}"
     );
     peer.await.expect("peer task");

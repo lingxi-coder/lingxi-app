@@ -6,7 +6,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::sync::Arc;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 #[tokio::test]
 async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {

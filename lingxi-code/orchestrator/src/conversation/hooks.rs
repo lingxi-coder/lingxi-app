@@ -65,19 +65,19 @@ impl ConversationOrchestrator {
 
     pub(crate) async fn clear_active_goal_state_and_hook(
         &self,
-    ) -> Option<traits::ActiveGoalSnapshot> {
-        self.finish_active_goal_state_and_hook(traits::GoalStatusKind::Cleared)
+    ) -> Option<platform_api::ActiveGoalSnapshot> {
+        self.finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Cleared)
             .await
     }
 
     async fn finish_active_goal_state_and_hook(
         &self,
-        status: traits::GoalStatusKind,
-    ) -> Option<traits::ActiveGoalSnapshot> {
+        status: platform_api::GoalStatusKind,
+    ) -> Option<platform_api::ActiveGoalSnapshot> {
         let (session_id, goal, cleared) = {
             let mut s = self.session.lock().await;
             let goal = s.active_goal.take();
-            let cleared = goal.as_ref().map(|goal| traits::ActiveGoalSnapshot {
+            let cleared = goal.as_ref().map(|goal| platform_api::ActiveGoalSnapshot {
                 condition: goal.condition.clone(),
                 set_at: goal.set_at,
                 last_reason: goal.last_reason.clone(),
@@ -744,7 +744,7 @@ impl ConversationOrchestrator {
                 // `set` attachment for the same successful evaluation.
                 self.record_goal_evaluation(None, false).await;
                 let _ = self
-                    .finish_active_goal_state_and_hook(traits::GoalStatusKind::Achieved)
+                    .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved)
                     .await;
                 None
             }
@@ -1296,7 +1296,7 @@ impl ConversationOrchestrator {
         &self,
         directory: &str,
         source: &str,
-    ) -> traits::DirectoryAddedHookSummary {
+    ) -> platform_api::DirectoryAddedHookSummary {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let aggregate = self
             .hooks
@@ -1374,7 +1374,7 @@ impl ConversationOrchestrator {
             self.persist_message_to_jsonl(&message).await;
         }
 
-        traits::DirectoryAddedHookSummary {
+        platform_api::DirectoryAddedHookSummary {
             failure_count,
             context_messages,
         }
@@ -1387,8 +1387,8 @@ impl ConversationOrchestrator {
     /// permission boundary it was told had changed.
     pub async fn register_repo_root(
         &self,
-        request: traits::RegisterRepoRootRequest,
-    ) -> Result<traits::RegisterRepoRootOutcome, traits::HandleError> {
+        request: platform_api::RegisterRepoRootRequest,
+    ) -> Result<platform_api::RegisterRepoRootOutcome, platform_api::HandleError> {
         let current = self.session_cwd.cwd();
         let raw = std::path::PathBuf::from(request.path.trim());
         let candidate = if raw.is_absolute() {
@@ -1397,12 +1397,12 @@ impl ConversationOrchestrator {
             current.join(raw)
         };
         let canonical = std::fs::canonicalize(&candidate).map_err(|_| {
-            traits::HandleError::ActionFailed(
+            platform_api::HandleError::ActionFailed(
                 "register_repo_root: target is not a directory".into(),
             )
         })?;
         if !canonical.is_dir() {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "register_repo_root: target is not a directory".into(),
             ));
         }
@@ -1417,14 +1417,14 @@ impl ConversationOrchestrator {
                 .as_ref()
                 .is_some_and(|home| canonical.starts_with(home))
         {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "register_repo_root: target is outside the allowed registration scope".into(),
             ));
         }
 
         // Sandbox/file permission refresh FIRST.
         if !self.session_cwd.add_trusted_dir(canonical.clone()) {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "register_repo_root: target is already a registered working directory".into(),
             ));
         }
@@ -1449,29 +1449,29 @@ impl ConversationOrchestrator {
         let reload = if request.reload_skills || request.reload_plugins {
             if let Some(reloader) = &self.repo_root_reloader {
                 reloader
-                    .reload(traits::RepoRootReloadRequest {
+                    .reload(platform_api::RepoRootReloadRequest {
                         root: canonical.clone(),
                         reload_skills: request.reload_skills,
                         reload_plugins: request.reload_plugins,
                     })
                     .await
             } else {
-                traits::RepoRootReloadOutcome {
+                platform_api::RepoRootReloadOutcome {
                     errors: vec![
                         "catalog reload unavailable in this runtime; repository root was registered"
                             .to_string(),
                     ],
-                    ..traits::RepoRootReloadOutcome::default()
+                    ..platform_api::RepoRootReloadOutcome::default()
                 }
             }
         } else {
-            traits::RepoRootReloadOutcome::default()
+            platform_api::RepoRootReloadOutcome::default()
         };
         for error in &reload.errors {
             tracing::warn!(%error, root = %canonical.display(), "register_repo_root reload failed");
         }
 
-        Ok(traits::RegisterRepoRootOutcome {
+        Ok(platform_api::RegisterRepoRootOutcome {
             directory: canonical,
             added: true,
             hooks,

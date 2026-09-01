@@ -33,7 +33,7 @@ Let the text/programmatic model-setting entry points accept a `profile/model` re
 `ModelRegistry::resolve_in` `multiple` (ambiguous) arm (`registry.rs`): change the message from `model reference 'X' is ambiguous across profiles: openai, github-copilot` to additionally suggest the qualified refs, e.g. `… ambiguous across profiles: openai, github-copilot — qualify it, e.g. openai/X or github-copilot/X`. One change; benefits every path (including programmatic, which surfaces the error string).
 
 ### 3. Entry points (each: list → parse → switch)
-- `/model <arg>` (`commands/core/src/model.rs`, switch branch): `let listings = self.handle.list_model_listings().await; let (model, profile) = traits::parse_model_ref(trimmed, &listings); self.handle.switch_model(&model, profile.as_deref()).await`. Display string uses the resolved `model` (or echoes the user input — keep the existing "Switched to model: {…}" template; show the bare model).
+- `/model <arg>` (`commands/core/src/model.rs`, switch branch): `let listings = self.handle.list_model_listings().await; let (model, profile) = platform_api::parse_model_ref(trimmed, &listings); self.handle.switch_model(&model, profile.as_deref()).await`. Display string uses the resolved `model` (or echoes the user input — keep the existing "Switched to model: {…}" template; show the bare model).
 - `engine-mobile` `SetModel` (`apps/engine-mobile/src/host.rs`, both sites): same list→parse→switch.
 - `bridge-server` `SetModel` (`apps/bridge-server/src/router.rs`): same; the `ModelChanged` event carries the resolved bare `model`.
 - config `default_model`: at session initialization (where the initial `SessionState.model` is set from `OrchestratorConfig.default_model`), run `parse_model_ref(default_model, &listings)` against the engine's assembled listings and set `SessionState.model` + `SessionState.model_profile`. (Locate the exact init site in the plan; the engine already builds the model listings/`model_providers` map during composition.)
@@ -49,7 +49,7 @@ Text/config entry → `list_model_listings()` (profile-aware) → `parse_model_r
 
 ## Testing (TDD)
 
-- `traits::parse_model_ref` pure unit tests: bare-unique → `(id, None)`; `openai/gpt-5.2` → `("gpt-5.2", Some("openai"))`; fully-qualified openrouter `openrouter/openai/gpt-4o` → `("openai/gpt-4o", Some("openrouter"))`; 2-segment `openai/gpt-4o` → qualified (when openai has gpt-4o); unknown prefix `foo/bar` → `("foo/bar", None)`; empty / `/` → `(input, None)`. Use a small hand-built `Vec<ModelListing>` fixture.
+- `platform_api::parse_model_ref` pure unit tests: bare-unique → `(id, None)`; `openai/gpt-5.2` → `("gpt-5.2", Some("openai"))`; fully-qualified openrouter `openrouter/openai/gpt-4o` → `("openai/gpt-4o", Some("openrouter"))`; 2-segment `openai/gpt-4o` → qualified (when openai has gpt-4o); unknown prefix `foo/bar` → `("foo/bar", None)`; empty / `/` → `(input, None)`. Use a small hand-built `Vec<ModelListing>` fixture.
 - `llm-client`: the ambiguous-error message contains the qualified suggestion forms (update the existing assertion in `profile_qualified_resolution_test.rs` / registry tests).
 - `/model` handler: a mock handle whose `list_model_listings` returns openai+copilot for `gpt-5.2`; `/model openai/gpt-5.2` → `switch_model("gpt-5.2", Some("openai"))` called; `/model gpt-4.1` (unique) → `switch_model("gpt-4.1", None)`.
 - mobile + bridge `SetModel`: same list→parse→switch assertion via their mocks.
@@ -63,9 +63,9 @@ Text/config entry → `list_model_listings()` (profile-aware) → `parse_model_r
 
 ## File structure (new + modified)
 
-- Modify: `lingxi-code/traits/src/orchestrator.rs` (`parse_model_ref` next to `ModelListing`)
+- Modify: `lingxi-code/platform-api/src/orchestrator.rs` (`parse_model_ref` next to `ModelListing`)
 - Modify: `lingxi-code/llm-client/src/registry.rs` (ambiguous-error suggestion) + the test asserting the message
 - Modify: `lingxi-code/commands/core/src/model.rs` (`/model` switch branch)
 - Modify: `lingxi-code/apps/engine-mobile/src/host.rs` (both `SetModel` sites), `lingxi-code/apps/bridge-server/src/router.rs` (`SetModel`)
 - Modify: the session-init site that seeds `SessionState.model` from `default_model` (engine composition; pin the exact file/line in the plan)
-- Create: `lingxi-code/traits/tests/parse_model_ref_test.rs` (or an inline `#[cfg(test)]` mod) for the pure-parser cases
+- Create: `lingxi-code/platform-api/tests/parse_model_ref_test.rs` (or an inline `#[cfg(test)]` mod) for the pure-parser cases

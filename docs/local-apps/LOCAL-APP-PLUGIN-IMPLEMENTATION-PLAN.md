@@ -1433,7 +1433,7 @@ Desktop/iOS/Android 的 MCP/Plugin 管理界面使用现有 MCP inventory 展示
 
 | 现有模块 | 现状 | 目标修改 |
 | --- | --- | --- |
-| `lingxi-code/traits/src/mcp.rs` | `McpToolDto` 缺 title/outputSchema/annotations/execution/icons/完整 `_meta`；capability 只有布尔投影 | 用完整标准 DTO 和结构化 initialize result 替换现有形状 |
+| `lingxi-code/platform-api/src/mcp.rs` | `McpToolDto` 缺 title/outputSchema/annotations/execution/icons/完整 `_meta`；capability 只有布尔投影 | 用完整标准 DTO 和结构化 initialize result 替换现有形状 |
 | `lingxi-code/mcp/src/client.rs` | 已解析 searchHint/alwaysLoad 和 structuredContent | 传递 Tool 全部标准字段与原始 `_meta`，增加 wire fixtures |
 | `lingxi-code/mcp/src/registry.rs` | 已处理 `notifications/tools/list_changed` | 复用现有 refresh/generation，增加 per-App managed server 的注册和注销入口 |
 | `lingxi-code/tools/mcp/src/mcp_tool.rs` | 已把 MCP DTO 转成可调用 tool 并传递 structured result | 传递 outputSchema/annotations/execution，调用现有 permission 检查 |

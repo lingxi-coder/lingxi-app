@@ -21,9 +21,9 @@ client-protocol = { path = "../client-protocol" }
 # The shared wire vocabulary (`protocol::ContentBlock` etc.) the lowering fns
 # (F1-11) read from.
 protocol = { path = "../protocol" }
-# `traits::OutputStream` / `traits::PermissionGate` — the engine sink traits the
+# `platform_api::OutputStream` / `platform_api::PermissionGate` — the engine sink traits the
 # adapter implements (F1-12 / F1-14).
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 # REQUIRED for `permission::tool_default` (the `PromptDefault` → `bool` collapse)
 # and the re-exported `PermissionRequest` / `PermissionResponse` from
 # `permission::gate` that `AdapterPermissionGate` (F1-14) plumbs through.

@@ -1,7 +1,7 @@
 //! Device-code flow for `OpenAI` / `ChatGPT` OAuth login.
 //!
-//! Port of codex `login/src/device_code_auth.rs` onto the `traits::HttpTransport`
-//! + `traits::Clock` seams so the flow is testable offline.
+//! Port of codex `login/src/device_code_auth.rs` onto the `platform_api::HttpTransport`
+//! + `platform_api::Clock` seams so the flow is testable offline.
 //!
 //! Flow:
 //! 1. `request_device_code` → POST `device_usercode_url` → `DeviceUserCode`
@@ -16,7 +16,7 @@ use protocol::{HttpMethod, HttpRequest};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use traits::{Clock, HttpTransport};
+use platform_api::{Clock, HttpTransport};
 
 /// Maximum time to wait for the user to complete device-code login.
 const MAX_WAIT: Duration = Duration::from_secs(15 * 60);

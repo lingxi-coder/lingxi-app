@@ -6,7 +6,7 @@ use crate::definition::{
 };
 use crate::display::{AgentColor, AgentDisplay};
 use async_trait::async_trait;
-use engine::token::Usage;
+use lingxi_core::token::Usage;
 use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -215,13 +215,13 @@ impl CountingInvoker {
     }
 }
 #[async_trait]
-impl traits::ToolInvoker for CountingInvoker {
+impl platform_api::ToolInvoker for CountingInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(serde_json::json!("tool-output"))
     }
@@ -233,14 +233,14 @@ impl traits::ToolInvoker for CountingInvoker {
 struct AbortInvoker;
 
 #[async_trait]
-impl traits::ToolInvoker for AbortInvoker {
+impl platform_api::ToolInvoker for AbortInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
-        Err(traits::tool_invoker::ToolInvokerError::Abort(
+        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        Err(platform_api::tool_invoker::ToolInvokerError::Abort(
             "Agent aborted: too many classifier denials in headless mode".into(),
         ))
     }
@@ -263,13 +263,13 @@ impl SessionModeRecordingInvoker {
 }
 
 #[async_trait]
-impl traits::ToolInvoker for SessionModeRecordingInvoker {
+impl platform_api::ToolInvoker for SessionModeRecordingInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         *self.captured.lock().unwrap() = Some(ctx.is_non_interactive_session);
         Ok(serde_json::json!("tool-output"))
     }
@@ -288,10 +288,10 @@ struct MockBudget {
     exceeded: bool,
 }
 #[async_trait]
-impl traits::budget::BudgetEnforcerHandle for MockBudget {
-    async fn check_and_charge(&self, _: u64) -> Result<(), traits::budget::BudgetError> {
+impl platform_api::budget::BudgetEnforcerHandle for MockBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
         if self.exceeded {
-            Err(traits::budget::BudgetError::Exceeded {
+            Err(platform_api::budget::BudgetError::Exceeded {
                 current_nano_usd: 1_500_000_000,
             })
         } else {
@@ -389,7 +389,7 @@ fn tool_use_response_with_usage(
 /// raising `max_turns` so multi-turn loops are reachable.
 fn loop_ctx(
     api_client: Arc<dyn crate::api::SubagentApiClient>,
-    tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+    tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
     max_turns: u32,
 ) -> SubagentContext {
     let mut ctx = fresh_subagent_ctx();
@@ -485,7 +485,7 @@ async fn drain(mut rx: mpsc::Receiver<SubagentEvent>) -> Vec<SubagentEvent> {
 
 #[tokio::test]
 async fn workflow_watchdog_times_out_stream_open() {
-    let policy = traits::WorkflowQueryWatchdog {
+    let policy = platform_api::WorkflowQueryWatchdog {
         stall_timeout_ms: 10,
         max_retries: 0,
     };
@@ -508,7 +508,7 @@ async fn workflow_watchdog_times_out_before_first_event() {
         futures::stream::pending::<Result<llm_client::LlmEvent, llm_client::LlmError>>().boxed();
     let mut watched = with_workflow_stream_watchdog(
         stream,
-        Some(traits::WorkflowQueryWatchdog {
+        Some(platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 10,
             max_retries: 0,
         }),
@@ -534,7 +534,7 @@ async fn workflow_watchdog_resets_between_events_and_has_no_total_deadline() {
     .boxed();
     let watched = with_workflow_stream_watchdog(
         stream,
-        Some(traits::WorkflowQueryWatchdog {
+        Some(platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 20,
             max_retries: 0,
         }),
@@ -552,13 +552,13 @@ struct SlowInvoker {
 }
 
 #[async_trait]
-impl traits::ToolInvoker for SlowInvoker {
+impl platform_api::ToolInvoker for SlowInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         tokio::time::sleep(self.delay).await;
         Ok(serde_json::json!("slow-tool-finished"))
     }
@@ -577,13 +577,13 @@ async fn workflow_watchdog_does_not_cover_tool_execution() {
     let api: Arc<dyn crate::api::SubagentApiClient> =
         Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             inner,
-            traits::WorkflowQueryWatchdog {
+            platform_api::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 0,
             },
             Vec::new(),
         ));
-    let invoker: Arc<dyn traits::ToolInvoker> = Arc::new(SlowInvoker {
+    let invoker: Arc<dyn platform_api::ToolInvoker> = Arc::new(SlowInvoker {
         delay: std::time::Duration::from_millis(35),
     });
     let ctx = loop_ctx(api, Some(invoker), 3);
@@ -629,9 +629,9 @@ struct RetryObserver {
 }
 
 #[async_trait]
-impl traits::SubagentSpawnObserver for RetryObserver {
-    async fn on_event(&self, event: traits::SubagentObservation) {
-        if let traits::SubagentObservation::Retry {
+impl platform_api::SubagentSpawnObserver for RetryObserver {
+    async fn on_event(&self, event: platform_api::SubagentObservation) {
+        if let platform_api::SubagentObservation::Retry {
             attempt, reason, ..
         } = event
         {
@@ -647,11 +647,11 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
         calls: AtomicUsize::new(0),
     });
     let observer = Arc::new(RetryObserver::default());
-    let observer_dyn: Arc<dyn traits::SubagentSpawnObserver> = observer.clone();
+    let observer_dyn: Arc<dyn platform_api::SubagentSpawnObserver> = observer.clone();
     let api: Arc<dyn crate::api::SubagentApiClient> =
         Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             inner.clone(),
-            traits::WorkflowQueryWatchdog {
+            platform_api::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 5,
             },
@@ -701,7 +701,7 @@ async fn run_subagent_emits_message_on_api_stream_end_then_completed() {
     let ctx = fresh_subagent_ctx();
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
     // Drive the runner from a request-response cycle the M1 reducer
@@ -716,7 +716,7 @@ async fn run_subagent_emits_message_on_api_stream_end_then_completed() {
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
     event_tx
-        .send(engine::Event::UserMessage {
+        .send(lingxi_core::Event::UserMessage {
             message_id: msg_id,
             request_id: req,
             content: "hi".into(),
@@ -724,11 +724,11 @@ async fn run_subagent_emits_message_on_api_stream_end_then_completed() {
         .await
         .unwrap();
     event_tx
-        .send(engine::Event::ApiStreamStart { request_id: req })
+        .send(lingxi_core::Event::ApiStreamStart { request_id: req })
         .await
         .unwrap();
     event_tx
-        .send(engine::Event::ApiStreamEnd {
+        .send(lingxi_core::Event::ApiStreamEnd {
             request_id: req,
             final_message: final_msg.clone(),
             usage: Usage::default(),
@@ -797,14 +797,14 @@ async fn run_subagent_emits_killed_on_user_exit_terminal() {
     let ctx = fresh_subagent_ctx();
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
     // Drive directly to terminal via UserExit. The fast-path in the
     // runner short-circuits to Killed on this input event.
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     drop(event_tx);
 
     handle.await.unwrap();
@@ -848,12 +848,12 @@ async fn run_subagent_emits_killed_on_user_interrupt_terminal() {
     let ctx = fresh_subagent_ctx();
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
-    event_tx.send(engine::Event::UserInterrupt).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
     drop(event_tx);
 
     handle.await.unwrap();
@@ -876,7 +876,7 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
     let ctx = fresh_subagent_ctx();
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
@@ -936,7 +936,7 @@ async fn loop_single_end_turn_completes_with_aggregated_text() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -953,7 +953,7 @@ async fn loop_completed_result_carries_claude_content_array() {
     // blocks (one per text block), not only the joined `text` string.
     let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -982,7 +982,7 @@ async fn loop_g2_backward_scan_recovers_text_from_earlier_turn() {
     ]);
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1013,7 +1013,7 @@ async fn schema_forces_structured_output_and_returns_the_tool_input() {
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api, Some(invoker.clone()), 4);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1044,7 +1044,7 @@ async fn schema_invalid_output_retried_then_captured() {
         r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
             .to_string(),
     );
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1083,7 +1083,7 @@ async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
         r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
             .to_string(),
     );
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1122,7 +1122,7 @@ async fn schema_retry_cap_exceeded_aborts() {
     let mut ctx = loop_ctx(api, Some(invoker), 10);
     ctx.schema =
         Some(r#"{"type":"object","properties":{"answer":{"type":"integer"}}}"#.to_string());
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     // Five invalid schema turns each surface multiple non-terminal events
     // before the runner returns. Keep the fixture from back-pressuring the
     // runner while this synchronous test waits to drain after completion.
@@ -1157,7 +1157,7 @@ async fn schema_no_call_nudges_twice_then_aborts() {
     let api2 = api.clone();
     let mut ctx = loop_ctx(api, Some(invoker), 10);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1227,7 +1227,7 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     ]);
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1268,7 +1268,7 @@ async fn loop_consumes_streaming_seam_end_to_end() {
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1291,7 +1291,7 @@ async fn synchronous_child_dispatch_preserves_scheduled_headless_session_mode() 
     ctx.is_async = false;
     ctx.session_interactive = Some(false);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -1316,7 +1316,7 @@ async fn loop_advertises_context_tool_schemas_to_the_seam() {
     })];
     ctx.tool_schemas = schemas.clone();
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -1355,7 +1355,7 @@ async fn schema_replaces_inherited_structured_output_tool() {
     });
     ctx.schema = Some(stage_schema.to_string());
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -1395,7 +1395,7 @@ async fn loop_streaming_protocol_error_surfaces_failed() {
     let api = StreamingMockApiClient::new(vec![truncated]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1421,7 +1421,7 @@ async fn loop_refuses_tool_outside_allowed_list_without_dispatching() {
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.allowed_tools = vec!["Bash".to_string()];
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1538,7 +1538,7 @@ async fn loop_nke_tool_refusal_includes_companion_note() {
         let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
         ctx.allowed_tools = vec!["Read".to_string()];
 
-        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
         run_subagent(ctx, event_rx, out_tx).await;
         let evs = drain(out_rx).await;
@@ -1580,7 +1580,7 @@ async fn loop_non_nke_tool_refusal_has_no_companion_note() {
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.allowed_tools = vec!["Read".to_string()];
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1618,7 +1618,7 @@ async fn loop_allows_tool_in_allowed_list() {
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.allowed_tools = vec!["Read".to_string()];
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -1641,7 +1641,7 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1676,7 +1676,7 @@ async fn loop_budget_ok_does_not_interfere_with_completion() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.budget = Some(Arc::new(MockBudget { exceeded: false }));
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1699,7 +1699,7 @@ async fn loop_tool_use_then_end_turn_invokes_tool_and_runs_two_turns() {
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1723,7 +1723,7 @@ async fn permission_abort_fails_subagent_without_recoverable_tool_result() {
     ]);
     let ctx = loop_ctx(api.clone(), Some(Arc::new(AbortInvoker)), 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let events = drain(out_rx).await;
@@ -1757,7 +1757,7 @@ async fn loop_end_turn_with_tool_use_still_dispatches_then_completes() {
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1786,7 +1786,7 @@ async fn loop_truncated_tool_use_terminates_instead_of_looping() {
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1812,7 +1812,7 @@ async fn loop_api_error_surfaces_failed() {
     })]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1835,14 +1835,14 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     ctx.prompt_messages = vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "design the local app".to_string(),
     )];
     let agent_id = ctx.agent_id;
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -1874,7 +1874,7 @@ async fn loop_tool_use_without_invoker_fails() {
     let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("tool_use")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1904,7 +1904,7 @@ async fn loop_exhausts_max_turns_when_never_terminal() {
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1924,9 +1924,9 @@ async fn loop_user_interrupt_mid_flight_surfaces_killed() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
-    event_tx.send(engine::Event::UserInterrupt).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
 
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -1959,7 +1959,7 @@ async fn persist_mode_processes_second_message_after_idling() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
@@ -1979,7 +1979,7 @@ async fn persist_mode_processes_second_message_after_idling() {
     assert_eq!(result["text"], "answer one", "turn-set 1 result");
 
     event_tx
-        .send(engine::Event::UserMessage {
+        .send(lingxi_core::Event::UserMessage {
             message_id: MessageId::new(),
             request_id: RequestId::new(),
             content: "second question".into(),
@@ -2022,11 +2022,11 @@ async fn persist_mode_transcript_distinguishes_idle_from_true_terminal() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     let agent_id = ctx.agent_id;
     let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(16);
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
@@ -2054,7 +2054,7 @@ async fn persist_mode_transcript_distinguishes_idle_from_true_terminal() {
     );
 
     event_tx
-        .send(engine::Event::UserMessage {
+        .send(lingxi_core::Event::UserMessage {
             message_id: MessageId::new(),
             request_id: RequestId::new(),
             content: "next".into(),
@@ -2077,7 +2077,7 @@ async fn persist_mode_transcript_distinguishes_idle_from_true_terminal() {
         });
     assert_eq!(last_status.as_deref(), Some("idle"));
 
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     handle.await.unwrap();
     let body = tokio::fs::read_to_string(&path).await.unwrap();
     let last_status = body
@@ -2101,7 +2101,7 @@ async fn persist_mode_terminates_on_channel_close_after_turn_set() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
 
     // Drop the sender immediately: the runner runs turn-set 1, parks, sees
@@ -2133,7 +2133,7 @@ async fn persist_mode_user_exit_while_idle_surfaces_killed() {
     ctx.persistent = true;
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
@@ -2147,7 +2147,7 @@ async fn persist_mode_user_exit_while_idle_surfaces_killed() {
         }
     }
     // Deliver UserExit to the idle runner.
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     handle.await.unwrap();
 
     let evs = drain(out_rx).await;
@@ -2216,7 +2216,7 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
@@ -2225,7 +2225,7 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
 
     // Message the stuck teammate.
     event_tx
-        .send(engine::Event::UserMessage {
+        .send(lingxi_core::Event::UserMessage {
             message_id: MessageId::new(),
             request_id: RequestId::new(),
             content: "are you alive? try again".into(),
@@ -2262,7 +2262,7 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
     );
 
     // Cooperative shutdown of the parked (persistent) runner.
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     handle.await.unwrap();
 }
 
@@ -2289,18 +2289,18 @@ impl PendingPermissionInvoker {
     }
 }
 #[async_trait]
-impl traits::ToolInvoker for PendingPermissionInvoker {
+impl platform_api::ToolInvoker for PendingPermissionInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.invoke_started.notify_one();
         self.release.notified().await;
         self.resolved.store(true, Ordering::SeqCst);
-        Err(traits::tool_invoker::ToolInvokerError::Internal(
+        Err(platform_api::tool_invoker::ToolInvokerError::Internal(
             "Permission to use SlowTool has been denied.".into(),
         ))
     }
@@ -2347,7 +2347,7 @@ impl crate::api::SubagentApiClient for ToolUseThenCapturingApiClient {
 /// a pending permission request. Structurally, LingXi keeps the two channels
 /// separate: permission approval reaches a pending prompt only through the
 /// permission gate below the `ToolInvoker` seam, while a launcher message
-/// arrives as `engine::Event::UserMessage` on the runner's event channel and
+/// arrives as `lingxi_core::Event::UserMessage` on the runner's event channel and
 /// is appended to history as a user message. This test locks that separation:
 /// with a permission prompt PENDING inside `invoke`, an inbound launcher
 /// message (1) does not resolve/approve the prompt, (2) does not re-run the
@@ -2359,12 +2359,12 @@ async fn launcher_message_is_direction_not_approval_of_pending_permission() {
     let invoker = PendingPermissionInvoker::new();
     let mut ctx = loop_ctx(
         api.clone(),
-        Some(invoker.clone() as Arc<dyn traits::ToolInvoker>),
+        Some(invoker.clone() as Arc<dyn platform_api::ToolInvoker>),
         4,
     );
     ctx.persistent = true;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
@@ -2373,7 +2373,7 @@ async fn launcher_message_is_direction_not_approval_of_pending_permission() {
 
     // The launcher messages the running subagent (SendMessage → UserMessage).
     event_tx
-        .send(engine::Event::UserMessage {
+        .send(lingxi_core::Event::UserMessage {
             message_id: MessageId::new(),
             request_id: RequestId::new(),
             content: "switch to auditing the docs instead".into(),
@@ -2432,7 +2432,7 @@ async fn launcher_message_is_direction_not_approval_of_pending_permission() {
     );
 
     // Cooperative shutdown of the parked (persistent) runner.
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     handle.await.unwrap();
 }
 
@@ -2717,7 +2717,7 @@ async fn frontmatter_stop_hook_fires_as_subagent_stop_in_runner() {
         vec![frontmatter_stop_hook("record-subagent-stop-in-runner")];
     ctx.hook_executor = Some(exec_recording_stop(seen.clone()));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2742,7 +2742,7 @@ async fn runner_subagent_stop_context_carries_final_assistant_text() {
         vec![frontmatter_stop_hook("record-subagent-stop-context")];
     ctx.hook_executor = Some(exec_recording_stop_context(seen.clone()));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2767,7 +2767,7 @@ async fn no_frontmatter_hooks_means_no_runner_subagent_stop() {
     // No frontmatter_hooks (default empty). Executor still wired.
     ctx.hook_executor = Some(exec_recording_stop(seen.clone()));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2872,7 +2872,7 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
     ctx.agent_definition.frontmatter_hooks = vec![frontmatter_stop_hook("r7-start-stop-counter")];
     ctx.hook_executor = Some(exec);
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2896,14 +2896,14 @@ struct MockSkillLoader {
     content_text: String,
 }
 #[async_trait]
-impl traits::skill_loader::SkillLoader for MockSkillLoader {
+impl platform_api::skill_loader::SkillLoader for MockSkillLoader {
     async fn resolve_and_load(
         &self,
         skill_name: &str,
         _agent_type: &str,
-    ) -> Option<traits::skill_loader::SkillLoad> {
+    ) -> Option<platform_api::skill_loader::SkillLoad> {
         if skill_name == self.known {
-            Some(traits::skill_loader::SkillLoad {
+            Some(platform_api::skill_loader::SkillLoad {
                 display_name: skill_name.to_string(),
                 progress_message: None,
                 content: vec![ContentBlock::Text {
@@ -2941,7 +2941,7 @@ async fn subagent_start_additional_context_injected_as_system_reminder() {
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
     ctx.hook_executor = Some(exec_with_start_context("extra from hook").await);
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2974,7 +2974,7 @@ async fn mobile_runtime_reminder_is_the_fixed_prefix_before_task_and_hooks() {
     ));
     ctx.hook_executor = Some(exec_with_start_context("extra from hook").await);
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3005,7 +3005,7 @@ async fn subagent_start_multiple_contexts_join_into_one_reminder() {
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
     ctx.hook_executor = Some(exec_with_two_start_contexts("alpha", "beta").await);
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3038,7 +3038,7 @@ async fn no_hook_executor_means_no_preload_injection() {
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
     // hook_executor + skill_loader both unset (default).
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3063,7 +3063,7 @@ async fn resolved_skill_prepends_metadata_then_content() {
         content_text: "SKILL BODY".into(),
     }));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3099,7 +3099,7 @@ async fn missing_skill_is_skipped_no_message() {
         content_text: "SKILL BODY".into(),
     }));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3128,7 +3128,7 @@ async fn preload_order_additional_context_then_skills() {
         content_text: "SKILL BODY".into(),
     }));
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     drop(event_tx);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -3264,9 +3264,9 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     let agent_id = ctx.agent_id;
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -3327,7 +3327,7 @@ async fn qualifying_error_with_no_content_fails() {
         scope: None,
     })]);
     let ctx = loop_ctx(api, Some(CountingInvoker::new()), 10);
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -3360,7 +3360,7 @@ async fn nonqualifying_error_after_content_still_fails() {
     );
     let api = ResultStreamMockApiClient::new(vec![turn1, turn2]);
     let ctx = loop_ctx(api, Some(CountingInvoker::new()), 10);
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
@@ -3389,14 +3389,14 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     ctx.prompt_messages = vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "do the thing".to_string(),
     )];
     let agent_id = ctx.agent_id;
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -3439,14 +3439,14 @@ async fn run_subagent_exposes_seed_before_first_model_response() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     ctx.prompt_messages = vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "design the airplane game".to_string(),
     )];
     let agent_id = ctx.agent_id;
 
-    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(16);
     let task = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
@@ -3471,7 +3471,7 @@ async fn run_subagent_exposes_seed_before_first_model_response() {
         serde_json::from_value(message).expect("seed event is a conversation message");
     assert_eq!(message.text_content(), "design the airplane game");
 
-    event_tx.send(engine::Event::UserExit).await.unwrap();
+    event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
     task.await.unwrap();
 }
 
@@ -3485,7 +3485,7 @@ async fn run_subagent_without_a_transcript_fs_writes_nothing() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     let agent_id = ctx.agent_id;
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -3521,7 +3521,7 @@ async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
         "<system-reminder>\nMOBILE WORKSPACE MUST NOT DUPLICATE\n</system-reminder>",
     ));
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
@@ -3561,14 +3561,14 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn traits::FileSystem>);
+    )) as Arc<dyn platform_api::FileSystem>);
     ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "ALREADY ON DISK".to_string(),
     )]);
     let agent_id = ctx.agent_id;
 
-    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;

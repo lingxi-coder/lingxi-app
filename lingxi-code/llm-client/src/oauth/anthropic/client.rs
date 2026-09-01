@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use traits::{Clock, HttpTransport};
+use platform_api::{Clock, HttpTransport};
 
 /// Timeout for the token-exchange POST.
 ///
@@ -495,11 +495,11 @@ pub async fn init_refresh_driver(
     access_token: Secret<String>,
     refresh_token: Option<Secret<String>>,
     expires_at: SystemTime,
-    http: Arc<dyn traits::HttpTransport>,
-    clock: Arc<dyn traits::Clock>,
+    http: Arc<dyn platform_api::HttpTransport>,
+    clock: Arc<dyn platform_api::Clock>,
     bus: Option<Arc<telemetry::AnalyticsBus>>,
     credentials: Option<Arc<secret::CredentialManager>>,
-    spawner: Arc<dyn traits::RuntimeSpawner>,
+    spawner: Arc<dyn platform_api::RuntimeSpawner>,
 ) -> Result<Arc<AuthState>, OAuthError> {
     let state = AuthState::new(
         config,

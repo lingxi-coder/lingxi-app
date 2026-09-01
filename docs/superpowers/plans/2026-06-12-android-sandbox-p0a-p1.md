@@ -6,7 +6,7 @@
 
 **Architecture:** Spec `docs/superpowers/specs/2026-06-12-android-sandbox-shell-design.md` (r3). This plan covers **P0a + P1 only**; P2 (runner execution), P3 (Shell tool), P4 (Git tool), P5 (bundled interpreter) get their own follow-on plans. P1 is pure host-testable Rust and ordered first; P0a (NDK build + device smoke) is second and is the **global gate for P2+** — no execution work may start until the P0a smoke passes on a device, but P1 host work is gate-independent.
 
-**Tech Stack:** Rust workspace at `lingxi-code/` (run all cargo commands from there). `traits` crate (Sandbox/ProcessRunner seam), `platform-android`, `android-aar` (UniFFI 0.28.3), vendored `third_party/minijail` (incl. `rust/minijail` safe wrapper + `rust/minijail-sys`), Android NDK + `cargo-ndk`, Gradle 9.3 instrumentation harness at `apps/android-aar/kotlin/`.
+**Tech Stack:** Rust workspace at `lingxi-code/` (run all cargo commands from there). `platform-api` crate (Sandbox/ProcessRunner seam), `platform-android`, `android-aar` (UniFFI 0.28.3), vendored `third_party/minijail` (incl. `rust/minijail` safe wrapper + `rust/minijail-sys`), Android NDK + `cargo-ndk`, Gradle 9.3 instrumentation harness at `apps/android-aar/kotlin/`.
 
 **Spec invariants this plan must not violate:**
 - `Sandbox::prepare()` is the only admission path; the Android runner rejects `BypassAuditedWithReason`, wrong backends, and missing plans.
@@ -20,8 +20,8 @@
 
 ```text
 lingxi-code/
-├── traits/src/process.rs                 MODIFY: +3 ProcessError variants
-├── traits/src/sandbox.rs                 MODIFY: +AndroidMinijail variant, +BackendPlanHandle,
+├── platform-api/src/process.rs                 MODIFY: +3 ProcessError variants
+├── platform-api/src/sandbox.rs                 MODIFY: +AndroidMinijail variant, +BackendPlanHandle,
 │                                                 +plan field, +__new_sandboxed_with_plan, +backend_plan()
 ├── platforms/android/src/lib.rs          MODIFY: module decls, shell wiring in AndroidPlatform::new
 ├── platforms/android/src/config.rs       CREATE: AndroidShellConfig
@@ -47,9 +47,9 @@ Responsibilities: `policy.rs` = pure policy→plan mapping (no I/O); `sandbox.rs
 ### Task 1: ProcessError structured variants
 
 **Files:**
-- Modify: `traits/src/process.rs:75-86`
+- Modify: `platform-api/src/process.rs:75-86`
 
-- [ ] **Step 1: Write the failing test** — append at the end of `traits/src/process.rs`:
+- [ ] **Step 1: Write the failing test** — append at the end of `platform-api/src/process.rs`:
 
 ```rust
 #[cfg(test)]
@@ -77,10 +77,10 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p traits structured_variants -- --nocapture`
+Run: `cargo test -p platform-api structured_variants -- --nocapture`
 Expected: FAIL — `no variant or associated item named 'PolicyUnsupported'`
 
-- [ ] **Step 3: Add the variants** — in `traits/src/process.rs`, replace the `ProcessError` enum body:
+- [ ] **Step 3: Add the variants** — in `platform-api/src/process.rs`, replace the `ProcessError` enum body:
 
 ```rust
 /// Failure modes shared by every [`ProcessRunner`] method.
@@ -112,7 +112,7 @@ pub enum ProcessError {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p traits structured_variants`
+Run: `cargo test -p platform-api structured_variants`
 Expected: PASS
 
 - [ ] **Step 5: Verify no exhaustive matches broke** (known `ProcessError` users: `hooks/src/executor.rs`, `platforms/{posix,posix-minimal,windows}`, `tasks/src/handlers/local_bash.rs`, `test-harness/src/contracts/process.rs`, `apps/engine-desktop`)
@@ -123,7 +123,7 @@ Expected: clean (all existing uses are constructions / non-exhaustive matches)
 - [ ] **Step 6: Commit**
 
 ```bash
-git add traits/src/process.rs
+git add platform-api/src/process.rs
 git commit -m "feat(traits): structured ProcessError variants for android policy diagnostics"
 ```
 
@@ -132,9 +132,9 @@ git commit -m "feat(traits): structured ProcessError variants for android policy
 ### Task 2: SandboxBackend::AndroidMinijail
 
 **Files:**
-- Modify: `traits/src/sandbox.rs:54-65`
+- Modify: `platform-api/src/sandbox.rs:54-65`
 
-- [ ] **Step 1: Write the failing test** — inside the existing `#[cfg(test)] mod tests` at the bottom of `traits/src/sandbox.rs` add:
+- [ ] **Step 1: Write the failing test** — inside the existing `#[cfg(test)] mod tests` at the bottom of `platform-api/src/sandbox.rs` add:
 
 ```rust
     #[test]
@@ -151,7 +151,7 @@ git commit -m "feat(traits): structured ProcessError variants for android policy
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p traits android_minijail_backend`
+Run: `cargo test -p platform-api android_minijail_backend`
 Expected: FAIL — `no variant named 'AndroidMinijail'`
 
 - [ ] **Step 3: Add the variant** — in the `SandboxBackend` enum after `WindowsJobObject`:
@@ -164,13 +164,13 @@ Expected: FAIL — `no variant named 'AndroidMinijail'`
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p traits && cargo check --workspace`
+Run: `cargo test -p platform-api && cargo check --workspace`
 Expected: PASS / clean
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add traits/src/sandbox.rs traits/Cargo.toml
+git add platform-api/src/sandbox.rs traits/Cargo.toml
 git commit -m "feat(traits): SandboxBackend::AndroidMinijail variant"
 ```
 
@@ -179,9 +179,9 @@ git commit -m "feat(traits): SandboxBackend::AndroidMinijail variant"
 ### Task 3: BackendPlanHandle + plan carriage on SandboxedCommand (spec D7)
 
 **Files:**
-- Modify: `traits/src/sandbox.rs:179-232`
+- Modify: `platform-api/src/sandbox.rs:179-232`
 
-- [ ] **Step 1: Write the failing tests** — in `traits/src/sandbox.rs` tests module:
+- [ ] **Step 1: Write the failing tests** — in `platform-api/src/sandbox.rs` tests module:
 
 ```rust
     #[derive(Debug, PartialEq)]
@@ -248,10 +248,10 @@ git commit -m "feat(traits): SandboxBackend::AndroidMinijail variant"
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p traits plan`
+Run: `cargo test -p platform-api plan`
 Expected: FAIL — `BackendPlanHandle` not found
 
-- [ ] **Step 3: Implement** — in `traits/src/sandbox.rs`:
+- [ ] **Step 3: Implement** — in `platform-api/src/sandbox.rs`:
 
 Add near the top (after the `use` block):
 
@@ -334,13 +334,13 @@ In `impl SandboxedCommand`, set `plan: None` inside the existing `__new_sandboxe
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p traits && cargo check --workspace`
+Run: `cargo test -p platform-api && cargo check --workspace`
 Expected: PASS / clean — `__new_sandboxed`'s signature did not change, so the posix/windows/hooks/tasks call sites are untouched.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add traits/src/sandbox.rs
+git add platform-api/src/sandbox.rs
 git commit -m "feat(traits): BackendPlanHandle plan carriage on SandboxedCommand (spec D7)"
 ```
 
@@ -517,7 +517,7 @@ git commit -m "feat(platform-android): android sandbox plan types (spec r3)"
 - [ ] **Step 1: Write the failing tests** — append inside `mod tests`:
 
 ```rust
-    use traits::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
+    use platform_api::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
 
     fn base_policy() -> SandboxPolicy {
         SandboxPolicy {
@@ -651,7 +651,7 @@ Expected: FAIL — `plan_from_policy` not found
 - [ ] **Step 3: Implement** — add to `policy.rs` (above tests):
 
 ```rust
-use traits::{NetworkPolicy, SandboxError, SandboxPolicy};
+use platform_api::{NetworkPolicy, SandboxError, SandboxPolicy};
 
 /// Map a [`SandboxPolicy`] onto an [`AndroidSandboxPlan`], failing closed with
 /// a **named guarantee** for everything Android cannot enforce
@@ -1021,7 +1021,7 @@ pub use capabilities::{AndroidSandboxCapabilities, CapabilityCache};
 
 use std::sync::OnceLock;
 
-use traits::{SandboxCapability, SandboxFeatures};
+use platform_api::{SandboxCapability, SandboxFeatures};
 
 /// Probed-by-real-behavior capability matrix (never inferred from API level).
 #[derive(Debug, Clone, Default)]
@@ -1209,7 +1209,7 @@ mod tests {
     use crate::capabilities::AndroidSandboxCapabilities;
     use crate::policy::NetProfile; // not in the impl's imports — tests need it explicitly
     use std::collections::HashMap;
-    use traits::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
+    use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
 
     fn ready_caps() -> AndroidSandboxCapabilities {
         AndroidSandboxCapabilities {
@@ -1268,8 +1268,8 @@ mod tests {
         let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
         assert!(matches!(
             sc.tag(),
-            traits::SandboxedTag::Wrapped {
-                backend: traits::SandboxBackend::AndroidMinijail
+            platform_api::SandboxedTag::Wrapped {
+                backend: platform_api::SandboxBackend::AndroidMinijail
             }
         ));
         let plan = sc
@@ -1298,7 +1298,7 @@ mod tests {
             AndroidSandboxCapabilities::unavailable("no device probe"),
         );
         let err = sb.prepare(cmd(None), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, traits::SandboxError::Unavailable(_)));
+        assert!(matches!(err, platform_api::SandboxError::Unavailable(_)));
     }
 
     #[test]
@@ -1309,7 +1309,7 @@ mod tests {
         let err = sb
             .prepare(cmd(Some(outside.path().to_path_buf())), &deny_net_policy())
             .unwrap_err();
-        assert!(matches!(err, traits::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
     }
 
     #[test]
@@ -1320,7 +1320,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
         let sb = sandbox_with(tmp.path(), ready_caps());
         let err = sb.prepare(cmd(Some(link)), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, traits::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
     }
 
     #[test]
@@ -1341,7 +1341,7 @@ mod tests {
         let sc = sb.bypass_with_audit(cmd(None), "test-reason");
         assert!(matches!(
             sc.tag(),
-            traits::SandboxedTag::BypassAuditedWithReason { .. }
+            platform_api::SandboxedTag::BypassAuditedWithReason { .. }
         ));
         assert!(sc.backend_plan().is_none());
     }
@@ -1360,14 +1360,14 @@ mod tests {
 Implementation (above the tests):
 
 ```rust
-//! [`traits::Sandbox`] impl for Android — validation + plan construction only;
+//! [`platform_api::Sandbox`] impl for Android — validation + plan construction only;
 //! never spawns (spec r3 §AndroidMinijailSandbox).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use traits::{
+use platform_api::{
     BackendPlanHandle, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -1515,7 +1515,7 @@ Tests:
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use traits::{
+    use platform_api::{
         BackendPlanHandle, ProcessCommand, ProcessError, ProcessRunner, SandboxBackend,
         SandboxedCommand, SandboxedTag,
     };
@@ -1613,14 +1613,14 @@ mod tests {
 Implementation:
 
 ```rust
-//! [`traits::ProcessRunner`] for Android. P1 ships the SECURITY INVARIANTS
+//! [`platform_api::ProcessRunner`] for Android. P1 ships the SECURITY INVARIANTS
 //! only — execution stays disabled until the P0a gate passes and the P2 plan
 //! lands the in-engine `minijail_run_pid_pipes` path.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use traits::{
+use platform_api::{
     ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };
@@ -1722,7 +1722,7 @@ git commit -m "feat(platform-android): runner security invariants (execution dis
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use traits::{
+    use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, Platform, SandboxBackend,
         ShareError, SharePayload, ShareResult, SharingService, VoiceError, VoiceRecorder,
         VoiceRecording, VoiceRecordingOpts,

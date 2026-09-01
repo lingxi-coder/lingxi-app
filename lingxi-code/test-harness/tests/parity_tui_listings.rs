@@ -9,7 +9,7 @@ use command_core::mcp::McpHandler;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde_json::Value;
 use std::sync::Arc;
-use traits::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
+use platform_api::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/tui_listings.json");
 

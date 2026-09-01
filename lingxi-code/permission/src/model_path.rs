@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 /// Answers "does this model-supplied path have a host twin?" without teaching
-/// `permission` about I/O. [`traits::FileSystem::translate_model_path`] is a
+/// `permission` about I/O. [`platform_api::FileSystem::translate_model_path`] is a
 /// sync trait method, so this is callable from the sync gate.
 pub trait ModelPathTranslator: Send + Sync {
     /// Resolve a model-supplied path against the guest/host mount table.
@@ -57,8 +57,8 @@ pub enum ModelPathOutcome {
     Fenced,
 }
 
-/// Production adapter over the session's [`traits::FileSystem`].
-pub struct FileSystemPathTranslator(pub Arc<dyn traits::FileSystem>);
+/// Production adapter over the session's [`platform_api::FileSystem`].
+pub struct FileSystemPathTranslator(pub Arc<dyn platform_api::FileSystem>);
 
 impl ModelPathTranslator for FileSystemPathTranslator {
     fn translate(&self, model_path: &str, write: bool) -> ModelPathOutcome {

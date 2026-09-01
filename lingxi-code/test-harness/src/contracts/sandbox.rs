@@ -17,7 +17,7 @@
 //! tests; this contract is the trait-level surface only.
 
 use std::collections::HashMap;
-use traits::sandbox::{
+use platform_api::sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxError, SandboxPolicy,
     SandboxedTag,
 };

@@ -6,7 +6,7 @@
 //! cases (append, truncate, mtime, flock) come with the broader 13-trait
 //! contract sweep in M2.
 
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// Run the standard [`FileSystem`] contract against an impl.
 ///

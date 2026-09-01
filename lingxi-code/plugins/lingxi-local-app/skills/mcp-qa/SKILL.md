@@ -57,7 +57,7 @@ tests something else and calls it equivalent.
 - **Result shape** — `CallToolResult` carries `content` /
   `structuredContent` / `isError` / `_meta` byte for byte (§13.1). This
   part already has a real wire type: `McpToolResultDto`
-  (`traits/src/mcp.rs:285-302`, BUILT — `content`, `is_error`, `meta`,
+  (`platform-api/src/mcp.rs:285-302`, BUILT — `content`, `is_error`, `meta`,
   `structured_content` all present today), though nothing populates it from
   a generated per-App catalog yet. List/search results are bounded with
   `cursor`/`has_more`; an error names a specific, actionable recovery.

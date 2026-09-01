@@ -18,7 +18,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/files` handler — renders the read-file-state cache as a path listing.
 #[derive(Clone)]
@@ -164,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn handle_renders_files_relative_to_cwd() {
         use orchestrator::test_support::MockOrchestratorHandle;
-        use traits::StatusSnapshot;
+        use platform_api::StatusSnapshot;
         // Pre-seed the read-file-state cache (absolute keys, insertion order)
         // and a matching cwd, then drive the real handler: proves the
         // `files_in_context` override + `render_files` compose 1:1 with the

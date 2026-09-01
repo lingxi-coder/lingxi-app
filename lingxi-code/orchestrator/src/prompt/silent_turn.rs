@@ -101,7 +101,7 @@ pub const SPEAKING_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Brief"];
 #[must_use]
 pub fn is_enabled() -> bool {
     let raw = std::env::var("CLAUDE_CODE_SILENT_TURN_REMINDER").ok();
-    traits::env::is_env_truthy(raw.as_deref())
+    platform_api::env::is_env_truthy(raw.as_deref())
 }
 
 /// `c3m()` — the reminder text, with the env override applied.

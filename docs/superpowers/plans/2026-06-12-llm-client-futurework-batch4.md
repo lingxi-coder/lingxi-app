@@ -54,11 +54,11 @@
 
 ---
 
-### Task 1: `traits::subscription` — SubscriptionSnapshot + predicates (FROZEN-ADDITIVE)
+### Task 1: `platform_api::subscription` — SubscriptionSnapshot + predicates (FROZEN-ADDITIVE)
 
 **Files:**
-- Create: `lingxi-code/traits/src/subscription.rs`
-- Modify: `lingxi-code/traits/src/lib.rs` (add `pub mod subscription;` — additive line only)
+- Create: `lingxi-code/platform-api/src/subscription.rs`
+- Modify: `lingxi-code/platform-api/src/lib.rs` (add `pub mod subscription;` — additive line only)
 
 `traits` is frozen-additive: a brand-new module + one new `pub mod` line is allowed; do not touch anything else in the crate.
 
@@ -171,9 +171,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to observe RED**: `cargo test -p traits subscription` → compile error (module missing). That counts as RED for a new module.
+- [ ] **Step 2: Run to observe RED**: `cargo test -p platform-api subscription` → compile error (module missing). That counts as RED for a new module.
 
-- [ ] **Step 3: Implement** `lingxi-code/traits/src/subscription.rs`:
+- [ ] **Step 3: Implement** `lingxi-code/platform-api/src/subscription.rs`:
 
 ```rust
 //! Claude.ai subscription-tier snapshot shared between the composition roots
@@ -282,14 +282,14 @@ impl SubscriptionSnapshot {
 pub type SharedSubscription = Arc<RwLock<Option<SubscriptionSnapshot>>>;
 ```
 
-Add to `lingxi-code/traits/src/lib.rs` (additive — put next to the existing `pub mod` lines): `pub mod subscription;`
+Add to `lingxi-code/platform-api/src/lib.rs` (additive — put next to the existing `pub mod` lines): `pub mod subscription;`
 
-- [ ] **Step 4: GREEN + clippy**: `cargo test -p traits subscription` → all pass. `cargo clippy -p traits --all-targets --no-deps -- -D warnings` → clean.
+- [ ] **Step 4: GREEN + clippy**: `cargo test -p platform-api subscription` → all pass. `cargo clippy -p platform-api --all-targets --no-deps -- -D warnings` → clean.
 - [ ] **Step 5: Frozen check**: `git diff main -- lingxi-code/traits | grep -c '^-[^-]'` → prints `0`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-code/traits/src/subscription.rs lingxi-code/traits/src/lib.rs
+git add lingxi-code/platform-api/src/subscription.rs lingxi-code/platform-api/src/lib.rs
 git commit -m "feat(traits): additive SubscriptionSnapshot + TS billing/upsell predicates
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -612,7 +612,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `lingxi-code/apps/engine-desktop/src/lib.rs` (`build` at :923, `DesktopRuntime` struct — find it in the same file)
 
-Behavior: `build` creates a `traits::subscription::SharedSubscription` slot. After the token read (:972), seed it with `Some(SubscriptionSnapshot { is_subscriber, ..Default::default() })` (API-key/no-token sessions: seed with `Some(SubscriptionSnapshot::default())` — predicates all false). When the OAuth path is active (`llm_oauth_state` set), `tokio::spawn` a background task that calls `fetch_profile_from_oauth_token` + `fetch_user_roles` with the access token and the existing `http` transport, builds the full snapshot via a pure mapping fn, and writes it into the slot. Expose the slot as a new `pub subscription` field on `DesktopRuntime`.
+Behavior: `build` creates a `platform_api::subscription::SharedSubscription` slot. After the token read (:972), seed it with `Some(SubscriptionSnapshot { is_subscriber, ..Default::default() })` (API-key/no-token sessions: seed with `Some(SubscriptionSnapshot::default())` — predicates all false). When the OAuth path is active (`llm_oauth_state` set), `tokio::spawn` a background task that calls `fetch_profile_from_oauth_token` + `fetch_user_roles` with the access token and the existing `http` transport, builds the full snapshot via a pure mapping fn, and writes it into the slot. Expose the slot as a new `pub subscription` field on `DesktopRuntime`.
 
 Secrecy: the access token is cloned ONLY into the spawned task and passed to the two fetchers; never logged, never formatted into errors.
 
@@ -627,7 +627,7 @@ fn subscription_snapshot_from(
     is_subscriber: bool,
     profile: Option<&anthropic_oauth::OAuthProfileResponse>,
     roles: Option<&anthropic_oauth::UserRolesResponse>,
-) -> traits::subscription::SubscriptionSnapshot {
+) -> platform_api::subscription::SubscriptionSnapshot {
     use anthropic_oauth::limits::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile.and_then(|p| p.subscription_type()).and_then(|t| match t {
@@ -637,7 +637,7 @@ fn subscription_snapshot_from(
         SubscriptionType::Enterprise => Some("enterprise"),
         SubscriptionType::Free | SubscriptionType::Unknown => None,
     });
-    traits::subscription::SubscriptionSnapshot {
+    platform_api::subscription::SubscriptionSnapshot {
         is_subscriber,
         subscription_type: subscription_type.map(str::to_owned),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
@@ -690,7 +690,7 @@ fn subscription_snapshot_absent_profile_is_conservative() {
 
 - [ ] **Step 2: RED → implement the fn → GREEN.**
 
-- [ ] **Step 3: Wire the slot into `build` + `DesktopRuntime`.** In `build`: create `let subscription: traits::subscription::SharedSubscription = Arc::new(std::sync::RwLock::new(None));` near the top of step (3). In the `Ok(Some(tokens))` arm, clone the access token string BEFORE it moves into `init_refresh_driver` (`let profile_token = tokens.access_token.clone();` — it's a `Secret<String>`; check how other code exposes it, e.g. `.expose_secret()`, and expose only inside the spawned task). After `is_subscriber` is computed, seed: `*subscription.write().expect("subscription slot") = Some(SubscriptionSnapshot { is_subscriber, ..Default::default() });`. When the refresh driver attaches AND `is_subscriber` (the same `if is_subscriber` block at :997), spawn:
+- [ ] **Step 3: Wire the slot into `build` + `DesktopRuntime`.** In `build`: create `let subscription: platform_api::subscription::SharedSubscription = Arc::new(std::sync::RwLock::new(None));` near the top of step (3). In the `Ok(Some(tokens))` arm, clone the access token string BEFORE it moves into `init_refresh_driver` (`let profile_token = tokens.access_token.clone();` — it's a `Secret<String>`; check how other code exposes it, e.g. `.expose_secret()`, and expose only inside the spawned task). After `is_subscriber` is computed, seed: `*subscription.write().expect("subscription slot") = Some(SubscriptionSnapshot { is_subscriber, ..Default::default() });`. When the refresh driver attaches AND `is_subscriber` (the same `if is_subscriber` block at :997), spawn:
 
 ```rust
 // Background subscription-tier resolution (closes the rendering half of the
@@ -701,7 +701,7 @@ fn subscription_snapshot_absent_profile_is_conservative() {
 // wiring (conservative predicates).
 {
     let slot = subscription.clone();
-    let transport: Arc<dyn traits::HttpTransport> = http.clone();
+    let transport: Arc<dyn platform_api::HttpTransport> = http.clone();
     let token = profile_token.clone();
     tokio::spawn(async move {
         let token = token.expose_secret();
@@ -718,7 +718,7 @@ fn subscription_snapshot_absent_profile_is_conservative() {
 
 (Adapt: exact `Secret` expose API, exact re-export paths, and whether `http` already coerces to `Arc<dyn HttpTransport>` — the profile fetcher signature is `&Arc<dyn HttpTransport>`.) For the no-token / API-key arms, seed `Some(SubscriptionSnapshot::default())`.
 
-Add to `DesktopRuntime`: `pub subscription: traits::subscription::SharedSubscription,` and set it in the struct literal at the end of `build`. Fix any other `DesktopRuntime` construction sites (grep `DesktopRuntime {` across the workspace — test support included).
+Add to `DesktopRuntime`: `pub subscription: platform_api::subscription::SharedSubscription,` and set it in the struct literal at the end of `build`. Fix any other `DesktopRuntime` construction sites (grep `DesktopRuntime {` across the workspace — test support included).
 
 - [ ] **Step 4: Build + tests + clippy**: `cargo test -p engine-desktop` and `cargo clippy -p engine-desktop --all-targets --no-deps -- -D warnings`.
 - [ ] **Step 5: Commit**
@@ -749,9 +749,9 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 fn app_state_subscription_defaults_none_and_snapshot_reads_through() {
     let mut st = AppState::new(StatusSnapshot::default());
     assert!(st.subscription_snapshot().is_none());
-    let slot: traits::subscription::SharedSubscription =
+    let slot: platform_api::subscription::SharedSubscription =
         std::sync::Arc::new(std::sync::RwLock::new(Some(
-            traits::subscription::SubscriptionSnapshot {
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 ..Default::default()
             },
@@ -767,7 +767,7 @@ fn app_state_subscription_defaults_none_and_snapshot_reads_through() {
 /// Shared subscription slot from the composition root (None in tests /
 /// print mode). Read at rate-limit compose time via
 /// [`Self::subscription_snapshot`].
-pub subscription: Option<traits::subscription::SharedSubscription>,
+pub subscription: Option<platform_api::subscription::SharedSubscription>,
 ```
 
 plus an accessor that hides the lock:
@@ -777,7 +777,7 @@ plus an accessor that hides the lock:
 /// a slot and the background fetch (or seed) has filled it. A poisoned lock
 /// degrades to `None` (conservative copy, never a panic in the render path).
 #[must_use]
-pub fn subscription_snapshot(&self) -> Option<traits::subscription::SubscriptionSnapshot> {
+pub fn subscription_snapshot(&self) -> Option<platform_api::subscription::SubscriptionSnapshot> {
     self.subscription
         .as_ref()
         .and_then(|s| s.read().ok())
@@ -785,7 +785,7 @@ pub fn subscription_snapshot(&self) -> Option<traits::subscription::Subscription
 }
 ```
 
-`session.rs`: add `with_subscription(mut self, sub: traits::subscription::SharedSubscription) -> Self` storing into a new `Runtime` field, defaulted `None`; thread it into `AppState` at the same place `command_registry` lands. `mode.rs`: append `.with_subscription(tui_build.runtime.subscription.clone())` to the builder chain at :209-215.
+`session.rs`: add `with_subscription(mut self, sub: platform_api::subscription::SharedSubscription) -> Self` storing into a new `Runtime` field, defaulted `None`; thread it into `AppState` at the same place `command_registry` lands. `mode.rs`: append `.with_subscription(tui_build.runtime.subscription.clone())` to the builder chain at :209-215.
 
 - [ ] **Step 4: GREEN + clippy** on `tui` and `lingxi-cli` builds: `cargo test -p tui state`, `cargo clippy -p tui --all-targets --no-deps -- -D warnings`, `cargo build -p cli` (use the actual CLI package name from `lingxi-code/apps/cli/Cargo.toml` — check it; prior sessions misremembered it as `lingxi-cli`).
 - [ ] **Step 5: Commit**

@@ -18,12 +18,12 @@
 use clap::{Args, Subcommand};
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
-use engine::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
+use lingxi_core::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
 use std::sync::Arc;
-use traits::AuthHandle;
+use platform_api::AuthHandle;
 
 /// `auth` — Manage authentication.
 ///
@@ -143,7 +143,7 @@ async fn run_login(args: &LoginArgs) -> i32 {
     if forced_method == Some(ForceLoginMethod::Gateway) {
         eprintln!(
             "{}",
-            engine::settings::enterprise::GATEWAY_NONINTERACTIVE_LOCKOUT
+            lingxi_core::settings::enterprise::GATEWAY_NONINTERACTIVE_LOCKOUT
         );
         return RUNTIME_ERROR;
     }
@@ -232,7 +232,7 @@ async fn run_login(args: &LoginArgs) -> i32 {
         }
     };
 
-    match engine::settings::enterprise::check_org_membership(
+    match lingxi_core::settings::enterprise::check_org_membership(
         &org_pin,
         std::slice::from_ref(&info.org_id),
     ) {
@@ -386,7 +386,7 @@ fn print_status_json(
         has_stored_api_key,
         oauth_email,
         oauth_org,
-        traits::traffic_mode::is_telemetry_disabled(),
+        platform_api::traffic_mode::is_telemetry_disabled(),
     );
     // Two-space pretty print, matching claude's `jsonStringify(_, null, 2)`.
     match serde_json::to_string_pretty(&value) {
@@ -512,7 +512,7 @@ async fn build_credential_manager() -> Result<Arc<secret::CredentialManager>, an
 
 pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle, anyhow::Error> {
     let credentials = build_credential_manager().await?;
-    let http: Arc<dyn traits::HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
     let config = if use_console {
         ClaudeAiOAuthConfig::console_with_port(0)
     } else {
@@ -525,7 +525,7 @@ pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle,
 pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {
     let mut method = None;
     for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(settings) = serde_json::from_str::<engine::settings::schema::SettingsJson>(&raw)
+        let Ok(settings) = serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(&raw)
         else {
             continue;
         };

@@ -13,7 +13,7 @@ use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;
-use traits::{
+use platform_api::{
     AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };

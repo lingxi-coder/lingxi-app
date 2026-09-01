@@ -4,9 +4,9 @@
 
 **Goal:** Build the `providers` crate's core abstraction (`LlmProvider` trait + pure `WireCodec`/`SseDecoder` + `GenericClient`), wrap Anthropic as the first `LlmProvider`, and add a `ProviderApiAdapter` bridge so the orchestrator can route any provider through its existing `OrchestratorApiClient`/`StreamingApiClient` traits — with zero change to existing behavior.
 
-**Architecture:** A new engine-tier crate `providers` defines the provider abstraction. The translation core is a pure `WireCodec` (encode request / decode response) + `SseDecoder` (stateful streaming). `GenericClient<C: WireCodec>` drives a codec over `traits::HttpTransport` (the harness OpenAI/Gemini use in P3/P4). `AnthropicLlmProvider<T>` delegates verbatim to the existing `api_client::AnthropicProvider` so byte-parity is automatic. A `ProviderApiAdapter` in the `orchestrator` crate adapts any `Arc<dyn LlmProvider>` to the two orchestrator traits. **This plan does NOT touch `apps/cli/src/init.rs`** — production still wires `AnthropicProviderAdapter`, so all existing tests stay green by construction. Composition-root switching is P2.
+**Architecture:** A new engine-tier crate `providers` defines the provider abstraction. The translation core is a pure `WireCodec` (encode request / decode response) + `SseDecoder` (stateful streaming). `GenericClient<C: WireCodec>` drives a codec over `platform_api::HttpTransport` (the harness OpenAI/Gemini use in P3/P4). `AnthropicLlmProvider<T>` delegates verbatim to the existing `api_client::AnthropicProvider` so byte-parity is automatic. A `ProviderApiAdapter` in the `orchestrator` crate adapts any `Arc<dyn LlmProvider>` to the two orchestrator traits. **This plan does NOT touch `apps/cli/src/init.rs`** — production still wires `AnthropicProviderAdapter`, so all existing tests stay green by construction. Composition-root switching is P2.
 
-**Tech Stack:** Rust 1.82.0 (pinned via `rust-toolchain.toml`). `async-trait`, `futures` (stream combinators), `serde_json`, `thiserror`. Reuses `protocol` (canonical types), `traits::HttpTransport`, `api-client` (`AnthropicProvider`, `ApiError`, wire types), `cost::ProviderId`.
+**Tech Stack:** Rust 1.82.0 (pinned via `rust-toolchain.toml`). `async-trait`, `futures` (stream combinators), `serde_json`, `thiserror`. Reuses `protocol` (canonical types), `platform_api::HttpTransport`, `api-client` (`AnthropicProvider`, `ApiError`, wire types), `cost::ProviderId`.
 
 **Spec:** `docs/superpowers/specs/2026-06-01-llm-providers-design.md` (§3 architecture, §12 P1).
 
@@ -64,7 +64,7 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 api-client = { path = "../api-client" }
 cost = { path = "../cost" }
 serde_json.workspace = true
@@ -506,7 +506,7 @@ Create `lingxi-code/providers/src/testutil.rs`:
 use async_trait::async_trait;
 use futures::stream;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::{HttpError, HttpTransport, SseStream};
+use platform_api::{HttpError, HttpTransport, SseStream};
 
 /// A canned transport for unit tests.
 pub(crate) struct MockTransport {
@@ -651,7 +651,7 @@ Expected: FAIL — compile error `cannot find ... GenericClient` (and `WireCodec
 Prepend the following to `lingxi-code/providers/src/client.rs` (above the `#[cfg(test)] mod tests` block):
 
 ```rust
-//! `GenericClient` drives a `WireCodec` over a `traits::HttpTransport`. This
+//! `GenericClient` drives a `WireCodec` over a `platform_api::HttpTransport`. This
 //! is the harness the OpenAI/Gemini codecs plug into (P3/P4).
 
 use crate::auth::Auth;
@@ -666,7 +666,7 @@ use cost::ProviderId;
 use futures::stream::{self, BoxStream, StreamExt};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use traits::{HttpError, HttpTransport, SseStream};
+use platform_api::{HttpError, HttpTransport, SseStream};
 
 /// A codec-driven provider: encode → transport → decode.
 pub struct GenericClient<C: WireCodec> {
@@ -909,7 +909,7 @@ use async_trait::async_trait;
 use cost::ProviderId;
 use futures::stream::BoxStream;
 use std::sync::Arc;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// Anthropic provider backed by `api_client::AnthropicProvider` + a transport.
 pub struct AnthropicLlmProvider<T: HttpTransport + Send + Sync + 'static> {

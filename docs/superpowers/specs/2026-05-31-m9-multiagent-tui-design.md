@@ -30,7 +30,7 @@ It is built **UI-first against a presentation adapter** (Q3): the full surface i
 
 Concrete deliverables — must all ship for v0.10.0:
 
-1. **Bridge contract + presentation model**: `MultiAgentEvent` variants on the existing orchestrator→TUI event path; a `MultiAgentState` aggregate in `AppState`; an adapter trait with a **real poller** impl (over `traits::task_registry::TaskRegistryHandle` + the coordinator mailbox) and a **fixture** impl.
+1. **Bridge contract + presentation model**: `MultiAgentEvent` variants on the existing orchestrator→TUI event path; a `MultiAgentState` aggregate in `AppState`; an adapter trait with a **real poller** impl (over `platform_api::task_registry::TaskRegistryHandle` + the coordinator mailbox) and a **fixture** impl.
 2. **6 team message renderers**: `TaskAssignmentMessage`, `UserTeammateMessage` (+ plan-approval / shutdown / task-completed / idle sub-types), `UserAgentNotificationMessage`, `UserChannelMessage`, `teamMemCollapsed`, `teamMemSaved`.
 3. **Status chrome**: `TeamStatus` (footer count + hint), `CoordinatorAgentStatus` (background-agent panel), `TeammateViewHeader` (viewing-teammate header), `AgentProgressLine` (per-agent tree progress line).
 4. **Background-task surface**: `BackgroundTaskStatus` footer, `BackgroundTasksDialog` (list↔detail), one row renderer per `TaskState` variant (7), `ShellProgress`, and **live output tailing** via `TaskRegistryHandle::output`. Local detail dialogs (Shell / InProcessTeammate / AsyncAgent).
@@ -107,7 +107,7 @@ tui/src/
 | Crate | Where | Why |
 |---|---|---|
 | `tasks` (path dep) | `apps/engine-desktop`, `apps/cli` | construct `TaskRegistry` in the composition root |
-| `traits::task_registry::*` | `tui` (already transitively available) | the `TaskRegistryHandle` the poller consumes |
+| `platform_api::task_registry::*` | `tui` (already transitively available) | the `TaskRegistryHandle` the poller consumes |
 | `coordinator` (path dep, optional) | `tui` or app | mailbox drain for teammate messages (confirm DAG at M9-01; may route through a handle to avoid a `tui→coordinator` edge — see §4 R5) |
 
 No third-party crates. The check-deps gate (`scripts/check_deps.py`) permits apps depending on `tasks`/`coordinator` (apps are composition roots). A `tui → coordinator` edge is evaluated at M9-01 against the gate; if disallowed, the mailbox is surfaced through an existing handle/trait instead (§4 R5).
@@ -377,7 +377,7 @@ Dedicated worktree `m9-execution` on branch `m9-execution`, created at M9-01 via
   - `agent/src/definition.rs` — `AgentDefinition`, `AgentSource`, `AgentToolPolicy`
   - `agent/src/display.rs` — `AgentColor`; `agent/src/color_manager.rs` — `AgentColorManager`
   - `agent/src/runner.rs` — `SubagentEvent`; `agent/src/pool.rs` — `StateMachinePool` (M1.14 stub)
-  - `traits::task_registry::TaskRegistryHandle` (consumed by the poller); `tasks/tests/handle_spool_round_trip.rs` (proves live output)
+  - `platform_api::task_registry::TaskRegistryHandle` (consumed by the poller); `tasks/tests/handle_spool_round_trip.rs` (proves live output)
   - `tui/src/events/orchestrator_bridge.rs` — `TurnEvent`, `BridgeOutputStream` (the path M9 extends)
 - claude-code reference source: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`
   - `components/messages/` — the 6 team renderers

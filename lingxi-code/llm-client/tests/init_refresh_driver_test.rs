@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
-use traits::http::SseStream;
-use traits::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use platform_api::http::SseStream;
+use platform_api::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct NoopTransport;
 #[async_trait]

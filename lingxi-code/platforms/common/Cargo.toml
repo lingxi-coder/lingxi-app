@@ -10,7 +10,7 @@ branding.workspace = true
 jsonrpc = { path = "../../jsonrpc" }
 llm-client = { path = "../../llm-client" }
 http-client = { path = "../../http-client" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 telemetry = { path = "../../telemetry" }
 # `.worktreeinclude` gitignore-style pattern matching (copyWorktreeIncludeFiles

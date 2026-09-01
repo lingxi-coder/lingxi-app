@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

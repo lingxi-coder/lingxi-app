@@ -12,9 +12,9 @@ use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
-use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use traits::{BudgetError, SubagentUsage};
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use platform_api::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -161,7 +161,7 @@ struct EchoSpawner {
 #[derive(Default)]
 struct WorkflowForwardingProbeSpawner {
     plain_spawns: std::sync::atomic::AtomicUsize,
-    watchdogs: StdMutex<Vec<traits::subagent_spawn::WorkflowQueryWatchdog>>,
+    watchdogs: StdMutex<Vec<platform_api::subagent_spawn::WorkflowQueryWatchdog>>,
     observer_presence: StdMutex<Vec<bool>>,
 }
 
@@ -232,8 +232,8 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.watchdogs.lock().unwrap().push(watchdog);
         self.observer_presence
@@ -243,7 +243,7 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
         let agent_id = protocol::AgentId::new();
         if let Some(observer) = observer {
             observer
-                .on_event(traits::subagent_spawn::SubagentObservation::Allocated {
+                .on_event(platform_api::subagent_spawn::SubagentObservation::Allocated {
                     agent_id,
                     agent_type: request.subagent_type,
                     name: request.name,
@@ -258,8 +258,8 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
 
 #[async_trait]
 impl SubagentSpawner for BlockingWorkflowObserverSpawner {
-    async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
-        vec![traits::subagent_spawn::SubagentListingEntry {
+    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+        vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
             tools_description: String::new(),
@@ -289,8 +289,8 @@ impl SubagentSpawner for BlockingWorkflowObserverSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        _observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
-        _watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+        _observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.started
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -312,11 +312,11 @@ struct AllocationCountingObserver {
 }
 
 #[async_trait]
-impl traits::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserver {
-    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+impl platform_api::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserver {
+    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
         if matches!(
             event,
-            traits::subagent_spawn::SubagentObservation::Allocated { .. }
+            platform_api::subagent_spawn::SubagentObservation::Allocated { .. }
         ) {
             self.allocations
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -326,7 +326,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserve
 
 #[async_trait]
 impl SubagentSpawner for EchoSpawner {
-    async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
         [
             "general-purpose",
             "Explore",
@@ -334,7 +334,7 @@ impl SubagentSpawner for EchoSpawner {
             "workflow-subagent",
         ]
         .iter()
-        .map(|t| traits::subagent_spawn::SubagentListingEntry {
+        .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: (*t).to_string(),
             when_to_use: String::new(),
             tools_description: String::new(),
@@ -373,25 +373,25 @@ impl SubagentSpawner for EchoSpawner {
 
 #[derive(Default)]
 struct RecordingWorktreeManager {
-    created: StdMutex<Vec<(String, traits::worktree::WorktreeHandle)>>,
-    removed: StdMutex<Vec<traits::worktree::WorktreeHandle>>,
+    created: StdMutex<Vec<(String, platform_api::worktree::WorktreeHandle)>>,
+    removed: StdMutex<Vec<platform_api::worktree::WorktreeHandle>>,
 }
 
 impl RecordingWorktreeManager {
-    fn created(&self) -> Vec<(String, traits::worktree::WorktreeHandle)> {
+    fn created(&self) -> Vec<(String, platform_api::worktree::WorktreeHandle)> {
         self.created.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl traits::worktree::WorktreeManager for RecordingWorktreeManager {
+impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
     async fn create_worktree(
         &self,
         slug: &str,
         _base_branch: Option<&str>,
         _copy_includes: &[PathBuf],
-    ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
-        let handle = traits::worktree::WorktreeHandle {
+    ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
+        let handle = platform_api::worktree::WorktreeHandle {
             path: PathBuf::from(format!("/tmp/mock-worktrees/{slug}")),
             branch_name: format!("worktree-{slug}"),
             base_commit: Some("base".into()),
@@ -405,22 +405,22 @@ impl traits::worktree::WorktreeManager for RecordingWorktreeManager {
 
     async fn remove_worktree(
         &self,
-        handle: &traits::worktree::WorktreeHandle,
-    ) -> Result<(), traits::worktree::WorktreeError> {
+        handle: &platform_api::worktree::WorktreeHandle,
+    ) -> Result<(), platform_api::worktree::WorktreeError> {
         self.removed.lock().unwrap().push(handle.clone());
         Ok(())
     }
 
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
+    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError> {
         Ok(Vec::new())
     }
 
     async fn cleanup_stale(
         &self,
         _max_age: std::time::Duration,
-    ) -> Result<Vec<PathBuf>, traits::worktree::WorktreeError> {
+    ) -> Result<Vec<PathBuf>, platform_api::worktree::WorktreeError> {
         Ok(Vec::new())
     }
 
@@ -552,7 +552,7 @@ impl FileSystem for InMemoryFs {
 #[derive(Default)]
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
-    workflow_outcome: StdMutex<Option<traits::task_registry::WorkflowTerminalOutcome>>,
+    workflow_outcome: StdMutex<Option<platform_api::task_registry::WorkflowTerminalOutcome>>,
     calls: StdMutex<Vec<&'static str>>,
 }
 #[async_trait]
@@ -570,7 +570,7 @@ impl TaskStatusSink for RecordingSink {
     async fn set_workflow_outcome(
         &self,
         _task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
         self.calls.lock().unwrap().push("outcome");
         *self.workflow_outcome.lock().unwrap() = Some(outcome);
@@ -631,7 +631,7 @@ impl TaskStatusSink for BlockingWorkflowTerminalSink {
     async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
         self.inner.set_workflow_outcome(task_id, outcome).await;
     }
@@ -639,7 +639,7 @@ impl TaskStatusSink for BlockingWorkflowTerminalSink {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         self.terminalizing
@@ -709,8 +709,8 @@ struct TranscriptOverrideSpawner {
 
 #[async_trait]
 impl SubagentSpawner for TranscriptOverrideSpawner {
-    async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
-        vec![traits::subagent_spawn::SubagentListingEntry {
+    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+        vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
             tools_description: String::new(),
@@ -867,7 +867,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
     struct YieldSpawner;
     #[async_trait]
     impl SubagentSpawner for YieldSpawner {
-        async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+        async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
             Vec::new()
         }
         async fn spawn(
@@ -1786,7 +1786,7 @@ async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
         transcript_subdir: None,
     };
     let observer = Arc::new(AllocationCountingObserver::default());
-    let watchdog = traits::subagent_spawn::WorkflowQueryWatchdog {
+    let watchdog = platform_api::subagent_spawn::WorkflowQueryWatchdog {
         stall_timeout_ms: 1_234,
         max_retries: 2,
     };
@@ -3954,9 +3954,9 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
     let agent_id = protocol::AgentId::new();
     let agent_id_string = agent_id.to_string();
 
-    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        traits::subagent_spawn::SubagentObservation::Allocated {
+        platform_api::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
@@ -3977,9 +3977,9 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
         Some("deepseek/deepseek-v4-flash")
     );
 
-    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        traits::subagent_spawn::SubagentObservation::Retry {
+        platform_api::subagent_spawn::SubagentObservation::Retry {
             agent_id,
             attempt: 2,
             reason: "workflow model query stalled while opening the response stream".to_string(),
@@ -4054,9 +4054,9 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         0,
     );
     let agent_id = protocol::AgentId::new();
-    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        traits::subagent_spawn::SubagentObservation::Allocated {
+        platform_api::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
@@ -4065,18 +4065,18 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         },
     )
     .await;
-    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        traits::subagent_spawn::SubagentObservation::Progress {
+        platform_api::subagent_spawn::SubagentObservation::Progress {
             agent_id,
             token_count: 11,
             tool_use_count: 2,
         },
     )
     .await;
-    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        traits::subagent_spawn::SubagentObservation::Completed {
+        platform_api::subagent_spawn::SubagentObservation::Completed {
             agent_id,
             content: Value::String("done".to_string()),
             total_tool_use_count: 3,

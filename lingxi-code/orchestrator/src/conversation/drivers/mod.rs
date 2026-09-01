@@ -1934,7 +1934,7 @@ impl ConversationOrchestrator {
     /// `<cross-session-message>` envelopes (2.1.232 `isMeta:!0`). Policy is
     /// applied at receive; this only injects already-accepted bodies.
     pub(crate) async fn drain_peer_inbox(&self, mid_turn: bool) -> bool {
-        let reminders = traits::live_sessions::take_accepted_peer_reminders(mid_turn);
+        let reminders = platform_api::live_sessions::take_accepted_peer_reminders(mid_turn);
         if reminders.is_empty() {
             return false;
         }
@@ -2042,7 +2042,7 @@ impl ConversationOrchestrator {
     /// the staged 429 into `self.api`'s caches (via
     /// [`crate::provider_adapter::ProviderApiAdapter::promote_pending_429`]),
     /// so these emit-on-change helpers flow the rejected snapshot (+ raw
-    /// windows) out as an [`traits::OutputEvent::RateLimit`] (+ `RawUtilization`).
+    /// windows) out as an [`platform_api::OutputEvent::RateLimit`] (+ `RawUtilization`).
     ///
     /// Gated on the rate-limited discriminant a terminal error carries BEFORE
     /// enrichment — `ApiCall(RateLimited)` (batched) or `Streaming(RateLimited)`
@@ -2081,7 +2081,7 @@ impl ConversationOrchestrator {
             prompt_len = prompt.len()
         );
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-            traits::session_flags::scope_non_interactive_session(
+            platform_api::session_flags::scope_non_interactive_session(
                 !self.prompt_is_interactive(),
                 self.try_run_turn(prompt),
             )
@@ -2282,7 +2282,7 @@ impl ConversationOrchestrator {
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-            traits::session_flags::scope_non_interactive_session(
+            platform_api::session_flags::scope_non_interactive_session(
                 !self.prompt_is_interactive(),
                 Box::pin(self.try_run_turn_streaming(prompt, Vec::new(), None, None, false)),
             )
@@ -2320,7 +2320,7 @@ impl ConversationOrchestrator {
     pub async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
         self.output.emit_turn_started().await;
-        let result = traits::session_flags::scope_non_interactive_session(
+        let result = platform_api::session_flags::scope_non_interactive_session(
             !self.prompt_is_interactive(),
             Box::pin(self.try_run_turn_streaming("", Vec::new(), None, None, true)),
         )
@@ -2886,7 +2886,7 @@ impl ConversationOrchestrator {
         );
         let result =
             telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                traits::session_flags::scope_non_interactive_session(
+                platform_api::session_flags::scope_non_interactive_session(
                     !self.prompt_is_interactive(),
                     self.try_run_turn_cancelable(prompt, cancel),
                 )
@@ -3195,7 +3195,7 @@ impl ConversationOrchestrator {
         let r = telemetry::otel::with_turn_span(
             "lingxi.orchestrator.turn.streaming.cancelable",
             async {
-                traits::session_flags::scope_non_interactive_session(
+                platform_api::session_flags::scope_non_interactive_session(
                     !self.prompt_is_interactive(),
                     Box::pin(self.try_run_turn_streaming(
                         prompt,

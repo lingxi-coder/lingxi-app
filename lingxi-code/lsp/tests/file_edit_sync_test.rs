@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 struct CaptureTransport {
     id: protocol::McpConnectionId,

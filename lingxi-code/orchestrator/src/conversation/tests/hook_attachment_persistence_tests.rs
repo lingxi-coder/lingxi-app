@@ -30,11 +30,11 @@ mod tool_frame_ordering_tests {
         )
     }
 
-    fn result_ids(events: &[traits::orchestrator::OutputEvent]) -> Vec<String> {
+    fn result_ids(events: &[platform_api::orchestrator::OutputEvent]) -> Vec<String> {
         events
             .iter()
             .filter_map(|e| match e {
-                traits::orchestrator::OutputEvent::ToolResult { id, .. } => Some(id.to_string()),
+                platform_api::orchestrator::OutputEvent::ToolResult { id, .. } => Some(id.to_string()),
                 _ => None,
             })
             .collect()
@@ -123,7 +123,7 @@ mod tool_frame_ordering_tests {
         let events = output.snapshot().await;
         let found = events.iter().any(|e| matches!(
             e,
-            traits::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
+            platform_api::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
         ));
         assert!(found, "the released frame must be emitted");
         assert!(
@@ -134,7 +134,7 @@ mod tool_frame_ordering_tests {
 }
 
 fn orch_with_writer(dir: &std::path::Path, path: std::path::PathBuf) -> ConversationOrchestrator {
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -290,35 +290,35 @@ async fn executor_run_reaches_the_transcript_through_the_real_sink() {
 
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
+    impl platform_api::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }

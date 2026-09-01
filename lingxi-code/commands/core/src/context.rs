@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/context` handler — renders the context-usage header panel.
 #[derive(Clone)]
@@ -58,7 +58,7 @@ impl BuiltinCommandHandler for ContextHandler {
 /// sub-tables are deferred). The `**Model:**` line carries the markdown
 /// hard-break (two trailing spaces) exactly as the TS source does.
 #[must_use]
-fn render_context(model: &str, usage: &traits::ContextUsageSnapshot) -> String {
+fn render_context(model: &str, usage: &platform_api::ContextUsageSnapshot) -> String {
     let used = usage.live_context_tokens;
     let max = usage.max_context_tokens;
     let pct = percentage(used, max);
@@ -88,8 +88,8 @@ fn render_context(model: &str, usage: &traits::ContextUsageSnapshot) -> String {
     out
 }
 
-fn category_label(kind: traits::ContextUsageCategoryKind) -> &'static str {
-    use traits::ContextUsageCategoryKind as Kind;
+fn category_label(kind: platform_api::ContextUsageCategoryKind) -> &'static str {
+    use platform_api::ContextUsageCategoryKind as Kind;
     match kind {
         Kind::SystemPrompt => "System prompt",
         Kind::SystemTools => "System tools",
@@ -168,7 +168,7 @@ mod tests {
     fn renders_header_with_locked_layout() {
         let s = render_context(
             "claude-opus-4-7",
-            &traits::ContextUsageSnapshot {
+            &platform_api::ContextUsageSnapshot {
                 live_context_tokens: 50_000,
                 max_context_tokens: 200_000,
                 ..Default::default()
@@ -187,10 +187,10 @@ mod tests {
 
     #[test]
     fn renders_shared_category_breakdown() {
-        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+        use platform_api::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
         let s = render_context(
             "claude-opus-5",
-            &traits::ContextUsageSnapshot {
+            &platform_api::ContextUsageSnapshot {
                 live_context_tokens: 100_000,
                 max_context_tokens: 1_000_000,
                 breakdown: vec![
@@ -212,7 +212,7 @@ mod tests {
     fn renders_explicit_over_context_warning() {
         let s = render_context(
             "claude-opus-5",
-            &traits::ContextUsageSnapshot {
+            &platform_api::ContextUsageSnapshot {
                 live_context_tokens: 1_012_345,
                 max_context_tokens: 1_000_000,
                 ..Default::default()
@@ -265,9 +265,9 @@ mod tests {
     #[tokio::test]
     async fn reflects_status_snapshot_model() {
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_status_snapshot(traits::StatusSnapshot {
+        mock.set_status_snapshot(platform_api::StatusSnapshot {
             model: "claude-sonnet-4-6".into(),
-            ..traits::StatusSnapshot::default()
+            ..platform_api::StatusSnapshot::default()
         });
         let h = ContextHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {

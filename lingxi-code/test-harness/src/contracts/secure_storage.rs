@@ -14,7 +14,7 @@
 //! surface only.
 
 use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
-use traits::SecureStorage;
+use platform_api::SecureStorage;
 
 const SERVICE: &str = "lingxi-contract-test";
 const ACCOUNT: &str = "contract@test.local";

@@ -13,7 +13,7 @@
 //! exercise it against the mock impl, the posix impl, and the windows impl.
 
 use std::time::Duration;
-use traits::Clock;
+use platform_api::Clock;
 
 /// Run the standard [`Clock`] contract against an impl.
 ///

@@ -246,7 +246,7 @@ async fn clear_session_resets_refusal_fallback_latch() {
         "first session swaps"
     );
 
-    <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&orch)
+    <ConversationOrchestrator as platform_api::OrchestratorHandle>::clear_session(&orch)
         .await
         .expect("clear_session succeeds");
 
@@ -271,13 +271,13 @@ async fn resume_session_resets_refusal_fallback_latch() {
         "first session swaps"
     );
 
-    <ConversationOrchestrator as traits::OrchestratorHandle>::resume_session(
+    <ConversationOrchestrator as platform_api::OrchestratorHandle>::resume_session(
         &orch,
         SessionId::new(),
         vec![],
         None,
         None,
-        traits::ResumeRuntimeSnapshot::default(),
+        platform_api::ResumeRuntimeSnapshot::default(),
     )
     .await
     .expect("resume_session succeeds");

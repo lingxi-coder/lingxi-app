@@ -393,7 +393,7 @@ mod tests {
     fn apply_gate_marks_disabled_servers() {
         use crate::connection::ConfigScope;
         use std::collections::HashMap;
-        use traits::McpTransportSpec;
+        use platform_api::McpTransportSpec;
 
         let stdio = |name: &str| McpServerConfig {
             name: name.to_string(),
@@ -481,7 +481,7 @@ mod tests {
     fn apply_gate_rejects_disabled_mcpjson_project_server() {
         use crate::connection::ConfigScope;
         use std::collections::HashMap;
-        use traits::McpTransportSpec;
+        use platform_api::McpTransportSpec;
 
         let stdio = |name: &str, scope: ConfigScope| McpServerConfig {
             name: name.to_string(),
@@ -533,7 +533,7 @@ mod tests {
     fn apply_gate_missing_config_gates_only_builtin() {
         use crate::connection::ConfigScope;
         use std::collections::HashMap;
-        use traits::McpTransportSpec;
+        use platform_api::McpTransportSpec;
 
         let stdio = |name: &str| McpServerConfig {
             name: name.to_string(),
@@ -585,7 +585,7 @@ mod tests {
         };
         let server = McpServerConfig {
             name: "docs".into(),
-            spec: traits::McpTransportSpec::Stdio {
+            spec: platform_api::McpTransportSpec::Stdio {
                 command: "docs".into(),
                 args: Vec::new(),
                 env: std::collections::HashMap::new(),
@@ -611,7 +611,7 @@ mod tests {
         let policy = McpPolicyContext::default();
         let make = |scope| McpServerConfig {
             name: "docs".into(),
-            spec: traits::McpTransportSpec::Stdio {
+            spec: platform_api::McpTransportSpec::Stdio {
                 command: "docs".into(),
                 args: Vec::new(),
                 env: std::collections::HashMap::new(),

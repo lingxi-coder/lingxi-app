@@ -30,7 +30,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// Always-ok test tool. Mirrors the `AlwaysOkTool` from
 /// `orchestrator_multi_turn_test.rs` verbatim — reused here so the

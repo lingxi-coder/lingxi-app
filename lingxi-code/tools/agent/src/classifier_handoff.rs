@@ -55,7 +55,7 @@ pub fn format_security_warning(reason: &str) -> String {
 /// byte-identical to today.
 #[must_use]
 pub fn is_transcript_classifier_enabled() -> bool {
-    traits::env::is_env_truthy(
+    platform_api::env::is_env_truthy(
         std::env::var("LINGXI_TRANSCRIPT_CLASSIFIER")
             .ok()
             .as_deref(),

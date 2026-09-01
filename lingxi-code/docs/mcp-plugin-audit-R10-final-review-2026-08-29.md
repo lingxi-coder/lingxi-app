@@ -139,7 +139,7 @@ Rust flow:
 
 - `mcp/src/client.rs:1559-1567` parses `anthropic/searchHint` and
   `anthropic/alwaysLoad`, but has no `anthropic/requiresUserInteraction` field;
-- `traits/src/mcp.rs:217-239` has no DTO slot for the bit;
+- `platform-api/src/mcp.rs:217-239` has no DTO slot for the bit;
 - `tools/mcp/src/mcp_tool.rs:780+` does not override the `Tool` trait's default
   `requires_user_interaction() -> false`;
 - no `suppress_always_allow_rule` channel exists;

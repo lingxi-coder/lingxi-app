@@ -33,7 +33,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -176,7 +176,7 @@ impl Default for AnalyticsBus { fn default() -> Self { Self::new() } }
 
 ```rust
 // feature_flags.rs
-use lingxi_traits::{RuntimeError, RuntimeSpawner};
+use lingxi_platform_api::{RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -261,7 +261,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true
@@ -531,7 +531,7 @@ use crate::config::ClaudeAiOAuthConfig;
 use crate::pkce::{generate_pkce, generate_state_token};
 use lingxi_protocol::Secret;
 use lingxi_secret::CredentialManager;
-use lingxi_traits::HttpTransport;
+use lingxi_platform_api::HttpTransport;
 use std::sync::Arc;
 use thiserror::Error;
 

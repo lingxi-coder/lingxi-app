@@ -26,7 +26,7 @@ use crate::oauth::anthropic::profile::{
     fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
 };
 use std::sync::Arc;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
 /// Presence of this scope is what distinguishes a real Claude.ai login token
@@ -100,7 +100,7 @@ pub fn apply_profile(state: &mut ClaudeAiLimitsState, profile: &OAuthProfileResp
 /// Map the resolved [`SubscriptionType`] to the claude-code `getSubscriptionType()`
 /// string union (`"pro" | "max" | "team" | "enterprise"`). `Free`/`Unknown` →
 /// `None` (no recognized paid tier — the predicates on
-/// [`traits::subscription::SubscriptionSnapshot`] all treat an absent tier as a
+/// [`platform_api::subscription::SubscriptionSnapshot`] all treat an absent tier as a
 /// conservative "not pro / not team / not enterprise").
 #[must_use]
 fn subscription_type_str(tier: SubscriptionType) -> Option<String> {
@@ -124,7 +124,7 @@ pub async fn resolve_subscription_snapshot(
     access_token: &str,
     scopes: &[String],
     transport: &Arc<dyn HttpTransport>,
-) -> Option<traits::subscription::SubscriptionSnapshot> {
+) -> Option<platform_api::subscription::SubscriptionSnapshot> {
     if !has_profile_scope(scopes) {
         return None;
     }
@@ -133,7 +133,7 @@ pub async fn resolve_subscription_snapshot(
     // the profile for `organizationRole`); failure leaves the role unknown.
     let roles = fetch_user_roles(access_token, transport).await;
     let org = profile.organization.as_ref();
-    Some(traits::subscription::SubscriptionSnapshot {
+    Some(platform_api::subscription::SubscriptionSnapshot {
         // `isClaudeAISubscriber` ← the `user:inference` scope.
         is_subscriber: subscription_from_scopes(scopes),
         subscription_type: profile.subscription_type().and_then(subscription_type_str),
@@ -145,7 +145,7 @@ pub async fn resolve_subscription_snapshot(
 }
 
 /// Resolve [`resolve_subscription_snapshot`] and publish it to the process-global
-/// [`traits::subscription`] cache, so subscription-gated logic (e.g. the
+/// [`platform_api::subscription`] cache, so subscription-gated logic (e.g. the
 /// `AgentTool` pro-plan prompt gate) reflects the signed-in user's plan.
 /// Best-effort: a missing `user:profile` scope or a failed fetch leaves the
 /// cache unchanged (subscription stays "unknown", matching the binary default).
@@ -155,7 +155,7 @@ pub async fn publish_subscription(
     transport: &Arc<dyn HttpTransport>,
 ) {
     if let Some(snapshot) = resolve_subscription_snapshot(access_token, scopes, transport).await {
-        traits::subscription::set_current_subscription(Some(snapshot));
+        platform_api::subscription::set_current_subscription(Some(snapshot));
     }
 }
 
@@ -320,13 +320,13 @@ mod tests {
         assert!(snap.has_extra_usage_enabled);
 
         // publish → the process-global cache reflects the pro plan.
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
         publish_subscription("tok", &scopes, &transport).await;
         assert!(
-            traits::subscription::is_pro_plan(),
+            platform_api::subscription::is_pro_plan(),
             "global must report pro after publish (this is what activates the F3 gate)"
         );
-        traits::subscription::set_current_subscription(None);
+        platform_api::subscription::set_current_subscription(None);
     }
 
     #[tokio::test]

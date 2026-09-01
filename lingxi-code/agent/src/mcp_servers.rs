@@ -338,7 +338,7 @@ mod tests {
         );
         assert!(matches!(
             &cfgs[0].config.spec,
-            traits::McpTransportSpec::Stdio { command, .. } if command == "npx"
+            platform_api::McpTransportSpec::Stdio { command, .. } if command == "npx"
         ));
     }
 
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert!(matches!(
             &cfgs[0].config.spec,
-            traits::McpTransportSpec::Http { url, .. } if url == "https://mcp.example/api"
+            platform_api::McpTransportSpec::Http { url, .. } if url == "https://mcp.example/api"
         ));
     }
 
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(cfgs[0].config.name, "docs");
         assert_eq!(cfgs[1].config.name, "other");
         assert!(
-            matches!(&cfgs[0].config.spec, traits::McpTransportSpec::Stdio { command, .. } if command == "second"),
+            matches!(&cfgs[0].config.spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "second"),
             "the LAST entry for a name wins"
         );
     }

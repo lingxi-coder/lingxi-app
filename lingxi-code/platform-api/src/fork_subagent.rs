@@ -7,7 +7,7 @@
 //! sessions; only an explicit `subagent_type: "fork"` takes the path. This
 //! module hosts the pure, dependency-free pieces of that feature —
 //! the feature gate, the recursion guard, the cache-prefix message builders, and
-//! the boilerplate constants — in the leaf `traits` crate so BOTH consumers can
+//! the boilerplate constants — in the leaf `platform-api` crate so BOTH consumers can
 //! reach them:
 //!
 //! - `tool-agent` (where `AgentTool` lives) builds the forked messages + runs
@@ -54,7 +54,7 @@ const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background
 ///
 /// Port env is `LINGXI_FORK_SUBAGENT` with a `CLAUDE_CODE_FORK_SUBAGENT` alias.
 /// `is_coordinator` / `is_non_interactive` are passed in because the leaf
-/// `traits` crate cannot read `CoordinatorMode` / the session — mirroring
+/// `platform-api` crate cannot read `CoordinatorMode` / the session — mirroring
 /// `isCoordinatorMode()` + `getIsNonInteractiveSession()`.
 #[must_use]
 pub fn is_fork_subagent_enabled(is_coordinator: bool, is_non_interactive: bool) -> bool {

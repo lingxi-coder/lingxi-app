@@ -25,8 +25,8 @@ use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleValue};
 use crate::update::PermissionUpdate;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use traits::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
-use traits::FsError;
+use platform_api::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
+use platform_api::FsError;
 
 /// Filesystem roots used to resolve a [`PermissionUpdateDestination`] to a
 /// concrete settings file (the persistence analogue of [`crate::FsRoots`]).

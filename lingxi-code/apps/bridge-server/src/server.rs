@@ -284,9 +284,9 @@ impl PermissionRequestSink for FramePermissionSink {
             self.tool_names.lock().await.remove(&request_id);
             self.reject(request_id).await;
         } else {
-            traits::live_sessions::set_process_status(
+            platform_api::live_sessions::set_process_status(
                 "waiting",
-                Some(traits::live_sessions::PERMISSION_PROMPT_WAITING_FOR),
+                Some(platform_api::live_sessions::PERMISSION_PROMPT_WAITING_FOR),
             );
         }
     }
@@ -1128,7 +1128,7 @@ impl BridgeConnection {
                     .map(|outcome| outcome.authority_events.clone())
                     .unwrap_or_default();
                 match outcome.map(|outcome| outcome.result) {
-                    Some(traits::SlashDispatchResult::RunAsTurn { prompt }) => {
+                    Some(platform_api::SlashDispatchResult::RunAsTurn { prompt }) => {
                         // Run the expanded prompt exactly like a direct user
                         // prompt (enqueue-or-spawn; no images).
                         self.handle_send_prompt(prompt, Vec::new(), turn_id).await;
@@ -1140,7 +1140,7 @@ impl BridgeConnection {
                     // `handle()` (and any of its `EmitEffects`/`InjectMessage`
                     // side effects) twice and discard the first result. Reuse
                     // the already-computed disposition instead.
-                    Some(traits::SlashDispatchResult::Handled { display }) => {
+                    Some(platform_api::SlashDispatchResult::Handled { display }) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1149,7 +1149,7 @@ impl BridgeConnection {
                             })
                             .await;
                     }
-                    Some(traits::SlashDispatchResult::Unknown { display, .. }) => {
+                    Some(platform_api::SlashDispatchResult::Unknown { display, .. }) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1158,7 +1158,7 @@ impl BridgeConnection {
                             })
                             .await;
                     }
-                    Some(traits::SlashDispatchResult::NotASlashCommand) => {
+                    Some(platform_api::SlashDispatchResult::NotASlashCommand) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1328,7 +1328,7 @@ impl BridgeConnection {
         // response owned a pending request, and the active-turn check preserves
         // terminal/disconnected state when cancellation won the race.
         if resolved && self.active_turn.accepts_interactions() {
-            traits::live_sessions::set_process_status("busy", None);
+            platform_api::live_sessions::set_process_status("busy", None);
         }
         if !resolved {
             tracing::debug!(
@@ -1574,7 +1574,7 @@ mod tests {
     use client_protocol::permission::{PermissionRequest, PermissionResponseDto};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
-    use traits::{PermissionDecision, PermissionGate};
+    use platform_api::{PermissionDecision, PermissionGate};
 
     use super::{is_owned_turn_event, ActiveTurnControl, BridgeConnection, TurnDriver};
 
@@ -1711,7 +1711,7 @@ mod tests {
     /// reaches `handle_send_prompt` (driving the [`TurnDriver`]) while a display-
     /// only result instead goes through `route`.
     struct StubRouter {
-        result: traits::SlashDispatchResult,
+        result: platform_api::SlashDispatchResult,
         routed: Arc<AtomicBool>,
     }
 
@@ -1746,7 +1746,7 @@ mod tests {
         });
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
-            result: traits::SlashDispatchResult::RunAsTurn {
+            result: platform_api::SlashDispatchResult::RunAsTurn {
                 prompt: "EXPANDED /loop prompt".to_string(),
             },
             routed: routed.clone(),
@@ -1789,7 +1789,7 @@ mod tests {
         });
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
-            result: traits::SlashDispatchResult::Handled {
+            result: platform_api::SlashDispatchResult::Handled {
                 display: "help text".to_string(),
             },
             routed: routed.clone(),
@@ -1929,13 +1929,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().expect("live-session tempdir");
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         let session_id = "11111111-2222-4333-8444-555555555555";
         let pid = std::process::id();
         dir.upsert_identity(pid, session_id, Some("bridge"), None, None, None)
             .unwrap();
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id(session_id);
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id(session_id);
 
         let connection = BridgeConnection::new();
         let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
@@ -1970,7 +1970,7 @@ mod tests {
         assert_eq!(waiting.status.as_deref(), Some("waiting"));
         assert_eq!(
             waiting.waiting_for.as_deref(),
-            Some(traits::live_sessions::PERMISSION_PROMPT_WAITING_FOR)
+            Some(platform_api::live_sessions::PERMISSION_PROMPT_WAITING_FOR)
         );
 
         connection

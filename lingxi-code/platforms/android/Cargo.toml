@@ -15,7 +15,7 @@ license.workspace = true
 # handles for scoped-storage-aware impls. Not cfg-gated: portable, host-verified.
 
 [dependencies]
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 platform-pty = { path = "../pty" }

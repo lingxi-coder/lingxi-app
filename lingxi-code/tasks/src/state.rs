@@ -201,7 +201,7 @@ pub struct LocalAgentTaskState {
     /// What the run reported when it terminated — final text, usage, and the
     /// kept-worktree coordinates — plus `killed_by` once a stop names its
     /// initiator. Populated by
-    /// [`TaskRegistryHandle::set_agent_outcome`](traits::task_registry::TaskRegistryHandle::set_agent_outcome)
+    /// [`TaskRegistryHandle::set_agent_outcome`](platform_api::task_registry::TaskRegistryHandle::set_agent_outcome)
     /// / `kill_with_reason` and read by the notification drain, which before
     /// this always rendered a `local_agent` completion with no `<result>`,
     /// `<usage>` or `<worktree>` and every stop as the bare `was stopped`.
@@ -214,7 +214,7 @@ pub struct LocalAgentTaskState {
 /// [`LocalAgentTaskState::outcome`] — the terminal notification payload plus
 /// the stop initiator.
 ///
-/// [`traits::task_registry::AgentTerminalOutcome`] is the WRITE shape (what a
+/// [`platform_api::task_registry::AgentTerminalOutcome`] is the WRITE shape (what a
 /// terminating run reports); this is the stored shape, which additionally holds
 /// `killed_by` because that arrives from the kill path rather than from the
 /// run.
@@ -225,7 +225,7 @@ pub struct AgentOutcomeState {
     pub result: Option<String>,
     /// Run usage → the `<usage>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<traits::task_registry::AgentRunUsage>,
+    pub usage: Option<platform_api::task_registry::AgentRunUsage>,
     /// Who stopped the task (`"parent"` / `"user"`) → the killed-summary verb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub killed_by: Option<String>,
@@ -241,8 +241,8 @@ impl AgentOutcomeState {
     /// Merge a terminating run's report in. A `Some` field overwrites; a `None`
     /// leaves the stored value alone, so a later partial report (e.g. a kill
     /// that only carries a worktree) never erases an earlier result.
-    pub fn merge(&mut self, incoming: traits::task_registry::AgentTerminalOutcome) {
-        let traits::task_registry::AgentTerminalOutcome {
+    pub fn merge(&mut self, incoming: platform_api::task_registry::AgentTerminalOutcome) {
+        let platform_api::task_registry::AgentTerminalOutcome {
             result,
             usage,
             error: _,
@@ -329,7 +329,7 @@ pub struct LocalWorkflowTaskState {
     pub current_step: usize,
     /// Terminal result/failure/usage payload for workflow notifications.
     #[serde(default)]
-    pub outcome: traits::task_registry::WorkflowTerminalOutcome,
+    pub outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     /// Typed Local App workflow authority for this run (design §18 Phase -1
     /// step 8 / §8.1) -- which app this task may touch, and why. Read by the
     /// workspace-lease and App-delete guards INSTEAD of `workflow_id`/`args`;

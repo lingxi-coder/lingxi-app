@@ -7,8 +7,8 @@
 //! transport-agnostic [`ClientEventSink`]. The SAME stream therefore feeds both
 //! transports (bridge-server WS and mobile `UniFFI`) — governing decision §0.1.
 //!
-//! It implements the [`traits::OutputStream`] callbacks
-//! (`traits/src/orchestrator.rs:448-516`), including the two §0.7
+//! It implements the [`platform_api::OutputStream`] callbacks
+//! (`platform-api/src/orchestrator.rs:448-516`), including the two §0.7
 //! "light up thinking/usage" follow-up callbacks (`emit_thinking`/`emit_usage`):
 //!
 //! | callback                    | emitted `ClientEvent`(s)            |
@@ -31,9 +31,9 @@
 //!
 //! ## `is_error` derivation
 //!
-//! [`traits::OutputStream::emit_tool_result`] carries `(id, tool, model_text,
+//! [`platform_api::OutputStream::emit_tool_result`] carries `(id, tool, model_text,
 //! &Value)` — it has NO separate `is_error` flag (verified
-//! `traits/src/orchestrator.rs:436`). The `model_text` (the model-facing string)
+//! `platform-api/src/orchestrator.rs:436`). The `model_text` (the model-facing string)
 //! is ignored by this adapter because the `client-protocol` DTO is wire-frozen;
 //! `result_json` carries the full metadata `data`.
 //! The orchestrator signals a failed tool by shaping the emitted payload as
@@ -56,12 +56,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use client_protocol::events::{ClientEvent, TurnOutcomeDto};
 use client_protocol::message::{MessageBlockDto, MessageDto};
-use traits::{CostSnapshot, OutputStream};
+use platform_api::{CostSnapshot, OutputStream};
 
 use crate::lowering::{lower_cost_snapshot, value_to_json_string};
 use crate::sink::ClientEventSink;
 
-/// An [`traits::OutputStream`] that lowers every live-turn callback into a
+/// An [`platform_api::OutputStream`] that lowers every live-turn callback into a
 /// [`ClientEvent`] DTO and forwards it through an [`Arc<dyn ClientEventSink>`].
 ///
 /// Connection-scoped: one stream per transport connection, holding the same
@@ -376,7 +376,7 @@ impl OutputStream for AdapterOutputStream {
     /// §0.7 "light up thinking/usage": lower each live reasoning delta into a
     /// [`ClientEvent::ThinkingDelta`]. `signature` is `None` for live deltas
     /// (the cryptographic signature only arrives on the completed thinking
-    /// block, not per-delta) — see `traits::OutputStream::emit_thinking`.
+    /// block, not per-delta) — see `platform_api::OutputStream::emit_thinking`.
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
         let mut blocks = self.message_blocks.lock().await;
         if let Some(MessageBlockDto::Thinking {
@@ -418,7 +418,7 @@ impl OutputStream for AdapterOutputStream {
 
     /// §0.7 "light up thinking/usage": lower each incremental token-usage
     /// update into a [`ClientEvent::UsageUpdate`]. The four counters map
-    /// field-for-field from `traits::OutputStream::emit_usage` (which itself
+    /// field-for-field from `platform_api::OutputStream::emit_usage` (which itself
     /// mirrors `cost::TokenUsage` on the orchestrator side).
     async fn emit_usage(
         &self,
@@ -454,9 +454,9 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
         let dto = match attachment {
-            traits::AttachmentKind::NestedMemory { display_path } => {
+            platform_api::AttachmentKind::NestedMemory { display_path } => {
                 client_protocol::events::AttachmentDto::NestedMemory { display_path }
             }
             // `AttachmentKind` is `#[non_exhaustive]`: a kind added upstream

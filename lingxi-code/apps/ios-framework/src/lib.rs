@@ -1,8 +1,8 @@
 //! `ios-framework` (M8-P12 → M10-F3) — the iOS `UniFFI` packager.
 //!
 //! This crate is the FFI boundary between the Rust engine and the iOS app. The
-//! Swift layer implements the [`traits::CameraControl`] / [`traits::VoiceRecorder`]
-//! / [`traits::SharingService`] callback interfaces (see the skeletons under
+//! Swift layer implements the [`platform_api::CameraControl`] / [`platform_api::VoiceRecorder`]
+//! / [`platform_api::SharingService`] callback interfaces (see the skeletons under
 //! `swift/`), hands them across as a [`PlatformImpls`] record, and Rust uses
 //! them to construct an `IosPlatform` and assemble the mobile engine — so Rust
 //! drives the device's native capabilities by calling *back* into Swift. That
@@ -55,12 +55,12 @@ use std::sync::Arc;
 #[cfg(feature = "uniffi")]
 use std::sync::{Mutex as StdMutex, OnceLock};
 #[cfg(feature = "uniffi")]
-use traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
-use traits::{CameraControl, SharingService, VoiceRecorder};
+use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
+use platform_api::{CameraControl, SharingService, VoiceRecorder};
 // `Platform` is named only inside the `cfg(target_os = "ios")` constructor body;
 // importing it unconditionally warns on the host build, so scope it to iOS.
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
-use traits::Platform;
+use platform_api::Platform;
 
 // F3-04: the shared session host + its error type are DEFINED ONCE in
 // `engine-mobile` and re-exported here. Both FFI packager crates re-export the
@@ -88,7 +88,7 @@ pub struct PlatformImpls {
     pub share: Arc<dyn SharingService>,
     /// Swift Keychain-backed `SecureStorage` impl, if provided. When `None` the
     /// composition root falls back to the non-persisting development stub.
-    pub secure_storage: Option<Arc<dyn traits::SecureStorage>>,
+    pub secure_storage: Option<Arc<dyn platform_api::SecureStorage>>,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: String,
     /// Optional mobile-linux runtime configuration.
@@ -490,12 +490,12 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
-            host_environment: Some(traits::MobileHostEnvironment::new(
-                traits::MobileHostOs::Ios,
+            host_environment: Some(platform_api::MobileHostEnvironment::new(
+                platform_api::MobileHostOs::Ios,
                 None,
-                traits::MobileDeviceClass::Unknown,
-                traits::MobileExecutionTarget::Unknown,
-                traits::MobileLaunchMode::Unknown,
+                platform_api::MobileDeviceClass::Unknown,
+                platform_api::MobileExecutionTarget::Unknown,
+                platform_api::MobileLaunchMode::Unknown,
             )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
@@ -543,31 +543,31 @@ pub fn build_mobile_engine(
 }
 
 #[cfg(feature = "uniffi")]
-fn mobile_linux_backend_name(backend: traits::SandboxBackend) -> String {
+fn mobile_linux_backend_name(backend: platform_api::SandboxBackend) -> String {
     match backend {
-        traits::SandboxBackend::LinuxNamespaces => "linux-namespaces",
-        traits::SandboxBackend::LinuxFirejail => "linux-firejail",
-        traits::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
-        traits::SandboxBackend::WindowsJobObject => "windows-job-object",
-        traits::SandboxBackend::AndroidMinijail => "android-minijail",
-        traits::SandboxBackend::AndroidProot => "android-proot",
-        traits::SandboxBackend::IosIsh => "ios-ish",
-        traits::SandboxBackend::None => "none",
+        platform_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        platform_api::SandboxBackend::LinuxFirejail => "linux-firejail",
+        platform_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        platform_api::SandboxBackend::WindowsJobObject => "windows-job-object",
+        platform_api::SandboxBackend::AndroidMinijail => "android-minijail",
+        platform_api::SandboxBackend::AndroidProot => "android-proot",
+        platform_api::SandboxBackend::IosIsh => "ios-ish",
+        platform_api::SandboxBackend::None => "none",
     }
     .to_string()
 }
 
 #[cfg(feature = "uniffi")]
-fn rootfs_state_to_ffi(state: traits::RootfsState) -> MobileLinuxRootfsStateFfi {
+fn rootfs_state_to_ffi(state: platform_api::RootfsState) -> MobileLinuxRootfsStateFfi {
     match state {
-        traits::RootfsState::Missing => MobileLinuxRootfsStateFfi::Missing,
-        traits::RootfsState::Installing => MobileLinuxRootfsStateFfi::Installing,
-        traits::RootfsState::Ready => MobileLinuxRootfsStateFfi::Ready,
-        traits::RootfsState::Corrupt => MobileLinuxRootfsStateFfi::Corrupt,
-        traits::RootfsState::Repairing => MobileLinuxRootfsStateFfi::Repairing,
-        traits::RootfsState::Resetting => MobileLinuxRootfsStateFfi::Resetting,
-        traits::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
-        traits::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
+        platform_api::RootfsState::Missing => MobileLinuxRootfsStateFfi::Missing,
+        platform_api::RootfsState::Installing => MobileLinuxRootfsStateFfi::Installing,
+        platform_api::RootfsState::Ready => MobileLinuxRootfsStateFfi::Ready,
+        platform_api::RootfsState::Corrupt => MobileLinuxRootfsStateFfi::Corrupt,
+        platform_api::RootfsState::Repairing => MobileLinuxRootfsStateFfi::Repairing,
+        platform_api::RootfsState::Resetting => MobileLinuxRootfsStateFfi::Resetting,
+        platform_api::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
+        platform_api::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
     }
 }
 
@@ -694,36 +694,36 @@ fn ios_mobile_config_from_launch_config(
         vision_delegation_enabled: config.vision_delegation_enabled,
         host_environment: Some(config.host_environment.as_ref().map_or_else(
             || {
-                traits::MobileHostEnvironment::new(
-                    traits::MobileHostOs::Ios,
+                platform_api::MobileHostEnvironment::new(
+                    platform_api::MobileHostOs::Ios,
                     None,
-                    traits::MobileDeviceClass::Unknown,
-                    traits::MobileExecutionTarget::Unknown,
-                    traits::MobileLaunchMode::Unknown,
+                    platform_api::MobileDeviceClass::Unknown,
+                    platform_api::MobileExecutionTarget::Unknown,
+                    platform_api::MobileLaunchMode::Unknown,
                 )
             },
             |environment| {
-                traits::MobileHostEnvironment::new(
-                    traits::MobileHostOs::Ios,
+                platform_api::MobileHostEnvironment::new(
+                    platform_api::MobileHostOs::Ios,
                     Some(environment.os_version.clone()),
                     match environment.device_class {
-                        IosDeviceClassFfi::Phone => traits::MobileDeviceClass::Phone,
-                        IosDeviceClassFfi::Tablet => traits::MobileDeviceClass::Tablet,
-                        IosDeviceClassFfi::Unknown => traits::MobileDeviceClass::Unknown,
+                        IosDeviceClassFfi::Phone => platform_api::MobileDeviceClass::Phone,
+                        IosDeviceClassFfi::Tablet => platform_api::MobileDeviceClass::Tablet,
+                        IosDeviceClassFfi::Unknown => platform_api::MobileDeviceClass::Unknown,
                     },
                     match environment.execution_target {
                         IosExecutionTargetFfi::PhysicalDevice => {
-                            traits::MobileExecutionTarget::PhysicalDevice
+                            platform_api::MobileExecutionTarget::PhysicalDevice
                         }
                         IosExecutionTargetFfi::Simulator => {
-                            traits::MobileExecutionTarget::Simulator
+                            platform_api::MobileExecutionTarget::Simulator
                         }
-                        IosExecutionTargetFfi::Unknown => traits::MobileExecutionTarget::Unknown,
+                        IosExecutionTargetFfi::Unknown => platform_api::MobileExecutionTarget::Unknown,
                     },
                     match environment.launch_mode {
-                        IosLaunchModeFfi::Interactive => traits::MobileLaunchMode::Interactive,
+                        IosLaunchModeFfi::Interactive => platform_api::MobileLaunchMode::Interactive,
                         IosLaunchModeFfi::ScheduledHeadless => {
-                            traits::MobileLaunchMode::ScheduledHeadless
+                            platform_api::MobileLaunchMode::ScheduledHeadless
                         }
                     },
                 )
@@ -936,13 +936,13 @@ fn resolve_mobile_linux_app_sandbox_root(
 }
 
 #[cfg(feature = "uniffi")]
-fn capability_to_ffi(capability: traits::MobileLinuxCapability) -> MobileLinuxCapabilityFfi {
+fn capability_to_ffi(capability: platform_api::MobileLinuxCapability) -> MobileLinuxCapabilityFfi {
     MobileLinuxCapabilityFfi {
         available: capability.available,
         backend: mobile_linux_backend_name(capability.backend),
         mode: match capability.mode {
-            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
         },
         reason: capability.reason,
         streaming_output: capability.streaming_output,
@@ -954,13 +954,13 @@ fn capability_to_ffi(capability: traits::MobileLinuxCapability) -> MobileLinuxCa
 }
 
 #[cfg(feature = "uniffi")]
-fn status_to_ffi(status: traits::RootfsStatus) -> MobileLinuxStatusFfi {
+fn status_to_ffi(status: platform_api::RootfsStatus) -> MobileLinuxStatusFfi {
     MobileLinuxStatusFfi {
         state: rootfs_state_to_ffi(status.state),
         backend: mobile_linux_backend_name(status.backend),
         mode: match status.mode {
-            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
         },
         platform: status.platform,
         abi: status.abi,
@@ -1077,7 +1077,7 @@ fn fallback_ios_mobile_linux_status(
 #[cfg(feature = "uniffi")]
 fn ios_mobile_linux_runtime(
     config: Option<&IosMobileLinuxConfigFfi>,
-) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+) -> Option<Arc<dyn platform_api::MobileLinuxRuntime>> {
     let cfg = config?;
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
@@ -1087,29 +1087,29 @@ fn ios_mobile_linux_runtime(
     }
     let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
     let runtime = if auth_present {
-        traits::UnavailableMobileLinuxRuntime::unavailable(
-            traits::SandboxBackend::IosIsh,
-            traits::MobileLinuxRuntimeMode::MobileLinux,
+        platform_api::UnavailableMobileLinuxRuntime::unavailable(
+            platform_api::SandboxBackend::IosIsh,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux,
             "ios",
             cfg.abi.clone(),
             "authorization present, but iSH runtime is not linked in this build",
         )
     } else {
-        traits::UnavailableMobileLinuxRuntime::blocked(
-            traits::SandboxBackend::IosIsh,
-            traits::MobileLinuxRuntimeMode::MobileLinux,
+        platform_api::UnavailableMobileLinuxRuntime::blocked(
+            platform_api::SandboxBackend::IosIsh,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux,
             "ios",
             cfg.abi.clone(),
             "missing additional written authorization for PRoot/iSH redistribution",
         )
     };
-    Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+    Some(Arc::new(runtime) as Arc<dyn platform_api::MobileLinuxRuntime>)
 }
 
 #[cfg(feature = "uniffi")]
 fn linked_ios_mobile_linux_runtime(
     cfg: &IosMobileLinuxConfigFfi,
-) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+) -> Option<Arc<dyn platform_api::MobileLinuxRuntime>> {
     let app_sandbox_root = resolve_mobile_linux_app_sandbox_root(cfg).ok()?;
     let (workspace_host_path, stable_workspace_id) =
         validate_mobile_linux_workspace_config(app_sandbox_root.to_string_lossy().as_ref(), cfg)
@@ -1129,30 +1129,30 @@ fn linked_ios_mobile_linux_runtime(
 }
 
 #[cfg(feature = "uniffi")]
-fn mount_purpose_from_ffi(value: MobileLinuxMountPurposeFfi) -> traits::MountPurpose {
+fn mount_purpose_from_ffi(value: MobileLinuxMountPurposeFfi) -> platform_api::MountPurpose {
     match value {
-        MobileLinuxMountPurposeFfi::Workspace => traits::MountPurpose::Workspace,
-        MobileLinuxMountPurposeFfi::LocalAppBuild => traits::MountPurpose::LocalAppBuild,
-        MobileLinuxMountPurposeFfi::Memory => traits::MountPurpose::Memory,
-        MobileLinuxMountPurposeFfi::Skills => traits::MountPurpose::Skills,
-        MobileLinuxMountPurposeFfi::Shared => traits::MountPurpose::Shared,
-        MobileLinuxMountPurposeFfi::External => traits::MountPurpose::External,
-        MobileLinuxMountPurposeFfi::Temp => traits::MountPurpose::Temp,
+        MobileLinuxMountPurposeFfi::Workspace => platform_api::MountPurpose::Workspace,
+        MobileLinuxMountPurposeFfi::LocalAppBuild => platform_api::MountPurpose::LocalAppBuild,
+        MobileLinuxMountPurposeFfi::Memory => platform_api::MountPurpose::Memory,
+        MobileLinuxMountPurposeFfi::Skills => platform_api::MountPurpose::Skills,
+        MobileLinuxMountPurposeFfi::Shared => platform_api::MountPurpose::Shared,
+        MobileLinuxMountPurposeFfi::External => platform_api::MountPurpose::External,
+        MobileLinuxMountPurposeFfi::Temp => platform_api::MountPurpose::Temp,
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn network_policy_from_ffi(value: MobileLinuxNetworkPolicyFfi) -> traits::NetworkPolicy {
+fn network_policy_from_ffi(value: MobileLinuxNetworkPolicyFfi) -> platform_api::NetworkPolicy {
     match value {
-        MobileLinuxNetworkPolicyFfi::Disabled => traits::NetworkPolicy::Disabled,
-        MobileLinuxNetworkPolicyFfi::LoopbackOnly => traits::NetworkPolicy::LoopbackOnly,
-        MobileLinuxNetworkPolicyFfi::Allowed => traits::NetworkPolicy::Allowed,
+        MobileLinuxNetworkPolicyFfi::Disabled => platform_api::NetworkPolicy::Disabled,
+        MobileLinuxNetworkPolicyFfi::LoopbackOnly => platform_api::NetworkPolicy::LoopbackOnly,
+        MobileLinuxNetworkPolicyFfi::Allowed => platform_api::NetworkPolicy::Allowed,
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn mount_spec_from_ffi(value: MobileLinuxMountSpecFfi) -> traits::MountSpec {
-    traits::MountSpec {
+fn mount_spec_from_ffi(value: MobileLinuxMountSpecFfi) -> platform_api::MountSpec {
+    platform_api::MountSpec {
         host_path: std::path::PathBuf::from(value.host_path),
         guest_path: value.guest_path,
         read_only: value.read_only,
@@ -1161,8 +1161,8 @@ fn mount_spec_from_ffi(value: MobileLinuxMountSpecFfi) -> traits::MountSpec {
 }
 
 #[cfg(feature = "uniffi")]
-fn command_request_from_ffi(value: MobileLinuxCommandRequestFfi) -> traits::LinuxCommandRequest {
-    traits::LinuxCommandRequest {
+fn command_request_from_ffi(value: MobileLinuxCommandRequestFfi) -> platform_api::LinuxCommandRequest {
+    platform_api::LinuxCommandRequest {
         command: value.command,
         args: value.args,
         cwd: value.cwd,
@@ -1170,19 +1170,19 @@ fn command_request_from_ffi(value: MobileLinuxCommandRequestFfi) -> traits::Linu
         stdin: value.stdin,
         timeout_ms: value.timeout_ms,
         network: network_policy_from_ffi(value.network),
-        resource_limits: traits::ResourceLimits::default(),
+        resource_limits: platform_api::ResourceLimits::default(),
         mounts: value.mounts.into_iter().map(mount_spec_from_ffi).collect(),
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn pty_request_from_ffi(value: MobileLinuxPtyOpenRequestFfi) -> traits::PtyOpenRequest {
-    traits::PtyOpenRequest {
+fn pty_request_from_ffi(value: MobileLinuxPtyOpenRequestFfi) -> platform_api::PtyOpenRequest {
+    platform_api::PtyOpenRequest {
         command: value.command,
         args: value.args,
         cwd: value.cwd,
         env: value.env.into_iter().collect(),
-        size: traits::PtySize {
+        size: platform_api::PtySize {
             cols: value.cols,
             rows: value.rows,
         },
@@ -1191,7 +1191,7 @@ fn pty_request_from_ffi(value: MobileLinuxPtyOpenRequestFfi) -> traits::PtyOpenR
 }
 
 #[cfg(feature = "uniffi")]
-fn command_result_to_ffi(value: traits::LinuxCommandResult) -> MobileLinuxCommandResultFfi {
+fn command_result_to_ffi(value: platform_api::LinuxCommandResult) -> MobileLinuxCommandResultFfi {
     MobileLinuxCommandResultFfi {
         stdout: value.stdout,
         stderr: value.stderr,
@@ -1202,19 +1202,19 @@ fn command_result_to_ffi(value: traits::LinuxCommandResult) -> MobileLinuxComman
 }
 
 #[cfg(feature = "uniffi")]
-fn task_snapshot_to_ffi(value: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTaskFfi {
+fn task_snapshot_to_ffi(value: platform_api::MobileLinuxTaskSnapshot) -> MobileLinuxTaskFfi {
     MobileLinuxTaskFfi {
         id: value.task_id,
         title: value.command,
         state: match value.status {
-            traits::MobileLinuxTaskStatus::Queued
-            | traits::MobileLinuxTaskStatus::Running
-            | traits::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Running,
-            traits::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
-            traits::MobileLinuxTaskStatus::Failed | traits::MobileLinuxTaskStatus::TimedOut => {
+            platform_api::MobileLinuxTaskStatus::Queued
+            | platform_api::MobileLinuxTaskStatus::Running
+            | platform_api::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Running,
+            platform_api::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
+            platform_api::MobileLinuxTaskStatus::Failed | platform_api::MobileLinuxTaskStatus::TimedOut => {
                 MobileLinuxTaskStateFfi::Failed
             }
-            traits::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
+            platform_api::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
         },
         detail: value.detail,
     }
@@ -1223,9 +1223,9 @@ fn task_snapshot_to_ffi(value: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTa
 #[cfg(feature = "uniffi")]
 /// `None` for events that have no stream representation and must be SKIPPED
 /// (not surfaced as a bogus stream event).
-fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEventFfi> {
+fn event_to_ffi(value: platform_api::MobileLinuxEvent) -> Option<MobileLinuxStreamEventFfi> {
     Some(match value.kind {
-        traits::MobileLinuxEventKind::TaskStatusChanged {
+        platform_api::MobileLinuxEventKind::TaskStatusChanged {
             status,
             exit_code,
             detail,
@@ -1240,9 +1240,9 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
             // the same way at its own creation event.
             if matches!(
                 status,
-                traits::MobileLinuxTaskStatus::Queued
-                    | traits::MobileLinuxTaskStatus::Running
-                    | traits::MobileLinuxTaskStatus::Backgrounded
+                platform_api::MobileLinuxTaskStatus::Queued
+                    | platform_api::MobileLinuxTaskStatus::Running
+                    | platform_api::MobileLinuxTaskStatus::Backgrounded
             ) {
                 return None;
             }
@@ -1258,10 +1258,10 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
                 text: detail,
                 data: None,
                 exit_code,
-                timed_out: matches!(status, traits::MobileLinuxTaskStatus::TimedOut),
+                timed_out: matches!(status, platform_api::MobileLinuxTaskStatus::TimedOut),
             }
         }
-        traits::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxStreamEventFfi {
+        platform_api::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxStreamEventFfi {
             sequence: value.sequence,
             task_id: value.task_id.clone(),
             stream_id: value
@@ -1275,7 +1275,7 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
             exit_code: None,
             timed_out: false,
         },
-        traits::MobileLinuxEventKind::StderrChunk { chunk } => MobileLinuxStreamEventFfi {
+        platform_api::MobileLinuxEventKind::StderrChunk { chunk } => MobileLinuxStreamEventFfi {
             sequence: value.sequence,
             task_id: value.task_id.clone(),
             stream_id: value
@@ -1289,7 +1289,7 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
             exit_code: None,
             timed_out: false,
         },
-        traits::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxStreamEventFfi {
+        platform_api::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxStreamEventFfi {
             sequence: value.sequence,
             task_id: value.task_id,
             stream_id: session_id,
@@ -1300,7 +1300,7 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
             exit_code: None,
             timed_out: false,
         },
-        traits::MobileLinuxEventKind::PtyClosed {
+        platform_api::MobileLinuxEventKind::PtyClosed {
             session_id,
             exit_code,
             detail,
@@ -1315,7 +1315,7 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
             exit_code,
             timed_out: false,
         },
-        traits::MobileLinuxEventKind::RuntimeError { detail } => MobileLinuxStreamEventFfi {
+        platform_api::MobileLinuxEventKind::RuntimeError { detail } => MobileLinuxStreamEventFfi {
             sequence: value.sequence,
             task_id: value.task_id,
             stream_id: "runtime".to_string(),
@@ -1330,40 +1330,40 @@ fn event_to_ffi(value: traits::MobileLinuxEvent) -> Option<MobileLinuxStreamEven
 }
 
 #[cfg(feature = "uniffi")]
-fn mobile_linux_error_to_ffi(error: traits::MobileLinuxError) -> MobileLinuxOperationFfiError {
+fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLinuxOperationFfiError {
     match error {
-        traits::MobileLinuxError::Unsupported => MobileLinuxOperationFfiError::Unsupported,
-        traits::MobileLinuxError::Unavailable(message) => {
+        platform_api::MobileLinuxError::Unsupported => MobileLinuxOperationFfiError::Unsupported,
+        platform_api::MobileLinuxError::Unavailable(message) => {
             MobileLinuxOperationFfiError::Unavailable { message }
         }
-        traits::MobileLinuxError::LicenseBlocked(message) => {
+        platform_api::MobileLinuxError::LicenseBlocked(message) => {
             MobileLinuxOperationFfiError::LicenseBlocked { message }
         }
-        traits::MobileLinuxError::Integrity(message)
-        | traits::MobileLinuxError::InvalidRequest(message) => {
+        platform_api::MobileLinuxError::Integrity(message)
+        | platform_api::MobileLinuxError::InvalidRequest(message) => {
             MobileLinuxOperationFfiError::InvalidRequest { message }
         }
-        traits::MobileLinuxError::Io(message) => MobileLinuxOperationFfiError::Io { message },
-        traits::MobileLinuxError::NetworkPolicyUnavailable(message) => {
+        platform_api::MobileLinuxError::Io(message) => MobileLinuxOperationFfiError::Io { message },
+        platform_api::MobileLinuxError::NetworkPolicyUnavailable(message) => {
             MobileLinuxOperationFfiError::Io {
                 message: format!("network_policy_unavailable: {message}"),
             }
         }
-        traits::MobileLinuxError::ResourceLimitExceeded(message) => {
+        platform_api::MobileLinuxError::ResourceLimitExceeded(message) => {
             MobileLinuxOperationFfiError::Io {
                 message: format!("resource_limit_exceeded: {message}"),
             }
         }
-        traits::MobileLinuxError::Timeout => MobileLinuxOperationFfiError::Timeout,
+        platform_api::MobileLinuxError::Timeout => MobileLinuxOperationFfiError::Timeout,
     }
 }
 
 #[cfg(feature = "uniffi")]
 async fn unavailable_runtime_error(
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> MobileLinuxOperationFfiError {
     match runtime.rootfs_status().await {
-        Ok(status) if matches!(status.state, traits::RootfsState::BlockedByLicense) => {
+        Ok(status) if matches!(status.state, platform_api::RootfsState::BlockedByLicense) => {
             MobileLinuxOperationFfiError::LicenseBlocked {
                 message: status
                     .last_error
@@ -1382,7 +1382,7 @@ async fn unavailable_runtime_error(
 #[cfg(feature = "uniffi")]
 fn probe_runtime(
     config: Option<&IosMobileLinuxConfigFfi>,
-) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+) -> Option<Arc<dyn platform_api::MobileLinuxRuntime>> {
     ios_mobile_linux_runtime(config)
 }
 
@@ -1404,7 +1404,7 @@ fn probe_runtime(
 // stubs + a no-op permission sink on the Rust side, threads the runtime config
 // (api base / key / model) into a `MobileConfig`, and delegates to the shared
 // `build_mobile_engine`. This is ADDITIVE FFI packaging only — it changes no
-// engine semantics and touches neither the `traits` crate nor Android.
+// engine semantics and touches neither the `platform-api` crate nor Android.
 //
 // SECRETS: `api_key` arrives as a parameter the Swift side reads from the
 // process environment (`ANTHROPIC_API_KEY`) / an app setting at runtime; it is
@@ -1424,7 +1424,7 @@ fn probe_runtime(
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 mod stub_capabilities {
     use async_trait::async_trait;
-    use traits::{
+    use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
         ShareResult, SharingService, VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
     };
@@ -1605,7 +1605,7 @@ impl ClientEventListener for IosListenerBridge {
 // These interfaces are DEFINED IN THIS CRATE (mirroring `IosEventListener`) so
 // their UniFFI `FfiConverter`s register under `ios_framework`'s tag — a
 // prerequisite for naming them as parameter types in `build_ios_engine`. The
-// engine consumes the SHARED `traits::*` seams, so each crate-local interface is
+// engine consumes the SHARED `platform_api::*` seams, so each crate-local interface is
 // adapted by a thin bridge struct to its `traits` counterpart.
 //
 // RETURN SHAPE (UniFFI 0.28.3): async callback-interface methods return
@@ -1613,7 +1613,7 @@ impl ClientEventListener for IosListenerBridge {
 
 /// FFI error surface for the iOS speech callback interfaces. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer `traits::SttError` / `traits::TtsError`.
+/// fans it back out onto the richer `platform_api::SttError` / `platform_api::TtsError`.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -1648,7 +1648,7 @@ pub enum SpeechFfiError {
 /// Crate-local foreign callback interface for native speech-to-text — the Swift
 /// app implements it over `SFSpeechRecognizer` (opens the live mic, listens for
 /// one utterance, returns the final transcript). Bridged to
-/// [`traits::SpeechToText`] by [`IosSttBridge`].
+/// [`platform_api::SpeechToText`] by [`IosSttBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -1660,7 +1660,7 @@ pub trait IosStt: Send + Sync {
 
 /// Crate-local foreign callback interface for native text-to-speech — the Swift
 /// app implements it over `AVSpeechSynthesizer`, returning 16-bit signed
-/// little-endian mono PCM. Bridged to [`traits::TextToSpeech`] by [`IosTtsBridge`].
+/// little-endian mono PCM. Bridged to [`platform_api::TextToSpeech`] by [`IosTtsBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -1688,7 +1688,7 @@ pub struct TtsAudioFfi {
 
 /// FFI error surface for the iOS share callback interface. A flat enum so `UniFFI`
 /// can render it for an async `callback_interface` method; the bridge fans it
-/// back out onto the richer [`traits::ShareError`].
+/// back out onto the richer [`platform_api::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -1705,7 +1705,7 @@ pub enum ShareFfiError {
 }
 
 /// FFI carrier for the outcome of a native share — whether the user completed
-/// or dismissed the system share sheet. Mapped to [`traits::ShareResult`].
+/// or dismissed the system share sheet. Mapped to [`platform_api::ShareResult`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Debug, Clone)]
@@ -1718,7 +1718,7 @@ pub enum ShareResultFfi {
 
 /// Crate-local foreign callback interface for native sharing — the Swift app
 /// implements it over `UIActivityViewController`. Bridged to
-/// [`traits::SharingService`] by [`IosShareBridge`]. The payload crosses the
+/// [`platform_api::SharingService`] by [`IosShareBridge`]. The payload crosses the
 /// seam as three flat optionals (`text` / `url` / `image_bytes`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -1735,10 +1735,10 @@ pub trait IosShare: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosShare`] callback interface to the shared
-/// [`traits::SharingService`] seam the engine consumes. Destructures
-/// [`traits::SharePayload`] into the flat `text` / `url` / `image_bytes` args
+/// [`platform_api::SharingService`] seam the engine consumes. Destructures
+/// [`platform_api::SharePayload`] into the flat `text` / `url` / `image_bytes` args
 /// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
-/// [`traits::ShareResult`] / [`traits::ShareError`].
+/// [`platform_api::ShareResult`] / [`platform_api::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosShareBridge {
@@ -1747,21 +1747,21 @@ struct IosShareBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::SharingService for IosShareBridge {
+impl platform_api::SharingService for IosShareBridge {
     async fn share(
         &self,
-        payload: traits::SharePayload,
-    ) -> Result<traits::ShareResult, traits::ShareError> {
-        let traits::SharePayload {
+        payload: platform_api::SharePayload,
+    ) -> Result<platform_api::ShareResult, platform_api::ShareError> {
+        let platform_api::SharePayload {
             text,
             url,
             image_bytes,
         } = payload;
         match self.inner.share(text, url, image_bytes).await {
-            Ok(ShareResultFfi::Success) => Ok(traits::ShareResult::Success),
-            Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
-            Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
-            Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+            Ok(ShareResultFfi::Success) => Ok(platform_api::ShareResult::Success),
+            Ok(ShareResultFfi::Cancelled) => Ok(platform_api::ShareResult::Cancelled),
+            Err(ShareFfiError::Unsupported) => Err(platform_api::ShareError::Unsupported),
+            Err(ShareFfiError::Other { message }) => Err(platform_api::ShareError::Other(message)),
         }
     }
 }
@@ -1791,7 +1791,7 @@ pub enum LocationFfiError {
 }
 
 /// FFI carrier for one resolved location crossing the callback-interface
-/// seam. Mapped to [`traits::LocationFix`].
+/// seam. Mapped to [`platform_api::LocationFix`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -1808,7 +1808,7 @@ pub struct LocationFixFfi {
 
 /// Crate-local foreign callback interface for one-shot location — the Swift
 /// app implements it over `CLLocationManager`. Bridged to
-/// [`traits::LocationProvider`] by [`IosLocationBridge`].
+/// [`platform_api::LocationProvider`] by [`IosLocationBridge`].
 ///
 /// One-shot only: continuous tracking would need a host-to-page push channel
 /// that does not exist yet, and a background-location entitlement nobody has
@@ -1822,7 +1822,7 @@ pub trait IosLocation: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosLocation`] callback interface to the shared
-/// [`traits::LocationProvider`] seam the engine consumes.
+/// [`platform_api::LocationProvider`] seam the engine consumes.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosLocationBridge {
@@ -1831,26 +1831,26 @@ struct IosLocationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::LocationProvider for IosLocationBridge {
-    async fn current_location(&self) -> Result<traits::LocationFix, traits::LocationError> {
+impl platform_api::LocationProvider for IosLocationBridge {
+    async fn current_location(&self) -> Result<platform_api::LocationFix, platform_api::LocationError> {
         match self.inner.current_location().await {
-            Ok(fix) => Ok(traits::LocationFix {
+            Ok(fix) => Ok(platform_api::LocationFix {
                 latitude: fix.latitude,
                 longitude: fix.longitude,
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
-            Err(LocationFfiError::PermissionDenied) => Err(traits::LocationError::PermissionDenied),
-            Err(LocationFfiError::Unavailable) => Err(traits::LocationError::Unavailable),
-            Err(LocationFfiError::Timeout) => Err(traits::LocationError::Timeout),
-            Err(LocationFfiError::Other { message }) => Err(traits::LocationError::Other(message)),
+            Err(LocationFfiError::PermissionDenied) => Err(platform_api::LocationError::PermissionDenied),
+            Err(LocationFfiError::Unavailable) => Err(platform_api::LocationError::Unavailable),
+            Err(LocationFfiError::Timeout) => Err(platform_api::LocationError::Timeout),
+            Err(LocationFfiError::Other { message }) => Err(platform_api::LocationError::Other(message)),
         }
     }
 }
 
 /// FFI error surface for the iOS notification callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::NotificationError`].
+/// fans it back out onto the richer [`platform_api::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -1868,7 +1868,7 @@ pub enum NotificationFfiError {
 
 /// Crate-local foreign callback interface for native notifications — the Swift
 /// app implements it over `UNUserNotificationCenter`. Bridged to
-/// [`traits::NotificationService`] by [`IosNotificationBridge`]. The request
+/// [`platform_api::NotificationService`] by [`IosNotificationBridge`]. The request
 /// crosses the seam as the flat `title` / `body` / `tag` args.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -1885,9 +1885,9 @@ pub trait IosNotification: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosNotification`] callback interface to the shared
-/// [`traits::NotificationService`] seam the engine consumes. Destructures
-/// [`traits::NotificationRequest`] into the flat `title` / `body` / `tag` args
-/// and fans [`NotificationFfiError`] back out onto [`traits::NotificationError`].
+/// [`platform_api::NotificationService`] seam the engine consumes. Destructures
+/// [`platform_api::NotificationRequest`] into the flat `title` / `body` / `tag` args
+/// and fans [`NotificationFfiError`] back out onto [`platform_api::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosNotificationBridge {
@@ -1896,19 +1896,19 @@ struct IosNotificationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::NotificationService for IosNotificationBridge {
+impl platform_api::NotificationService for IosNotificationBridge {
     async fn notify(
         &self,
-        req: traits::NotificationRequest,
-    ) -> Result<(), traits::NotificationError> {
-        let traits::NotificationRequest { title, body, tag } = req;
+        req: platform_api::NotificationRequest,
+    ) -> Result<(), platform_api::NotificationError> {
+        let platform_api::NotificationRequest { title, body, tag } = req;
         match self.inner.notify(title, body, tag).await {
             Ok(()) => Ok(()),
             Err(NotificationFfiError::PermissionDenied) => {
-                Err(traits::NotificationError::PermissionDenied)
+                Err(platform_api::NotificationError::PermissionDenied)
             }
             Err(NotificationFfiError::Other { message }) => {
-                Err(traits::NotificationError::Other(message))
+                Err(platform_api::NotificationError::Other(message))
             }
         }
     }
@@ -1916,7 +1916,7 @@ impl traits::NotificationService for IosNotificationBridge {
 
 /// FFI error surface for the iOS clipboard callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::ClipboardError`].
+/// fans it back out onto the richer [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -1934,7 +1934,7 @@ pub enum ClipboardFfiError {
 
 /// Crate-local foreign callback interface for native clipboard access — the
 /// Swift app implements it over `UIPasteboard` (set via `string =`; get via
-/// `string`). Bridged to [`traits::Clipboard`] by [`IosClipboardBridge`].
+/// `string`). Bridged to [`platform_api::Clipboard`] by [`IosClipboardBridge`].
 /// `get_text` returns `None` when the clipboard is empty or holds no text.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -1947,8 +1947,8 @@ pub trait IosClipboard: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosClipboard`] callback interface to the shared
-/// [`traits::Clipboard`] seam the engine consumes. One forwarding hop per call;
-/// maps [`ClipboardFfiError`] back out onto [`traits::ClipboardError`].
+/// [`platform_api::Clipboard`] seam the engine consumes. One forwarding hop per call;
+/// maps [`ClipboardFfiError`] back out onto [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosClipboardBridge {
@@ -1957,14 +1957,14 @@ struct IosClipboardBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::Clipboard for IosClipboardBridge {
-    async fn set_text(&self, text: String) -> Result<(), traits::ClipboardError> {
+impl platform_api::Clipboard for IosClipboardBridge {
+    async fn set_text(&self, text: String) -> Result<(), platform_api::ClipboardError> {
         self.inner
             .set_text(text)
             .await
             .map_err(clipboard_error_from_ffi)
     }
-    async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
+    async fn get_text(&self) -> Result<Option<String>, platform_api::ClipboardError> {
         self.inner
             .get_text()
             .await
@@ -1973,13 +1973,13 @@ impl traits::Clipboard for IosClipboardBridge {
 }
 
 /// Fan a flat [`ClipboardFfiError`] back out onto the richer
-/// [`traits::ClipboardError`].
+/// [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
+fn clipboard_error_from_ffi(e: ClipboardFfiError) -> platform_api::ClipboardError {
     match e {
-        ClipboardFfiError::Unsupported => traits::ClipboardError::Unsupported,
-        ClipboardFfiError::Other { message } => traits::ClipboardError::Other(message),
+        ClipboardFfiError::Unsupported => platform_api::ClipboardError::Unsupported,
+        ClipboardFfiError::Other { message } => platform_api::ClipboardError::Other(message),
     }
 }
 
@@ -2007,7 +2007,7 @@ pub enum DeviceControlFfiError {
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
 pub trait IosDeviceControl: Send + Sync {
-    /// Return a JSON-encoded bounded [`traits::DeviceStatus`] record.
+    /// Return a JSON-encoded bounded [`platform_api::DeviceStatus`] record.
     async fn status_json(&self) -> Result<String, DeviceControlFfiError>;
     /// Trigger one host-approved style.
     async fn trigger_haptic(&self, style: String) -> Result<(), DeviceControlFfiError>;
@@ -2027,38 +2027,38 @@ struct IosDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::DeviceStatusProvider for IosDeviceControlBridge {
-    async fn status(&self) -> Result<traits::DeviceStatus, traits::DeviceStatusError> {
+impl platform_api::DeviceStatusProvider for IosDeviceControlBridge {
+    async fn status(&self) -> Result<platform_api::DeviceStatus, platform_api::DeviceStatusError> {
         let body = self
             .inner
             .status_json()
             .await
             .map_err(ios_device_control_error)?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::DeviceStatusError::Other(format!("invalid native device status: {error}"))
+            platform_api::DeviceStatusError::Other(format!("invalid native device status: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::HapticService for IosDeviceControlBridge {
-    async fn trigger(&self, style: traits::HapticStyle) -> Result<(), traits::HapticError> {
+impl platform_api::HapticService for IosDeviceControlBridge {
+    async fn trigger(&self, style: platform_api::HapticStyle) -> Result<(), platform_api::HapticError> {
         self.inner
             .trigger_haptic(ios_haptic_style_to_wire(style).to_string())
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::HapticError::Unavailable,
+                DeviceControlFfiError::Unavailable => platform_api::HapticError::Unavailable,
                 DeviceControlFfiError::Rejected { message }
-                | DeviceControlFfiError::Other { message } => traits::HapticError::Other(message),
+                | DeviceControlFfiError::Other { message } => platform_api::HapticError::Other(message),
             })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::DeepLinkOpener for IosDeviceControlBridge {
-    async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+impl platform_api::DeepLinkOpener for IosDeviceControlBridge {
+    async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
         self.inner
             .open_deep_link(url)
             .await
@@ -2068,86 +2068,86 @@ impl traits::DeepLinkOpener for IosDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::CalendarProvider for IosDeviceControlBridge {
+impl platform_api::CalendarProvider for IosDeviceControlBridge {
     async fn list_events(
         &self,
-        query: traits::CalendarQuery,
-    ) -> Result<Vec<traits::CalendarEvent>, traits::CalendarError> {
+        query: platform_api::CalendarQuery,
+    ) -> Result<Vec<platform_api::CalendarEvent>, platform_api::CalendarError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| traits::CalendarError::Other(error.to_string()))?;
+            .map_err(|error| platform_api::CalendarError::Other(error.to_string()))?;
         let body = self
             .inner
             .calendar_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::CalendarError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => traits::CalendarError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => traits::CalendarError::Other(message),
+                DeviceControlFfiError::Unavailable => platform_api::CalendarError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => platform_api::CalendarError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => platform_api::CalendarError::Other(message),
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::CalendarError::Other(format!("invalid native calendar response: {error}"))
+            platform_api::CalendarError::Other(format!("invalid native calendar response: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::ContactsProvider for IosDeviceControlBridge {
+impl platform_api::ContactsProvider for IosDeviceControlBridge {
     async fn search(
         &self,
-        query: traits::ContactsQuery,
-    ) -> Result<Vec<traits::Contact>, traits::ContactsError> {
+        query: platform_api::ContactsQuery,
+    ) -> Result<Vec<platform_api::Contact>, platform_api::ContactsError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| traits::ContactsError::Other(error.to_string()))?;
+            .map_err(|error| platform_api::ContactsError::Other(error.to_string()))?;
         let body = self
             .inner
             .contacts_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::ContactsError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => traits::ContactsError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => traits::ContactsError::Other(message),
+                DeviceControlFfiError::Unavailable => platform_api::ContactsError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => platform_api::ContactsError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => platform_api::ContactsError::Other(message),
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::ContactsError::Other(format!("invalid native contacts response: {error}"))
+            platform_api::ContactsError::Other(format!("invalid native contacts response: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn ios_haptic_style_to_wire(style: traits::HapticStyle) -> &'static str {
+fn ios_haptic_style_to_wire(style: platform_api::HapticStyle) -> &'static str {
     match style {
-        traits::HapticStyle::Light => "light",
-        traits::HapticStyle::Medium => "medium",
-        traits::HapticStyle::Heavy => "heavy",
-        traits::HapticStyle::Success => "success",
-        traits::HapticStyle::Warning => "warning",
-        traits::HapticStyle::Error => "error",
+        platform_api::HapticStyle::Light => "light",
+        platform_api::HapticStyle::Medium => "medium",
+        platform_api::HapticStyle::Heavy => "heavy",
+        platform_api::HapticStyle::Success => "success",
+        platform_api::HapticStyle::Warning => "warning",
+        platform_api::HapticStyle::Error => "error",
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn ios_device_control_error(error: DeviceControlFfiError) -> traits::DeviceStatusError {
+fn ios_device_control_error(error: DeviceControlFfiError) -> platform_api::DeviceStatusError {
     match error {
-        DeviceControlFfiError::Unavailable => traits::DeviceStatusError::Unavailable,
+        DeviceControlFfiError::Unavailable => platform_api::DeviceStatusError::Unavailable,
         DeviceControlFfiError::Rejected { message } | DeviceControlFfiError::Other { message } => {
-            traits::DeviceStatusError::Other(message)
+            platform_api::DeviceStatusError::Other(message)
         }
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn ios_deep_link_error(error: DeviceControlFfiError) -> traits::DeepLinkError {
+fn ios_deep_link_error(error: DeviceControlFfiError) -> platform_api::DeepLinkError {
     match error {
-        DeviceControlFfiError::Unavailable => traits::DeepLinkError::Unavailable,
-        DeviceControlFfiError::Rejected { message } => traits::DeepLinkError::Rejected(message),
-        DeviceControlFfiError::Other { message } => traits::DeepLinkError::Other(message),
+        DeviceControlFfiError::Unavailable => platform_api::DeepLinkError::Unavailable,
+        DeviceControlFfiError::Rejected { message } => platform_api::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Other { message } => platform_api::DeepLinkError::Other(message),
     }
 }
 
 /// FFI error surface for the iOS camera callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::CameraError`].
+/// fans it back out onto the richer [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2185,7 +2185,7 @@ pub struct CapturedImageFfi {
 
 /// Crate-local foreign callback interface for native camera access — the Swift
 /// app implements it over `UIImagePickerController` / `PHPickerViewController`.
-/// Bridged to [`traits::CameraControl`] by [`IosCameraBridge`].
+/// Bridged to [`platform_api::CameraControl`] by [`IosCameraBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -2226,10 +2226,10 @@ pub trait IosCamera: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosCamera`] callback interface to the shared
-/// [`traits::CameraControl`] seam the engine consumes. Maps
-/// [`traits::CameraPosition`] onto the flat `front` bool, threads
+/// [`platform_api::CameraControl`] seam the engine consumes. Maps
+/// [`platform_api::CameraPosition`] onto the flat `front` bool, threads
 /// `allow_editing`, and fans [`CameraFfiError`] back out onto
-/// [`traits::CameraError`].
+/// [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosCameraBridge {
@@ -2238,18 +2238,18 @@ struct IosCameraBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::CameraControl for IosCameraBridge {
+impl platform_api::CameraControl for IosCameraBridge {
     async fn capture_photo(
         &self,
-        opts: traits::CapturePhotoOpts,
-    ) -> Result<traits::CapturedImage, traits::CameraError> {
-        let front = matches!(opts.position, traits::CameraPosition::Front);
+        opts: platform_api::CapturePhotoOpts,
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+        let front = matches!(opts.position, platform_api::CameraPosition::Front);
         match self.inner.capture_photo(front, opts.allow_editing).await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
         }
     }
-    async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
+    async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
         match self.inner.pick_from_library().await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -2259,11 +2259,11 @@ impl traits::CameraControl for IosCameraBridge {
     // scale, and a local app's bridge budget depends on it doing so.
     async fn capture_photo_sized(
         &self,
-        opts: traits::CapturePhotoOpts,
+        opts: platform_api::CapturePhotoOpts,
         max_dimension: u32,
         jpeg_quality: f32,
-    ) -> Result<traits::CapturedImage, traits::CameraError> {
-        let front = matches!(opts.position, traits::CameraPosition::Front);
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+        let front = matches!(opts.position, platform_api::CameraPosition::Front);
         match self
             .inner
             .capture_photo_sized(front, opts.allow_editing, max_dimension, jpeg_quality)
@@ -2277,7 +2277,7 @@ impl traits::CameraControl for IosCameraBridge {
         &self,
         max_dimension: u32,
         jpeg_quality: f32,
-    ) -> Result<traits::CapturedImage, traits::CameraError> {
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
         match self
             .inner
             .pick_from_library_sized(max_dimension, jpeg_quality)
@@ -2289,32 +2289,32 @@ impl traits::CameraControl for IosCameraBridge {
     }
 }
 
-/// Convert an FFI [`CapturedImageFfi`] into the shared [`traits::CapturedImage`].
+/// Convert an FFI [`CapturedImageFfi`] into the shared [`platform_api::CapturedImage`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn captured_image_from_ffi(img: CapturedImageFfi) -> traits::CapturedImage {
-    traits::CapturedImage {
+fn captured_image_from_ffi(img: CapturedImageFfi) -> platform_api::CapturedImage {
+    platform_api::CapturedImage {
         jpeg_bytes: img.jpeg_bytes,
         width: img.width,
         height: img.height,
     }
 }
 
-/// Fan a flat [`CameraFfiError`] back out onto the richer [`traits::CameraError`].
+/// Fan a flat [`CameraFfiError`] back out onto the richer [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
+fn camera_error_from_ffi(e: CameraFfiError) -> platform_api::CameraError {
     match e {
-        CameraFfiError::PermissionDenied => traits::CameraError::PermissionDenied,
-        CameraFfiError::Cancelled => traits::CameraError::Cancelled,
-        CameraFfiError::DeviceUnavailable => traits::CameraError::DeviceUnavailable,
-        CameraFfiError::Other { message } => traits::CameraError::Other(message),
+        CameraFfiError::PermissionDenied => platform_api::CameraError::PermissionDenied,
+        CameraFfiError::Cancelled => platform_api::CameraError::Cancelled,
+        CameraFfiError::DeviceUnavailable => platform_api::CameraError::DeviceUnavailable,
+        CameraFfiError::Other { message } => platform_api::CameraError::Other(message),
     }
 }
 
 /// FFI error surface for the iOS secure-storage callback interface. A flat enum
 /// so `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::SecureStorageError`].
+/// fans it back out onto the richer [`platform_api::SecureStorageError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2344,7 +2344,7 @@ pub enum SecureStorageFfiError {
 /// (kSecClass GenericPassword, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 /// so items are excluded from iCloud/iTunes backups). The engine's serialized
 /// `SecureStorageData` crosses the seam as an opaque `blob` keyed by
-/// `(service, account)`. Bridged to [`traits::SecureStorage`] by
+/// `(service, account)`. Bridged to [`platform_api::SecureStorage`] by
 /// [`IosSecureStorageBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -2370,7 +2370,7 @@ pub trait IosSecureStorage: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosSecureStorage`] (opaque-blob FFI) to the shared
-/// [`traits::SecureStorage`] seam: serde-encodes `SecureStorageData` to a blob on
+/// [`platform_api::SecureStorage`] seam: serde-encodes `SecureStorageData` to a blob on
 /// store, decodes on retrieve, and reports the Keychain as an encrypted backend.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
@@ -2380,15 +2380,15 @@ struct IosSecureStorageBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::SecureStorage for IosSecureStorageBridge {
+impl platform_api::SecureStorage for IosSecureStorageBridge {
     async fn store(
         &self,
         service: &str,
         account: &str,
         data: protocol::SecureStorageData,
-    ) -> Result<(), traits::SecureStorageError> {
+    ) -> Result<(), platform_api::SecureStorageError> {
         let blob = serde_json::to_vec(&data)
-            .map_err(|e| traits::SecureStorageError::Io(format!("serialize: {e}")))?;
+            .map_err(|e| platform_api::SecureStorageError::Io(format!("serialize: {e}")))?;
         self.inner
             .store(service.to_string(), account.to_string(), blob)
             .await
@@ -2398,7 +2398,7 @@ impl traits::SecureStorage for IosSecureStorageBridge {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
         match self
             .inner
             .retrieve(service.to_string(), account.to_string())
@@ -2407,19 +2407,19 @@ impl traits::SecureStorage for IosSecureStorageBridge {
         {
             Some(blob) => {
                 let data = serde_json::from_slice(&blob)
-                    .map_err(|e| traits::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                    .map_err(|e| platform_api::SecureStorageError::Io(format!("deserialize: {e}")))?;
                 Ok(Some(data))
             }
             None => Ok(None),
         }
     }
-    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
         self.inner
             .delete(service.to_string(), account.to_string())
             .await
             .map_err(securestorage_error_from_ffi)
     }
-    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
         self.inner
             .list(service.to_string())
             .await
@@ -2428,29 +2428,29 @@ impl traits::SecureStorage for IosSecureStorageBridge {
     fn is_encrypted(&self) -> bool {
         true
     }
-    fn backend(&self) -> traits::SecureStorageBackend {
-        traits::SecureStorageBackend::IosKeychain
+    fn backend(&self) -> platform_api::SecureStorageBackend {
+        platform_api::SecureStorageBackend::IosKeychain
     }
 }
 
-/// Fan a flat [`SecureStorageFfiError`] back out onto [`traits::SecureStorageError`].
+/// Fan a flat [`SecureStorageFfiError`] back out onto [`platform_api::SecureStorageError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> traits::SecureStorageError {
+fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> platform_api::SecureStorageError {
     match e {
         SecureStorageFfiError::PermissionDenied { message } => {
-            traits::SecureStorageError::PermissionDenied(message)
+            platform_api::SecureStorageError::PermissionDenied(message)
         }
         SecureStorageFfiError::BackendUnavailable { message } => {
-            traits::SecureStorageError::BackendUnavailable(message)
+            platform_api::SecureStorageError::BackendUnavailable(message)
         }
-        SecureStorageFfiError::Io { message } => traits::SecureStorageError::Io(message),
+        SecureStorageFfiError::Io { message } => platform_api::SecureStorageError::Io(message),
     }
 }
 
 /// FFI error surface for the iOS mic-recorder callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::VoiceError`].
+/// fans it back out onto the richer [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2476,7 +2476,7 @@ pub enum VoiceFfiError {
 }
 
 /// FFI carrier for a finished recording crossing the callback-interface seam:
-/// the encoded audio bytes + their MIME type. Mapped to [`traits::VoiceRecording`].
+/// the encoded audio bytes + their MIME type. Mapped to [`platform_api::VoiceRecording`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -2488,7 +2488,7 @@ pub struct VoiceRecordingFfi {
 }
 
 /// Crate-local foreign callback interface for native mic recording — the Swift
-/// app implements it over `AVAudioRecorder`. Bridged to [`traits::VoiceRecorder`]
+/// app implements it over `AVAudioRecorder`. Bridged to [`platform_api::VoiceRecorder`]
 /// by [`IosVoiceBridge`]. Driven by the engine through `tool-voice`
 /// (start/stop/is_recording); the recording opts cross the seam as the flat
 /// `sample_rate_hz` / `format` args.
@@ -2509,10 +2509,10 @@ pub trait IosVoice: Send + Sync {
 }
 
 /// Adapts the crate-local [`IosVoice`] callback interface to the shared
-/// [`traits::VoiceRecorder`] seam the engine consumes. Destructures
-/// [`traits::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
-/// args, converts [`VoiceRecordingFfi`] back to [`traits::VoiceRecording`], and
-/// fans [`VoiceFfiError`] back out onto [`traits::VoiceError`].
+/// [`platform_api::VoiceRecorder`] seam the engine consumes. Destructures
+/// [`platform_api::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
+/// args, converts [`VoiceRecordingFfi`] back to [`platform_api::VoiceRecording`], and
+/// fans [`VoiceFfiError`] back out onto [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosVoiceBridge {
@@ -2521,12 +2521,12 @@ struct IosVoiceBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::VoiceRecorder for IosVoiceBridge {
+impl platform_api::VoiceRecorder for IosVoiceBridge {
     async fn start_recording(
         &self,
-        opts: traits::VoiceRecordingOpts,
-    ) -> Result<(), traits::VoiceError> {
-        let traits::VoiceRecordingOpts {
+        opts: platform_api::VoiceRecordingOpts,
+    ) -> Result<(), platform_api::VoiceError> {
+        let platform_api::VoiceRecordingOpts {
             sample_rate_hz,
             format,
         } = opts;
@@ -2535,9 +2535,9 @@ impl traits::VoiceRecorder for IosVoiceBridge {
             .await
             .map_err(voice_error_from_ffi)
     }
-    async fn stop_recording(&self) -> Result<traits::VoiceRecording, traits::VoiceError> {
+    async fn stop_recording(&self) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
         match self.inner.stop_recording().await {
-            Ok(rec) => Ok(traits::VoiceRecording {
+            Ok(rec) => Ok(platform_api::VoiceRecording {
                 audio_bytes: rec.audio_bytes,
                 mime_type: rec.mime_type,
             }),
@@ -2549,21 +2549,21 @@ impl traits::VoiceRecorder for IosVoiceBridge {
     }
 }
 
-/// Fan a flat [`VoiceFfiError`] back out onto the richer [`traits::VoiceError`].
+/// Fan a flat [`VoiceFfiError`] back out onto the richer [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
+fn voice_error_from_ffi(e: VoiceFfiError) -> platform_api::VoiceError {
     match e {
-        VoiceFfiError::PermissionDenied => traits::VoiceError::PermissionDenied,
-        VoiceFfiError::NotRecording => traits::VoiceError::NotRecording,
-        VoiceFfiError::Busy => traits::VoiceError::Busy,
-        VoiceFfiError::Other { message } => traits::VoiceError::Other(message),
+        VoiceFfiError::PermissionDenied => platform_api::VoiceError::PermissionDenied,
+        VoiceFfiError::NotRecording => platform_api::VoiceError::NotRecording,
+        VoiceFfiError::Busy => platform_api::VoiceError::Busy,
+        VoiceFfiError::Other { message } => platform_api::VoiceError::Other(message),
     }
 }
 
 /// Adapts the crate-local [`IosStt`] callback interface to the shared
-/// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
-/// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
+/// [`platform_api::SpeechToText`] seam the engine consumes. One forwarding hop per
+/// call; maps [`SpeechFfiError`] onto [`platform_api::SttError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosSttBridge {
@@ -2572,32 +2572,32 @@ struct IosSttBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::SpeechToText for IosSttBridge {
+impl platform_api::SpeechToText for IosSttBridge {
     async fn transcribe(
         &self,
-        opts: traits::SttOpts,
-    ) -> Result<traits::SttTranscript, traits::SttError> {
+        opts: platform_api::SttOpts,
+    ) -> Result<platform_api::SttTranscript, platform_api::SttError> {
         match self.inner.transcribe(opts.language.clone()).await {
-            Ok(text) => Ok(traits::SttTranscript {
+            Ok(text) => Ok(platform_api::SttTranscript {
                 text,
                 language: opts.language,
                 confidence: None,
             }),
             Err(e) => Err(match e {
-                SpeechFfiError::PermissionDenied => traits::SttError::PermissionDenied,
-                SpeechFfiError::NoSpeech => traits::SttError::NoSpeech,
-                SpeechFfiError::Unavailable => traits::SttError::Unavailable,
-                SpeechFfiError::Busy => traits::SttError::Busy,
-                SpeechFfiError::Retriable { message } => traits::SttError::Retriable(message),
-                SpeechFfiError::Other { message } => traits::SttError::Other(message),
+                SpeechFfiError::PermissionDenied => platform_api::SttError::PermissionDenied,
+                SpeechFfiError::NoSpeech => platform_api::SttError::NoSpeech,
+                SpeechFfiError::Unavailable => platform_api::SttError::Unavailable,
+                SpeechFfiError::Busy => platform_api::SttError::Busy,
+                SpeechFfiError::Retriable { message } => platform_api::SttError::Retriable(message),
+                SpeechFfiError::Other { message } => platform_api::SttError::Other(message),
             }),
         }
     }
 }
 
 /// Adapts the crate-local [`IosTts`] callback interface to the shared
-/// [`traits::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
-/// onto [`traits::TtsError`].
+/// [`platform_api::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
+/// onto [`platform_api::TtsError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 struct IosTtsBridge {
@@ -2606,31 +2606,31 @@ struct IosTtsBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::TextToSpeech for IosTtsBridge {
+impl platform_api::TextToSpeech for IosTtsBridge {
     async fn synthesize(
         &self,
-        opts: traits::TtsOpts,
-    ) -> Result<traits::TtsAudio, traits::TtsError> {
+        opts: platform_api::TtsOpts,
+    ) -> Result<platform_api::TtsAudio, platform_api::TtsError> {
         match self.inner.synthesize(opts.text, opts.voice).await {
-            Ok(audio) => Ok(traits::TtsAudio {
+            Ok(audio) => Ok(platform_api::TtsAudio {
                 pcm: audio.pcm,
                 sample_rate_hz: audio.sample_rate_hz,
             }),
             Err(e) => Err(match e {
-                SpeechFfiError::Unavailable => traits::TtsError::Unavailable,
+                SpeechFfiError::Unavailable => platform_api::TtsError::Unavailable,
                 SpeechFfiError::Retriable { message } | SpeechFfiError::Other { message } => {
-                    traits::TtsError::SynthesisFailed(message)
+                    platform_api::TtsError::SynthesisFailed(message)
                 }
                 // STT-only variants are not produced by a TTS impl; fold them
                 // into a generic TTS error rather than panic.
                 SpeechFfiError::PermissionDenied => {
-                    traits::TtsError::Other("permission denied".to_string())
+                    platform_api::TtsError::Other("permission denied".to_string())
                 }
-                SpeechFfiError::NoSpeech => traits::TtsError::Other("no speech".to_string()),
+                SpeechFfiError::NoSpeech => platform_api::TtsError::Other("no speech".to_string()),
                 // Audio-session contention is real for playback too, but
                 // `TtsError` has no busy variant; keep it recognizable in
                 // the message rather than folding it into a bare "other".
-                SpeechFfiError::Busy => traits::TtsError::Other("audio session busy".to_string()),
+                SpeechFfiError::Busy => platform_api::TtsError::Other("audio session busy".to_string()),
             }),
         }
     }
@@ -2710,17 +2710,17 @@ pub fn build_ios_engine_with_config(
         use platform_ios::{IosPlatform, IosPlatformInputs};
         let device_status = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::DeviceStatusProvider>);
+            .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
         let haptics = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::HapticService>);
+            .map(|service| service.clone() as Arc<dyn platform_api::HapticService>);
         let calendar = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::CalendarProvider>);
+            .map(|service| service.clone() as Arc<dyn platform_api::CalendarProvider>);
         let contacts = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::ContactsProvider>);
-        let deep_link = device_control.map(|service| service as Arc<dyn traits::DeepLinkOpener>);
+            .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
+        let deep_link = device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
         // The app generator uses the bundled runtime independently of the
@@ -2759,10 +2759,10 @@ pub fn build_ios_engine_with_config(
             calendar,
             contacts,
             secure_storage: secure_storage.map(|s| {
-                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
+                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn platform_api::SecureStorage>
             }),
             location: location.map(|l| {
-                Arc::new(IosLocationBridge { inner: l }) as Arc<dyn traits::LocationProvider>
+                Arc::new(IosLocationBridge { inner: l }) as Arc<dyn platform_api::LocationProvider>
             }),
             mobile_linux: ios_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
@@ -2855,10 +2855,10 @@ pub fn probe_ios_mobile_linux(config: Option<IosMobileLinuxConfigFfi>) -> Mobile
                 .expect("ios mobile-linux probe runtime");
             capability_to_ffi(probe_rt.block_on(runtime.probe_capability()))
         }
-        None => capability_to_ffi(traits::MobileLinuxCapability {
+        None => capability_to_ffi(platform_api::MobileLinuxCapability {
             available: false,
-            backend: traits::SandboxBackend::IosIsh,
-            mode: traits::MobileLinuxRuntimeMode::Legacy,
+            backend: platform_api::SandboxBackend::IosIsh,
+            mode: platform_api::MobileLinuxRuntimeMode::Legacy,
             reason: Some("legacy unavailable backend selected".to_string()),
             streaming_output: false,
             background_processes: false,
@@ -2917,8 +2917,8 @@ struct MobileLinuxStreamSinkBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::ProcessStreamSink for MobileLinuxStreamSinkBridge {
-    async fn stdout_line(&self, line: String) -> Result<(), traits::ProcessError> {
+impl platform_api::ProcessStreamSink for MobileLinuxStreamSinkBridge {
+    async fn stdout_line(&self, line: String) -> Result<(), platform_api::ProcessError> {
         self.inner
             .on_event(MobileLinuxStreamEventFfi {
                 sequence: 0,
@@ -2932,10 +2932,10 @@ impl traits::ProcessStreamSink for MobileLinuxStreamSinkBridge {
                 timed_out: false,
             })
             .await
-            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+            .map_err(|err| platform_api::ProcessError::Io(err.to_string()))
     }
 
-    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), traits::ProcessError> {
+    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), platform_api::ProcessError> {
         self.inner
             .on_event(MobileLinuxStreamEventFfi {
                 sequence: 0,
@@ -2949,17 +2949,17 @@ impl traits::ProcessStreamSink for MobileLinuxStreamSinkBridge {
                 timed_out: false,
             })
             .await
-            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+            .map_err(|err| platform_api::ProcessError::Io(err.to_string()))
     }
 }
 
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct IosMobileLinuxRuntimeHandle {
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 }
 
 impl IosMobileLinuxRuntimeHandle {
-    fn new(runtime: Arc<dyn traits::MobileLinuxRuntime>) -> Self {
+    fn new(runtime: Arc<dyn platform_api::MobileLinuxRuntime>) -> Self {
         Self { runtime }
     }
 
@@ -3099,7 +3099,7 @@ impl IosMobileLinuxRuntimeHandle {
                         text: Some(detail.clone()),
                         data: None,
                         exit_code: None,
-                        timed_out: matches!(error, traits::MobileLinuxError::Timeout),
+                        timed_out: matches!(error, platform_api::MobileLinuxError::Timeout),
                     })
                     .await;
                 Err(mobile_linux_error_to_ffi(error))
@@ -3176,9 +3176,9 @@ impl IosMobileLinuxRuntimeHandle {
         task_id: String,
     ) -> Result<MobileLinuxTaskFfi, MobileLinuxOperationFfiError> {
         self.runtime
-            .kill(&traits::LinuxProcessHandle {
+            .kill(&platform_api::LinuxProcessHandle {
                 id: task_id.clone(),
-                enforcement: traits::LinuxEnforcementReceipt::default(),
+                enforcement: platform_api::LinuxEnforcementReceipt::default(),
             })
             .await
             .map_err(mobile_linux_error_to_ffi)?;
@@ -3211,7 +3211,7 @@ impl IosMobileLinuxRuntimeHandle {
         data: Vec<u8>,
     ) -> Result<(), MobileLinuxOperationFfiError> {
         self.runtime
-            .write_pty(&traits::PtySessionHandle { id: session_id }, data)
+            .write_pty(&platform_api::PtySessionHandle { id: session_id }, data)
             .await
             .map_err(mobile_linux_error_to_ffi)
     }
@@ -3224,8 +3224,8 @@ impl IosMobileLinuxRuntimeHandle {
     ) -> Result<(), MobileLinuxOperationFfiError> {
         self.runtime
             .resize_pty(
-                &traits::PtySessionHandle { id: session_id },
-                traits::PtySize { cols, rows },
+                &platform_api::PtySessionHandle { id: session_id },
+                platform_api::PtySize { cols, rows },
             )
             .await
             .map_err(mobile_linux_error_to_ffi)
@@ -3233,7 +3233,7 @@ impl IosMobileLinuxRuntimeHandle {
 
     pub async fn close_pty(&self, session_id: String) -> Result<(), MobileLinuxOperationFfiError> {
         self.runtime
-            .close_pty(&traits::PtySessionHandle { id: session_id })
+            .close_pty(&platform_api::PtySessionHandle { id: session_id })
             .await
             .map_err(mobile_linux_error_to_ffi)
     }
@@ -3610,33 +3610,33 @@ mod tests {
     /// its own creation event the same way.
     #[test]
     fn non_terminal_task_status_events_are_skipped_and_terminal_ones_map_to_exit() {
-        let event = |status| traits::MobileLinuxEvent {
+        let event = |status| platform_api::MobileLinuxEvent {
             sequence: 1,
             task_id: Some("session-1".to_string()),
-            kind: traits::MobileLinuxEventKind::TaskStatusChanged {
+            kind: platform_api::MobileLinuxEventKind::TaskStatusChanged {
                 status,
                 exit_code: None,
                 detail: None,
             },
         };
         for status in [
-            traits::MobileLinuxTaskStatus::Queued,
-            traits::MobileLinuxTaskStatus::Running,
-            traits::MobileLinuxTaskStatus::Backgrounded,
+            platform_api::MobileLinuxTaskStatus::Queued,
+            platform_api::MobileLinuxTaskStatus::Running,
+            platform_api::MobileLinuxTaskStatus::Backgrounded,
         ] {
             assert!(
                 super::event_to_ffi(event(status)).is_none(),
                 "{status:?} must not become a stream event"
             );
         }
-        let ffi = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::Completed))
+        let ffi = super::event_to_ffi(event(platform_api::MobileLinuxTaskStatus::Completed))
             .expect("terminal status maps");
         assert!(matches!(
             ffi.kind,
             super::MobileLinuxStreamEventKindFfi::Exit
         ));
         assert_eq!(ffi.stream_id, "session-1");
-        let timed_out = super::event_to_ffi(event(traits::MobileLinuxTaskStatus::TimedOut))
+        let timed_out = super::event_to_ffi(event(platform_api::MobileLinuxTaskStatus::TimedOut))
             .expect("terminal status maps");
         assert!(timed_out.timed_out);
     }
@@ -3648,7 +3648,7 @@ mod tests {
     use client_protocol::permission::PermissionRequest as PermissionRequestDto;
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
     use tokio::sync::Mutex;
-    use traits::{
+    use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
         SharingService, VoiceRecorder, WorktreeManager,
     };
@@ -4173,13 +4173,13 @@ mod tests {
         assert!(!cfg.vision_delegation_enabled);
         assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
         let host = cfg.host_environment.as_ref().expect("mobile host fallback");
-        assert_eq!(host.host_os, traits::MobileHostOs::Ios);
-        assert_eq!(host.device_class, traits::MobileDeviceClass::Unknown);
+        assert_eq!(host.host_os, platform_api::MobileHostOs::Ios);
+        assert_eq!(host.device_class, platform_api::MobileDeviceClass::Unknown);
         assert_eq!(
             host.execution_target,
-            traits::MobileExecutionTarget::Unknown
+            platform_api::MobileExecutionTarget::Unknown
         );
-        assert_eq!(host.launch_mode, traits::MobileLaunchMode::Unknown);
+        assert_eq!(host.launch_mode, platform_api::MobileLaunchMode::Unknown);
         assert_eq!(
             cfg.lingxi_home,
             temp.path().join(branding::DOT_DIR),
@@ -4266,16 +4266,16 @@ mod tests {
         .expect("launch config");
 
         let environment = cfg.host_environment.expect("host environment");
-        assert_eq!(environment.host_os, traits::MobileHostOs::Ios);
+        assert_eq!(environment.host_os, platform_api::MobileHostOs::Ios);
         assert_eq!(environment.host_os_version.as_deref(), Some("19.0"));
-        assert_eq!(environment.device_class, traits::MobileDeviceClass::Tablet);
+        assert_eq!(environment.device_class, platform_api::MobileDeviceClass::Tablet);
         assert_eq!(
             environment.execution_target,
-            traits::MobileExecutionTarget::Simulator
+            platform_api::MobileExecutionTarget::Simulator
         );
         assert_eq!(
             environment.launch_mode,
-            traits::MobileLaunchMode::ScheduledHeadless
+            platform_api::MobileLaunchMode::ScheduledHeadless
         );
     }
 

@@ -13,12 +13,12 @@ permission = { path = "../permission" }
 # NOTE (M8-P3): `engine` is carried transitively via the unchanged
 # `ToolUseContext::session: SessionState` field. The design's clean ToolCtx
 # (full Platform handles, no engine dep) is a P4 reshape — this dep is cut then.
-engine = { path = "../engine" }
+core = { path = "../core" }
 # M8-P5: BuiltinToolContext (the construction-time handle every builtin tool
 # takes) moved here so per-category tool crates (tools/file, tools/shell, …)
 # can construct tools without depending on the `tools` monolith. Pulls in the
 # handle-providing crates. The design §5.1 ToolCtx reshape will slim this later.
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 telemetry = { path = "../telemetry" }
 sandbox = { path = "../sandbox" }
 mcp = { path = "../mcp" }

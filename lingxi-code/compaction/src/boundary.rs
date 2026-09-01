@@ -28,7 +28,7 @@ pub const BOUNDARY_CONTENT: &str = "Conversation compacted";
 /// typed compact metadata while avoiding a protocol→engine dependency cycle.
 #[must_use]
 pub fn compact_active_goal_from_engine(
-    goal: &engine::session::ActiveGoalState,
+    goal: &lingxi_core::session::ActiveGoalState,
 ) -> CompactActiveGoalState {
     CompactActiveGoalState {
         condition: goal.condition.clone(),
@@ -43,8 +43,8 @@ pub fn compact_active_goal_from_engine(
 #[must_use]
 pub fn compact_active_goal_into_engine(
     goal: CompactActiveGoalState,
-) -> engine::session::ActiveGoalState {
-    engine::session::ActiveGoalState {
+) -> lingxi_core::session::ActiveGoalState {
+    lingxi_core::session::ActiveGoalState {
         condition: goal.condition,
         set_at: goal.set_at,
         last_reason: goal.last_reason,
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn active_goal_conversion_is_typed_and_roundtrips() {
-        let goal = engine::session::ActiveGoalState {
+        let goal = lingxi_core::session::ActiveGoalState {
             condition: "ship only when tests pass".to_string(),
             set_at: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),

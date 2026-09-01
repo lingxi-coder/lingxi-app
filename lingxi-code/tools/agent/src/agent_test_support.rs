@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use traits::budget::{BudgetEnforcerHandle, BudgetError};
-use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-use traits::subagent_spawn::{
+use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
-use traits::task_registry::{
+use platform_api::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
@@ -46,7 +46,7 @@ pub struct MockSubagentSpawner {
     required_mcp_servers: Mutex<Vec<String>>,
     /// Optional scripted `SelectedAgentMeta` for `resolve_selection` (G11 — the
     /// `tengu_agent_tool_selected` event). `None` ⇒ the default minimal meta.
-    selection: Mutex<Option<traits::subagent_spawn::SelectedAgentMeta>>,
+    selection: Mutex<Option<platform_api::subagent_spawn::SelectedAgentMeta>>,
     /// Captured `register_name(name, agent_id)` calls (G14) so tests can assert
     /// that a name-carrying spawn registered the mapping.
     registered_names: Mutex<Vec<(String, protocol::AgentId)>>,
@@ -129,7 +129,7 @@ impl MockSubagentSpawner {
     }
 
     /// Script the `SelectedAgentMeta` the next `resolve_selection` returns (G11).
-    pub fn script_selection(&self, meta: traits::subagent_spawn::SelectedAgentMeta) {
+    pub fn script_selection(&self, meta: platform_api::subagent_spawn::SelectedAgentMeta) {
         *self.selection.lock().unwrap() = Some(meta);
     }
 
@@ -290,14 +290,14 @@ impl SubagentSpawner for MockSubagentSpawner {
     }
 
     /// Records the spawn request (so tests can assert the threaded
-    /// `tool_use_id`) and returns a fixed [`traits::subagent_spawn::AsyncLaunch`]
+    /// `tool_use_id`) and returns a fixed [`platform_api::subagent_spawn::AsyncLaunch`]
     /// — overriding the defaulted "not wired" stub so the async dispatch path is
     /// exercisable in tests.
     async fn spawn_async(
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<traits::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+    ) -> Result<platform_api::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
         if *self.async_unwired.lock().unwrap() {
             // Mirror the default trait stub — no invocation recorded (no silent
             // sync fallback).
@@ -312,7 +312,7 @@ impl SubagentSpawner for MockSubagentSpawner {
             .lock()
             .unwrap()
             .push(MockSpawnInvocation { request, inherit });
-        Ok(traits::subagent_spawn::AsyncLaunch {
+        Ok(platform_api::subagent_spawn::AsyncLaunch {
             agent_id: protocol::AgentId::new(),
             output_file: "/tmp/mock-agent.output".to_string(),
         })
@@ -365,11 +365,11 @@ impl SubagentSpawner for MockSubagentSpawner {
         &self,
         subagent_type: &str,
         _model: Option<&str>,
-    ) -> traits::subagent_spawn::SelectedAgentMeta {
+    ) -> platform_api::subagent_spawn::SelectedAgentMeta {
         self.selection.lock().unwrap().clone().unwrap_or(
-            traits::subagent_spawn::SelectedAgentMeta {
+            platform_api::subagent_spawn::SelectedAgentMeta {
                 agent_type: subagent_type.to_string(),
-                ..traits::subagent_spawn::SelectedAgentMeta::default()
+                ..platform_api::subagent_spawn::SelectedAgentMeta::default()
             },
         )
     }

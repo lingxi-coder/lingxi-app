@@ -316,7 +316,7 @@ pub struct BottomPane {
     /// Owner-fed context-pressure banner (`TurnEvent::ContextPressure` — the
     /// claude-code `<TokenWarning>` line). Rendered as its own row between the
     /// status row and the composer; `None` renders nothing.
-    context_pressure: Option<traits::ContextPressureBanner>,
+    context_pressure: Option<platform_api::ContextPressureBanner>,
     /// Theme for status-row styling.
     theme: Theme,
     /// Session accent color (`/color`): tints the composer's `›` gutter
@@ -768,7 +768,7 @@ impl BottomPane {
     }
 
     /// Open the held-peer-message dialog (2.1.232 inbound hold).
-    pub fn show_held_peer(&mut self, held: traits::uds_inbox::HeldPeer) {
+    pub fn show_held_peer(&mut self, held: platform_api::uds_inbox::HeldPeer) {
         self.view_stack
             .push(Box::new(held_peer_view::HeldPeerView::new(held)));
     }
@@ -903,7 +903,7 @@ impl BottomPane {
 
     /// Set or clear the owner-fed context-pressure banner
     /// (`TurnEvent::ContextPressure`); `None` removes the banner row.
-    pub fn set_context_pressure(&mut self, banner: Option<traits::ContextPressureBanner>) {
+    pub fn set_context_pressure(&mut self, banner: Option<platform_api::ContextPressureBanner>) {
         self.context_pressure = banner;
     }
 
@@ -961,7 +961,7 @@ impl BottomPane {
 
     /// The context-pressure banner currently shown, if any (tests/owner).
     #[must_use]
-    pub fn context_pressure(&self) -> Option<&traits::ContextPressureBanner> {
+    pub fn context_pressure(&self) -> Option<&platform_api::ContextPressureBanner> {
         self.context_pressure.as_ref()
     }
 
@@ -1849,11 +1849,11 @@ impl BottomPane {
     /// byte-exact orchestrator-computed text, colored by severity (`Dim` →
     /// theme dim, `Warning`/`Error` → the matching theme colors). Only called
     /// when a banner is set (its zone is zero-height otherwise).
-    fn context_pressure_line(&self, banner: &traits::ContextPressureBanner) -> Line<'static> {
+    fn context_pressure_line(&self, banner: &platform_api::ContextPressureBanner) -> Line<'static> {
         let color = match banner.level {
-            traits::ContextPressureLevel::Dim => self.theme.dim,
-            traits::ContextPressureLevel::Warning => self.theme.warning,
-            traits::ContextPressureLevel::Error => self.theme.error,
+            platform_api::ContextPressureLevel::Dim => self.theme.dim,
+            platform_api::ContextPressureLevel::Warning => self.theme.warning,
+            platform_api::ContextPressureLevel::Error => self.theme.error,
         };
         Line::from(Span::styled(
             banner.text.clone(),
@@ -3672,9 +3672,9 @@ mod tests {
     fn context_pressure_banner_takes_one_row_between_status_and_composer() {
         let mut pane = pane();
         let without = pane.desired_height(80);
-        pane.set_context_pressure(Some(traits::ContextPressureBanner {
+        pane.set_context_pressure(Some(platform_api::ContextPressureBanner {
             text: "Context left until auto-compact: 8%".to_string(),
-            level: traits::ContextPressureLevel::Dim,
+            level: platform_api::ContextPressureLevel::Dim,
         }));
         assert_eq!(pane.desired_height(80), without + 1, "banner adds one row");
         let area = Rect::new(0, 0, 80, pane.desired_height(80));

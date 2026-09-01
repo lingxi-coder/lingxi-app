@@ -10,8 +10,8 @@ use std::sync::Mutex as StdMutex;
 
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::Mutex as TokioMutex;
-use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use traits::RuntimeSpawner;
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::RuntimeSpawner;
 
 // ---- In-memory FileSystem (mirrors the other handler tests) ------------
 
@@ -390,7 +390,7 @@ async fn await_claim(
 ) -> task_store::TodoTask {
     for _ in 0..400 {
         if let Some(task) = store.get(task_id).await {
-            if task.owner.as_deref() == Some(owner) && task.status == engine::TodoState::InProgress
+            if task.owner.as_deref() == Some(owner) && task.status == lingxi_core::TodoState::InProgress
             {
                 return task;
             }
@@ -520,8 +520,8 @@ async fn build_context_resolves_inherit_to_default_model() {
 async fn build_context_wires_budget_description_and_tool_resolution() {
     struct DummyBudget;
     #[async_trait]
-    impl traits::budget::BudgetEnforcerHandle for DummyBudget {
-        async fn check_and_charge(&self, _: u64) -> Result<(), traits::budget::BudgetError> {
+    impl platform_api::budget::BudgetEnforcerHandle for DummyBudget {
+        async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -939,14 +939,14 @@ async fn send_message_after_runner_terminated_is_not_found() {
         .unwrap();
     handler
         .pool
-        .send_event(&aid, engine::Event::UserExit)
+        .send_event(&aid, lingxi_core::Event::UserExit)
         .await
         .unwrap();
     // Wait until the slot's inbound channel is observably closed.
     for _ in 0..400 {
         if handler
             .pool
-            .send_event(&aid, engine::Event::UserInterrupt)
+            .send_event(&aid, lingxi_core::Event::UserInterrupt)
             .await
             .is_err()
         {
@@ -1441,7 +1441,7 @@ impl Drop for ClaimEnvGuard {
     }
 }
 
-fn todo(subject: &str, status: engine::TodoState, owner: Option<&str>) -> task_store::TodoTask {
+fn todo(subject: &str, status: lingxi_core::TodoState, owner: Option<&str>) -> task_store::TodoTask {
     let mut t =
         task_store::TodoTask::new(subject.into(), "desc".into(), None, serde_json::Map::new());
     t.status = status;
@@ -1451,7 +1451,7 @@ fn todo(subject: &str, status: engine::TodoState, owner: Option<&str>) -> task_s
 
 #[test]
 fn pick_next_task_skips_owned_blocked_and_non_pending() {
-    use engine::TodoState::{Completed, InProgress, Pending};
+    use lingxi_core::TodoState::{Completed, InProgress, Pending};
     let mut blocked = todo("blocked", Pending, None);
     blocked.id = "4".into();
     blocked.blocked_by = vec!["2".into()];
@@ -1493,7 +1493,7 @@ fn pick_next_task_skips_owned_blocked_and_non_pending() {
 fn claimed_task_prompt_is_byte_exact() {
     // Oracle Vvb (2.1.223 @251672219) segment table: `": \n\n "` — a SPACE
     // after the colon at end-of-line and a space before the subject.
-    let mut t = todo("Fix the parser", engine::TodoState::Pending, None);
+    let mut t = todo("Fix the parser", lingxi_core::TodoState::Pending, None);
     t.id = "7".into();
     t.description = String::new();
     assert_eq!(
@@ -1551,7 +1551,7 @@ async fn spawn_auto_claims_next_available_task() {
     let team = "claim-team-startup";
     let store = task_store::TodoStore::for_list(team);
     let tid = store
-        .create(todo("Startup work", engine::TodoState::Pending, None))
+        .create(todo("Startup work", lingxi_core::TodoState::Pending, None))
         .await
         .unwrap();
 
@@ -1576,7 +1576,7 @@ async fn spawn_auto_claims_next_available_task() {
     // depending on executor scheduling after `spawn` returns.
     let t = await_claim(&store, &tid, "buddy").await;
     assert_eq!(t.owner.as_deref(), Some("buddy"), "claimed at startup");
-    assert_eq!(t.status, engine::TodoState::InProgress);
+    assert_eq!(t.status, lingxi_core::TodoState::InProgress);
 
     handler.kill(&h.task_id, c).await.unwrap();
 }
@@ -1589,7 +1589,7 @@ async fn pool_allocation_failure_rolls_back_startup_claim() {
     let task_id = store
         .create(todo(
             "Must remain available",
-            engine::TodoState::Pending,
+            lingxi_core::TodoState::Pending,
             None,
         ))
         .await
@@ -1628,7 +1628,7 @@ async fn pool_allocation_failure_rolls_back_startup_claim() {
     assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
     let task = store.get(&task_id).await.unwrap();
     assert_eq!(task.owner, None, "failed startup must release the claim");
-    assert_eq!(task.status, engine::TodoState::Pending);
+    assert_eq!(task.status, lingxi_core::TodoState::Pending);
     assert!(handler.entries.lock().await.is_empty());
 }
 
@@ -1642,7 +1642,7 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
     let config_home = guard.dir.join("host-owned-config");
     let store = task_store::TodoStore::for_list_at(&config_home, team);
     let tid = store
-        .create(todo("Host-owned work", engine::TodoState::Pending, None))
+        .create(todo("Host-owned work", lingxi_core::TodoState::Pending, None))
         .await
         .unwrap();
 
@@ -1669,7 +1669,7 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
         Some("buddy"),
         "startup claim must read the injected config home"
     );
-    assert_eq!(t.status, engine::TodoState::InProgress);
+    assert_eq!(t.status, lingxi_core::TodoState::InProgress);
     assert!(
         task_store::TodoStore::for_list(team)
             .list()
@@ -1715,7 +1715,7 @@ async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
 
     // NOW a task appears on the shared list.
     let tid = store
-        .create(todo("Late work", engine::TodoState::Pending, None))
+        .create(todo("Late work", lingxi_core::TodoState::Pending, None))
         .await
         .unwrap();
 
@@ -1725,7 +1725,7 @@ async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
     loop {
         let t = store.get(&tid).await.unwrap();
         if t.owner.as_deref() == Some("buddy")
-            && t.status == engine::TodoState::InProgress
+            && t.status == lingxi_core::TodoState::InProgress
             && api_handle.call_count() >= 2
         {
             break;
@@ -1774,12 +1774,12 @@ async fn killed_teammate_stops_claiming() {
     handler.kill(&h.task_id, c).await.unwrap();
 
     let tid = store
-        .create(todo("Post-kill work", engine::TodoState::Pending, None))
+        .create(todo("Post-kill work", lingxi_core::TodoState::Pending, None))
         .await
         .unwrap();
     // Two full tick intervals: a live poller would have claimed by now.
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     let t = store.get(&tid).await.unwrap();
     assert_eq!(t.owner, None, "killed teammate must not claim");
-    assert_eq!(t.status, engine::TodoState::Pending);
+    assert_eq!(t.status, lingxi_core::TodoState::Pending);
 }

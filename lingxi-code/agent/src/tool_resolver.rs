@@ -267,7 +267,7 @@ impl AgentToolResolver {
         // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
         // bypass (returned above) is exempt — fork recursion is governed by the
         // `is_in_fork_child` message guard in `AgentTool`.
-        if depth >= traits::subagent_spawn::max_subagent_spawn_depth() {
+        if depth >= platform_api::subagent_spawn::max_subagent_spawn_depth() {
             tools.retain(|t| t.name() != "Agent");
         }
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// One line in the agent transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ impl AgentTranscriptWriter {
     }
 
     /// Append one [`TranscriptEntry`] for `message`.
-    pub async fn record(&self, message: &ConversationMessage) -> Result<(), traits::FsError> {
+    pub async fn record(&self, message: &ConversationMessage) -> Result<(), platform_api::FsError> {
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
@@ -112,7 +112,7 @@ impl AgentTranscriptWriter {
         &self,
         status: &str,
         error: Option<&str>,
-    ) -> Result<(), traits::FsError> {
+    ) -> Result<(), platform_api::FsError> {
         let detail = error.unwrap_or(status);
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
@@ -133,7 +133,7 @@ impl AgentTranscriptWriter {
         self.append_entry(&entry).await
     }
 
-    async fn append_entry(&self, entry: &TranscriptEntry) -> Result<(), traits::FsError> {
+    async fn append_entry(&self, entry: &TranscriptEntry) -> Result<(), platform_api::FsError> {
         let line = format!(
             "{}\n",
             serde_json::to_string(entry).expect("transcript serialization")

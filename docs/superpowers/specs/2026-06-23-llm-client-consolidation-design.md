@@ -68,14 +68,14 @@ that stays green at every phase.
 
 **Connection wiring (verified):**
 ```
-reqwest (ReqwestHttp : traits::http::HttpTransport)   [platforms/common, windows, posix — 3 copies]
+reqwest (ReqwestHttp : platform_api::http::HttpTransport)   [platforms/common, windows, posix — 3 copies]
   → LlmTransportBridge<T: HttpTransport> : llm_client::Transport   [platforms/common/llm_transport.rs]
   → Arc<dyn llm_client::Transport>  → ProviderApiAdapter::new_with_routing(...)   [engine-desktop/lib.rs:2091]
 ```
 - All three "platform" HTTP impls are the same `reqwest + rustls-tls` code
   (Windows is **not** WinHTTP). `platforms/posix-minimal` is a **stub** that
   errors on every call (`"Plan 17 wires the real client"`).
-- `traits::http::HttpTransport` is a **shared** abstraction also used by
+- `platform_api::http::HttpTransport` is a **shared** abstraction also used by
   `web_fetch`/`web_search`, MCP, cron, sidequery, and the oauth refreshers —
   only composition roots reference the concrete `ReqwestHttp`.
 
@@ -97,10 +97,10 @@ reqwest (ReqwestHttp : traits::http::HttpTransport)   [platforms/common, windows
 
 ```
 ┌─ http-client crate (NEW) ─────────────────────────────────────────┐
-│  ReqwestHttp : traits::http::HttpTransport   (the ONE Rust socket) │
+│  ReqwestHttp : platform_api::http::HttpTransport   (the ONE Rust socket) │
 │  reqwest + rustls-tls + tokio-tungstenite (WS)                     │
 └───────────────────────────────────────────────────────────────────┘
-        ▲ injected as Arc<dyn traits::http::HttpTransport>
+        ▲ injected as Arc<dyn platform_api::http::HttpTransport>
         │  (only composition roots know about http-client)
 ┌─ llm-client crate ────────────────────────────────────────────────┐
 │  transport::LlmTransportBridge   (HttpTransport → Transport, moved)│
@@ -171,7 +171,7 @@ New edges and why each is safe:
   prompt-cache gates, forced-tool-choice, request-metadata, thinking config,
   cost estimation, analytics) into `llm_client::service::ApiService`.
 - Struct state moves verbatim: `client`, `transport`, subscriber/subscription
-  (`traits::subscription::SharedSubscription`), `forced_tool_choice`,
+  (`platform_api::subscription::SharedSubscription`), `forced_tool_choice`,
   `thinking`, `request_metadata`, `cache_editing_inputs`, `ua`, `version`,
   `analytics`, fallback config.
 - Public surface mirrors the union of the three traits' methods, in protocol /

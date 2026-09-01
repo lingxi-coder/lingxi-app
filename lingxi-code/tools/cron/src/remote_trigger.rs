@@ -404,7 +404,7 @@ impl Tool for RemoteTriggerTool {
         // `HttpError::Status` (non-2xx) is mapped back to a result, not an error.
         let resp = match self.ctx.http.request(req).await {
             Ok(r) => r,
-            Err(traits::http::HttpError::Status { status, body }) => protocol::HttpResponse {
+            Err(platform_api::http::HttpError::Status { status, body }) => protocol::HttpResponse {
                 status,
                 headers: vec![],
                 body,
@@ -449,8 +449,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::http::{HttpError, HttpTransport, SseStream};
-    use traits::process::ProcessOutput;
+    use platform_api::http::{HttpError, HttpTransport, SseStream};
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

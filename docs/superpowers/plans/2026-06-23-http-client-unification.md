@@ -4,7 +4,7 @@
 
 **Goal:** Collapse the LLM HTTP socket onto one pure-Rust `reqwest+rustls` transport in a new shared `http-client` crate, delete the duplicate copies + the stub, and move the `HttpTransport → llm_client::Transport` bridge into `llm-client`.
 
-**Architecture:** New leaf crate `http-client` owns `ReqwestHttp` (impl of `traits::http::HttpTransport`). The platform crates (common/windows/posix/posix-minimal/ios/android) become thin re-export shims pointing at it. The generic `LlmTransportBridge<T: HttpTransport>` (impl `llm_client::Transport`) moves into `llm-client`, which gains `traits`+`protocol` deps. This is **byte-identical relocation** — the same reqwest code, in one place.
+**Architecture:** New leaf crate `http-client` owns `ReqwestHttp` (impl of `platform_api::http::HttpTransport`). The platform crates (common/windows/posix/posix-minimal/ios/android) become thin re-export shims pointing at it. The generic `LlmTransportBridge<T: HttpTransport>` (impl `llm_client::Transport`) moves into `llm-client`, which gains `traits`+`protocol` deps. This is **byte-identical relocation** — the same reqwest code, in one place.
 
 **Tech Stack:** Rust (edition/MSRV from workspace = 1.82), `reqwest` (rustls-tls), `tokio-tungstenite`, `eventsource-stream`, `tokio`.
 
@@ -46,8 +46,8 @@
 - Modify: `lingxi-code/Cargo.toml` (members), `lingxi-code/platforms/common/Cargo.toml`, `lingxi-code/platforms/common/src/lib.rs`
 
 **Interfaces:**
-- Produces: crate `http-client` exposing `http_client::ReqwestHttp` (`impl traits::http::HttpTransport`), constructor `ReqwestHttp::new() -> Self`, `Default`.
-- Consumes: `traits::http::HttpTransport`, `protocol::{HttpRequest, HttpResponse, ...}`.
+- Produces: crate `http-client` exposing `http_client::ReqwestHttp` (`impl platform_api::http::HttpTransport`), constructor `ReqwestHttp::new() -> Self`, `Default`.
+- Consumes: `platform_api::http::HttpTransport`, `protocol::{HttpRequest, HttpResponse, ...}`.
 
 - [ ] **Step 1: Create the crate manifest**
 
@@ -62,7 +62,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -111,7 +111,7 @@ Create `lingxi-code/http-client/src/lib.rs`:
 ```rust
 //! Shared pure-Rust HTTP transport (`reqwest` + `rustls-tls`).
 //!
-//! Single source of truth for the production [`traits::http::HttpTransport`]
+//! Single source of truth for the production [`platform_api::http::HttpTransport`]
 //! used by every host (desktop, windows, mobile). Replaces the formerly
 //! duplicated `platforms/{common,windows,posix}` copies.
 
@@ -123,7 +123,7 @@ pub use reqwest_http::ReqwestHttp;
 - [ ] **Step 5: Fix module-internal references in the moved file**
 
 In `lingxi-code/http-client/src/reqwest_http.rs`, the file previously lived in `platform_common`. Fix any references so it stands alone:
-- Replace any `crate::` paths that pointed at `platform_common` siblings with the real crate (`traits::…`, `protocol::…`). The transport only needs `traits::http::*` and `protocol::{HttpRequest, HttpResponse, HttpMethod, ...}`.
+- Replace any `crate::` paths that pointed at `platform_common` siblings with the real crate (`platform_api::…`, `protocol::…`). The transport only needs `platform_api::http::*` and `protocol::{HttpRequest, HttpResponse, HttpMethod, ...}`.
 - Remove any `use super::…`.
 - If the file references `platform_common::…`, that is a smell — the transport must be self-contained; resolve by importing from `traits`/`protocol`.
 
@@ -243,14 +243,14 @@ git commit -m "refactor(platforms): all hosts re-export http-client::ReqwestHttp
 - Modify: `lingxi-code/llm-client/src/lib.rs`, `platforms/common/src/lib.rs`, `platforms/common/tests/llm_transport_test.rs`
 
 **Interfaces:**
-- Consumes: `traits::http::HttpTransport`, `protocol::*`, `crate::Transport` (the `llm_client::Transport` trait).
-- Produces: `llm_client::LlmTransportBridge<T: traits::http::HttpTransport>` (`impl llm_client::Transport`), `LlmTransportBridge::new(http: T) -> Self`, and convenience `llm_client::transport::from_http(http: Arc<dyn traits::http::HttpTransport>) -> Arc<dyn crate::Transport>`.
+- Consumes: `platform_api::http::HttpTransport`, `protocol::*`, `crate::Transport` (the `llm_client::Transport` trait).
+- Produces: `llm_client::LlmTransportBridge<T: platform_api::http::HttpTransport>` (`impl llm_client::Transport`), `LlmTransportBridge::new(http: T) -> Self`, and convenience `llm_client::transport::from_http(http: Arc<dyn platform_api::http::HttpTransport>) -> Arc<dyn crate::Transport>`.
 
 - [ ] **Step 1: Add the deps to llm-client**
 
 In `lingxi-code/llm-client/Cargo.toml` `[dependencies]`, add:
 ```toml
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 ```
@@ -273,18 +273,18 @@ pub use transport_bridge::{from_http, LlmTransportBridge};
 ```
 
 In `lingxi-code/llm-client/src/transport_bridge.rs`:
-- Fix imports: references to `llm_client::Transport` / `llm_client::*` become `crate::…`; keep `traits::http::HttpTransport`, `protocol::…`. Remove any `platform_common::…` references (verify none remain — the bridge must be self-contained).
+- Fix imports: references to `llm_client::Transport` / `llm_client::*` become `crate::…`; keep `platform_api::http::HttpTransport`, `protocol::…`. Remove any `platform_common::…` references (verify none remain — the bridge must be self-contained).
 - Append the convenience constructor:
 ```rust
 use std::sync::Arc;
 
-/// Wrap any host [`traits::http::HttpTransport`] as an [`crate::Transport`].
+/// Wrap any host [`platform_api::http::HttpTransport`] as an [`crate::Transport`].
 #[must_use]
-pub fn from_http(http: Arc<dyn traits::http::HttpTransport>) -> Arc<dyn crate::Transport> {
+pub fn from_http(http: Arc<dyn platform_api::http::HttpTransport>) -> Arc<dyn crate::Transport> {
     Arc::new(LlmTransportBridge::new(http))
 }
 ```
-(If `LlmTransportBridge::new` requires `T: Sized` rather than `Arc<dyn …>`, add a blanket `impl traits::http::HttpTransport for Arc<dyn traits::http::HttpTransport>` is unnecessary — instead make `from_http` construct `LlmTransportBridge::new(http)` where `LlmTransportBridge<Arc<dyn HttpTransport>>`; confirm the existing `new` is generic `T: HttpTransport` and that `Arc<dyn HttpTransport>: HttpTransport` via the trait's existing blanket impl in `traits`. If no blanket impl exists, keep `from_http` generic: `pub fn from_http<T: traits::http::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport>`.)
+(If `LlmTransportBridge::new` requires `T: Sized` rather than `Arc<dyn …>`, add a blanket `impl platform_api::http::HttpTransport for Arc<dyn platform_api::http::HttpTransport>` is unnecessary — instead make `from_http` construct `LlmTransportBridge::new(http)` where `LlmTransportBridge<Arc<dyn HttpTransport>>`; confirm the existing `new` is generic `T: HttpTransport` and that `Arc<dyn HttpTransport>: HttpTransport` via the trait's existing blanket impl in `traits`. If no blanket impl exists, keep `from_http` generic: `pub fn from_http<T: platform_api::http::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport>`.)
 
 - [ ] **Step 4: Make platforms/common re-export the bridge from llm-client**
 

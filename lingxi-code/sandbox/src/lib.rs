@@ -49,7 +49,7 @@ pub use runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
     SandboxRuntimeConfig, SandboxSettingsJson, SettingsJson, SettingsPermissions,
 };
-pub use traits::{
+pub use platform_api::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
     SandboxedCommand, SandboxedTag,
 };
@@ -66,19 +66,19 @@ pub use wrap::{wrap_with_sandbox, SandboxWrapError};
 /// process to write outside the project.
 ///
 /// # Errors
-/// Returns [`traits::SandboxError::PathCanonicalize`] if the kernel
+/// Returns [`platform_api::SandboxError::PathCanonicalize`] if the kernel
 /// canonicalization itself fails, or
-/// [`traits::SandboxError::SymlinkEscape`] when the canonical path
+/// [`platform_api::SandboxError::SymlinkEscape`] when the canonical path
 /// resolves outside `workspace`.
 pub fn canonicalize_safely(
     path: &std::path::Path,
     workspace: &std::path::Path,
-) -> Result<std::path::PathBuf, traits::SandboxError> {
+) -> Result<std::path::PathBuf, platform_api::SandboxError> {
     let canon = path
         .canonicalize()
-        .map_err(|e| traits::SandboxError::PathCanonicalize(e.to_string()))?;
+        .map_err(|e| platform_api::SandboxError::PathCanonicalize(e.to_string()))?;
     if !canon.starts_with(workspace) {
-        return Err(traits::SandboxError::SymlinkEscape(
+        return Err(platform_api::SandboxError::SymlinkEscape(
             path.display().to_string(),
         ));
     }

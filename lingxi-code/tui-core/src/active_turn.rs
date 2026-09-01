@@ -222,7 +222,7 @@ pub fn diff_inputs_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::TurnOutcome;
+    use platform_api::TurnOutcome;
 
     fn start_tool(id: &protocol::ToolUseId, tool: &str, input: serde_json::Value) -> TurnEvent {
         TurnEvent::ToolUseStart {

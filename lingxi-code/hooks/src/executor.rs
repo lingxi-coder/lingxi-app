@@ -53,8 +53,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use traits::subagent_spawn::SubagentSpawner;
-use traits::{
+use platform_api::subagent_spawn::SubagentSpawner;
+use platform_api::{
     HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner,
     Sandbox,
 };
@@ -221,7 +221,7 @@ pub struct HookExecutorImpl {
     /// `stderr: "Hook {id} failed: command executor not wired"`.
     process: Option<Arc<dyn ProcessRunner>>,
     /// Optional sandbox — required alongside `process` to mint the
-    /// [`traits::SandboxedCommand`] the runner accepts. Attached via
+    /// [`platform_api::SandboxedCommand`] the runner accepts. Attached via
     /// [`Self::with_process_runner`].
     sandbox: Option<Arc<dyn Sandbox>>,
     /// Optional background registry for non-blocking (`blocking == false`)
@@ -429,7 +429,7 @@ impl HookExecutorImpl {
 
     /// Attach a [`ProcessRunner`] + [`Sandbox`] so the `Command` arm can spawn
     /// child processes. Both are required: the runner only accepts a
-    /// [`traits::SandboxedCommand`], which only the sandbox can mint (the
+    /// [`platform_api::SandboxedCommand`], which only the sandbox can mint (the
     /// D2 / spec A1 sandbox-decision invariant). Without this, `Command`
     /// hooks return a structured "not wired" error.
     #[must_use]
@@ -1598,11 +1598,11 @@ impl Dispatcher {
                 let progress_frames = self
                     .begin_hook_progress_frames(hook, &format!("{:?}", event.event_type()))
                     .await;
-                let live_observer: Option<Arc<dyn traits::HookOutputObserver>> =
+                let live_observer: Option<Arc<dyn platform_api::HookOutputObserver>> =
                     progress_frames.as_ref().map(|frames| {
                         Arc::new(HookLiveOutputObserver {
                             buf: frames.buf.clone(),
-                        }) as Arc<dyn traits::HookOutputObserver>
+                        }) as Arc<dyn platform_api::HookOutputObserver>
                     });
                 // Runtime `{"async":true}` first-line detection (claude-code
                 // `hooks.ts:1117-1166`): a hook whose first stdout line is that
@@ -1623,7 +1623,7 @@ impl Dispatcher {
                     )
                     .await
                 {
-                    Ok(traits::HookRunOutcome::Backgrounded {
+                    Ok(platform_api::HookRunOutcome::Backgrounded {
                         async_timeout,
                         output,
                     }) => {
@@ -1651,7 +1651,7 @@ impl Dispatcher {
                             );
                             let work: HookWork = Box::pin(async move {
                                 let out =
-                                    output_rx.await.unwrap_or_else(|_| traits::ProcessOutput {
+                                    output_rx.await.unwrap_or_else(|_| platform_api::ProcessOutput {
                                         stdout: String::new(),
                                         stderr: "async hook output channel closed".to_string(),
                                         exit_code: -1,
@@ -1701,7 +1701,7 @@ impl Dispatcher {
                             false,
                         )
                     }
-                    Ok(traits::HookRunOutcome::Completed(output)) => {
+                    Ok(platform_api::HookRunOutcome::Completed(output)) => {
                         map_command_output(hook, Ok(output), expected_event)
                     }
                     Err(e) => map_command_output(hook, Err(e), expected_event),
@@ -2117,13 +2117,13 @@ impl HookLiveOutput {
     }
 }
 
-/// SH-07 — the [`traits::HookOutputObserver`] the runner pushes chunks into.
+/// SH-07 — the [`platform_api::HookOutputObserver`] the runner pushes chunks into.
 struct HookLiveOutputObserver {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
 }
 
 #[async_trait]
-impl traits::HookOutputObserver for HookLiveOutputObserver {
+impl platform_api::HookOutputObserver for HookLiveOutputObserver {
     async fn on_chunk(&self, stdout_delta: &[u8], stderr_delta: &[u8]) {
         let mut live = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if !stdout_delta.is_empty() {
@@ -2142,7 +2142,7 @@ impl traits::HookOutputObserver for HookLiveOutputObserver {
 struct HookProgressFrames {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<traits::BackgroundTaskHandle>,
+    handle: Option<platform_api::BackgroundTaskHandle>,
 }
 
 /// SH-06 — `Otr()` (oracle 2.1.238 @ 284437507):
@@ -3171,7 +3171,7 @@ fn process_error_outcome(hook: &HookDefinition, e: &ProcessError) -> (HookResult
 ///    - any other non-zero ⇒ non-blocking error (`Error`, no `Block` decision).
 fn map_command_output(
     hook: &HookDefinition,
-    run: Result<traits::ProcessOutput, ProcessError>,
+    run: Result<platform_api::ProcessOutput, ProcessError>,
     expected_event: &'static str,
 ) -> (HookResult, bool) {
     match run {
@@ -3660,7 +3660,7 @@ mod attachment_wiring_tests {
     use protocol::{HookId, ToolUseId};
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use traits::{
+    use platform_api::{
         ProcessHandle, ProcessOutput, RuntimeError, SandboxBackend, SandboxCapability,
         SandboxPolicy, SandboxedCommand, SandboxedTag,
     };
@@ -3721,7 +3721,7 @@ mod attachment_wiring_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, traits::SandboxError> {
+        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -3741,7 +3741,7 @@ mod attachment_wiring_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: traits::SandboxFeatures::default(),
+                features: platform_api::SandboxFeatures::default(),
             }
         }
     }
@@ -3753,11 +3753,11 @@ mod attachment_wiring_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -3768,14 +3768,14 @@ mod attachment_wiring_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 

@@ -148,7 +148,7 @@ mod session_end_batch_deadline_tests {
     use crate::response::{HookOutcome, HookResult};
     use protocol::HookId;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use traits::RuntimeError;
+    use platform_api::RuntimeError;
 
     /// `HttpTransport` stub — the Builtin arm never touches HTTP.
     struct UnusedHttp;
@@ -157,14 +157,14 @@ mod session_end_batch_deadline_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -175,11 +175,11 @@ mod session_end_batch_deadline_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -341,8 +341,8 @@ mod command_arm_tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand};
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand};
 
     /// Mock `ProcessRunner` that returns a canned `ProcessOutput` (or
     /// `ProcessError`) and records the `SandboxedCommand` it was handed so the
@@ -429,7 +429,7 @@ mod command_arm_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, traits::SandboxError> {
+        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -449,7 +449,7 @@ mod command_arm_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: traits::SandboxFeatures::default(),
+                features: platform_api::SandboxFeatures::default(),
             }
         }
     }
@@ -462,11 +462,11 @@ mod command_arm_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -478,14 +478,14 @@ mod command_arm_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -2319,8 +2319,8 @@ mod async_path_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Notify};
-    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{
         BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
         RuntimeSpawner, SandboxPolicy, SandboxedCommand,
     };
@@ -2428,7 +2428,7 @@ mod async_path_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, traits::SandboxError> {
+        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -2448,7 +2448,7 @@ mod async_path_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: traits::SandboxFeatures::default(),
+                features: platform_api::SandboxFeatures::default(),
             }
         }
     }
@@ -2460,14 +2460,14 @@ mod async_path_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -2958,7 +2958,7 @@ mod async_path_tests {
     /// A `ProcessRunner` whose `run_hook_with_async_detection` BACKGROUNDS the
     /// hook (mirroring the posix runner when it sees the `{"async":true}` marker
     /// on the child's first stdout line): it hands back a
-    /// [`traits::HookRunOutcome::Backgrounded`] with an eventual-output handle
+    /// [`platform_api::HookRunOutcome::Backgrounded`] with an eventual-output handle
     /// pre-loaded with `eventual`. Its plain `run` is never taken on this path.
     struct MarkerBackgroundingRunner {
         eventual: StdMutex<Option<ProcessOutput>>,
@@ -2981,12 +2981,12 @@ mod async_path_tests {
             &self,
             _cmd: &SandboxedCommand,
             _default_async_timeout: Duration,
-        ) -> Result<traits::HookRunOutcome, ProcessError> {
+        ) -> Result<platform_api::HookRunOutcome, ProcessError> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             // Deliver the eventual (post-marker) output immediately, as a real
             // detached drain would once the child finished.
             let _ = tx.send(self.eventual.lock().unwrap().take().expect("one call"));
-            Ok(traits::HookRunOutcome::Backgrounded {
+            Ok(platform_api::HookRunOutcome::Backgrounded {
                 async_timeout: self.async_timeout,
                 output: Some(rx),
             })
@@ -3042,10 +3042,10 @@ mod async_path_tests {
             &self,
             _cmd: &SandboxedCommand,
             _default_async_timeout: Duration,
-        ) -> Result<traits::HookRunOutcome, ProcessError> {
+        ) -> Result<platform_api::HookRunOutcome, ProcessError> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.sender.lock().unwrap() = Some(tx);
-            Ok(traits::HookRunOutcome::Backgrounded {
+            Ok(platform_api::HookRunOutcome::Backgrounded {
                 async_timeout: self.async_timeout,
                 output: Some(rx),
             })
@@ -3073,7 +3073,7 @@ mod async_path_tests {
     }
 
     #[async_trait]
-    impl traits::OutputStream for AsyncProgressObserver {
+    impl platform_api::OutputStream for AsyncProgressObserver {
         async fn emit_text(&self, _text: &str) {}
 
         async fn emit_tool_call(
@@ -3093,7 +3093,7 @@ mod async_path_tests {
         ) {
         }
 
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
 
         async fn emit_hook_progress_started(
             &self,
@@ -3425,7 +3425,7 @@ mod once_and_status_message_tests {
     }
 
     #[async_trait]
-    impl traits::OutputStream for ProgressObserver {
+    impl platform_api::OutputStream for ProgressObserver {
         async fn emit_text(&self, _text: &str) {}
 
         async fn emit_tool_call(
@@ -3445,7 +3445,7 @@ mod once_and_status_message_tests {
         ) {
         }
 
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
 
         async fn emit_hook_progress_started(
             &self,
@@ -3476,14 +3476,14 @@ mod once_and_status_message_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -3495,14 +3495,14 @@ mod once_and_status_message_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -4083,12 +4083,12 @@ mod http_agent_dispatch_tests {
     use protocol::{HookId, HttpResponse, ToolUseId};
     use serde_json::json;
     use std::sync::Mutex;
-    use traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use traits::subagent_spawn::{
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::subagent_spawn::{
         SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
         SubagentUsage,
     };
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     /// `RuntimeSpawner` stub — never exercised by these tests.
     struct UnusedRuntime;
@@ -4098,14 +4098,14 @@ mod http_agent_dispatch_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -4122,7 +4122,7 @@ mod http_agent_dispatch_tests {
         async fn request(
             &self,
             req: protocol::HttpRequest,
-        ) -> Result<HttpResponse, traits::HttpError> {
+        ) -> Result<HttpResponse, platform_api::HttpError> {
             self.recorded.lock().unwrap().push(req);
             Ok(HttpResponse {
                 status: self.status,
@@ -4134,8 +4134,8 @@ mod http_agent_dispatch_tests {
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -4247,14 +4247,14 @@ mod http_agent_dispatch_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -4387,14 +4387,14 @@ mod prompt_dispatch_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -4406,14 +4406,14 @@ mod prompt_dispatch_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 

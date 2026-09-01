@@ -143,7 +143,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
 }
 
 async fn run_build(cfg: DesktopConfig) -> Result<engine_desktop::DesktopRuntime, BuildError> {
-    let output: Arc<dyn traits::OutputStream> =
+    let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     build(cfg, output, perm_sink).await

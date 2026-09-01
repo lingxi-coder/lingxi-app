@@ -4,7 +4,7 @@
 
 - 可执行文件：`/Users/luolingfeng/.local/share/claude/versions/2.1.245`
 - `claude upgrade`：`Claude Code is up to date (2.1.245)`
-- 本项目版本源：`traits::CLAUDE_CODE_VERSION = "2.1.245"`
+- 本项目版本源：`platform_api::CLAUDE_CODE_VERSION = "2.1.245"`
 
 本文件是当前目标的增量收口记录。旧的 2.1.220 fixture 和 2.1.238 审计保留为历史证据，不改写其捕获版本。
 

@@ -38,11 +38,11 @@ use async_trait::async_trait;
 use engine_desktop::TEAMMATE_POOL_CAP;
 use protocol::AgentId;
 use test_harness::mocks::MockRuntimeSpawner;
-use traits::budget::{BudgetEnforcerHandle, BudgetError};
-use traits::subagent_spawn::{
+use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
-use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Scripted `SubagentApiClient`: one non-streaming round-trip per call, returning
 /// a single `end_turn` text turn so the non-persistent subagent loop terminates
@@ -118,7 +118,7 @@ impl BudgetEnforcerHandle for OpenBudget {
 }
 
 /// A minimal persistent-teammate `SubagentContext` with `api_client = None`, so
-/// the slot runs the legacy stub runner. With no inbound `engine::Event` ever
+/// the slot runs the legacy stub runner. With no inbound `lingxi_core::Event` ever
 /// delivered, the stub parks forever on `event_rx.recv()` — exactly a persistent
 /// teammate idling between turn-sets. The slot is never deallocated, so it holds
 /// its pool slot for the life of the test.
@@ -325,7 +325,7 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
 
     // `PoolSubagentSpawner` preserves the pool-capacity condition as PoolFull.
     assert!(
-        matches!(err, traits::subagent_spawn::SubagentSpawnError::PoolFull),
+        matches!(err, platform_api::subagent_spawn::SubagentSpawnError::PoolFull),
         "shared-pool spawn fails pool-full; got {err:?}"
     );
     // The spawn never reached the runner, so no model round-trip occurred.

@@ -1,8 +1,8 @@
-//! Platform abstraction traits.
+//! Platform abstraction traits (`platform-api` crate).
 //!
-//! Engine crates depend on these traits; platform crates (`platforms/posix`,
-//! `platforms/windows`, etc.) implement them. The engine never imports a
-//! concrete runtime or OS API directly.
+//! Library crates depend on these traits; platform crates (`platforms/posix`,
+//! `platforms/windows`, etc.) implement them. The conversation state machine
+//! (`core`) never imports a concrete runtime or OS API directly.
 //!
 //! See spec §4 (Trait System) and D17 (Runtime boundary).
 

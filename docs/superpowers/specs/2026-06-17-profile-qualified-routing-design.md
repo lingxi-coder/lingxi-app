@@ -17,7 +17,7 @@ Let a model request optionally carry the provider **profile** so an id offered b
 
 - `tui/src/screens/model.rs`: picker yields `ModelOutcome::Commit { provider_id, request_model }` — profile known here.
 - `tui/src/root.rs:481-488`: `Commit` records `(provider_id, request_model)` to `recent_models` (which stores both), but sets `pending_switch_model = Some(request_model)` — **drops `provider_id`**.
-- `traits::OrchestratorHandle::switch_model(&str)` (`traits/src/orchestrator.rs:303`): takes only the bare model.
+- `platform_api::OrchestratorHandle::switch_model(&str)` (`platform-api/src/orchestrator.rs:303`): takes only the bare model.
 - `orchestrator/src/provider_adapter.rs:391-401`: builds `LlmRequest::new(model)` from the bare stored model.
 - `llm-client` `DefaultLlmClient::prepare` → `ModelRegistry::resolve(&request.model)` (`registry.rs:83`): matches the bare id across ALL providers; `>1` match → `InvalidRequest "ambiguous across profiles: …"`.
 - Already structured/qualified elsewhere (precedent, unaffected): fallback **chains** (`ChainEntry { provider_id, model }`), routing aliases + `assemble::locate` (`profile/model`), `cost_wiring` (`profile/model` parse). Model-name consumers that must stay bare-id: `prompt_caching_enabled(model)`, betas assembler, telemetry, cost.
@@ -79,7 +79,7 @@ Picker `Commit (profile, model)` → `switch_model(model, Some(profile))` → or
 
 - Modify: `lingxi-code/llm-client/src/protocol.rs` (`LlmRequest.profile` + `with_profile`), `llm-client/src/registry.rs` (`resolve_in`, `resolve` delegates), `llm-client/src/client.rs` (`prepare_at` uses `resolve_in`)
 - Create: `lingxi-code/llm-client/tests/profile_qualified_resolution_test.rs`
-- Modify: `lingxi-code/traits/src/orchestrator.rs` (`switch_model` signature + the test mock at :1036; `OrchestratorApiClient` request-method signatures gain `profile: Option<&str>`)
+- Modify: `lingxi-code/platform-api/src/orchestrator.rs` (`switch_model` signature + the test mock at :1036; `OrchestratorApiClient` request-method signatures gain `profile: Option<&str>`)
 - Modify: `lingxi-code/orchestrator/src/config.rs` (`SessionState.model_profile`), `handle_impl.rs` (`switch_model` sets both), `provider_adapter.rs` (`build_request` + the `OrchestratorApiClient` impls take/use profile), `turn_loop.rs` (read `s.model_profile` at :305 and pass through the call sites), `test_support.rs` + `test_support_stream.rs` (mock impls)
 - Modify: `lingxi-code/tui/src/state.rs` (`pending_switch_model` carries the profile — e.g. `Option<(String, Option<String>)>`), `lingxi-code/tui/src/root.rs` (commit at :488 + `pump_switch_model` at :1218 + recent-restore at :1190 thread the profile)
 - Grep-and-update: every `switch_model(` and `OrchestratorApiClient` request-method caller/mock in the workspace for the new signatures.

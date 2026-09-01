@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 branding = { path = "../branding" }
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 tasks = { path = "../tasks" }
 # `autonomous_loop` (relocated here to satisfy §8.1 layering) reads feature
 # flags via `telemetry::flag_bool`, emits `emit_loop_persistent_activated`, and

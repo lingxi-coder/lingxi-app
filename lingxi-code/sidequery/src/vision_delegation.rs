@@ -16,7 +16,7 @@ use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinSet;
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 use url::Url;
 
 /// Version of the delegate prompt and persisted analysis schema.
@@ -1183,7 +1183,7 @@ fn supported_image_media_type(headers: &[(String, String)]) -> Result<String, Si
 
 fn validate_public_target(
     url: &Url,
-    resolved: Option<&traits::ResolvedAddressOverride>,
+    resolved: Option<&platform_api::ResolvedAddressOverride>,
 ) -> Result<(), SideQueryError> {
     if let Some(resolved) = resolved {
         for addr in &resolved.addrs {
@@ -1380,7 +1380,7 @@ mod tests {
     };
     use tokio::sync::{oneshot, Notify};
     use tokio::time::{timeout, Duration};
-    use traits::http::SseStream;
+    use platform_api::http::SseStream;
 
     struct FakeSideQueryClient {
         responses: Mutex<Vec<Result<SideQueryResponse, SideQueryError>>>,
@@ -1494,7 +1494,7 @@ mod tests {
 
     struct StaticHttpTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
-        resolved: Mutex<Vec<Option<traits::ResolvedAddressOverride>>>,
+        resolved: Mutex<Vec<Option<platform_api::ResolvedAddressOverride>>>,
     }
 
     impl StaticHttpTransport {
@@ -1505,7 +1505,7 @@ mod tests {
             }
         }
 
-        fn resolved_calls(&self) -> Vec<Option<traits::ResolvedAddressOverride>> {
+        fn resolved_calls(&self) -> Vec<Option<platform_api::ResolvedAddressOverride>> {
             self.resolved.lock().unwrap().clone()
         }
     }
@@ -1536,8 +1536,8 @@ mod tests {
         async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
             &self,
             _req: HttpRequest,
-            resolved: Option<traits::ResolvedAddressOverride>,
-        ) -> Result<traits::RawByteStreamWithMeta, HttpError> {
+            resolved: Option<platform_api::ResolvedAddressOverride>,
+        ) -> Result<platform_api::RawByteStreamWithMeta, HttpError> {
             self.resolved.lock().unwrap().push(resolved);
             let response = self
                 .responses
@@ -1546,7 +1546,7 @@ mod tests {
                 .pop_front()
                 .expect("missing scripted response");
             let bytes = response.body_bytes.clone();
-            Ok(traits::RawByteStreamWithMeta {
+            Ok(platform_api::RawByteStreamWithMeta {
                 status: response.status,
                 headers: response.headers,
                 stream: Box::pin(VecOnceStream(Some(Ok(bytes)))),

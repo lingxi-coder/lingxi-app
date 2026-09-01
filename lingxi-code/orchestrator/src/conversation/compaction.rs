@@ -272,7 +272,7 @@ impl ConversationOrchestrator {
     pub async fn force_compact_with_cancel(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::CompactionSummary, traits::HandleError> {
+    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
         self.force_compact_with_instructions_and_cancel(None, cancel)
             .await
     }
@@ -282,9 +282,9 @@ impl ConversationOrchestrator {
         &self,
         custom_instructions: Option<&str>,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::CompactionSummary, traits::HandleError> {
+    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "compaction unavailable".into(),
             ));
         };
@@ -307,7 +307,7 @@ impl ConversationOrchestrator {
         // deterministic even when process_iteration completes synchronously
         // (e.g. the M3 stub Autocompactor path).
         if cancel.is_cancelled() {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "compaction cancelled".into(),
             ));
         }
@@ -321,7 +321,7 @@ impl ConversationOrchestrator {
         // which the port surfaces via `process_forced`'s
         // `CompactionError::NotEnoughMessages` mapping below.
         if history_before.is_empty() {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "No messages to compact".into(),
             ));
         }
@@ -348,7 +348,7 @@ impl ConversationOrchestrator {
                 format!("Compaction blocked by PreCompact hook: {detail}")
             };
             tracing::warn!("{msg}");
-            return Err(traits::HandleError::ActionFailed(msg));
+            return Err(platform_api::HandleError::ActionFailed(msg));
         }
 
         let merged_instructions = merge_compact_instructions(
@@ -377,7 +377,7 @@ impl ConversationOrchestrator {
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Err(traits::HandleError::ActionFailed(
+                return Err(platform_api::HandleError::ActionFailed(
                     "compaction cancelled".into(),
                 ));
             }
@@ -388,17 +388,17 @@ impl ConversationOrchestrator {
                     // as `MaxRetriesExceeded`. Surface the byte-exact GJn message
                     // rather than the generic "compaction failed: …".
                     compaction::autocompact::CompactionError::MaxRetriesExceeded => {
-                        traits::HandleError::ActionFailed(
+                        platform_api::HandleError::ActionFailed(
                             compaction::ptl_retry::COMPACTION_CONVERSATION_TOO_LONG.to_string(),
                         )
                     }
                     compaction::autocompact::CompactionError::NotEnoughMessages => {
-                        traits::HandleError::ActionFailed(
+                        platform_api::HandleError::ActionFailed(
                             "Not enough messages to compact.".to_string(),
                         )
                     }
                     other => {
-                        traits::HandleError::ActionFailed(format!("compaction failed: {other}"))
+                        platform_api::HandleError::ActionFailed(format!("compaction failed: {other}"))
                     }
                 })?,
         };
@@ -408,7 +408,7 @@ impl ConversationOrchestrator {
         // hooks, history swap) — otherwise the cancelled task swaps history out
         // from under a prompt the user has since submitted.
         if cancel.is_cancelled() {
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "compaction cancelled".into(),
             ));
         }
@@ -445,7 +445,7 @@ impl ConversationOrchestrator {
         else {
             // Esc landed before the post-compact commit phase: no auxiliary
             // state or history has been changed.
-            return Err(traits::HandleError::ActionFailed(
+            return Err(platform_api::HandleError::ActionFailed(
                 "compaction cancelled".into(),
             ));
         };
@@ -462,7 +462,7 @@ impl ConversationOrchestrator {
     /// Apply a completed compaction pass to the live session: append the
     /// `[Compacted N → M messages]` boundary marker, swap `session.history`
     /// under the lock, persist the marker to the optional JSONL writer, and
-    /// emit [`traits::OutputStream::emit_compaction_completed`].
+    /// emit [`platform_api::OutputStream::emit_compaction_completed`].
     ///
     /// Factored out of [`Self::force_compact_with_cancel`] (Batch 4) so the
     /// manual `/compact` path, the proactive pre-call trigger
@@ -813,7 +813,7 @@ impl ConversationOrchestrator {
         bytes_before: u64,
         compact_started: std::time::Instant,
         cancel: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Option<traits::CompactionSummary> {
+    ) -> Option<platform_api::CompactionSummary> {
         // Preserve the transcript-only summary before `result.messages` is
         // consumed into the replacement history. The TUI carries this on the
         // compact boundary so Ctrl-O can reveal the same summary sent to the
@@ -1077,7 +1077,7 @@ impl ConversationOrchestrator {
             )
             .await;
 
-        Some(traits::CompactionSummary {
+        Some(platform_api::CompactionSummary {
             messages_before,
             messages_after,
             bytes_saved,

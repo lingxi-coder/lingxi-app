@@ -11,7 +11,7 @@ use crate::storage::{LoadedSession, SessionStorage};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// Output of [`SessionResumer::resume`].
 pub struct ResumedSession {

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::spawn_blocking;
-use traits::mobile_linux::LinuxEnforcementReceipt;
-use traits::{
+use platform_api::mobile_linux::LinuxEnforcementReceipt;
+use platform_api::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
@@ -30,7 +30,7 @@ const BACKGROUND_REAP_BUDGET: Duration = Duration::from_secs(3);
 const LINGXI_DOT_DIR: &str = ".lingxi";
 // Canonical value lives in the guest-path atlas; the local name is kept so
 // the three mount-contract call sites read unchanged.
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
+const LOCAL_APP_BUILD_GUEST_ROOT: &str = platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
 
 #[derive(Clone, Copy)]
 enum ForegroundMountMode {
@@ -70,7 +70,7 @@ impl IosIshRuntimeConfig {
     }
 
     fn workspace_guest_path(&self) -> String {
-        traits::mobile_linux::guest_paths::workspace(&self.stable_workspace_id)
+        platform_api::mobile_linux::guest_paths::workspace(&self.stable_workspace_id)
     }
 
     fn persistent_home_host_path(&self) -> PathBuf {
@@ -89,7 +89,7 @@ impl IosIshRuntimeConfig {
     fn persistent_home_mount(&self) -> MountSpec {
         MountSpec {
             host_path: self.persistent_home_host_path(),
-            guest_path: traits::mobile_linux::guest_paths::HOME.to_string(),
+            guest_path: platform_api::mobile_linux::guest_paths::HOME.to_string(),
             read_only: false,
             purpose: MountPurpose::Shared,
         }
@@ -338,9 +338,9 @@ impl IosIshRuntime {
             archive_sha256: self.state.config.archive_sha256.clone(),
             installed_size_bytes: directory_size(&active_root).ok(),
             writable_guest_paths: vec![
-                traits::mobile_linux::guest_paths::HOME.to_string(),
-                traits::mobile_linux::guest_paths::SCRATCH[0].to_string(),
-                traits::mobile_linux::guest_paths::SCRATCH[1].to_string(),
+                platform_api::mobile_linux::guest_paths::HOME.to_string(),
+                platform_api::mobile_linux::guest_paths::SCRATCH[0].to_string(),
+                platform_api::mobile_linux::guest_paths::SCRATCH[1].to_string(),
                 self.state.config.workspace_guest_path(),
                 LOCAL_APP_BUILD_GUEST_ROOT.to_string(),
             ],
@@ -512,7 +512,7 @@ impl IosIshRuntime {
                     .native_poll_background(
                         &native_process_id,
                         last_sequence,
-                        traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH as u32,
+                        platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH as u32,
                     )
                     .await
                 {
@@ -725,7 +725,7 @@ impl IosIshRuntime {
             .filter(|mount| {
                 matches!(mount.purpose, MountPurpose::Shared)
                     && mount.guest_path
-                        == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+                        == platform_api::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
             })
             .count();
         if build_count != 1 || store_count > 1 || request_mounts.len() != 1 + store_count {
@@ -900,7 +900,7 @@ impl IosIshRuntime {
                 match runtime
                     .native_poll_pty(
                         after_sequence,
-                        traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH as u32,
+                        platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH as u32,
                     )
                     .await
                 {
@@ -1171,7 +1171,7 @@ impl MobileLinuxRuntime for IosIshRuntime {
             for event in self
                 .read_events(
                     Some(cursor),
-                    traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH,
+                    platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH,
                 )
                 .await?
             {
@@ -1497,7 +1497,7 @@ impl MobileLinuxRuntime for IosIshRuntime {
             .expect("ios-ish events mutex")
             .iter()
             .filter(|event| event.sequence > after)
-            .take(limit.min(traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH))
+            .take(limit.min(platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH))
             .cloned()
             .collect())
     }
@@ -1602,7 +1602,7 @@ struct RunRequestPayload {
     stdin: Option<String>,
     timeout_ms: Option<u64>,
     network: &'static str,
-    resource_limits: traits::ResourceLimits,
+    resource_limits: platform_api::ResourceLimits,
     mounts: Vec<MountPayload>,
     include_default_mounts: bool,
 }
@@ -1621,9 +1621,9 @@ impl RunRequestPayload {
             stdin: request.stdin.clone(),
             timeout_ms: request.timeout_ms,
             network: match request.network {
-                traits::NetworkPolicy::Disabled => "disabled",
-                traits::NetworkPolicy::LoopbackOnly => "loopback-only",
-                traits::NetworkPolicy::Allowed => "allowed",
+                platform_api::NetworkPolicy::Disabled => "disabled",
+                platform_api::NetworkPolicy::LoopbackOnly => "loopback-only",
+                platform_api::NetworkPolicy::Allowed => "allowed",
             },
             resource_limits: request.resource_limits,
             mounts: mounts.iter().map(MountPayload::from_mount).collect(),
@@ -2156,7 +2156,7 @@ fn validate_mount(
     let lingxi_root = normalize_host_path(&config.lingxi_root(), ".lingxi root")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
 
-    if guest_path_has_prefix(&mount.guest_path, traits::mobile_linux::guest_paths::HOME) {
+    if guest_path_has_prefix(&mount.guest_path, platform_api::mobile_linux::guest_paths::HOME) {
         return Err(MobileLinuxError::InvalidRequest(
             "request mounts may not replace the runtime-managed persistent /root".to_string(),
         ));
@@ -2229,7 +2229,7 @@ fn validate_mount(
             )));
         }
     } else if matches!(mount.purpose, MountPurpose::Shared)
-        && mount.guest_path == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+        && mount.guest_path == platform_api::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
     {
         let expected_root = normalize_host_path(
             &config.app_sandbox_root.join("dependency-cache"),
@@ -2299,7 +2299,7 @@ fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLi
     if segments.next().is_some()
         || !is_valid_local_app_id(app_id)
         || !matches!(channel, "store" | "full")
-        || project != traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
+        || project != platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
     {
         return Err(MobileLinuxError::InvalidRequest(format!(
             "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<store|full>/project"
@@ -2832,7 +2832,7 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::NetworkPolicy;
+    use platform_api::NetworkPolicy;
 
     fn test_config(root: &Path) -> IosIshRuntimeConfig {
         IosIshRuntimeConfig {
@@ -2924,7 +2924,7 @@ mod tests {
     /// including the persistent `/root` bind the runtime adds on its own.
     #[test]
     fn current_mounts_exposes_the_live_workspace_and_home_table() {
-        use traits::MobileLinuxRuntime as _;
+        use platform_api::MobileLinuxRuntime as _;
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("app");
         let config = test_config(&root);
@@ -2933,11 +2933,11 @@ mod tests {
         assert_eq!(mounts.len(), 2);
         assert_eq!(
             mounts[0].guest_path,
-            traits::mobile_linux::guest_paths::workspace(&config.stable_workspace_id)
+            platform_api::mobile_linux::guest_paths::workspace(&config.stable_workspace_id)
         );
         assert_eq!(
             mounts[1].guest_path,
-            traits::mobile_linux::guest_paths::HOME
+            platform_api::mobile_linux::guest_paths::HOME
         );
         assert_eq!(
             mounts[1].host_path,

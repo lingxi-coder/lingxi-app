@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use traits::{ProcessCommand, ProcessRunner, Sandbox};
+use platform_api::{ProcessCommand, ProcessRunner, Sandbox};
 
 /// Audit reason stamped on the `tmux new-session` command handed to the
 /// [`ProcessRunner`]. This is an internal infra invocation (not a
@@ -42,7 +42,7 @@ pub fn build_worktree_tmux_argv(session_name: &str, worktree_path: &Path) -> Vec
 /// Run `tmux new-session -d -s <session_name> -c <worktree_path>` through
 /// the given [`ProcessRunner`] seam. Maps a non-zero exit to
 /// `Err(stderr)` (mirrors 206's `{created:false,error}`); a zero exit
-/// (or any output) maps to `Ok(())`. A runner-level [`traits::ProcessError`]
+/// (or any output) maps to `Ok(())`. A runner-level [`platform_api::ProcessError`]
 /// is stringified into the `Err`.
 ///
 /// `sandbox` mints the `SandboxedCommand` via [`Sandbox::bypass_with_audit`]
@@ -169,7 +169,7 @@ mod tests {
     use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use traits::{ProcessError, ProcessHandle, ProcessOutput, SandboxedCommand};
+    use platform_api::{ProcessError, ProcessHandle, ProcessOutput, SandboxedCommand};
 
     #[test]
     fn build_worktree_tmux_argv_shape_is_exact() {

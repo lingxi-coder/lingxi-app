@@ -52,7 +52,7 @@ Full Plan 3c in one spec — all four sub-systems (decided during brainstorming)
   single `self.credentials` slot, keyed by `CredentialScope{provider_id, credential_id}`. Secrets
   are extracted from `Credential::ApiKey|BearerToken` uniformly; the `AuthStrategy`
   (`ApiKey`/`Bearer`/`OAuthBearer`/`CopilotBearer`) selects the header.
-- `engine::settings` already defines `providers: Option<BTreeMap<String, Value>>` (shape:
+- `lingxi_core::settings` already defines `providers: Option<BTreeMap<String, Value>>` (shape:
   `{"groq":{"type":"openai","baseUrl":"…","apiKeyEnv":"GROQ_API_KEY"}}`) and a `routing` block; these
   ride into `DesktopConfig.provider_profiles` / `DesktopConfig.routing` but are currently **unread**
   (they were parsed by the now-deleted `providers::parse_profiles` / `parse_routing`).

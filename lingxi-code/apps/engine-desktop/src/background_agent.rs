@@ -34,12 +34,12 @@ use protocol::AgentId;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
 use tasks::TaskType;
-use traits::subagent_spawn::{
+use platform_api::subagent_spawn::{
     AsyncLaunch, SelectedAgentMeta, SubagentInheritance, SubagentListingEntry, SubagentResult,
     SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
 };
-use traits::team_spawn::TeamSpawnSeam;
-use traits::RuntimeSpawner;
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::RuntimeSpawner;
 
 /// Decorator that wires `spawn_async` (the `run_in_background` path) while
 /// delegating every synchronous `SubagentSpawner` method to `inner`.
@@ -266,9 +266,9 @@ mod tests {
     use tasks::TaskType;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::task::JoinHandle;
-    use traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use traits::{BackgroundTaskHandle, RuntimeError};
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BackgroundTaskHandle, RuntimeError};
 
     /// Records the `is_backgrounded` flag the decorator spawned with, returning
     /// a fixed task id (the spool path is pure `path_for`, so no I/O needed).

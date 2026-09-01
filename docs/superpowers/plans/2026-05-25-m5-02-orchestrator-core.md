@@ -17,7 +17,7 @@ This plan ships:
 
 - A new crate `lingxi-orchestrator` (added to workspace + default-members).
 - `OrchestratorError`, `OrchestratorConfig`, `ConversationOrchestrator`, `ConversationOutcome`.
-- 4 new traits in `lingxi-traits::orchestrator`: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`.
+- 4 new traits in `lingxi-platform_api::orchestrator`: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`.
 - A `test_support` module in the new crate (gated `#[cfg(any(test, feature = "test-support"))]`) with `MockApiClient`, `MockOutputStream`, `NoOpHookExecutor`, `NoOpPermissionGate`.
 - 3 new telemetry events in a brand-new `lingxi_telemetry::tengu::orchestrator` submodule, growing `ALL_EVENT_NAMES` from **238 → 241** and the `tengu_events.json` parity fixture in lockstep.
 - 4 integration test files under `crates/orchestrator/tests/`.
@@ -55,7 +55,7 @@ This plan ships:
   - `lingxi-code/crates/tools/src/registry.rs:23` — `ToolRegistry { ... }` + `ToolRegistry::find_by_name(name) -> Option<Arc<dyn Tool>>`.
   - `lingxi-code/crates/tools/src/context.rs:20` — `ToolUseContext { options, messages, tool_use_id, agent_id, content_replacement_state, session, subagent_registry }` + `ToolUseOptions`.
   - `lingxi-code/crates/tools/src/tool_trait.rs::Tool::call(input, ctx, progress_tx) -> Result<ToolCallResult, ToolError>` + `ToolCallResult { data, new_messages, context_modifier, mcp_meta }`.
-  - `lingxi-code/crates/cost/src/summary.rs:30` — `CostSummary { session, day, month, by_model }` + `SessionCostSummary { session_id, total_nano_usd, total_tokens }`. M5-02's `CostSnapshot` trait-level type is a NEW lightweight struct in `lingxi-traits::orchestrator` that holds `{ total_nano_usd: u64, total_tokens: u64, session_id: SessionId }` — it is NOT a re-export of `CostSummary` (the trait surface must stay free of `lingxi-cost` deps to keep `lingxi-traits` a leaf). Task 4 documents this with a doc-link from `CostSnapshot` to `lingxi_cost::CostSummary`.
+  - `lingxi-code/crates/cost/src/summary.rs:30` — `CostSummary { session, day, month, by_model }` + `SessionCostSummary { session_id, total_nano_usd, total_tokens }`. M5-02's `CostSnapshot` trait-level type is a NEW lightweight struct in `lingxi-platform_api::orchestrator` that holds `{ total_nano_usd: u64, total_tokens: u64, session_id: SessionId }` — it is NOT a re-export of `CostSummary` (the trait surface must stay free of `lingxi-cost` deps to keep `lingxi-traits` a leaf). Task 4 documents this with a doc-link from `CostSnapshot` to `lingxi_cost::CostSummary`.
   - `lingxi-code/crates/protocol/src/ids.rs` — `SessionId`, `MessageId`, `AgentId`, `ToolUseId`.
   - `lingxi-code/crates/permission/src/lib.rs` — `PermissionGate` trait (M4-XX); M5-02 uses an in-crate `NoOpPermissionGate` test stub.
   - `lingxi-code/crates/hooks/src/lib.rs` — `HookExecutor` (M5-06 wires 4 arms); M5-02 uses an in-crate `NoOpHookExecutor` test stub.
@@ -90,13 +90,13 @@ This plan ships:
 - `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs` — exceeds `max_turns`, asserts byte-locked Display.
 - `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs` — tool returns `ToolError`, propagates as `is_error: true`.
 - `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs` — integrates with real `ToolRegistry` + `FileReadTool` + a tempfile.
-- `lingxi-code/crates/traits/src/orchestrator.rs` — 4 new public types: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, plus `OrchestratorError` re-export.
+- `lingxi-code/crates/platform-api/src/orchestrator.rs` — 4 new public types: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, plus `OrchestratorError` re-export.
 - `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — 3 new constants + `NAMES` array.
 
 **Modifies (existing files):**
 
 - `lingxi-code/Cargo.toml` — add `crates/orchestrator` to `members` AND `default-members` (preserve alphabetical-ish order; insert after `crates/mcp` so the alphabetic placement reads naturally — see Task 1 step 2).
-- `lingxi-code/crates/traits/src/lib.rs` — add `pub mod orchestrator;` declaration + `pub use orchestrator::{...}` re-exports.
+- `lingxi-code/crates/platform-api/src/lib.rs` — add `pub mod orchestrator;` declaration + `pub use orchestrator::{...}` re-exports.
 - `lingxi-code/crates/telemetry/src/tengu/mod.rs` — add `pub mod orchestrator;` declaration + update `const TOTAL` arithmetic (`+ 3`) + insert `orchestrator::NAMES` walk before `release::NAMES` in `concat_all()`.
 - `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` — bump expected count from `238` to `241` in the test + update the explanatory comment to add `M5-02 added 3 (conversation lifecycle × 3 = started/completed/failed): 238 + 3 = 241.`
 - `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert the 3 orchestrator event names (verbatim wire strings, see "Wire identifiers" below) in registration order BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry. The `_note` field is also updated to mention "+3 (M5-02 orchestrator)". File grows from 286 lines to 289 lines.
@@ -120,19 +120,19 @@ This plan ships:
   - `tengu_orchestrator_conversation_completed`
   - `tengu_orchestrator_conversation_failed`
   These are the constant VALUES (the `&str` literals); the constant NAMES (Rust identifiers) are `CONVERSATION_STARTED`, `CONVERSATION_COMPLETED`, `CONVERSATION_FAILED`, exported from `lingxi_telemetry::tengu::orchestrator`. The Rust name + the `&str` value mapping is itself a byte-lock from this plan onward.
-- **`OutputStream` trait surface** (in `lingxi-traits::orchestrator`):
+- **`OutputStream` trait surface** (in `lingxi-platform_api::orchestrator`):
   - `async fn emit_text(&self, text: &str)`
   - `async fn emit_tool_call(&self, tool: &str, input: &serde_json::Value)`
   - `async fn emit_tool_result(&self, tool: &str, result: &serde_json::Value)`
   - `async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot)`
   All four `async fn` use `&self` (immutable borrow + interior mutability in implementations) and take borrowed args (no clone in the hot path). Concrete impls (e.g. `MockOutputStream`) use `tokio::sync::Mutex<Vec<OutputEvent>>` for capture.
-- **`OrchestratorHandle` trait surface** (in `lingxi-traits::orchestrator`):
+- **`OrchestratorHandle` trait surface** (in `lingxi-platform_api::orchestrator`):
   - `async fn current_session_id(&self) -> SessionId`
   - `async fn clear_session(&self) -> Result<(), OrchestratorError>`
   - `async fn force_compact(&self) -> Result<CompactionSummary, OrchestratorError>`
   - `async fn snapshot_cost(&self) -> CostSnapshot`
   - `async fn switch_model(&self, model: &str) -> Result<(), OrchestratorError>`
-  `CompactionSummary` is a NEW lightweight type in `lingxi-traits::orchestrator` (Task 3): `pub struct CompactionSummary { pub messages_before: u32, pub messages_after: u32, pub bytes_saved: u64 }`. M5-10 wires `/compact` against this surface; this plan defines the type so future plans can reference it. M5-02 itself does NOT implement `OrchestratorHandle` on `ConversationOrchestrator` (that wiring lives in M5-09 when the slash dispatcher needs it) — the trait merely lives next to `OutputStream` in the same module for cohesion.
+  `CompactionSummary` is a NEW lightweight type in `lingxi-platform_api::orchestrator` (Task 3): `pub struct CompactionSummary { pub messages_before: u32, pub messages_after: u32, pub bytes_saved: u64 }`. M5-10 wires `/compact` against this surface; this plan defines the type so future plans can reference it. M5-02 itself does NOT implement `OrchestratorHandle` on `ConversationOrchestrator` (that wiring lives in M5-09 when the slash dispatcher needs it) — the trait merely lives next to `OutputStream` in the same module for cohesion.
 - **`ConversationOutcome` enum** (in `lingxi-orchestrator::conversation`):
   - `EndTurn { turn_count: u32, final_message_id: MessageId }`
   - `MaxTurnsReached` — internal sentinel turned into `Err(OrchestratorError::MaxTurnsReached)` by `run_turn` before returning to caller. NEVER exposed publicly; only used in `turn_loop.rs` private return.
@@ -175,7 +175,7 @@ This plan ships:
   [dependencies]
   lingxi-protocol = { path = "../protocol" }
   lingxi-core = { path = "../core" }
-  lingxi-traits = { path = "../traits" }
+  lingxi-platform-api = { path = "../platform-api" }
   lingxi-api-client = { path = "../api-client" }
   lingxi-tools = { path = "../tools" }
   lingxi-permission = { path = "../permission" }
@@ -348,12 +348,12 @@ This plan ships:
 ### Task 3: Add `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, `CompactionSummary` traits to `lingxi-traits`
 
 **Files:**
-- Create: `lingxi-code/crates/traits/src/orchestrator.rs`
-- Modify: `lingxi-code/crates/traits/src/lib.rs` (add `pub mod orchestrator;` + re-exports)
+- Create: `lingxi-code/crates/platform-api/src/orchestrator.rs`
+- Modify: `lingxi-code/crates/platform-api/src/lib.rs` (add `pub mod orchestrator;` + re-exports)
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-code/crates/traits/src/orchestrator.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/platform-api/src/orchestrator.rs`:
   ```rust
   //! Orchestrator-level traits — the public surface that slash commands
   //! (via `SlashContext`, M5-09) and the CLI binary (M5-12) consume.
@@ -555,7 +555,7 @@ This plan ships:
 
   Use only the corrected version. (The earlier draft with `PhantomData<T>` is documentation; do NOT paste it.)
 
-- [ ] Step 2 — Modify `lingxi-code/crates/traits/src/lib.rs` — add the module declaration AND re-exports. Insert after the existing `pub mod mcp;` line:
+- [ ] Step 2 — Modify `lingxi-code/crates/platform-api/src/lib.rs` — add the module declaration AND re-exports. Insert after the existing `pub mod mcp;` line:
   ```rust
   pub mod orchestrator;
   ```
@@ -589,7 +589,7 @@ This plan ships:
   ```rust
   /// Session-scope rollup.
   ///
-  /// `lingxi_traits::CostSnapshot` (M5-02) mirrors the three primary fields
+  /// `lingxi_platform_api::CostSnapshot` (M5-02) mirrors the three primary fields
   /// (`session_id`, `total_nano_usd`, `total_tokens`) without depending on
   /// `lingxi-cost`, so traits-tier consumers can publish costs without
   /// pulling in pricing. The two types convert via
@@ -601,9 +601,9 @@ This plan ships:
 - [ ] Step 3 — Inside `lingxi-orchestrator::conversation`, add a small private helper that will be used by `run_turn` and verified later:
   ```rust
   // (sketch — actual definition lives in Task 10)
-  fn cost_snapshot_from_session(session: &SessionState) -> lingxi_traits::CostSnapshot {
+  fn cost_snapshot_from_session(session: &SessionState) -> lingxi_platform_api::CostSnapshot {
       // M5-02 reports zero cost — `lingxi-cost` integration is M5-05 / M5-11.
-      lingxi_traits::CostSnapshot {
+      lingxi_platform_api::CostSnapshot {
           session_id: session.session_id,
           total_nano_usd: 0,
           total_tokens: session.usage.input_tokens.saturating_add(session.usage.output_tokens),
@@ -917,7 +917,7 @@ This plan ships:
 - [ ] Step 1 — Append to `lingxi-code/crates/orchestrator/src/test_support.rs`:
   ```rust
   use async_trait::async_trait as _;
-  use lingxi_traits::{CostSnapshot, OutputEvent, OutputStream};
+  use lingxi_platform_api::{CostSnapshot, OutputEvent, OutputStream};
 
   /// Capture all `OutputStream` events into an in-memory `Vec` for assertion.
   pub struct MockOutputStream {
@@ -1178,7 +1178,7 @@ This plan ships:
       mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
   };
   use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::sync::Arc;
 
   #[tokio::test]
@@ -1260,7 +1260,7 @@ This plan ships:
   use lingxi_core::SessionState;
   use lingxi_protocol::{ConversationMessage, MessageId, SessionId};
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::{HttpTransport, OutputStream};
+  use lingxi_platform_api::{HttpTransport, OutputStream};
   use serde_json::Value;
   use std::sync::Arc;
   use tokio::sync::Mutex;
@@ -1426,7 +1426,7 @@ This plan ships:
   use lingxi_core::SessionState;
   use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
   use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-  use lingxi_traits::CostSnapshot;
+  use lingxi_platform_api::CostSnapshot;
 
   /// What one turn step decided.
   pub(crate) enum TurnStepOutcome {
@@ -1704,7 +1704,7 @@ This plan ships:
   use lingxi_tools::tool_trait::{
       DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
   };
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use serde_json::json;
   use std::sync::Arc;
 
@@ -1996,7 +1996,7 @@ This plan ships:
   use lingxi_tools::tool_trait::{
       DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
   };
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use serde_json::json;
   use std::sync::Arc;
 
@@ -2138,7 +2138,7 @@ This plan ships:
   use lingxi_protocol::ToolUseId;
   use lingxi_tools::registry::ToolRegistry;
   use lingxi_tools::FileReadTool;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use serde_json::json;
   use std::io::Write;
   use std::sync::Arc;
@@ -2552,7 +2552,7 @@ This plan ships:
 
 1. **Spec coverage:** §3 M5-02 row (turn loop, mock model, 3 events, ~16 tasks) — ALL mapped. §4.2 (maxTurns byte-lock) — Task 2 step 1 verifies + step 4 byte-tests. §6.1 (dep graph + cycle risk) — Task 1 step 7 forbids agent/tasks/commands deps. §6.3 (telemetry growth 238 → 241) — Task 15 steps 2-3.
 2. **Placeholder scan:** No `TBD`, no `<placeholder>`, no `// TODO: implement`. Every code block compiles as written (modulo the field-name verifications in Task 6 step 2 and Task 10 step 0).
-3. **Type consistency:** `OrchestratorError` appears in Tasks 2, 10, 12. `ConversationOrchestrator` in Tasks 9, 10, 11, 12, 13, 14, 15. `OutputStream` in Tasks 3, 7, 9, 11, 13. Always the same fully-qualified name (`lingxi_orchestrator::ConversationOrchestrator`, `lingxi_traits::OutputStream`).
+3. **Type consistency:** `OrchestratorError` appears in Tasks 2, 10, 12. `ConversationOrchestrator` in Tasks 9, 10, 11, 12, 13, 14, 15. `OutputStream` in Tasks 3, 7, 9, 11, 13. Always the same fully-qualified name (`lingxi_orchestrator::ConversationOrchestrator`, `lingxi_platform_api::OutputStream`).
 4. **Cargo cycle prevention:** Task 1 step 3 declares orchestrator deps; Task 1 step 7 verifies via `cargo tree`. The new traits live in `lingxi-traits` (leaf), the events live in `lingxi-telemetry` (leaf), the orchestrator depends only on existing leaves + protocol/core. No back-edges.
 5. **New events count consistent:** 238 (post-M4-09) + 3 (M5-02 orchestrator) = **241**. Updated in (a) `tengu::mod.rs` TOTAL arithmetic, (b) `event_name_completeness_test.rs` assertion, (c) `tengu_events.json` insert + `_note` update. All three locations cross-referenced in Task 15.
 6. **Byte-lock fidelity:** `Reached maximum number of turns (<n>)` — Task 2 step 4 (3 tests covering 30, 1, 9999). `Error: <err>` ToolResult prefix — Task 13. `tengu_orchestrator_conversation_*` wire strings — Task 15 step 1.

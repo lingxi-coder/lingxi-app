@@ -18,7 +18,7 @@ Route the engine's real command-sandboxing path — the bash / powershell / skil
 - The wrap call sites (`tools/shell/src/bash.rs:570`, `tools/shell/src/powershell.rs:219`, `tools/skill/src/skill.rs:292`) are already inside `async fn`s → the wrap can become `async` with no `block_on` bridge.
 - `tool-shell` and the runner crate do **not** reach `engine-mobile` (verified: `cargo tree -p engine-mobile` shows 0 edges to `tool-shell`), so depending on `sandbox-runtime` there keeps mobile 0-dep.
 - `traits/` (frozen) is untouched — the new `SandboxRunner` trait is additive in `tool-api`.
-- The existing coarse `traits::sandbox::Sandbox`/`NetworkPolicy` path (`PosixSandbox::prepare`) is a *separate*, generic process-spawn mechanism; it is NOT the bash path and is left as-is (a possible later unification, out of scope here).
+- The existing coarse `platform_api::sandbox::Sandbox`/`NetworkPolicy` path (`PosixSandbox::prepare`) is a *separate*, generic process-spawn mechanism; it is NOT the bash path and is left as-is (a possible later unification, out of scope here).
 
 ## Architecture
 
@@ -101,6 +101,6 @@ The desktop engine/platform constructs `Arc::new(SandboxRuntimeRunner::new())` a
 
 ## Out of scope (tracked follow-ups)
 
-- Unifying the coarse `traits::sandbox::Sandbox`/`PosixSandbox::prepare` path with this rich path.
+- Unifying the coarse `platform_api::sandbox::Sandbox`/`PosixSandbox::prepare` path with this rich path.
 - Surfacing `sandbox-runtime`'s violation store / ask-callback into the engine UI (the runner passes `ask=None` for now; domain prompts stay deny-on-unmatched).
 - Windows live wiring (the engine bash path is posix/macOS; Windows uses `wrap_with_sandbox`'s windows branch — left on the legacy runner).

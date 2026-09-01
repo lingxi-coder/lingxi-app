@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Fresh implementer per task, two-stage review, SEQUENTIAL edit-agents. Strict TDD.
 
-**Goal:** Finish the llm-client adoption: (1) the engine's `providers`/`routing` settings actually configure `llm_client::ClientConfig` (today: parsed but consumed by nothing), (2) llm-client's `CostEstimator` runs off a catalog populated from the cost crate so `LlmResponse.cost` is real, (3) streaming responses carry true status/headers through an ADDITIVE `traits::HttpTransport` extension so connect-phase 429s honor server reset headers.
+**Goal:** Finish the llm-client adoption: (1) the engine's `providers`/`routing` settings actually configure `llm_client::ClientConfig` (today: parsed but consumed by nothing), (2) llm-client's `CostEstimator` runs off a catalog populated from the cost crate so `LlmResponse.cost` is real, (3) streaming responses carry true status/headers through an ADDITIVE `platform_api::HttpTransport` extension so connect-phase 429s honor server reset headers.
 
 **Branch:** `worktree-llm-client-plan3c` (main @ c86af605). Cargo from `lingxi-code/`. NEVER `git add -A`. Clippy `-D warnings` (pedantic, --all-targets --no-deps). `traits/`+`protocol/` frozen — ADDITIVE ONLY (T1 adds; the diff vs main must show only additions). Commit trailer:
 ```
@@ -15,7 +15,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 
 ### Task 1: streaming metadata — additive traits extension + bridge + impls
 
-**Files:** `traits/src/http.rs` (ADD ONLY), `platforms/common/src/http.rs` (ReqwestHttp override), `platforms/common/src/llm_transport.rs` (bridge uses it), `apps/engine-mobile/src/host.rs` (DynHttp forward), `platforms/posix-minimal` (default impl suffices — verify compile), tests.
+**Files:** `platform-api/src/http.rs` (ADD ONLY), `platforms/common/src/http.rs` (ReqwestHttp override), `platforms/common/src/llm_transport.rs` (bridge uses it), `apps/engine-mobile/src/host.rs` (DynHttp forward), `platforms/posix-minimal` (default impl suffices — verify compile), tests.
 
 1. **traits (additive):** add
 ```rust
@@ -34,7 +34,7 @@ and a defaulted trait method `async fn stream_sse_with_meta(&self, req: HttpRequ
 3. **DynHttp (engine-mobile):** forward `stream_sse_with_meta` to inner (one-line; without it the default would silently drop metadata for mobile).
 4. **Bridge:** `LlmTransportBridge::open_stream` calls `stream_sse_with_meta`; populates `StreamingResponse{status, headers}` for real (headers Vec→BTreeMap lowercase). Error path `HttpError::Status` unchanged (headers stay empty there — reqwest's error arm has no headers; document). Update the stale "SseStream surfaces no response metadata" comments here + the provider_adapter.rs:469-475 gap note (now closed) + memory of llm_config doc if it mentions it.
 5. **Orchestrator effect test:** provider_adapter test: fake `Transport` whose open_stream returns 429 + `retry-after: 7` headers → assert the connect-phase retry sleeps per header ladder (next_step RetryAfter with 7s, not the 1s fallback). (The adapter code path already exists — the test pins that real headers now drive it; use the existing fake-transport patterns.)
-6. Gates: `cargo test -p traits -p platform-common -p engine-mobile -p orchestrator` 0 failed; clippy; `git diff main -- lingxi-code/traits` shows ONLY additions; workspace check.
+6. Gates: `cargo test -p platform-api -p platform-common -p engine-mobile -p orchestrator` 0 failed; clippy; `git diff main -- lingxi-code/platform-api` shows ONLY additions; workspace check.
 7. Commit: `feat(traits,platform-common): streaming responses carry real status/headers (additive stream_sse_with_meta)`.
 
 ### Task 2: settings providers/routing → ClientConfig
@@ -51,7 +51,7 @@ pub fn apply_settings_providers(
 ```
 Per settings entry `{name: {"type": "openai"|"anthropic"|"gemini", "baseUrl": str, "apiKeyEnv": str, "models": [{"id": str, "aliases": [str]?, "capabilities": {...}?}]?}}` (schema doc's example shape) → `ProviderProfile{profile_name: name, provider_id: <map type→ProviderId variant — READ the enum; openai-compat custom name>, protocol: type→ProtocolFamily (openai→OpenAiChat, gemini→GeminiGenerateContent, anthropic→AnthropicMessages), auth: ApiKey, credential: Env{var: apiKeyEnv}, models: parsed or a sensible default-capability model from "models" REQUIRED (error if absent/empty — no guessing), pricing: PricingConfig::default()}` appended to cfg.providers. Unknown "type" → InvalidRequest naming it. routing handling: `routing.aliases: {alias: "profile/model"}` → push alias onto the TARGET ModelProfile (resolve `profile/model` across cfg.providers incl. builtin; unknown target → InvalidRequest); `routing.fallback`/`routing.retry` → NOT wired (return Ok but emit nothing; doc-comment: fallback_model comes from config/argv today, retry from CLAUDE_CODE_MAX_RETRIES — wiring them is future work, documented in the schema comment update). Tests: openai+gemini profile parse, env credential, alias injection (builtin + custom target), missing models error, unknown type error, duplicate profile name error.
 2. **Desktop:** add `provider_profiles: Option<BTreeMap<String, Value>>` + `routing: Option<Value>` to DesktopConfig (serde defaults; mirror MobileConfig docs); FIND where DesktopConfig is built from engine settings (grep settings usage in apps/cli + engine-desktop; if DesktopConfig is built by the CLI host from `engine` settings schema, thread schema.providers/routing through — follow fallback_model's existing journey and mirror it). In the client construction block: after `builtin_anthropic_config`, call `apply_settings_providers` when fields are Some. Mobile: same call from its existing fields.
-3. **Schema comment refresh** (engine/src/settings/schema.rs:155-168): note aliases ARE wired; fallback/retry keys parsed-but-inert (documented).
+3. **Schema comment refresh** (core/src/settings/schema.rs:155-168): note aliases ARE wired; fallback/retry keys parsed-but-inert (documented).
 4. Gates: tests on platform-common/engine-desktop/engine-mobile/cli + clippy + workspace check. An e2e-flavored test in engine-desktop: DesktopConfig with a groq-style openai profile → built client's `available_models()` includes the custom model and alias resolution works (construct via the same path build uses; no network).
 5. Commit: `feat(apps,platform-common): wire providers/routing settings into ClientConfig (modelProviders)`.
 

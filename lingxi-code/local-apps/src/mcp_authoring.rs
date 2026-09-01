@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use traits::{McpPermissionCeiling, McpToolDefinitionDto};
+use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
 
 /// Maximum generated Local App tools allowed in one published catalog.
 pub const MAX_GENERATED_MCP_TOOLS: usize = 16;
@@ -972,24 +972,24 @@ pub fn save_candidate_journal(
     let mut body = serde_json::to_vec_pretty(journal)
         .map_err(|error| AppError::Io(format!("serialize candidate journal: {error}")))?;
     body.push(b'\n');
-    traits::rooted_fs::atomic_write(
+    platform_api::rooted_fs::atomic_write(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         &body,
-        traits::rooted_fs::AtomicWriteOptions::default(),
+        platform_api::rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|error| AppError::from_fs("write candidate journal", &error))
 }
 
 /// Load and authenticate the durable authoring journal before resume.
 pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal, AppError> {
-    let body = traits::rooted_fs::read_to_string_limited(
+    let body = platform_api::rooted_fs::read_to_string_limited(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         256 * 1024,
     )
     .map_err(|error| match error {
-        traits::FsError::NotFound(_) => {
+        platform_api::FsError::NotFound(_) => {
             AppError::StorageCorrupt("candidate journal is missing".into())
         }
         other => AppError::from_fs("read candidate journal", &other),
@@ -1603,7 +1603,7 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::BTreeMap;
-    use traits::{McpPermissionCeiling, McpToolDefinitionDto};
+    use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
 
     #[test]
     fn zero_tool_catalog_is_valid() {

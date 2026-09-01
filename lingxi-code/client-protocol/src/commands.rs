@@ -23,7 +23,7 @@
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
 //!   (matches `protocol::ContentBlock` / api-client `StreamEvent`),
-//! - the top-level enum is `#[non_exhaustive]` (mirrors `traits::OutputEvent`),
+//! - the top-level enum is `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`),
 //! - every optional field uses
 //!   `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 //!
@@ -105,7 +105,7 @@ impl std::fmt::Debug for ProviderCredentialSecretDto {
 
 /// The inbound command envelope a client sends to the engine.
 ///
-/// `#[non_exhaustive]` (mirrors `traits::OutputEvent`) so adding a command is
+/// `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`) so adding a command is
 /// additive (no major bump). Internally tagged on `type`, `snake_case`
 /// (decision §0.1).
 ///
@@ -923,10 +923,10 @@ pub enum ListingKindDto {
 }
 
 /// Coarse, branchable failure class for [`AudioResultDto::Failed`] — the
-/// union of `traits::{SttError, VoiceError, TtsError}`'s failure modes,
+/// union of `platform_api::{SttError, VoiceError, TtsError}`'s failure modes,
 /// collapsed to a shared tag so a caller can branch on the SAME kind
 /// whichever trait produced the underlying failure. Mirrors
-/// `traits::SttError::Busy`'s own doc comment: `VoiceError::Busy` and
+/// `platform_api::SttError::Busy`'s own doc comment: `VoiceError::Busy` and
 /// `SttError::Busy` report the same audio-session contention, and a caller
 /// branching on one should not have to also recognize the other.
 ///
@@ -985,8 +985,8 @@ pub enum AudioErrorKindDto {
 }
 
 /// A finished microphone/speaker operation, or a typed failure — the wire
-/// lowering of `traits::{VoiceRecording, SttTranscript, TtsAudio}` plus the
-/// unioned failure kind from `traits::{SttError, VoiceError, TtsError}`.
+/// lowering of `platform_api::{VoiceRecording, SttTranscript, TtsAudio}` plus the
+/// unioned failure kind from `platform_api::{SttError, VoiceError, TtsError}`.
 /// Carried by [`ClientCommand::AudioResponse`]. Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future outcome is additive.
 ///

@@ -104,7 +104,7 @@ Agent scope 没有稳定 `agentSource` 时返回 `no-fingerprint`，不会降级
 
 ## 5. Protocol era：expected 与 actual 分离
 
-`traits/src/mcp.rs` 定义 `McpProtocolEra::{Legacy, Modern}`、`McpNegotiatedProtocol { era, version }`、`McpConnectOptions { expected_era, deadline_ms }` 与 `McpConnectResult::negotiated`。`mcp/src/protocol_negotiation.rs` 负责从 `MCP_PROTOCOL_NEGOTIATION`、transport gate、feature flag 和 server denylist 得到期望值：
+`platform-api/src/mcp.rs` 定义 `McpProtocolEra::{Legacy, Modern}`、`McpNegotiatedProtocol { era, version }`、`McpConnectOptions { expected_era, deadline_ms }` 与 `McpConnectResult::negotiated`。`mcp/src/protocol_negotiation.rs` 负责从 `MCP_PROTOCOL_NEGOTIATION`、transport gate、feature flag 和 server denylist 得到期望值：
 
 - `legacy` 明确选择单次 legacy initialize；
 - `auto` 对 eligible HTTP/stdio 路径先做 modern `server/discover` probe；
@@ -264,7 +264,7 @@ Sol xhigh 最终只读复审结论：**APPROVE — zero unresolved P0–P3**。
 | `mcp/src/json_config.rs` | transport/schema、`discoveryCache`、`role` 与 metadata 来源 |
 | `mcp/src/oauth.rs` | MCP OAuth secure storage、refresh-grant token 派生、PKCE/token lifecycle |
 | `mcp/src/client.rs` | live client、tool/prompt/resource dispatch 与 negotiated protocol metadata |
-| `traits/src/mcp.rs` | transport spec、protocol era/options/result、capabilities extensions |
+| `platform-api/src/mcp.rs` | transport spec、protocol era/options/result、capabilities extensions |
 | `platforms/common/src/mcp_remote.rs` | 共享 HTTP/SSE wire、probe、deadline、modern envelope、connection cleanup |
 | `platforms/posix/src/mcp.rs` | stdio process/reaper 与 shared remote bridge |
 | `agent/src/mcp_servers.rs` | inline Agent source metadata 注入与 scoped config |

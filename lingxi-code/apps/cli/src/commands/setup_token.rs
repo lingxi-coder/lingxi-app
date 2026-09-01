@@ -22,7 +22,7 @@
 //! does not persist the token, and prints it once for headless/CI use.
 
 use clap::Args;
-use engine::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin};
+use lingxi_core::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin};
 
 /// `setup-token` payload — no children, no options beyond the clap-provided
 /// `-h/--help` (matches the byte oracle exactly).
@@ -49,14 +49,14 @@ pub async fn run(_cli: &Cli) -> i32 {
         ForceLoginOrgPin::Invalid => {
             eprintln!(
                 "{}",
-                engine::settings::enterprise::FORCE_LOGIN_ORG_UUID_INVALID
+                lingxi_core::settings::enterprise::FORCE_LOGIN_ORG_UUID_INVALID
             );
             return crate::exit_codes::RUNTIME_ERROR;
         }
         ForceLoginOrgPin::EmptyArray => {
             eprintln!(
                 "{}",
-                engine::settings::enterprise::FORCE_LOGIN_ORG_UUID_EMPTY_ARRAY
+                lingxi_core::settings::enterprise::FORCE_LOGIN_ORG_UUID_EMPTY_ARRAY
             );
             return crate::exit_codes::RUNTIME_ERROR;
         }

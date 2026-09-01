@@ -47,8 +47,8 @@
 | `lingxi-code/telemetry/src/tengu/mod.rs` | Modify | register block, TOTAL 339→348 |
 | `lingxi-code/test-harness/src/parity/fixtures/tengu_events.json` | Modify | append 9 names (order-locked tail) |
 | count-assert sites (`tui/src/components/prompt_input/vim.rs`, `tui/tests/behavior_palette.rs`, `telemetry/tests/event_name_completeness_test.rs`, `orchestrator/src/diagnostics.rs`) | Modify | 339→348 |
-| `lingxi-code/engine/src/settings/schema.rs` | Modify | drop `deny_unknown_fields` |
-| `lingxi-code/engine/src/settings/loader.rs` | Modify | rejection test → tolerance test |
+| `lingxi-code/core/src/settings/schema.rs` | Modify | drop `deny_unknown_fields` |
+| `lingxi-code/core/src/settings/loader.rs` | Modify | rejection test → tolerance test |
 | `lingxi-code/apps/cli/Cargo.toml` + `src/lib.rs` | Modify | wire `run_migrations` pre-REPL |
 
 Shared test helper (env lock + temp HOME), used by every task in the `migrations` crate — defined once in Task 1 as `src/test_support.rs` (`#[cfg(test)]`-gated module):
@@ -2492,8 +2492,8 @@ pub async fn migrate_changelog_from_config(env: &MigrationEnv) {
 ### Task 11: engine SettingsJson — remove `deny_unknown_fields`
 
 **Files:**
-- Modify: `lingxi-code/engine/src/settings/schema.rs:73` (the `#[serde(...)]` attr on `SettingsJson`)
-- Modify: `lingxi-code/engine/src/settings/loader.rs` (tests at ~line 101)
+- Modify: `lingxi-code/core/src/settings/schema.rs:73` (the `#[serde(...)]` attr on `SettingsJson`)
+- Modify: `lingxi-code/core/src/settings/loader.rs` (tests at ~line 101)
 
 - [ ] **Step 1: Failing test FIRST.** In `loader.rs` tests, REPLACE `returns_schema_violation_for_unknown_field` (which asserts a ParseError for unknown keys) with:
 
@@ -2518,7 +2518,7 @@ pub async fn migrate_changelog_from_config(env: &MigrationEnv) {
     }
 ```
 
-Run `cargo test -p engine settings` → the new test FAILS (ParseError) while `deny_unknown_fields` is still present.
+Run `cargo test -p core settings` → the new test FAILS (ParseError) while `deny_unknown_fields` is still present.
 
 - [ ] **Step 2: Implement.** In `schema.rs`, change
 
@@ -2532,11 +2532,11 @@ to
 #[serde(rename_all = "camelCase")]
 ```
 
-and update the struct's doc comment: replace the strictness rationale with: unknown keys are tolerated-and-ignored, matching claude-code's zod `safeParse` (non-strict ⇒ strip; `settings.ts:219`); known fields keep their typed parses; this also un-breaks settings files carrying keys written by ConfigTool//effort/the migration subsystem. Sweep `schema.rs` + `loader.rs` + `engine/src/settings/mod.rs` for now-stale comments that say `deny_unknown_fields` REJECTS (schema.rs:104-113 `permissions` field comment, schema.rs:149, schema.rs:207/223 history notes, loader.rs:16 error-doc) — reword each to reflect tolerance (the `permissions`/`output_style` fields stay typed for ACCESS, no longer load-bearing for acceptance).
+and update the struct's doc comment: replace the strictness rationale with: unknown keys are tolerated-and-ignored, matching claude-code's zod `safeParse` (non-strict ⇒ strip; `settings.ts:219`); known fields keep their typed parses; this also un-breaks settings files carrying keys written by ConfigTool//effort/the migration subsystem. Sweep `schema.rs` + `loader.rs` + `core/src/settings/mod.rs` for now-stale comments that say `deny_unknown_fields` REJECTS (schema.rs:104-113 `permissions` field comment, schema.rs:149, schema.rs:207/223 history notes, loader.rs:16 error-doc) — reword each to reflect tolerance (the `permissions`/`output_style` fields stay typed for ACCESS, no longer load-bearing for acceptance).
 
-- [ ] **Step 3: Run.** `cargo test -p engine` → ALL PASS (the old rejection test was replaced; check no OTHER test asserts unknown-key rejection: `grep -rn "unknown" lingxi-code/engine/src/settings/`).
+- [ ] **Step 3: Run.** `cargo test -p core` → ALL PASS (the old rejection test was replaced; check no OTHER test asserts unknown-key rejection: `grep -rn "unknown" lingxi-code/core/src/settings/`).
 
-- [ ] **Step 4: Gate + commit** (`fix(engine): SettingsJson tolerates unknown fields (zod-strip parity; un-breaks effortLevel et al)`). Clippy: `cargo clippy -p engine --all-targets --no-deps -- -D warnings`.
+- [ ] **Step 4: Gate + commit** (`fix(engine): SettingsJson tolerates unknown fields (zod-strip parity; un-breaks effortLevel et al)`). Clippy: `cargo clippy -p core --all-targets --no-deps -- -D warnings`.
 
 ---
 
@@ -2594,7 +2594,7 @@ cargo clippy -p cli -p migrations --all-targets --no-deps -- -D warnings
 - [ ] **Step 3: FULL GATE RITUAL:**
 
 ```bash
-cargo test -p engine
+cargo test -p core
 cargo test -p telemetry
 cargo test -p orchestrator diagnostics
 cargo test -p tui vim

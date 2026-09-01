@@ -730,13 +730,13 @@ impl<'cb> RataApp<'cb> {
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     initial_prompt: Option<String>,
-    background_handoff: Option<traits::BackgroundingSnapshot>,
+    background_handoff: Option<platform_api::BackgroundingSnapshot>,
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
     ask_user_question_rx: Receiver<AskUserQuestionExchange>,
     computer_access_rx: Receiver<ComputerAccessExchange>,
-    subscription: Option<traits::subscription::SharedSubscription>,
+    subscription: Option<platform_api::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
@@ -747,10 +747,10 @@ pub fn run_app(
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
-    orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    orchestrator: Option<std::sync::Arc<dyn platform_api::OrchestratorHandle>>,
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
-    task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
+    task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
     // Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218):
     // seeds the composer recall + persists submissions. `None` = session-local
     // recall only (tests, `CLAUDE_CODE_SKIP_PROMPT_HISTORY`).
@@ -904,7 +904,7 @@ pub fn run_app(
     // ←-on-empty gesture; it is ANDed with the agent-view enablement gate,
     // because a disabled agent view fails `kGt`'s `Zan(C2t({fleetEnabled:
     // $H(), …}))` check and installs no handler at all.
-    let agent_view_enabled = traits::agent_view::is_enabled();
+    let agent_view_enabled = platform_api::agent_view::is_enabled();
     app.chat_widget.set_left_arrow_opens_agents(
         tui_core::theme_persist::load_left_arrow_opens_agents().unwrap_or(true)
             && agent_view_enabled,
@@ -1133,7 +1133,7 @@ mod tests {
         app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
         assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "Hello");
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(!app.chat_widget.turn_running());
     }
 
@@ -1159,7 +1159,7 @@ mod tests {
             ChatOutcome::Continue
         ));
         assert!(!app.chat_widget.bottom_pane().ctrl_c_armed());
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
         assert!(!app.chat_widget.turn_running());
         // First idle Ctrl-C only arms the exit; it does not quit.
         assert!(matches!(
@@ -1411,7 +1411,7 @@ mod tests {
             app.on_key(press(KeyCode::Esc)),
             ChatOutcome::Continue
         ));
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
         // Idle only after the terminal event: Esc now reaches quit policy.
         assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
     }
@@ -1441,7 +1441,7 @@ mod tests {
         ));
         assert!(token.is_cancelled());
         assert!(app.chat_widget.turn_running());
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
         // And once the terminal boundary makes it idle, Esc quits.
         assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
     }
@@ -2013,7 +2013,7 @@ mod tests {
             1,
             "still streaming: tail stays held back"
         );
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         app.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(
             app.chat_widget.transcript().committed_to_terminal(),
@@ -2146,7 +2146,7 @@ mod tests {
             app.apply_turn_event(TurnEvent::TextDelta(
                 "Hello! How can I help you today?".to_string(),
             ));
-            app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+            app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
             app.render_tick(&mut terminal).unwrap();
             app.flush_scrollback(&mut terminal).unwrap();
             app.render_tick(&mut terminal).unwrap();
@@ -2824,7 +2824,7 @@ mod tests {
         raw.borrow_mut().clear();
         app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TextDelta("post-shrink reply".to_string()));
-        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         app.flush_scrollback(&mut terminal).unwrap();
         let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
         assert!(out.contains("post-shrink reply"), "reply flushed");

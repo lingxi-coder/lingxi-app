@@ -596,7 +596,7 @@ impl ConversationOrchestrator {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if !matches!(selection, traits::ReasoningSelection::Automatic) {
+            if !matches!(selection, platform_api::ReasoningSelection::Automatic) {
                 if let Ok(value) = serde_json::to_value(selection) {
                     extra.insert("reasoningSelection".to_string(), value);
                 }
@@ -884,13 +884,13 @@ impl ConversationOrchestrator {
         let absolute = config_home.join(&relative);
         let bytes = text.as_bytes().to_vec();
         let write = tokio::task::spawn_blocking(move || {
-            traits::rooted_fs::atomic_write(
+            platform_api::rooted_fs::atomic_write(
                 &config_home,
                 &relative,
                 &bytes,
-                traits::AtomicWriteOptions {
+                platform_api::AtomicWriteOptions {
                     overwrite: false,
-                    ..traits::AtomicWriteOptions::default()
+                    ..platform_api::AtomicWriteOptions::default()
                 },
             )
         })
@@ -915,12 +915,12 @@ impl ConversationOrchestrator {
     /// compaction cannot summarize away the only copy.
     pub(crate) async fn persist_active_goal_state_to_jsonl(
         &self,
-        active_goal: Option<&engine::session::ActiveGoalState>,
+        active_goal: Option<&lingxi_core::session::ActiveGoalState>,
     ) {
         let status = if active_goal.is_some() {
-            traits::GoalStatusKind::Set
+            platform_api::GoalStatusKind::Set
         } else {
-            traits::GoalStatusKind::Cleared
+            platform_api::GoalStatusKind::Cleared
         };
         self.persist_goal_status_attachment(status, active_goal)
             .await;
@@ -928,8 +928,8 @@ impl ConversationOrchestrator {
 
     pub(super) async fn persist_goal_status_attachment(
         &self,
-        status: traits::GoalStatusKind,
-        active_goal: Option<&engine::session::ActiveGoalState>,
+        status: platform_api::GoalStatusKind,
+        active_goal: Option<&lingxi_core::session::ActiveGoalState>,
     ) {
         let Some(goal) = active_goal else {
             return;
@@ -940,14 +940,14 @@ impl ConversationOrchestrator {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        let snapshot = traits::ActiveGoalSnapshot {
+        let snapshot = platform_api::ActiveGoalSnapshot {
             condition: goal.condition.clone(),
             set_at: goal.set_at,
             last_reason: goal.last_reason.clone(),
             iterations: goal.iterations,
             tokens_at_start: goal.tokens_at_start,
         };
-        let attachment = traits::GoalStatusAttachment {
+        let attachment = platform_api::GoalStatusAttachment {
             kind: "goal_status".to_string(),
             status,
             condition: goal.condition.clone(),
@@ -955,7 +955,7 @@ impl ConversationOrchestrator {
             duration_ms,
             tokens: total_tokens.saturating_sub(goal.tokens_at_start),
             last_reason: goal.last_reason.clone(),
-            goal_state: matches!(status, traits::GoalStatusKind::Set).then_some(snapshot),
+            goal_state: matches!(status, platform_api::GoalStatusKind::Set).then_some(snapshot),
         };
         match serde_json::to_value(attachment) {
             Ok(value) => self.persist_hook_attachment_to_jsonl(value).await,

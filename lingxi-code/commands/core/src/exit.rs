@@ -9,10 +9,10 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/exit` handler — calls
-/// [`OrchestratorHandle::request_exit`](traits::OrchestratorHandle::request_exit)
+/// [`OrchestratorHandle::request_exit`](platform_api::OrchestratorHandle::request_exit)
 /// and renders `"Exiting."`.
 ///
 /// `request_exit` is infallible — the `_failed` telemetry slot is reserved

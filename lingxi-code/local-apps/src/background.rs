@@ -7,8 +7,8 @@ use crate::runtime_v2::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use traits::rooted_fs::{self, AtomicWriteOptions};
-use traits::FsError;
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 
 const TASKS_FILE: &str = "background-tasks.json";
 const JOURNAL_FILE: &str = "background-journal.json";

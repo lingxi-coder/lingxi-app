@@ -204,7 +204,7 @@ pub struct OrchestratorConfig {
     /// fetch (`anthropic_oauth::fetch_profile_from_oauth_token` +
     /// `fetch_user_roles`) now runs as a background task in
     /// `engine_desktop::build` (llm-client future-work batch 4), filling the
-    /// shared `traits::subscription::SharedSubscription` slot, and the
+    /// shared `platform_api::subscription::SharedSubscription` slot, and the
     /// provider adapter reads that live slot at drive time via
     /// `effective_subscriber()` (batch 5) — so the 429/enterprise retry gate
     /// sees the resolved tier even though this static field stays `false` at
@@ -290,7 +290,7 @@ pub struct OrchestratorConfig {
     /// `feature('TRANSCRIPT_CLASSIFIER')`, an ant-internal GrowthBook/Statsig
     /// flag that is OFF in every external build). It guards the auto-mode
     /// classifier's `PermissionDenied`-hook retry path: only when this is `true`
-    /// AND the deny came from a [`traits::permission_gate::PermissionDecisionSource::Classifier`]
+    /// AND the deny came from a [`platform_api::permission_gate::PermissionDecisionSource::Classifier`]
     /// source does the turn loop honour a `PermissionDenied` hook's
     /// `{retry: true}` by pushing the verbatim `isMeta` retry message
     /// (`toolExecution.ts:1075-1101`).

@@ -1084,7 +1084,7 @@ pub struct Argv {
     //
     // (CLI-12) Oracle @307414302 — NEW in 2.1.238 (0 hits in 2.1.220).
     // WIRED: `crate::mode::ensure_live_messaging` binds the process UDS inbox
-    // at `traits::uds_inbox::default_socket_path(pid)`; this flag overrides
+    // at `platform_api::uds_inbox::default_socket_path(pid)`; this flag overrides
     // that default via [`crate::mode::set_messaging_socket_override`].
     #[arg(long = "messaging-socket-path", value_name = "path", hide = true)]
     pub messaging_socket_path: Option<String>,

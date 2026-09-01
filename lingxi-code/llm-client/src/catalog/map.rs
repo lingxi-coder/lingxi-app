@@ -3,7 +3,7 @@
 
 use crate::catalog::models_dev::Model;
 use crate::{Capabilities, ModelProfile, TokenPricing};
-use traits::{ModelBillingMode, ModelMetadata, ModelPricing, ModelPricingTier};
+use platform_api::{ModelBillingMode, ModelMetadata, ModelPricing, ModelPricingTier};
 
 /// Map a models.dev model to a [`ModelProfile`]. `request_model` and
 /// `billing_model` are both the wire id; `display_model` is the human name.

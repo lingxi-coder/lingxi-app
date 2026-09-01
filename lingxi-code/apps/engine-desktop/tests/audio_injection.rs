@@ -28,10 +28,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use engine_desktop::{build, desktop_tool_registry, DesktopAudio, DesktopConfig};
 use tool_api::BuiltinToolContext;
-use traits::process::ProcessOutput;
-use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-use traits::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-use traits::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+use platform_api::process::ProcessOutput;
+use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
+use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 
 /// A stand-in for `bridge_server::audio_bridge::AudioBridge`: ONE object
 /// implementing all three audio traits, which is what the desktop actually
@@ -187,7 +187,7 @@ fn sandbox_config(audio: Option<DesktopAudio>) -> (tempfile::TempDir, DesktopCon
 }
 
 async fn run_build(cfg: DesktopConfig) -> engine_desktop::DesktopRuntime {
-    let output: Arc<dyn traits::OutputStream> =
+    let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     // `build` returns a large future; boxing it keeps this test off the stack

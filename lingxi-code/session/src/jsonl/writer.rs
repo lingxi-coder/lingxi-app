@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use traits::{FileSystem, FsError};
+use platform_api::{FileSystem, FsError};
 
 /// Failure modes for [`JsonlWriter`] operations.
 #[derive(Debug, Error)]

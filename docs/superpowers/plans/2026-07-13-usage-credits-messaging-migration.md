@@ -189,9 +189,9 @@ function Gid({...}){
 ## File Structure
 
 - `llm-client/src/model/rate_limit.rs` — add 4 header fields to `RateLimitInfo` + parse them; add `credits_required` error-body → `overage_disabled_reason`.
-- `traits/src/orchestrator.rs` — add the 4 fields to the `TurnEvent::RateLimit` variant.
+- `platform-api/src/orchestrator.rs` — add the 4 fields to the `TurnEvent::RateLimit` variant.
 - The `llm_client::RateLimitInfo → TurnEvent::RateLimit` bridge (whichever crate maps it — Task 3 locates it) — thread the 4 fields.
-- `traits/src/subscription.rs` — add `is_usage_based_billing()` (`A5`), confirm/adjust `has_claude_ai_billing_access` (`tC`) and `is_overage_provisioning_allowed` (`QJe`), and (Phase 0 Task 2) any new predicate/state the deep branches need.
+- `platform-api/src/subscription.rs` — add `is_usage_based_billing()` (`A5`), confirm/adjust `has_claude_ai_billing_access` (`tC`) and `is_overage_provisioning_allowed` (`QJe`), and (Phase 0 Task 2) any new predicate/state the deep branches need.
 - `tui/src/rate_limit_messages.rs` — add the 4 fields to the composer `RateLimitInfo`; rewrite the six functions + helpers; new upsell string consts; byte-exact tests. (Primary file.)
 - `tui/src/chat_widget.rs:988-999` — populate the 4 new composer `RateLimitInfo` fields from `TurnEvent::RateLimit`.
 
@@ -202,8 +202,8 @@ function Gid({...}){
 ### Task 1: Confirm `A5`/`tC`/`QJe`/`Bo` ↔ existing `SubscriptionSnapshot` mapping; add `is_usage_based_billing`
 
 **Files:**
-- Modify: `traits/src/subscription.rs`
-- Test: inline `#[cfg(test)]` in `traits/src/subscription.rs`
+- Modify: `platform-api/src/subscription.rs`
+- Test: inline `#[cfg(test)]` in `platform-api/src/subscription.rs`
 
 **Interfaces:**
 - Produces: `SubscriptionSnapshot::is_usage_based_billing(&self) -> bool` (`A5` = `billing_type=="usage_based"`).
@@ -220,7 +220,7 @@ fn is_usage_based_billing_matches_a5() {
     assert!(!s.is_usage_based_billing());
 }
 ```
-- [ ] **Step 2: Run to verify it fails** — `cargo test -p traits is_usage_based_billing_matches_a5` → FAIL (method missing).
+- [ ] **Step 2: Run to verify it fails** — `cargo test -p platform-api is_usage_based_billing_matches_a5` → FAIL (method missing).
 - [ ] **Step 3: Implement**
 ```rust
 /// Port of `A5()` (`Uc()?.billingType==="usage_based"`) — selects "usage limit"
@@ -234,10 +234,10 @@ Then, in a doc comment on `has_claude_ai_billing_access`, record: "Also serves a
 `tC()` / `hasBillingAccess` in the 2.1.206 `getUpsellMessage` (`Bo()&&(max|pro || orgRole∈…)`);
 byte-equivalent given `Bo()≈is_subscriber`." Confirm `is_overage_provisioning_allowed`
 already lists all four `QJe` billing types (it does: stripe/stripe_contracted/apple/google_play).
-- [ ] **Step 4: Run to verify pass** — `cargo test -p traits` → green.
+- [ ] **Step 4: Run to verify pass** — `cargo test -p platform-api` → green.
 - [ ] **Step 5: Commit**
 ```bash
-git add traits/src/subscription.rs
+git add platform-api/src/subscription.rs
 git commit -m "feat(subscription): is_usage_based_billing (A5) + document tC/QJe mapping for 206 rate-limit msgs
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -246,7 +246,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: Decode & pin the deep-internal predicates (`ZA`,`WBe`,`B5`,`Eyt`, overage-included-model set)
 
 **Files:**
-- Modify: `traits/src/subscription.rs` (add the pinned predicates/state) OR
+- Modify: `platform-api/src/subscription.rs` (add the pinned predicates/state) OR
   `tui/src/rate_limit_messages.rs` (if a predicate is composer-local) — decided by what each consumes.
 - Test: inline unit tests for each pinned predicate.
 
@@ -273,7 +273,7 @@ table (e.g. `first_party_default → B5()==false path`, `usage-included model in
 - [ ] **Step 3: Implement** the predicates as `SubscriptionSnapshot` methods / composer-local
 fns with the decoded bodies. For any leaf with no port data source, implement the documented
 faithful default and add a `// 206 <sym>: <default> because <the port lacks X>` comment.
-- [ ] **Step 4: Run** — `cargo test -p traits -p tui <the new tests>` → green.
+- [ ] **Step 4: Run** — `cargo test -p platform-api -p tui <the new tests>` → green.
 - [ ] **Step 5: Commit** (`feat(subscription): pin ZA/WBe/B5/Eyt/overage-included predicates for 206 …`).
 
 ### Task 3: `tengu_*` flag gates (`tengu_pewter_summit`, `tengu_idle_amber_finch`, `tengu_coral_beacon`)
@@ -383,12 +383,12 @@ and assert the derived `overage_disabled_reason == Some("out_of_credits")` and a
 ### Task 6: Thread the new fields through `TurnEvent::RateLimit` + the TUI composer `RateLimitInfo`
 
 **Files:**
-- Modify: `traits/src/orchestrator.rs` (`TurnEvent::RateLimit` variant ~line 1287)
+- Modify: `platform-api/src/orchestrator.rs` (`TurnEvent::RateLimit` variant ~line 1287)
 - Modify: the `llm_client::RateLimitInfo → TurnEvent::RateLimit` bridge (locate with
   `grep -rn "TurnEvent::RateLimit {" --include=*.rs` in `client-adapter`/`orchestrator`)
 - Modify: `tui/src/rate_limit_messages.rs` (add the 4 fields to the composer `RateLimitInfo`,
   `#[derive(Default)]` covers them) + `tui/src/chat_widget.rs:999` (populate them)
-- Test: `traits/src/orchestrator_test.rs` round-trip + a `chat_widget` apply test.
+- Test: `platform-api/src/orchestrator_test.rs` round-trip + a `chat_widget` apply test.
 
 **Interfaces:**
 - Produces (on `tui::rate_limit_messages::RateLimitInfo`): `pub overage_in_use: bool`,
@@ -401,7 +401,7 @@ round-trip to carry the new fields and assert they survive; add/extend a `chat_w
 - [ ] **Step 2: Run to verify it fails.**
 - [ ] **Step 3: Implement** — add the fields to the variant, the bridge mapping, and the
 `chat_widget.rs:999` `RateLimitInfo { … }` literal; add the 5 fields to the composer struct.
-- [ ] **Step 4: Run** — `cargo test -p traits -p tui` → green (+ `cargo build --workspace` to catch every `TurnEvent::RateLimit { … }` construction site; fill new fields with defaults at test/mocks).
+- [ ] **Step 4: Run** — `cargo test -p platform-api -p tui` → green (+ `cargo build --workspace` to catch every `TurnEvent::RateLimit { … }` construction site; fill new fields with defaults at test/mocks).
 - [ ] **Step 5: Commit** (`feat: thread 206 overage header fields to the rate-limit composer`).
 
 ---
@@ -549,7 +549,7 @@ absent headers composes exactly what it did pre-migration for the non-billing pa
 `/usage-credits` leakage). 
 - [ ] **Step 3: Oracle re-diff** — `grep -abo` / latin-1 slice every new literal against the
 2.1.206 binary; confirm the `·`/`’` bytes.
-- [ ] **Step 4: Full verify** — `cargo build --workspace`; `cargo test -p llm-client -p traits -p tui`; `cargo test -p test-harness` if present. Green (modulo the known compaction flake).
+- [ ] **Step 4: Full verify** — `cargo build --workspace`; `cargo test -p llm-client -p platform-api -p tui`; `cargo test -p test-harness` if present. Green (modulo the known compaction flake).
 - [ ] **Step 5: Update records + commit** — flip `RATE_LIMIT_MSG_AUDIT_2026-07-12` to
 "CLOSED (2026-07-13): /usage-credits migration ported byte-exact (full plumbing)"; update the
 `lingxi-accepted-divergences` billing-messaging entry to note the reversal (message layer ported;

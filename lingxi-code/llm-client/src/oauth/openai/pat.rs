@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 use crate::oauth::openai::client::OAuthError;
 use crate::oauth::openai::config::OpenAiOAuthConfig;

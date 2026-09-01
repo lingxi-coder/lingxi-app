@@ -20,7 +20,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use traits::{LspError, LspServerConfig};
+use platform_api::{LspError, LspServerConfig};
 
 const CONTENT_MODIFIED: i32 = -32801;
 const CONTENT_MODIFIED_RETRIES: u32 = 3;

@@ -46,7 +46,7 @@ pub struct ForkLaunchContext {
     pub options: Option<BackgroundLaunchOptions>,
     pub transcript_path: Option<String>,
     /// Mid-turn UI boundary restored by the hidden background TUI.
-    pub handoff: Option<traits::BackgroundingSnapshot>,
+    pub handoff: Option<platform_api::BackgroundingSnapshot>,
     /// Foreground-resolved, safety-checked permission mode. When present this
     /// replaces raw CLI/settings authority in the durable launch options.
     pub resolved_permission_mode: Option<permission::PermissionMode>,
@@ -1212,7 +1212,7 @@ mod tests {
                 system_prompt: Some("captured system".to_string()),
                 ..BackgroundLaunchOptions::default()
             }),
-            handoff: Some(traits::BackgroundingSnapshot::Idle {
+            handoff: Some(platform_api::BackgroundingSnapshot::Idle {
                 queued_commands: vec!["/compact".to_string()],
                 draft: "保留这段草稿".to_string(),
                 boundary_id: uuid::Uuid::nil(),

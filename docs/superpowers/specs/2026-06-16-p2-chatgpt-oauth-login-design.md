@@ -44,7 +44,7 @@ Proactive: refresh if access token expires within 5 min OR `last_refresh` > 8 da
 
 ## Template (our anthropic-oauth — verified)
 
-`anthropic-oauth/` modules: `lib`, `handle` (login driver + `traits::AuthHandle`), `client` (authorize/exchange + `init_refresh_driver`), `config` (endpoints/client_id/scopes), `pkce`, `callback` (loopback listener), `refresh` (`AuthState` single-flight + proactive task, `RefreshDriver`), `credential_provider` (`impl llm_client::CredentialProvider`), `profile`, `resolver`, `subscription`, `limits`, `scope_upgrade`, `testsupport`.
+`anthropic-oauth/` modules: `lib`, `handle` (login driver + `platform_api::AuthHandle`), `client` (authorize/exchange + `init_refresh_driver`), `config` (endpoints/client_id/scopes), `pkce`, `callback` (loopback listener), `refresh` (`AuthState` single-flight + proactive task, `RefreshDriver`), `credential_provider` (`impl llm_client::CredentialProvider`), `profile`, `resolver`, `subscription`, `limits`, `scope_upgrade`, `testsupport`.
 
 - Login persists 3 keychain entries via `secret::CredentialManager::store_oauth_tokens(access, refresh, expires_at, scopes, email, org_id)`; reads via `get_oauth_tokens()`.
 - Credential seam: `OAuthCredentialProvider` (`impl llm_client::CredentialProvider::load`) checks expiry under RwLock, single-flight refresh, returns `Credential::BearerToken`.

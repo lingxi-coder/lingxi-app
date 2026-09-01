@@ -2,13 +2,13 @@
 //!
 //! One MCP server is modelled as a config plus a state. The registry
 //! (`registry.rs`) drives transitions between the variants below using
-//! the platform-supplied [`traits::McpTransport`].
+//! the platform-supplied [`platform_api::McpTransport`].
 
 use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
-use traits::{
+use platform_api::{
     McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
 };
@@ -296,7 +296,7 @@ pub enum McpConnectionState {
         /// Server capabilities returned by `initialize`.
         capabilities: ServerCapabilitiesDto,
         /// Protocol family/version negotiated for this live connection.
-        negotiated: traits::McpNegotiatedProtocol,
+        negotiated: platform_api::McpNegotiatedProtocol,
         /// Tools advertised by the server.
         tools: Vec<McpToolDto>,
         /// Resources advertised by the server.
@@ -337,7 +337,7 @@ pub enum McpConnectionState {
         capabilities: ServerCapabilitiesDto,
         /// Protocol family/version recorded when the cached catalog was
         /// populated. No transport is live in this state.
-        negotiated: traits::McpNegotiatedProtocol,
+        negotiated: platform_api::McpNegotiatedProtocol,
         /// Tools from the cached `tools/list` round.
         tools: Vec<McpToolDto>,
         /// Resources from the cached `resources/list` round.
@@ -442,7 +442,7 @@ impl McpConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::McpHeaders;
+    use platform_api::McpHeaders;
 
     fn cfg(spec: McpTransportSpec, config_error: Option<&str>) -> McpServerConfig {
         McpServerConfig {

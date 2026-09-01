@@ -124,7 +124,7 @@ sites) and matches the TS `Stream<StdoutMessage>` + single drain loop 1:1. The
 
 `apps/cli/src/lib.rs:146-170`: the SAME `Arc<StreamJsonStream>` is
 (1) installed as the orchestrator's `OutputStream`
-(`let adapter: Arc<dyn traits::OutputStream> = stream.clone()` → `build_runtime`)
+(`let adapter: Arc<dyn platform_api::OutputStream> = stream.clone()` → `build_runtime`)
 AND (2) handed by value into `run_stream_json_input_loop(... stream ...)`. So the
 loop already holds the writer handle — a control responder built on the same
 shared stream needs no new plumbing to reach stdout.
@@ -135,7 +135,7 @@ shared stream needs no new plumbing to reach stdout.
 
 ### Gate trait surface (the workspace-authoritative seam)
 
-`traits/src/permission_gate.rs` — `PermissionGate` (line 116). The orchestrator
+`platform-api/src/permission_gate.rs` — `PermissionGate` (line 116). The orchestrator
 holds exactly one: `orchestrator/src/conversation.rs:563`
 `pub(crate) perms: Arc<dyn PermissionGate>`. The turn loop consults it at:
 - `orchestrator/src/turn_loop.rs:2329` `orch.perms.resolve_detailed(name,

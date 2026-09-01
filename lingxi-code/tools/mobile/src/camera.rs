@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::camera::{CameraError, CameraPosition, CapturePhotoOpts};
+use platform_api::camera::{CameraError, CameraPosition, CapturePhotoOpts};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;

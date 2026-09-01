@@ -42,7 +42,7 @@ For each trait, create a `contracts/<trait>.rs` module exposing a public `<trait
 Example: `contracts/filesystem.rs`
 
 ```rust
-use lingxi_traits::{FileContent, FileSystem};
+use lingxi_platform_api::{FileContent, FileSystem};
 use std::sync::Arc;
 
 pub async fn filesystem_contract_tests<F: FileSystem>(fs: &F) {

@@ -139,7 +139,7 @@ impl PromptHistoryStore {
             "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
         ]
         .iter()
-        .any(|var| traits::env::is_env_truthy(std::env::var(var).ok().as_deref()))
+        .any(|var| platform_api::env::is_env_truthy(std::env::var(var).ok().as_deref()))
     }
 
     /// Queue one typed prompt (`cuy`). Applies the consecutive-duplicate

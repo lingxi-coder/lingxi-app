@@ -45,7 +45,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -54,7 +54,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -65,11 +65,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }

@@ -423,7 +423,7 @@ copyable slot 通过 UniFFI 可达的 `mcp_oauth_authorization_url` 暴露；URL
 | `mcp/src/json_config.rs` | MCP transport schema、`discoveryCache`、`role`、raw transport metadata |
 | `mcp/src/oauth.rs` | MCP OAuth 2.1/PKCE、secure storage、refresh-grant fingerprint 输入 |
 | `mcp/src/client.rs` | live MCP client、catalog/tool/resource/prompt dispatch、negotiated protocol metadata |
-| `traits/src/mcp.rs` | transport spec/kind、era/options/result、capabilities/extensions DTO |
+| `platform-api/src/mcp.rs` | transport spec/kind、era/options/result、capabilities/extensions DTO |
 | `platforms/common/src/mcp_remote.rs` | shared HTTP/SSE wire、server/discover、envelope、deadline、remote cleanup |
 | `platforms/posix/src/mcp.rs` | stdio child/reaper、POSIX raw bridge、POSIX probe/cleanup delegation |
 | `agent/src/mcp_servers.rs` | inline Agent source → MCP metadata、scoped config conversion |

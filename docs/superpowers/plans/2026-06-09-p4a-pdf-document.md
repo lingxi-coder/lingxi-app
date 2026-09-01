@@ -15,7 +15,7 @@
 ## File Structure
 
 - **Modify** `lingxi-code/protocol/src/messages.rs` — add `ContentBlock::Document` + `DocumentSource` + a wire round-trip test.
-- **Modify** (1 arm each, ~8 files) the exhaustive `ContentBlock` matches: `providers/src/openai/encode.rs`, `providers/src/gemini/encode.rs`, `protocol/src/message_size.rs`, `compaction/src/strip_media.rs`, `engine/src/prompt.rs`, `commands/core/src/export.rs`, `tui/src/replay.rs`, `client-adapter/src/turn.rs`; and 3 `matches!` predicates in `orchestrator/src/provider_adapter.rs`.
+- **Modify** (1 arm each, ~8 files) the exhaustive `ContentBlock` matches: `providers/src/openai/encode.rs`, `providers/src/gemini/encode.rs`, `protocol/src/message_size.rs`, `compaction/src/strip_media.rs`, `core/src/prompt.rs`, `commands/core/src/export.rs`, `tui/src/replay.rs`, `client-adapter/src/turn.rs`; and 3 `matches!` predicates in `orchestrator/src/provider_adapter.rs`.
 - **Modify** `lingxi-code/tools/file/Cargo.toml` — `pdf-read` feature (`lopdf` + `base64`).
 - **Create** `lingxi-code/tools/file/src/pdf_read.rs` — detect + page count + routing helpers.
 - **Modify** `lingxi-code/tools/file/src/{lib.rs,read.rs}` — the PDF branch + `pages` input.
@@ -143,7 +143,7 @@ This lists every exhaustive `match` missing a `Document` arm. The known set (fro
    ContentBlock::Document { .. } => ContentBlock::Text { text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string() },
    ```
    And update the module-level doc comment that currently says the Rust protocol has no Document variant.
-7. `engine/src/prompt.rs` (`content_blocks_to_api`, near the Image arm):
+7. `core/src/prompt.rs` (`content_blocks_to_api`, near the Image arm):
    ```rust
    ContentBlock::Document { source } => serde_json::json!({"type": "document", "source": source}),
    ```

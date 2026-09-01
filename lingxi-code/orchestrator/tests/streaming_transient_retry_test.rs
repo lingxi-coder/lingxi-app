@@ -85,7 +85,7 @@ async fn thinking_only_transient_reset_retries_and_succeeds() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            traits::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn"
+            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn"
         )),
         "retry must succeed with end_turn; events={events:#?}"
     );
@@ -146,7 +146,7 @@ async fn tool_started_then_transient_reset_does_not_retry() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            traits::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "turn must end model_error (no retry); events={events:#?}"
     );

@@ -144,26 +144,26 @@ fn batched_and_streaming_produce_same_assistant_text() {
 // path. These two tests pin the symmetry: each reminder, when its source is
 // wired, now appears on BOTH paths.
 
-struct OnceTaskNotifications(std::sync::Mutex<Vec<traits::task_registry::TaskNotification>>);
+struct OnceTaskNotifications(std::sync::Mutex<Vec<platform_api::task_registry::TaskNotification>>);
 #[async_trait::async_trait]
 impl orchestrator::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
     async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<traits::task_registry::TaskNotification> {
+    ) -> Vec<platform_api::task_registry::TaskNotification> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
 
 struct MockDiag(Option<String>);
 #[async_trait::async_trait]
-impl traits::NewDiagnosticsSource for MockDiag {
+impl platform_api::NewDiagnosticsSource for MockDiag {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         self.0.clone()
     }
 }
 
-fn one_task_notification() -> traits::task_registry::TaskNotification {
-    traits::task_registry::TaskNotification {
+fn one_task_notification() -> platform_api::task_registry::TaskNotification {
+    platform_api::task_registry::TaskNotification {
         task_id: "b12345678".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),

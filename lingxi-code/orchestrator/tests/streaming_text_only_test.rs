@@ -17,7 +17,7 @@ use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, Orch
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 #[tokio::test]
 async fn streaming_text_only_three_deltas() {

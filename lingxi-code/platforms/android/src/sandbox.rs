@@ -1,11 +1,11 @@
-//! [`traits::Sandbox`] impl for Android — validation + plan construction only;
+//! [`platform_api::Sandbox`] impl for Android — validation + plan construction only;
 //! never spawns (spec r3 §`AndroidMinijailSandbox`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use traits::{
+use platform_api::{
     BackendPlanHandle, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -224,7 +224,7 @@ mod tests {
     use crate::capabilities::AndroidSandboxCapabilities;
     use crate::policy::{AndroidSandboxPlan, NetProfile}; // not in the impl's imports — tests need it explicitly
     use std::collections::HashMap;
-    use traits::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
+    use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
 
     fn ready_caps() -> AndroidSandboxCapabilities {
         AndroidSandboxCapabilities {
@@ -325,8 +325,8 @@ mod tests {
         let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
         assert!(matches!(
             sc.tag(),
-            traits::SandboxedTag::Wrapped {
-                backend: traits::SandboxBackend::AndroidMinijail
+            platform_api::SandboxedTag::Wrapped {
+                backend: platform_api::SandboxBackend::AndroidMinijail
             }
         ));
         let plan = sc
@@ -417,7 +417,7 @@ mod tests {
             AndroidSandboxCapabilities::unavailable("no device probe"),
         );
         let err = sb.prepare(cmd(None), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, traits::SandboxError::Unavailable(_)));
+        assert!(matches!(err, platform_api::SandboxError::Unavailable(_)));
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
         let err = sb
             .prepare(cmd(Some(outside.path().to_path_buf())), &deny_net_policy())
             .unwrap_err();
-        assert!(matches!(err, traits::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
         let sb = sandbox_with(tmp.path(), ready_caps());
         let err = sb.prepare(cmd(Some(link)), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, traits::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         let sc = sb.bypass_with_audit(cmd(None), "test-reason");
         assert!(matches!(
             sc.tag(),
-            traits::SandboxedTag::BypassAuditedWithReason { .. }
+            platform_api::SandboxedTag::BypassAuditedWithReason { .. }
         ));
         assert!(sc.backend_plan().is_none());
     }
@@ -504,7 +504,7 @@ mod tests {
         let err = sb
             .prepare(cmd(Some(tmp.path().join("missing"))), &deny_net_policy())
             .unwrap_err();
-        assert!(matches!(err, traits::SandboxError::PathCanonicalize(_)));
+        assert!(matches!(err, platform_api::SandboxError::PathCanonicalize(_)));
     }
 
     #[test]

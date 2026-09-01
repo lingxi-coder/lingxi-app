@@ -9,7 +9,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// The user-visible `/compact` result, byte-faithful to claude-code's
 /// non-verbose `buildDisplayText` (`commands/compact/compact.ts:247`):
@@ -18,7 +18,7 @@ use traits::OrchestratorHandle;
 const COMPACT_DISPLAY: &str = "Compacted (ctrl+o to see full summary)";
 
 /// `/compact` handler — calls
-/// [`OrchestratorHandle::force_compact`](traits::OrchestratorHandle::force_compact)
+/// [`OrchestratorHandle::force_compact`](platform_api::OrchestratorHandle::force_compact)
 /// and renders the summary template.
 #[derive(Clone)]
 pub struct CompactHandler {
@@ -150,7 +150,7 @@ pub fn compact_failure_is_error(msg: &str) -> bool {
 mod tests {
     use super::*;
     use orchestrator::test_support::MockOrchestratorHandle;
-    use traits::CompactionSummary;
+    use platform_api::CompactionSummary;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

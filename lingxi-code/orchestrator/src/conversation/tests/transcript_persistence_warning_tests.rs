@@ -11,7 +11,7 @@ fn failing_orchestrator(root: &std::path::Path) -> (ConversationOrchestrator, Mo
     // every append fail without relying on platform permission semantics.
     let transcript_path = root.join("transcript.jsonl");
     std::fs::create_dir(&transcript_path).expect("create blocking directory");
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(root.to_path_buf()));
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(root.to_path_buf()));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
         transcript_path,
         fs,
@@ -83,7 +83,7 @@ async fn transcript_append_failure_is_silent_to_the_user() {
         .snapshot()
         .await
         .into_iter()
-        .filter(|event| matches!(event, traits::OutputEvent::SystemNotice { .. }))
+        .filter(|event| matches!(event, platform_api::OutputEvent::SystemNotice { .. }))
         .count();
     assert_eq!(
         notice_count, 0,

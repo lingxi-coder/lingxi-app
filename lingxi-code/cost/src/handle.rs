@@ -10,7 +10,7 @@
 
 use crate::budget::{BudgetCheckResult, BudgetEnforcer};
 use async_trait::async_trait;
-use traits::budget::{BudgetEnforcerHandle, BudgetError};
+use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
 
 #[async_trait]
 impl BudgetEnforcerHandle for BudgetEnforcer {

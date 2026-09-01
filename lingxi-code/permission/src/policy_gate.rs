@@ -61,7 +61,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::permission_gate::PermissionRequestSource;
+use platform_api::permission_gate::PermissionRequestSource;
 
 /// Live model/provider inputs read by the auto-mode permission gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,7 +450,7 @@ impl PolicyPermissionGate {
                 updated_input,
                 permission_updates: Vec::new(),
                 decision_classification: Some(
-                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
                 ),
             };
         }
@@ -620,7 +620,7 @@ impl PolicyPermissionGate {
                             // the optional classification still represents a
                             // temporary user grant, not a standing hook allow.
                             decision_classification: decision_classification.or(Some(
-                                traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
                             )),
                         }
                     }
@@ -1797,8 +1797,8 @@ impl PermissionGate for PolicyPermissionGate {
         name: &str,
         input: &Value,
         transient_allow_rules: &[String],
-    ) -> Option<traits::permission_gate::NonInteractivePermissionDecision> {
-        use traits::permission_gate::NonInteractivePermissionDecision;
+    ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision> {
+        use platform_api::permission_gate::NonInteractivePermissionDecision;
 
         let mode = self.effective_mode_for_tool(name);
         let mut live = self

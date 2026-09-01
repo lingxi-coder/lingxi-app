@@ -9,7 +9,7 @@
 //! ## How the events reach the client
 //!
 //! The driver does NOT hold the [`client_adapter::AdapterOutputStream`] directly —
-//! the orchestrator already owns it as its [`traits::OutputStream`] (wired at
+//! the orchestrator already owns it as its [`platform_api::OutputStream`] (wired at
 //! construction, by `engine_desktop::build` in production or by the test harness).
 //! Because that output stream lowers every callback into a
 //! [`client_protocol::events::ClientEvent`] and forwards it through the
@@ -70,14 +70,14 @@ impl CredentialRequiredTurnDriver {
     }
 
     async fn reject_turn(&self) {
-        traits::live_sessions::set_process_status("busy", None);
+        platform_api::live_sessions::set_process_status("busy", None);
         self.event_sink
             .emit(ClientEvent::Error {
                 kind: ErrorKindDto::Server,
                 message: CREDENTIAL_REQUIRED_MESSAGE.to_string(),
             })
             .await;
-        traits::live_sessions::set_process_status("idle", None);
+        platform_api::live_sessions::set_process_status("idle", None);
     }
 }
 
@@ -135,7 +135,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 /// of the `/loop` dynamic-mode one-shot self-wakeup seam (Phase 2).
 ///
 /// Twin of [`MsgQueueMidTurnInput`]: it lives in the bridge (which owns the
-/// per-connection queue + the [`traits::RuntimeSpawner`]) so the `tool-cron`
+/// per-connection queue + the [`platform_api::RuntimeSpawner`]) so the `tool-cron`
 /// crate — and the orchestrator — keep NO knowledge of how a wakeup is delivered.
 /// [`WakeupScheduler::schedule`] spawns ONE background task that
 /// [`RuntimeSpawner::sleep`]s for `delay`, resolves the autonomous sentinel via
@@ -155,7 +155,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 /// empty → the tool is an honest no-op.
 pub struct MsgQueueWakeupScheduler {
     queue: Arc<msgqueue::MessageQueueManager>,
-    runtime: Arc<dyn traits::RuntimeSpawner>,
+    runtime: Arc<dyn platform_api::RuntimeSpawner>,
     loop_runtime: Arc<tool_cron::LoopRuntime>,
 }
 
@@ -164,7 +164,7 @@ impl MsgQueueWakeupScheduler {
     #[must_use]
     pub fn new(
         queue: Arc<msgqueue::MessageQueueManager>,
-        runtime: Arc<dyn traits::RuntimeSpawner>,
+        runtime: Arc<dyn platform_api::RuntimeSpawner>,
     ) -> Self {
         Self {
             queue,
@@ -177,7 +177,7 @@ impl MsgQueueWakeupScheduler {
     #[must_use]
     pub fn with_loop_runtime(
         queue: Arc<msgqueue::MessageQueueManager>,
-        runtime: Arc<dyn traits::RuntimeSpawner>,
+        runtime: Arc<dyn platform_api::RuntimeSpawner>,
         loop_runtime: Arc<tool_cron::LoopRuntime>,
     ) -> Self {
         Self {
@@ -415,7 +415,7 @@ impl OrchestratorTurnDriver {
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
     ) {
-        traits::live_sessions::set_process_status("busy", None);
+        platform_api::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
             output.reset_message_buffer().await;
         }
@@ -486,7 +486,7 @@ impl OrchestratorTurnDriver {
                 }
             }
         }
-        traits::live_sessions::set_process_status("idle", None);
+        platform_api::live_sessions::set_process_status("idle", None);
     }
 }
 
@@ -570,7 +570,7 @@ mod tests {
     fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
         let batched = Arc::new(MockApiClient::new(Vec::new()));
         let sink = MockSink::arc();
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(AdapterOutputStream::new(sink as Arc<dyn ClientEventSink>));
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
@@ -866,14 +866,14 @@ mod tests {
     /// spawns the future on the current tokio runtime and uses real `sleep`.
     struct TestRuntime;
     #[async_trait::async_trait]
-    impl traits::RuntimeSpawner for TestRuntime {
+    impl platform_api::RuntimeSpawner for TestRuntime {
         async fn spawn(
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::runtime::RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::runtime::RuntimeError> {
             tokio::spawn(task);
-            Ok(traits::BackgroundTaskHandle {
+            Ok(platform_api::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -883,8 +883,8 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::runtime::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::runtime::RuntimeError> {
             Ok(())
         }
     }
@@ -903,7 +903,7 @@ mod tests {
         tool_cron::reset_autonomous_loop_delivered();
 
         let queue = Arc::new(MessageQueueManager::new());
-        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(TestRuntime);
+        let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(TestRuntime);
         let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
 
         // Schedule a 0-delay wakeup carrying the autonomous sentinel — it must be
@@ -944,7 +944,7 @@ mod tests {
         use tool_cron::WakeupScheduler;
 
         let queue = Arc::new(MessageQueueManager::new());
-        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(TestRuntime);
+        let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(TestRuntime);
         let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
         sched
             .schedule(

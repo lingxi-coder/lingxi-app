@@ -1,4 +1,4 @@
-//! `AgentSkillLoader` — the [`traits::skill_loader::SkillLoader`] impl that backs
+//! `AgentSkillLoader` — the [`platform_api::skill_loader::SkillLoader`] impl that backs
 //! G5 subagent skill preloading (claude `runAgent.ts:577-646`).
 //!
 //! claude's `runAgent` resolves each frontmatter `skills:` entry to a registered
@@ -8,7 +8,7 @@
 //! This adapter ports that over the shared desktop [`CommandRegistry`] (the same
 //! registry the slash dispatcher + `Skill` tool read), so a child agent runner
 //! can preload skills WITHOUT the `agent` crate depending on `commands-core`
-//! (the leaf [`traits::skill_loader`] seam breaks that cycle).
+//! (the leaf [`platform_api::skill_loader`] seam breaks that cycle).
 //!
 //! The production composition root injects the same prompt-shell provider used
 //! by the Skill tool and slash dispatcher, so preloads run the complete empty-
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use command_api::{CommandRegistry, SlashCommand, SlashCommandKind};
 use protocol::ContentBlock;
 use tokio::sync::RwLock;
-use traits::skill_loader::{SkillLoad, SkillLoader};
+use platform_api::skill_loader::{SkillLoad, SkillLoader};
 
 /// [`SkillLoader`] backed by the shared desktop [`CommandRegistry`].
 pub struct AgentSkillLoader {

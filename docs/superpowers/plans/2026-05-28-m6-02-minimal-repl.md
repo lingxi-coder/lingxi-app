@@ -6,7 +6,7 @@
 
 **Architecture:** Extends the `lingxi-tui` library crate created in M6-01. M6-01 shipped `TuiApp` shell + `<App>` root component + event loop merging keyboard/orchestrator/100ms-ticker via `tokio::select!` + `run_tui_session(runtime, cancel)` public entry. M6-02 fills the shell with state and the REPL screen body: a new `AppState` struct holds `messages: Vec<RenderedMessage>` (cap 500, FIFO eviction), `prompt_text: String`, `prompt_cursor: usize`, `scroll_offset: usize`, `history: Vec<String>` + `history_cursor: Option<usize>`, `status: StatusSnapshot`, `in_flight_turn: Option<TurnInFlight>`, `sigint_armed_at: Option<Instant>`. The REPL screen (`screens/repl.rs`) composes the three zones with iocraft `Box(flex_direction: FlexDirection::Column)`. Per-frame the screen reads from `use_state` (iocraft's hook). Keyboard events feed through `events/keymap.rs` → enum `KeyAction` → `app.rs::dispatch(KeyAction, &mut state)`. Slash dispatch reuses `RegistrySlashDispatcher` from M5-09 — for `/clear` we clear `state.messages`; for `/exit` we set the `should_exit` flag (M5-10 contract); for `/help` we push a `SystemTextMessage` to scrollback. Hardcoded `theme::TuiTheme` constants (`ASSISTANT_CYAN`, `USER_DEFAULT`, `ERROR_RED`, `DIM_GRAY`) — picker deferred to M7. Tests use `iocraft_test_helpers::render_to_string` for insta snapshots + a behavior harness in `lingxi-tui/tests/behavior_*.rs` that feeds synthetic `TuiEvent::Key(...)` into the loop and asserts state.
 
-**Tech Stack:** Rust 2021, `iocraft = "=0.6"` (pinned; from M6-01), `crossterm = "0.28"` (transitively via iocraft), `tokio = "1"` (`select!`, `time::Instant`), `lingxi-orchestrator::ConversationOrchestrator::run_turn` (from M5-13), `lingxi-commands::RegistrySlashDispatcher` (from M5-09), `lingxi-traits::{PermissionMode, Money}` (from M3), `insta = "1"` (snapshot testing — already in workspace).
+**Tech Stack:** Rust 2021, `iocraft = "=0.6"` (pinned; from M6-01), `crossterm = "0.28"` (transitively via iocraft), `tokio = "1"` (`select!`, `time::Instant`), `lingxi-orchestrator::ConversationOrchestrator::run_turn` (from M5-13), `lingxi-commands::RegistrySlashDispatcher` (from M5-09), `lingxi-platform_api::{PermissionMode, Money}` (from M3), `insta = "1"` (snapshot testing — already in workspace).
 
 ---
 
@@ -231,7 +231,7 @@ git commit -m "feat(tui): add TuiTheme with 4 color constants (M6-02 T1)"
 use std::path::PathBuf;
 use std::time::Instant;
 
-use lingxi_traits::{Money, PermissionMode};
+use lingxi_platform_api::{Money, PermissionMode};
 
 pub const SCROLLBACK_CAP: usize = 500;
 
@@ -307,7 +307,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_traits::PermissionMode;
+    use lingxi_platform_api::PermissionMode;
 
     fn fake_status() -> StatusSnapshot {
         StatusSnapshot {
@@ -371,7 +371,7 @@ cargo test -p lingxi-tui --lib state::tests 2>&1 | head -20
 
   Expected: builds, both tests pass on first try (this is a state-shape task, not a logic task; the test exercises FIFO).
 
-  If `Money::zero()` doesn't exist on `lingxi_traits::Money`, use `Money::default()` instead — adjust the test.
+  If `Money::zero()` doesn't exist on `lingxi_platform_api::Money`, use `Money::default()` instead — adjust the test.
 
 - [ ] **Step 5: Commit.**
 
@@ -401,7 +401,7 @@ git commit -m "feat(tui): add AppState + RenderedMessage + FIFO cap at 500 (M6-0
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_traits::{Money, PermissionMode};
+use lingxi_platform_api::{Money, PermissionMode};
 use lingxi_tui::components::status_line::{StatusLine, StatusLineProps};
 
 #[test]
@@ -420,7 +420,7 @@ fn status_line_default_state() {
 }
 ```
 
-  If `Money::zero()` is not the actual constructor, use `Money::from_micros(0)` or `Money::default()` — read `crates/traits/src/money.rs` first.
+  If `Money::zero()` is not the actual constructor, use `Money::from_micros(0)` or `Money::default()` — read `crates/platform-api/src/money.rs` first.
 
 - [ ] **Step 2: Run + watch fail (compile error: unknown component).**
 
@@ -448,7 +448,7 @@ cargo test -p lingxi-tui --test render_status_line 2>&1 | head -20
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_traits::{Money, PermissionMode};
+use lingxi_platform_api::{Money, PermissionMode};
 
 #[derive(Default, Props)]
 pub struct StatusLineProps {
@@ -483,7 +483,7 @@ pub fn StatusLine(props: &StatusLineProps) -> impl Into<AnyElement<'static>> {
 }
 ```
 
-  If `PermissionMode` variant names differ (e.g. `Default` instead of `Normal`), match the actual enum — read `crates/traits/src/permission.rs`.
+  If `PermissionMode` variant names differ (e.g. `Default` instead of `Normal`), match the actual enum — read `crates/platform-api/src/permission.rs`.
 
 - [ ] **Step 4: Wire into the components module.**
 
@@ -1219,7 +1219,7 @@ mod dispatch_tests {
     use crate::components::prompt_input::CursorMove as PiCursor;
     use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
     use crate::state::{AppState, RenderedMessage, StatusSnapshot};
-    use lingxi_traits::{Money, PermissionMode};
+    use lingxi_platform_api::{Money, PermissionMode};
     use std::path::PathBuf;
 
     fn s() -> AppState {
@@ -1588,7 +1588,7 @@ git commit -m "feat(tui): /clear /exit /help route through RegistrySlashDispatch
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_traits::{Money, PermissionMode};
+use lingxi_platform_api::{Money, PermissionMode};
 use lingxi_tui::screens::repl::{ReplScreen, ReplScreenProps};
 use lingxi_tui::state::{RenderedMessage, StatusSnapshot};
 
@@ -1891,7 +1891,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_traits::{Money, PermissionMode};
+use lingxi_platform_api::{Money, PermissionMode};
 use lingxi_tui::app::{ConversationOrchestratorTrait, TurnTextOutcome};
 use lingxi_tui::state::StatusSnapshot;
 use tokio_util::sync::CancellationToken;
@@ -2324,7 +2324,7 @@ echo "M6-02 complete"
 
 **Unresolved gaps (flagged for execution):**
 - Exact `Money::format()` output for zero may be `$0.00` or `$0.000`; T0 locks `$0.000` and tests assert it — if `Money::format` returns `$0.00`, either change the lock here or adjust `Money::format` (separate decision).
-- `PermissionMode` variant spelling (`Normal` vs `Default` etc.) — verify against `crates/traits/src/permission.rs` at execution time and adjust labels in T3.
+- `PermissionMode` variant spelling (`Normal` vs `Default` etc.) — verify against `crates/platform-api/src/permission.rs` at execution time and adjust labels in T3.
 - iocraft hook name (`use_terminal_size` vs `use_size`) — verify against M6-01's actual import.
 - M5-13's `TurnOutcome` may or may not expose a `final_text()` accessor — T11 step 2 documents the small additive change if needed.
 

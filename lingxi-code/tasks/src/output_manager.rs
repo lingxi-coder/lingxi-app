@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// Disk cap for a single task's output file. Mirrors claude-code's
 /// `MAX_TASK_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024` (`diskOutput.ts:30`).
@@ -130,7 +130,7 @@ impl TaskOutputManager {
             .create_new_file(path_str)
             .await
             .map_err(|e| match e {
-                traits::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
+                platform_api::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
                 other => OutputError::Io(other.to_string()),
             })?;
         Ok(path)
@@ -226,7 +226,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
-    use traits::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
 
     /// In-memory [`FileSystem`] with REAL exclusive-create semantics: a
     /// `create_new_file` for a path that already has a key fails with

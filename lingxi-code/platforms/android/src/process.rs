@@ -1,4 +1,4 @@
-//! [`traits::ProcessRunner`] for Android. P2 turns on execution: after the P1
+//! [`platform_api::ProcessRunner`] for Android. P2 turns on execution: after the P1
 //! security invariants pass, the runner translates the prepared
 //! [`AndroidSandboxPlan`] into a [`platform_android_minijail::JailSpec`] and
 //! runs it through `run_jailed` on a blocking thread. `platform-android` stays
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use platform_android_minijail::{JailRlimit, JailSpec};
-use traits::{
+use platform_api::{
     ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };
@@ -258,7 +258,7 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use traits::{
+    use platform_api::{
         BackendPlanHandle, ProcessCommand, ProcessError, ProcessRunner, SandboxBackend,
         SandboxedCommand, SandboxedTag,
     };

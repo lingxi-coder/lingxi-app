@@ -394,7 +394,7 @@ pub struct SettingsJson {
     /// `I2i()` (the `vO()` gate) alongside the `CLAUDE_CODE_DISABLE_AGENT_VIEW`
     /// env var: `settings.disableAgentView === true` disables agent view exactly
     /// like a truthy env var. Threaded into command registration via
-    /// [`traits::agent_view::is_enabled_with_setting`] (see
+    /// [`platform_api::agent_view::is_enabled_with_setting`] (see
     /// `command_core::register_core_batch_8`). Scalar-override merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_agent_view: Option<bool>,

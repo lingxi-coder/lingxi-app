@@ -13,10 +13,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use traits::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
+use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 fn spec(kind: &str, url: String) -> McpTransportSpec {
-    let headers = traits::McpHeaders::new();
+    let headers = platform_api::McpHeaders::new();
     match kind {
         "sse" => McpTransportSpec::Sse {
             url,
@@ -196,7 +196,7 @@ async fn exercise(kind: &str, url: String) {
     transport.disconnect(conn.connection_id).await.unwrap();
     assert!(matches!(
         transport.ping(conn.connection_id).await,
-        Err(traits::McpError::Connection(_))
+        Err(platform_api::McpError::Connection(_))
     ));
 }
 

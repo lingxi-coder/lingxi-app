@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use test_harness::mocks::mock_lsp_server::mock_lsp_server_path;
-use traits::LspServerConfig;
+use platform_api::LspServerConfig;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mock_config() -> LspServerConfig {
@@ -30,7 +30,7 @@ fn mock_config() -> LspServerConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn posix_spawn_and_initialize_round_trip() {
     use platform_posix::lsp::PosixLspTransport;
-    use traits::LspTransport;
+    use platform_api::LspTransport;
 
     // The mock binary must be present. Cargo does not cross-build artifacts
     // for integration tests of another package automatically — the test
@@ -71,7 +71,7 @@ async fn posix_spawn_and_initialize_round_trip() {
 #[tokio::test]
 async fn posix_spawn_enoent_is_clean_error() {
     use platform_posix::lsp::PosixLspTransport;
-    use traits::LspTransport;
+    use platform_api::LspTransport;
     let mut config = mock_config();
     config.command = "/nonexistent/path/to/lsp-server".into();
     let transport = PosixLspTransport::new();
@@ -95,7 +95,7 @@ async fn posix_spawn_uses_absolute_workspace_folder_as_child_cwd() {
     use platform_posix::lsp::PosixLspTransport;
     use tempfile::tempdir;
     use tokio::time::{sleep, timeout, Duration};
-    use traits::LspTransport;
+    use platform_api::LspTransport;
 
     let workspace = tempdir().expect("workspace tempdir");
     let witness = tempdir().expect("witness tempdir");

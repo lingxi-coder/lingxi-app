@@ -17,8 +17,8 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
-use traits::sandbox::ProcessCommand;
-use traits::{ProcessError, ProcessRunner, Sandbox};
+use platform_api::sandbox::ProcessCommand;
+use platform_api::{ProcessError, ProcessRunner, Sandbox};
 
 const TEST_BYPASS_REASON: &str = "contract test (bypass auditing intentional)";
 

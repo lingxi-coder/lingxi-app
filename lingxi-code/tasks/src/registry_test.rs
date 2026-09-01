@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
-use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
 // ---- In-memory FileSystem (mirrors the other handler/registry tests) ----
 
@@ -334,7 +334,7 @@ async fn spawn_local_agent_dispatches_once_registered() {
 #[tokio::test]
 async fn budget_stop_matches_claude_background_agent_filter() {
     use crate::state::LocalAgentTaskState;
-    use traits::task_registry::TaskRegistryHandle;
+    use platform_api::task_registry::TaskRegistryHandle;
 
     let (_d, mut registry) = make_registry();
     let agent_handler = RecordingHandler::new(TaskType::LocalAgent, "abudget01");
@@ -508,7 +508,7 @@ async fn failed_handler_kill_preserves_route_and_cleanup_for_retry() {
 
 #[tokio::test]
 async fn team_spawn_seam_spawns_real_teammate() {
-    use traits::team_spawn::TeamSpawnSeam;
+    use platform_api::team_spawn::TeamSpawnSeam;
 
     let (_d, mut registry) = make_registry();
     // Reuse the T01 recording handler: it records that `spawn` ran and
@@ -555,7 +555,7 @@ async fn team_spawn_seam_spawns_real_teammate() {
 
 #[tokio::test]
 async fn team_spawn_seam_unknown_handler_is_unsupported() {
-    use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, registry) = make_registry();
     // No InProcessTeammate handler registered.
@@ -661,7 +661,7 @@ impl Task for MsgRecordingHandler {
 
 #[tokio::test]
 async fn seam_send_message_routes_to_recording_handler() {
-    use traits::team_spawn::TeamSpawnSeam;
+    use platform_api::team_spawn::TeamSpawnSeam;
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::new(TaskType::InProcessTeammate, "tmsgid");
@@ -694,7 +694,7 @@ async fn seam_send_message_routes_to_recording_handler() {
 
 #[tokio::test]
 async fn seam_send_message_unknown_task_is_terminated() {
-    use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, registry) = make_registry();
     let seam: &dyn TeamSpawnSeam = &registry;
@@ -708,7 +708,7 @@ async fn seam_send_message_unknown_task_is_terminated() {
 
 #[tokio::test]
 async fn seam_send_message_terminated_handler_maps_to_terminated() {
-    use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::terminating(TaskType::InProcessTeammate, "tgone");
@@ -734,7 +734,7 @@ async fn seam_send_message_terminated_handler_maps_to_terminated() {
 
 #[tokio::test]
 async fn seam_send_message_unsupporting_handler_is_unsupported() {
-    use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::no_messages(TaskType::InProcessTeammate, "tnomsg");
@@ -1382,28 +1382,28 @@ impl FileSystem for ExclusiveCountingFs {
         path: &str,
         _o: Option<u64>,
         _l: Option<u64>,
-    ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
+    ) -> Result<platform_api::filesystem::FileContent, platform_api::filesystem::FsError> {
         let map = self.files.lock().await;
         let content = map.get(path).cloned().unwrap_or_default();
         let total_lines = content.lines().count() as u64;
-        Ok(traits::filesystem::FileContent {
+        Ok(platform_api::filesystem::FileContent {
             content,
             truncated: false,
             total_lines,
         })
     }
-    async fn write_file(&self, path: &str, body: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn write_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
             .insert(path.to_string(), body.to_string());
         Ok(())
     }
-    async fn create_new_file(&self, path: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn create_new_file(&self, path: &str) -> Result<(), platform_api::filesystem::FsError> {
         self.creates.fetch_add(1, Ord2::SeqCst);
         let mut map = self.files.lock().await;
         if map.contains_key(path) {
-            return Err(traits::filesystem::FsError::AlreadyExists(path.to_string()));
+            return Err(platform_api::filesystem::FsError::AlreadyExists(path.to_string()));
         }
         map.insert(path.to_string(), String::new());
         Ok(())
@@ -1415,12 +1415,12 @@ impl FileSystem for ExclusiveCountingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = traits::filesystem::FileEvent> + Send>>,
-        traits::filesystem::FsError,
+        std::pin::Pin<Box<dyn futures::Stream<Item = platform_api::filesystem::FileEvent> + Send>>,
+        platform_api::filesystem::FsError,
     > {
-        Err(traits::filesystem::FsError::Io("nope".into()))
+        Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
-    async fn append_file(&self, path: &str, body: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn append_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1429,33 +1429,33 @@ impl FileSystem for ExclusiveCountingFs {
             .push_str(body);
         Ok(())
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), traits::filesystem::FsError> {
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::filesystem::FsError> {
         Ok(())
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, traits::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, platform_api::filesystem::FsError> {
         Ok(std::time::SystemTime::UNIX_EPOCH)
     }
-    async fn file_size(&self, path: &str) -> Result<u64, traits::filesystem::FsError> {
+    async fn file_size(&self, path: &str) -> Result<u64, platform_api::filesystem::FsError> {
         let map = self.files.lock().await;
         Ok(map.get(path).map_or(0, |s| s.len() as u64))
     }
-    async fn delete_file(&self, path: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn delete_file(&self, path: &str) -> Result<(), platform_api::filesystem::FsError> {
         self.files.lock().await.remove(path);
         Ok(())
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
         Ok(())
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
-        Err(traits::filesystem::FsError::Io("nope".into()))
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+        Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
-    async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
         Ok(())
     }
 }
@@ -1919,7 +1919,7 @@ async fn take_pending_carries_workflow_resume_and_terminal_metadata() {
             script_path: Some("/tmp/session/workflows/wf_abcdef.js".into()),
             transcript_dir: Some("/tmp/session/subagents/workflows/wf_abcdef".into()),
             current_step: 2,
-            outcome: traits::task_registry::WorkflowTerminalOutcome {
+            outcome: platform_api::task_registry::WorkflowTerminalOutcome {
                 result: Some("ok".into()),
                 failures: vec!["one retry exhausted".into()],
                 agent_count: 4,
@@ -1993,7 +1993,7 @@ async fn workflow_notification_omits_default_progress_counts() {
             script_path: Some("/tmp/session/workflows/wf_counts_hidden.js".into()),
             transcript_dir: Some("/tmp/session/subagents/workflows/wf_counts_hidden".into()),
             current_step: 1,
-            outcome: traits::task_registry::WorkflowTerminalOutcome {
+            outcome: platform_api::task_registry::WorkflowTerminalOutcome {
                 result: Some("stopped".into()),
                 agent_count: 2,
                 total_tokens: 40,
@@ -2111,9 +2111,9 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
     registry
         .set_agent_outcome(
             "adone0001",
-            traits::task_registry::AgentTerminalOutcome {
+            platform_api::task_registry::AgentTerminalOutcome {
                 result: Some("the answer".into()),
-                usage: Some(traits::task_registry::AgentRunUsage {
+                usage: Some(platform_api::task_registry::AgentRunUsage {
                     subagent_tokens: 120,
                     tool_uses: 3,
                     duration_ms: 4_500,
@@ -2157,7 +2157,7 @@ async fn set_agent_outcome_error_reaches_the_failed_summary() {
     registry
         .set_agent_outcome(
             "afail0001",
-            traits::task_registry::AgentTerminalOutcome {
+            platform_api::task_registry::AgentTerminalOutcome {
                 error: Some("model refused".into()),
                 ..Default::default()
             },
@@ -2184,7 +2184,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
     registry
         .set_agent_outcome(
             "amerge001",
-            traits::task_registry::AgentTerminalOutcome {
+            platform_api::task_registry::AgentTerminalOutcome {
                 result: Some("partial answer".into()),
                 ..Default::default()
             },
@@ -2193,7 +2193,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
     registry
         .set_agent_outcome(
             "amerge001",
-            traits::task_registry::AgentTerminalOutcome {
+            platform_api::task_registry::AgentTerminalOutcome {
                 worktree_path: Some("/wt".into()),
                 ..Default::default()
             },
@@ -2968,7 +2968,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         .mark_task_rested(
             "a-rest-1",
             Some("final answer".to_string()),
-            Some(traits::task_registry::AgentRunUsage {
+            Some(platform_api::task_registry::AgentRunUsage {
                 subagent_tokens: 42,
                 tool_uses: 3,
                 duration_ms: 1500,
@@ -3093,7 +3093,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
         .mark_task_rested(
             "a-rest-parent",
             Some("rested".into()),
-            Some(traits::task_registry::AgentRunUsage {
+            Some(platform_api::task_registry::AgentRunUsage {
                 subagent_tokens: 7,
                 tool_uses: 1,
                 duration_ms: 99,
@@ -3191,7 +3191,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
         .mark_task_rested(
             "a-rest-parent",
             Some("rested".into()),
-            Some(traits::task_registry::AgentRunUsage {
+            Some(platform_api::task_registry::AgentRunUsage {
                 subagent_tokens: 7,
                 tool_uses: 1,
                 duration_ms: 99,
@@ -3289,7 +3289,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
         .mark_task_rested(
             "a-rest-parent",
             Some("stale".into()),
-            Some(traits::task_registry::AgentRunUsage {
+            Some(platform_api::task_registry::AgentRunUsage {
                 subagent_tokens: 1,
                 tool_uses: 1,
                 duration_ms: 10,
@@ -3310,7 +3310,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
         .mark_task_rested(
             "a-rest-parent",
             Some("fresh".into()),
-            Some(traits::task_registry::AgentRunUsage {
+            Some(platform_api::task_registry::AgentRunUsage {
                 subagent_tokens: 9,
                 tool_uses: 2,
                 duration_ms: 20,
@@ -3543,12 +3543,12 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
 struct ExitZeroRunner;
 
 #[async_trait]
-impl traits::ProcessRunner for ExitZeroRunner {
+impl platform_api::ProcessRunner for ExitZeroRunner {
     async fn run(
         &self,
-        _cmd: &traits::SandboxedCommand,
-    ) -> Result<traits::ProcessOutput, traits::ProcessError> {
-        Ok(traits::ProcessOutput {
+        _cmd: &platform_api::SandboxedCommand,
+    ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
+        Ok(platform_api::ProcessOutput {
             stdout: "done\n".into(),
             stderr: String::new(),
             exit_code: 0,
@@ -3557,11 +3557,11 @@ impl traits::ProcessRunner for ExitZeroRunner {
     }
     async fn spawn_background(
         &self,
-        _cmd: &traits::SandboxedCommand,
-    ) -> Result<traits::ProcessHandle, traits::ProcessError> {
-        Err(traits::ProcessError::Unsupported)
+        _cmd: &platform_api::SandboxedCommand,
+    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
+        Err(platform_api::ProcessError::Unsupported)
     }
-    async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+    async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -3569,47 +3569,47 @@ impl traits::ProcessRunner for ExitZeroRunner {
     }
 }
 
-/// Pass-through [`traits::Sandbox`] stub (audited bypass tag, like the
+/// Pass-through [`platform_api::Sandbox`] stub (audited bypass tag, like the
 /// local_bash unit tests').
 struct PassSandbox;
 
 #[async_trait]
-impl traits::Sandbox for PassSandbox {
+impl platform_api::Sandbox for PassSandbox {
     fn is_available(&self) -> bool {
         true
     }
-    fn backend(&self) -> traits::SandboxBackend {
-        traits::SandboxBackend::None
+    fn backend(&self) -> platform_api::SandboxBackend {
+        platform_api::SandboxBackend::None
     }
     fn prepare(
         &self,
-        cmd: traits::ProcessCommand,
-        _policy: &traits::SandboxPolicy,
-    ) -> Result<traits::SandboxedCommand, traits::SandboxError> {
-        Ok(traits::SandboxedCommand::__new_sandboxed(
+        cmd: platform_api::ProcessCommand,
+        _policy: &platform_api::SandboxPolicy,
+    ) -> Result<platform_api::SandboxedCommand, platform_api::SandboxError> {
+        Ok(platform_api::SandboxedCommand::__new_sandboxed(
             cmd,
-            traits::SandboxedTag::BypassAuditedWithReason {
+            platform_api::SandboxedTag::BypassAuditedWithReason {
                 reason: "test".into(),
             },
         ))
     }
     fn bypass_with_audit(
         &self,
-        cmd: traits::ProcessCommand,
+        cmd: platform_api::ProcessCommand,
         reason: &str,
-    ) -> traits::SandboxedCommand {
-        traits::SandboxedCommand::__new_sandboxed(
+    ) -> platform_api::SandboxedCommand {
+        platform_api::SandboxedCommand::__new_sandboxed(
             cmd,
-            traits::SandboxedTag::BypassAuditedWithReason {
+            platform_api::SandboxedTag::BypassAuditedWithReason {
                 reason: reason.into(),
             },
         )
     }
-    async fn probe_capability(&self) -> traits::SandboxCapability {
-        traits::SandboxCapability {
+    async fn probe_capability(&self) -> platform_api::SandboxCapability {
+        platform_api::SandboxCapability {
             available: true,
             reason: None,
-            features: traits::SandboxFeatures::default(),
+            features: platform_api::SandboxFeatures::default(),
         }
     }
 }
@@ -3641,7 +3641,7 @@ async fn finished_background_bash_task_does_not_stay_running() {
         Arc::new(PassSandbox),
         Arc::new(mcp::McpRegistry::new(
             Arc::new(test_harness::mocks::MockMcpTransport::default())
-                as Arc<dyn traits::McpTransport>,
+                as Arc<dyn platform_api::McpTransport>,
         )),
         bash_sink.clone() as Arc<dyn crate::handlers::TaskStatusSink>,
     );

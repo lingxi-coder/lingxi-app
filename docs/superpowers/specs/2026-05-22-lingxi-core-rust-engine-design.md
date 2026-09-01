@@ -426,7 +426,7 @@ lingxi-code/                          ← workspace root
 2. **`core` crate Cargo.toml PROHIBITS OS dependencies**: internal dep `protocol` plus external `serde`, `serde_json`, `thiserror`, `tracing` only.
 3. **`core` and `traits` are siblings**: both depend on `protocol`; neither depends on the other. Host/run-loop code maps protocol effects to trait calls.
 4. **Each subsystem is a separate crate**: clear dependency graph, parallel development, independent versioning.
-5. **`api-client` depends on `traits::HttpTransport`**: does not use reqwest directly.
+5. **`api-client` depends on `platform_api::HttpTransport`**: does not use reqwest directly.
 6. **`platforms/posix-minimal` is M1 demo-only**: production platform crates stay out of the core workspace and land in M2.
 
 ### Crate Dependency Graph
@@ -907,7 +907,7 @@ pub enum Event {
 
 ### 5.3 Effect Definitions (full list)
 
-`Effect`, `EffectResult`, and `EffectError` are defined in `lingxi-protocol` because both `core` and `traits::EffectHandler` need them. They are documented here because the reducer emits these effects.
+`Effect`, `EffectResult`, and `EffectError` are defined in `lingxi-protocol` because both `core` and `platform_api::EffectHandler` need them. They are documented here because the reducer emits these effects.
 
 ```rust
 #[derive(Debug, Clone)]
@@ -7078,7 +7078,7 @@ futures-core = "0.3"
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
 lingxi-core = { path = "../core" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

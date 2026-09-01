@@ -191,7 +191,7 @@ ignored (TS `.catch(() => {})`), retried next startup.
 
 ## Component 5: engine SettingsJson loosening (approved)
 
-Remove `deny_unknown_fields` from `engine/src/settings/schema.rs::SettingsJson`. Rationale:
+Remove `deny_unknown_fields` from `core/src/settings/schema.rs::SettingsJson`. Rationale:
 claude-code's zod `SettingsSchema().safeParse` STRIPS unknown keys (zod default — non-strict);
 the Rust strictness is itself a parity divergence, and it already bites: `/effort`'s persisted
 `effortLevel` makes the engine settings load return `ParseError` → production callers `.ok()` →
@@ -254,7 +254,7 @@ tests serialized with the existing env-lock pattern).
 - settings_update: merge/delete/broken-JSON-bail; localSettings path shape.
 - Schema loosening regression: settings.json with `effortLevel` + arbitrary unknown keys loads;
   known fields still parse; merge/tracer behavior unchanged.
-- Gates: `cargo test -p migrations -p engine -p telemetry` + the W36-lesson dependent-crate RUN
+- Gates: `cargo test -p migrations -p core -p telemetry` + the W36-lesson dependent-crate RUN
   set; `clippy -D warnings` on touched crates; whole-workspace `cargo test --workspace --no-run`
   struct-trap; both engines build; verify engine-mobile pulls no `migrations` crate
   (`cargo tree -p engine-mobile | grep -c migrations` == 0).

@@ -17,7 +17,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::{ModelListing, OrchestratorHandle};
+use platform_api::{ModelListing, OrchestratorHandle};
 
 fn provider_for_ref<'a>(
     model_ref: &str,
@@ -26,7 +26,7 @@ fn provider_for_ref<'a>(
     listings
         .iter()
         .find(|listing| {
-            traits::qualified_model_ref(&listing.request_model, Some(&listing.provider_id))
+            platform_api::qualified_model_ref(&listing.request_model, Some(&listing.provider_id))
                 == model_ref
         })
         .or_else(|| {
@@ -101,7 +101,7 @@ impl BuiltinCommandHandler for ModelHandler {
         let trimmed = args.raw_args.trim();
         if trimmed.is_empty() {
             // List mode. Curate to the "latest few" per provider (the shared
-            // `traits::curated_model_refs`, same whitelist as the TUI picker +
+            // `platform_api::curated_model_refs`, same whitelist as the TUI picker +
             // mobile listing) instead of joining the full assembled catalog
             // (~hundreds of ids — every preset is injected into the live config by
             // `provider_config::assemble`). Qualified refs preserve provider
@@ -110,7 +110,7 @@ impl BuiltinCommandHandler for ModelHandler {
             let available = self.handle.list_available_models().await;
             let listings = self.handle.list_model_listings().await;
             let snap = self.handle.get_status_snapshot().await;
-            let models = traits::curated_model_refs(
+            let models = platform_api::curated_model_refs(
                 &listings,
                 &available,
                 &snap.model,
@@ -123,7 +123,7 @@ impl BuiltinCommandHandler for ModelHandler {
                 String::new()
             } else {
                 models.first().cloned().unwrap_or_else(|| {
-                    traits::qualified_model_ref(&snap.model, snap.model_profile.as_deref())
+                    platform_api::qualified_model_ref(&snap.model, snap.model_profile.as_deref())
                 })
             };
             let available = render_grouped_model_refs(&models, &listings);
@@ -140,7 +140,7 @@ impl BuiltinCommandHandler for ModelHandler {
         // Switch mode. Resolve an optional `profile/model` qualifier so a shared
         // id (offered by multiple providers) routes deterministically.
         let listings = self.handle.list_model_listings().await;
-        let (model, profile) = traits::parse_model_ref(trimmed, &listings);
+        let (model, profile) = platform_api::parse_model_ref(trimmed, &listings);
         match self.handle.switch_model(&model, profile.as_deref()).await {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
@@ -182,9 +182,9 @@ mod tests {
     async fn list_mode_when_no_args() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_available_models(vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into()]);
-        let snap = traits::StatusSnapshot {
+        let snap = platform_api::StatusSnapshot {
             model: "claude-opus-4-7".into(),
-            ..traits::StatusSnapshot::default()
+            ..platform_api::StatusSnapshot::default()
         };
         mock.set_status_snapshot(snap);
         let h = ModelHandler::new(mock);
@@ -222,10 +222,10 @@ mod tests {
             listing("openai", "OpenAI", "gpt-4o"),
             listing("github-copilot", "GitHub Copilot", "gpt-5.6-sol"),
         ]);
-        mock.set_status_snapshot(traits::StatusSnapshot {
+        mock.set_status_snapshot(platform_api::StatusSnapshot {
             model: "gpt-5.6-sol".into(),
             model_profile: Some("github-copilot".into()),
-            ..traits::StatusSnapshot::default()
+            ..platform_api::StatusSnapshot::default()
         });
 
         let h = ModelHandler::new(mock);
@@ -262,10 +262,10 @@ mod tests {
             reasoning: Default::default(),
             supports_reasoning: true,
         }]);
-        mock.set_status_snapshot(traits::StatusSnapshot {
+        mock.set_status_snapshot(platform_api::StatusSnapshot {
             model: "deepseek-v4-flash".into(),
             model_profile: None,
-            ..traits::StatusSnapshot::default()
+            ..platform_api::StatusSnapshot::default()
         });
 
         let h = ModelHandler::new(mock);
@@ -330,7 +330,7 @@ mod tests {
     /// `("gpt-4.1", None)`.
     #[tokio::test]
     async fn model_switch_parses_profile_qualified_ref() {
-        use traits::ModelListing;
+        use platform_api::ModelListing;
         fn listing(provider_id: &str, request_model: &str) -> ModelListing {
             ModelListing {
                 display_model: request_model.to_string(),

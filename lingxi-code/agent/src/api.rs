@@ -20,7 +20,7 @@ use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, LlmResponse};
 use protocol::AgentId;
 use std::sync::Arc;
-use traits::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
+use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 
 const OBSERVER_EVENT_BUFFER: usize = 100;
 

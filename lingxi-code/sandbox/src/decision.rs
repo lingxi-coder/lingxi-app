@@ -19,7 +19,7 @@ use crate::runtime_config::SandboxRuntimeConfig;
 use permission::shell_command::{
     matches_excluded_pattern, split_command, strip_env_and_wrappers_fixedpoint,
 };
-use traits::SandboxPolicy;
+use platform_api::SandboxPolicy;
 
 /// Outcome of [`should_use_sandbox`].
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub enum SandboxDecision {
     NoSandbox,
     /// Wrap the command using the supplied policy.
     Sandbox {
-        /// Policy to apply when calling [`traits::Sandbox::prepare`].
+        /// Policy to apply when calling [`platform_api::Sandbox::prepare`].
         policy: SandboxPolicy,
     },
 }

@@ -24,7 +24,7 @@ use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use traits::OutputStream;
+use platform_api::OutputStream;
 
 const MAX_CHAT_MESSAGES: usize = 20;
 const MAX_SYSTEM_BYTES: usize = 8 * 1024;
@@ -626,21 +626,21 @@ mod tests {
     struct StubCamera(Vec<u8>);
 
     #[async_trait]
-    impl traits::CameraControl for StubCamera {
+    impl platform_api::CameraControl for StubCamera {
         async fn capture_photo(
             &self,
-            _opts: traits::CapturePhotoOpts,
-        ) -> Result<traits::CapturedImage, traits::CameraError> {
-            Ok(traits::CapturedImage {
+            _opts: platform_api::CapturePhotoOpts,
+        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+            Ok(platform_api::CapturedImage {
                 jpeg_bytes: self.0.clone(),
                 width: 1280,
                 height: 960,
             })
         }
 
-        async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
-            self.capture_photo(traits::CapturePhotoOpts {
-                position: traits::CameraPosition::Back,
+        async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+            self.capture_photo(platform_api::CapturePhotoOpts {
+                position: platform_api::CameraPosition::Back,
                 allow_editing: false,
             })
             .await

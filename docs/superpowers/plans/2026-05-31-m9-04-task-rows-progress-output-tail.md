@@ -597,7 +597,7 @@ A presentation buffer + an async tail that calls `TaskRegistryHandle::output(id,
 //! reading `TaskRegistryHandle::output(id, Some(offset))` and appending only
 //! the new bytes. `render_output_tail` shows the last N lines.
 
-use traits::task_registry::{TaskRegistryError, TaskRegistryHandle};
+use platform_api::task_registry::{TaskRegistryError, TaskRegistryHandle};
 
 /// Accumulated tail state for one task's spool.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -645,7 +645,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::Mutex;
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskUpdatePatch,
     };
 

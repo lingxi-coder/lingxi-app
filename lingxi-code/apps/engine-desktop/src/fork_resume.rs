@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use traits::fork_resume_gate::ForkResumeGate;
+use platform_api::fork_resume_gate::ForkResumeGate;
 
 /// Resolves whether a skill name still names a FORK-CAPABLE skill.
 ///

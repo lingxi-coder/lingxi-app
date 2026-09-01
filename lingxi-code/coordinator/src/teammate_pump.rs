@@ -28,7 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
 use crate::mailbox::{TeammateMailbox, TeammateMessage};
 

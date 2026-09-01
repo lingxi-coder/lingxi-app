@@ -1,7 +1,7 @@
 //! Settings snapshot builder.
 //!
-//! Lives in `bridge-server` rather than `engine::settings` because the
-//! `engine` crate's dependencies are deliberately minimal (no `traits`, no
+//! Lives in `bridge-server` rather than `lingxi_core::settings` because the
+//! `core` crate's dependencies are deliberately minimal (no `traits`, no
 //! `permission`), while `bridge-server` already depends on client-protocol,
 //! permission, migrations, traits and engine — `permission::mark_internal_write`
 //! is needed by [`apply_patch`], the writer below.
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use client_protocol::commands::SettingsDestinationDto;
-use engine::settings::merger::merge_raw_layer;
+use lingxi_core::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
 use serde_json::Value;
 
@@ -847,7 +847,7 @@ mod tests {
     }
 
     /// The engine does NOT resolve `hooks` (or any other key in
-    /// `engine::settings::schema::MERGE_STRATEGIES`) by letting the
+    /// `lingxi_core::settings::schema::MERGE_STRATEGIES`) by letting the
     /// highest-priority layer's whole value win: `merger::merge` deep-merges
     /// it, so a hook defined only in `user` survives alongside a hook defined
     /// only in `project`. A snapshot that overwrites the key top-level shows

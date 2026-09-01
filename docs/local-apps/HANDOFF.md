@@ -410,7 +410,7 @@ Useful commands from `lingxi-code/`:
 ```bash
 cargo test -p tool-workflow
 cargo test -p permission workspace_lease --lib
-cargo test -p traits default_run_isolated_fails_closed
+cargo test -p platform-api default_run_isolated_fails_closed
 cargo test -p platform-android isolated_execution_mounts
 cargo test -p platform-ios-ish-runtime isolated_mounts_
 cargo test -p engine-mobile --features uniffi --lib local_apps_

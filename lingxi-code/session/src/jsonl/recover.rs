@@ -6,7 +6,7 @@
 
 use crate::transcript::TranscriptEntry;
 use thiserror::Error;
-use traits::{FileSystem, FsError};
+use platform_api::{FileSystem, FsError};
 
 /// Failure modes for session storage operations.
 #[derive(Debug, Clone, Error)]

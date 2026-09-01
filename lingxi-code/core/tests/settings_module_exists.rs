@@ -5,5 +5,5 @@
 #[test]
 fn settings_module_re_exports_error_type() {
     // The mere fact this compiles is the assertion.
-    fn _accepts(_: engine::settings::SettingsError) {}
+    fn _accepts(_: lingxi_core::settings::SettingsError) {}
 }

@@ -33,7 +33,7 @@ use base64::Engine;
 use protocol::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::Duration;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// XAA request deadline (xaa.ts `XAA_REQUEST_TIMEOUT_MS = 30000`).
 const XAA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -96,9 +96,9 @@ impl XaaError {
     }
 }
 
-impl From<XaaError> for traits::McpError {
+impl From<XaaError> for platform_api::McpError {
     fn from(e: XaaError) -> Self {
-        traits::McpError::OAuth(e.to_string())
+        platform_api::McpError::OAuth(e.to_string())
     }
 }
 

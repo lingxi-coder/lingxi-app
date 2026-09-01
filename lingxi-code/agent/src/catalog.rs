@@ -496,7 +496,7 @@ fn parse_observer_frontmatter(
         "[agentObserver] Agent {owner} declares observer {agent} (observeSubagents={observe_subagents})"
     );
     Some(ObserverSpec {
-        schema_version: traits::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+        schema_version: platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION,
         agent,
         message,
         observe_subagents,
@@ -1167,7 +1167,7 @@ pub fn parse_agent_from_json(
                 }
             };
             Some(ObserverSpec {
-                schema_version: traits::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+                schema_version: platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION,
                 agent: agent.trim().to_string(),
                 message,
                 observe_subagents,

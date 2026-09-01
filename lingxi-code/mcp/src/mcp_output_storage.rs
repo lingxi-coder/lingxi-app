@@ -17,7 +17,7 @@
 //! in tests) so no real home directory is ever written during tests.
 
 use std::path::{Path, PathBuf};
-use traits::McpResourceContentsRich;
+use platform_api::McpResourceContentsRich;
 
 /// One element of a `resources/read` `contents[]` array as decoded off the
 /// wire, before blob persistence. `text` and `blob` are mutually exclusive in

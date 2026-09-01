@@ -396,7 +396,7 @@ impl McpProtocolOutput {
 }
 
 #[async_trait::async_trait]
-impl traits::OutputStream for McpProtocolOutput {
+impl platform_api::OutputStream for McpProtocolOutput {
     async fn emit_text(&self, _text: &str) {}
 
     async fn emit_tool_call(
@@ -432,7 +432,7 @@ impl traits::OutputStream for McpProtocolOutput {
         }
     }
 
-    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
 }
 
 struct McpServePermissionSink;
@@ -467,7 +467,7 @@ async fn run_serve(a: &ServeArgs) -> i32 {
         Arc::new(McpServePermissionSink);
     let runtime = match engine_desktop::build(
         cfg,
-        output.clone() as Arc<dyn traits::OutputStream>,
+        output.clone() as Arc<dyn platform_api::OutputStream>,
         permission_sink,
     )
     .await
@@ -823,8 +823,8 @@ async fn run_login(a: &LoginArgs) -> i32 {
             return RUNTIME_ERROR;
         }
     };
-    let clock: Arc<dyn traits::Clock> = Arc::new(PosixClock::new());
-    let http: Arc<dyn traits::HttpTransport> = Arc::new(PosixHttp::new());
+    let clock: Arc<dyn platform_api::Clock> = Arc::new(PosixClock::new());
+    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
 
     let server_key = oauth::server_key(&cfg.name, &cfg.spec);
     let no_browser = a.no_browser;
@@ -893,7 +893,7 @@ async fn run_logout(a: &LogoutArgs) -> i32 {
             return RUNTIME_ERROR;
         }
     };
-    let http: Arc<dyn traits::HttpTransport> = Arc::new(PosixHttp::new());
+    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
 
     // Remote revocation is best-effort and only possible while the server
     // configuration still exists. Local deletion is authoritative and runs for
@@ -1015,14 +1015,14 @@ fn find_loaded_server(name: &str) -> Option<mcp::connection::McpServerConfig> {
 /// Extract `(url, oauth_cfg)` when `cfg` is an OAuth-capable MCP remote transport.
 fn extract_oauth_spec(
     cfg: &mcp::connection::McpServerConfig,
-) -> Option<(&str, &traits::McpOAuthConfigDto)> {
+) -> Option<(&str, &platform_api::McpOAuthConfigDto)> {
     match &cfg.spec {
-        traits::McpTransportSpec::Sse {
+        platform_api::McpTransportSpec::Sse {
             url,
             oauth: Some(cfg),
             ..
         } => Some((url.as_str(), cfg)),
-        traits::McpTransportSpec::Http {
+        platform_api::McpTransportSpec::Http {
             url,
             oauth: Some(cfg),
             ..
@@ -1032,7 +1032,7 @@ fn extract_oauth_spec(
 }
 
 /// Build a CLI-local secure-storage backend used for MCP OAuth token persistence.
-async fn mcp_token_storage() -> Result<Arc<dyn traits::SecureStorage>, String> {
+async fn mcp_token_storage() -> Result<Arc<dyn platform_api::SecureStorage>, String> {
     let home = crate::run::lingxi_home_dir();
     let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
     platform_posix::secure_storage_for_platform(user, home.clone(), home.join(".credentials.json"))
@@ -1044,13 +1044,13 @@ async fn mcp_token_storage() -> Result<Arc<dyn traits::SecureStorage>, String> {
 /// `write_server` (`command` / `args` / `env` or `type` + `url` + `headers`).
 fn cfg_to_entry_value(cfg: &mcp::connection::McpServerConfig) -> Option<serde_json::Value> {
     match &cfg.spec {
-        traits::McpTransportSpec::Stdio { command, args, env } => Some(serde_json::json!({
+        platform_api::McpTransportSpec::Stdio { command, args, env } => Some(serde_json::json!({
             "type": "stdio",
             "command": command,
             "args": args,
             "env": env,
         })),
-        traits::McpTransportSpec::Sse { url, headers, .. } => {
+        platform_api::McpTransportSpec::Sse { url, headers, .. } => {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), "sse".into());
             obj.insert("url".into(), serde_json::Value::String(url.clone()));
@@ -1067,7 +1067,7 @@ fn cfg_to_entry_value(cfg: &mcp::connection::McpServerConfig) -> Option<serde_js
             }
             Some(serde_json::Value::Object(obj))
         }
-        traits::McpTransportSpec::Http { url, headers, .. } => {
+        platform_api::McpTransportSpec::Http { url, headers, .. } => {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), "http".into());
             obj.insert("url".into(), serde_json::Value::String(url.clone()));
@@ -1964,7 +1964,7 @@ async fn run_list() -> i32 {
     println!("Checking MCP server health\u{2026}");
     println!();
 
-    let transport: std::sync::Arc<dyn traits::McpTransport> =
+    let transport: std::sync::Arc<dyn platform_api::McpTransport> =
         std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
     let registry = mcp::McpRegistry::new(transport);
 
@@ -2052,7 +2052,7 @@ async fn run_get(a: &GetArgs) -> i32 {
             println!("  Issue: {issue}");
         }
     } else {
-        let transport: std::sync::Arc<dyn traits::McpTransport> =
+        let transport: std::sync::Arc<dyn platform_api::McpTransport> =
             std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
         let registry = mcp::McpRegistry::new(transport);
         let (status, issue) = probe_server_health(&registry, cfg).await;
@@ -2062,7 +2062,7 @@ async fn run_get(a: &GetArgs) -> i32 {
         }
     }
     match &cfg.spec {
-        traits::McpTransportSpec::Stdio { command, args, env } => {
+        platform_api::McpTransportSpec::Stdio { command, args, env } => {
             println!("  Type: stdio");
             println!("  Command: {command}");
             println!("  Args: {}", args.join(" "));
@@ -2073,11 +2073,11 @@ async fn run_get(a: &GetArgs) -> i32 {
                 println!("    {k}={}", env[k]);
             }
         }
-        traits::McpTransportSpec::Sse { url, .. } => {
+        platform_api::McpTransportSpec::Sse { url, .. } => {
             println!("  Type: sse");
             println!("  URL: {url}");
         }
-        traits::McpTransportSpec::Http { url, .. } => {
+        platform_api::McpTransportSpec::Http { url, .. } => {
             println!("  Type: http");
             println!("  URL: {url}");
         }
@@ -2585,18 +2585,18 @@ fn scope_contains_server(name: &str, scope: Scope) -> bool {
 
 /// One-line transport summary for `list` (e.g. `echo hello`,
 /// `https://x/mcp (HTTP)`).
-fn transport_summary(spec: &traits::McpTransportSpec) -> String {
+fn transport_summary(spec: &platform_api::McpTransportSpec) -> String {
     match spec {
-        traits::McpTransportSpec::Stdio { command, args, .. } => {
+        platform_api::McpTransportSpec::Stdio { command, args, .. } => {
             // Unconditional `{command} {args}`, matching the oracle — an
             // argless stdio server renders WITH a trailing space
             // (`mock_stdio_mcp  - ✘ …`). Special-casing the empty-args case to
             // trim it looks tidier and is a byte divergence.
             format!("{command} {}", args.join(" "))
         }
-        traits::McpTransportSpec::Sse { url, .. } => format!("{url} (SSE)"),
-        traits::McpTransportSpec::Http { url, .. } => format!("{url} (HTTP)"),
-        traits::McpTransportSpec::WebSocket { url, .. } => format!("{url} (WebSocket)"),
+        platform_api::McpTransportSpec::Sse { url, .. } => format!("{url} (SSE)"),
+        platform_api::McpTransportSpec::Http { url, .. } => format!("{url} (HTTP)"),
+        platform_api::McpTransportSpec::WebSocket { url, .. } => format!("{url} (WebSocket)"),
         other => other.kind().to_string(),
     }
 }
@@ -2845,7 +2845,7 @@ fn print_file_modified(scope: Scope, path: &std::path::Path) {
 
 #[cfg(test)]
 mod transport_summary_tests {
-    use traits::McpTransportSpec;
+    use platform_api::McpTransportSpec;
 
     #[test]
     fn argless_stdio_keeps_the_oracle_trailing_space() {
@@ -3118,7 +3118,7 @@ mod pending_approval_tests {
     fn stdio(name: &str, scope: ConfigScope) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            spec: traits::McpTransportSpec::Stdio {
+            spec: platform_api::McpTransportSpec::Stdio {
                 command: "srv".into(),
                 args: vec![],
                 env: HashMap::new(),
@@ -3247,9 +3247,9 @@ mod pending_approval_tests {
     fn unconnectable_status_splits_unconfigured_from_invalid_config() {
         const CONFIG_ERROR: &str = "'url' \"${VAR:-}\" expanded to an empty string. Set the referenced environment variable, or update the server's config and reconnect.";
 
-        let http = |url: &str| traits::McpTransportSpec::Http {
+        let http = |url: &str| platform_api::McpTransportSpec::Http {
             url: url.to_string(),
-            headers: traits::McpHeaders::default(),
+            headers: platform_api::McpHeaders::default(),
             headers_helper: None,
             oauth: None,
         };
@@ -3423,7 +3423,7 @@ mod pending_approval_tests {
              environment variable, or update the server's config and reconnect."
                 .to_string(),
         );
-        let transport: std::sync::Arc<dyn traits::McpTransport> =
+        let transport: std::sync::Arc<dyn platform_api::McpTransport> =
             std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
         let registry = mcp::McpRegistry::new(transport);
         let err = registry.connect(cfg.clone()).await.unwrap_err();

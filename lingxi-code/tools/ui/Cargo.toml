@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../../tool-api" }
 tui-core = { path = "../../tui-core" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
@@ -22,7 +22,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 

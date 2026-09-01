@@ -136,10 +136,10 @@ lingxi-code/crates/tools/
 
 | Tool group | Depends on |
 |------------|------------|
-| File ops | `lingxi-traits::FileSystem` (M1), `lingxi-permission::PermissionGate` (M1) |
-| Shell | `lingxi-traits::Process` (M1), `lingxi-sandbox` (M2-04), `lingxi-cost::events` (M3-05) |
-| Web | `lingxi-traits::Http` (M1), `lingxi-api-client` (M3-03 for WebSearch), `lingxi-cost::events` (M3-05), `lingxi-telemetry::tengu::tool` (M3-06) |
-| Workflow | `lingxi-session` (M1), `lingxi-traits::Worktree` (M2-01) |
+| File ops | `lingxi-platform_api::FileSystem` (M1), `lingxi-permission::PermissionGate` (M1) |
+| Shell | `lingxi-platform_api::Process` (M1), `lingxi-sandbox` (M2-04), `lingxi-cost::events` (M3-05) |
+| Web | `lingxi-platform_api::Http` (M1), `lingxi-api-client` (M3-03 for WebSearch), `lingxi-cost::events` (M3-05), `lingxi-telemetry::tengu::tool` (M3-06) |
+| Workflow | `lingxi-session` (M1), `lingxi-platform_api::Worktree` (M2-01) |
 | Agent/Task | `lingxi-agent` (M1), `lingxi-coordinator` (M1), `lingxi-tasks` (M1), `lingxi-api-client` (M3-03, for sub-engine API calls), `lingxi-anthropic-oauth` (M3-04, for sub-engine OAuth) |
 | MCP | `lingxi-mcp` (M2-02b), `lingxi-jsonrpc` (M2-02a) |
 | LSP | `lingxi-lsp` (M2-03) |

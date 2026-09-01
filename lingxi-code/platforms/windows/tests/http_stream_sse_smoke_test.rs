@@ -14,7 +14,7 @@ use protocol::{HttpMethod, HttpRequest};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 const SSE_BODY: &str = concat!(
     "event: message_start\n",
@@ -109,7 +109,7 @@ async fn stream_sse_surfaces_non_2xx_at_open_time() {
         panic!("stream should fail for 429");
     };
     match err {
-        traits::HttpError::Status { status, body } => {
+        platform_api::HttpError::Status { status, body } => {
             assert_eq!(status, 429);
             assert!(body.contains("rate limited"));
         }

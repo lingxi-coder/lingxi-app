@@ -2,7 +2,7 @@
 //!
 //! The LIVE version-facing pins moved to `parity_claude_2_1_220.rs` when the
 //! parity target advanced. This file no longer asserts against
-//! `traits::CLAUDE_CODE_VERSION` — pinning a live constant to a superseded
+//! `platform_api::CLAUDE_CODE_VERSION` — pinning a live constant to a superseded
 //! version is how a suite starts failing for being CORRECT, and the 2.1.216
 //! audit demoted the 2.1.208 suite the same way.
 //!

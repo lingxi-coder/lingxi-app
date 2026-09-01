@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use protocol::SecureStorageData;
 use std::path::PathBuf;
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Plain-text file-based secure storage rooted at a base directory.
 pub struct PlainTextSecureStorage {

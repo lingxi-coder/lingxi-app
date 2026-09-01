@@ -6,7 +6,7 @@
 
 **Architecture:** Two new static `CredentialProvider`s in the `openai-oauth` crate (`PatCredentialProvider`, `ExternalTokensCredentialProvider`), both returning `Credential::ChatGptOAuth`. The engine selects the `openai-chatgpt` delegate by precedence (PAT env → external-tokens env → OAuth session), all env-var configured. Picker availability ORs the three sources.
 
-**Tech Stack:** Rust workspace (`lingxi-code/`). `tokio`, injected `traits::HttpTransport`, `serde`. Tests use the `openai-oauth` `testsupport` mock-HTTP pattern. Run cargo with `CARGO_PROFILE_DEV_DEBUG=0` (disk near-full).
+**Tech Stack:** Rust workspace (`lingxi-code/`). `tokio`, injected `platform_api::HttpTransport`, `serde`. Tests use the `openai-oauth` `testsupport` mock-HTTP pattern. Run cargo with `CARGO_PROFILE_DEV_DEBUG=0` (disk near-full).
 
 **Reference spec:** `docs/superpowers/specs/2026-06-16-p3-enterprise-auth-design.md`.
 
@@ -15,7 +15,7 @@
 ## Reused P2 facts (verified)
 - `llm_client::Credential::ChatGptOAuth { access_token: String, account_id: Option<String>, fedramp: bool }`; `AuthStrategy::ChatGptOAuth` + `ChatGptAuthenticator` already dispatch in `client.rs`.
 - `llm_client::{CredentialProvider, CredentialScope, BoxFuture, Credential, LlmError}` — trait: `fn load<'a>(&'a self, scope: &'a CredentialScope) -> BoxFuture<'a, Result<Credential, LlmError>>`.
-- `openai-oauth` already exports `OpenAiOAuthConfig`, `OAuthError`, `token_data::parse_id_token`. HTTP shape (from `device_code.rs`): `protocol::HttpRequest { method: protocol::HttpMethod::{Get,Post}, url, headers: Vec<(String,String)>, body: Option<String>, body_bytes: None, timeout: Option<Duration> }`; `traits::HttpTransport::request(req).await -> Result<resp,_>` where `resp.status: u16`, `resp.body: String`.
+- `openai-oauth` already exports `OpenAiOAuthConfig`, `OAuthError`, `token_data::parse_id_token`. HTTP shape (from `device_code.rs`): `protocol::HttpRequest { method: protocol::HttpMethod::{Get,Post}, url, headers: Vec<(String,String)>, body: Option<String>, body_bytes: None, timeout: Option<Duration> }`; `platform_api::HttpTransport::request(req).await -> Result<resp,_>` where `resp.status: u16`, `resp.body: String`.
 - `compute_availability(credentials, sources, anthropic_has_api_key, anthropic_has_oauth, openai_chatgpt_has_oauth)` — has an arm `"openai-chatgpt" => openai_chatgpt_has_oauth`. Called once in `apps/engine-desktop/src/lib.rs:2745` passing `has_openai_oauth`.
 - Engine `openai-chatgpt` delegate built in `apps/engine-desktop/src/lib.rs` ~1414–1516: builds `openai_oauth_cfg`/`openai_oauth_client`, detects `get_openai_oauth_tokens()` → `init_refresh_driver` → `openai_oauth_state`, then inserts `OpenAiOAuthCredentialProvider` under `"openai-chatgpt"` (line ~1510–1516); `has_openai_oauth = openai_oauth_state.is_some()` (line ~1509).
 
@@ -100,7 +100,7 @@ use std::time::Duration;
 use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 use crate::client::OAuthError;
 use crate::config::OpenAiOAuthConfig;

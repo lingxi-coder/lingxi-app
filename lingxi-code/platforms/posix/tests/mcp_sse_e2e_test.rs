@@ -30,7 +30,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use platform_posix::mcp::PosixMcpTransport;
-use traits::{McpTransport, McpTransportSpec};
+use platform_api::{McpTransport, McpTransportSpec};
 
 #[derive(Clone)]
 struct MockState {
@@ -131,7 +131,7 @@ async fn spawn_mock() -> String {
 fn sse_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Sse {
         url,
-        headers: traits::McpHeaders::new(),
+        headers: platform_api::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }
@@ -203,7 +203,7 @@ async fn full_mcp_surface_roundtrips_over_sse() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(traits::McpError::Connection(_))),
+        matches!(after, Err(platform_api::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }

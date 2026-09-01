@@ -22,7 +22,7 @@ use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,

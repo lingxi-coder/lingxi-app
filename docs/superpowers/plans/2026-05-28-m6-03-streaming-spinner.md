@@ -6,7 +6,7 @@
 
 **Architecture:**
 
-1. **TurnEvent bridge** — `crates/tui/src/events/orchestrator_bridge.rs` (file exists from M6-01) gains a public `TurnEvent` enum with `TextDelta(String)`, `ToolUseStart{id, tool, input}`, `ToolUseResult{id, result}`, `PermissionRequest{...}`, `TurnStarted`, `TurnEnded(TurnOutcome)`. A new `BridgeOutputStream` impl of `lingxi_traits::OutputStream` translates `emit_text` → `TurnEvent::TextDelta`, `emit_tool_call` → `TurnEvent::ToolUseStart`, `emit_tool_result` → `TurnEvent::ToolUseResult`, `emit_end_turn` → `TurnEvent::TurnEnded`. `TurnStarted` fires before `run_turn_streaming` is awaited.
+1. **TurnEvent bridge** — `crates/tui/src/events/orchestrator_bridge.rs` (file exists from M6-01) gains a public `TurnEvent` enum with `TextDelta(String)`, `ToolUseStart{id, tool, input}`, `ToolUseResult{id, result}`, `PermissionRequest{...}`, `TurnStarted`, `TurnEnded(TurnOutcome)`. A new `BridgeOutputStream` impl of `lingxi_platform_api::OutputStream` translates `emit_text` → `TurnEvent::TextDelta`, `emit_tool_call` → `TurnEvent::ToolUseStart`, `emit_tool_result` → `TurnEvent::ToolUseResult`, `emit_end_turn` → `TurnEvent::TurnEnded`. `TurnStarted` fires before `run_turn_streaming` is awaited.
 2. **Cancelable streaming** — `ConversationOrchestrator::run_turn_streaming_with_cancel(prompt, cancel)` mirrors the existing `run_turn_with_cancel` (M5-13) pattern: it races `try_run_turn_streaming` against `cancel.cancelled()` via `tokio::select!`, returning `TurnOutcome::Cancelled` when the token fires. `OrchestratorHandle::run_turn_streaming_with_cancel` is the trait-level wrapper.
 3. **Streaming subscriber** — `crates/tui/src/streaming.rs` owns the receiver side of an `mpsc::UnboundedReceiver<TurnEvent>`. Its `apply_event(&mut AppState, ev: TurnEvent)` function: appends a new `AssistantTextMessage` on the first `TextDelta` of a turn; concatenates subsequent `TextDelta`s into the same message's text; toggles `AppState.streaming` to `Some(StreamingState{turn_id, started_at})` on `TurnStarted` and to `None` on `TurnEnded(_)`.
 4. **Rate-limited render** — Each `apply_event` call appends to the buffer and calls `render_notify.notify_one()` (a `tokio::sync::Notify` shared with the renderer). The render loop awaits `render_notify.notified()` then sleeps 33ms (≈ 30fps cap) before draining queued state into iocraft. Bursts collapse into a single redraw.
@@ -43,7 +43,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 | Path | Action | Responsibility |
 |---|---|---|
 | `lingxi-code/crates/orchestrator/src/conversation.rs` | Modify | Add `pub async fn run_turn_streaming_with_cancel(&self, prompt: &str, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError>` mirroring `run_turn_with_cancel` shape. |
-| `lingxi-code/crates/traits/src/orchestrator.rs` | Modify | Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait; default impl delegates to `run_turn_streaming` (preserves existing impls). |
+| `lingxi-code/crates/platform-api/src/orchestrator.rs` | Modify | Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait; default impl delegates to `run_turn_streaming` (preserves existing impls). |
 | `lingxi-code/crates/orchestrator/src/handle_impl.rs` | Modify | Real impl wires through to `ConversationOrchestrator::run_turn_streaming_with_cancel`. |
 | `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs` | Modify | Define `pub enum TurnEvent` + `pub struct BridgeOutputStream { tx: mpsc::UnboundedSender<TurnEvent> }` + `impl OutputStream for BridgeOutputStream`. |
 | `lingxi-code/crates/tui/src/streaming.rs` | Create | `pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify)`. Pure function — accepts mutable state, dispatches on variant, calls `notify.notify_one()` at end. |
@@ -260,7 +260,7 @@ Refs M6-03 Task 1"
 ## Task 2: Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/orchestrator.rs` (trait definition).
+- Modify: `lingxi-code/crates/platform-api/src/orchestrator.rs` (trait definition).
 - Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs` (real impl).
 
 - [ ] **Step 1: Write the failing test**
@@ -271,12 +271,12 @@ Refs M6-03 Task 1"
   #[tokio::test]
   async fn handle_impl_run_turn_streaming_with_cancel_routes_to_orchestrator() {
       let orch = std::sync::Arc::new(crate::test_support::build_test_orchestrator_minimal().await.0);
-      let handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle> =
+      let handle: std::sync::Arc<dyn lingxi_platform_api::OrchestratorHandle> =
           std::sync::Arc::new(OrchestratorHandleImpl::new(orch.clone()));
       let cancel = tokio_util::sync::CancellationToken::new();
       cancel.cancel(); // pre-cancelled → should return Cancelled immediately
       let outcome = handle.run_turn_streaming_with_cancel("hi", cancel).await.unwrap();
-      assert!(matches!(outcome, lingxi_traits::TurnOutcome::Cancelled));
+      assert!(matches!(outcome, lingxi_platform_api::TurnOutcome::Cancelled));
   }
   ```
 
@@ -290,7 +290,7 @@ Refs M6-03 Task 1"
 
 - [ ] **Step 3: Extend the trait**
 
-  In `lingxi-code/crates/traits/src/orchestrator.rs`, find the `pub trait OrchestratorHandle` block. After the existing `run_turn_with_cancel` method (M5-13), append:
+  In `lingxi-code/crates/platform-api/src/orchestrator.rs`, find the `pub trait OrchestratorHandle` block. After the existing `run_turn_with_cancel` method (M5-13), append:
 
   ```rust
       /// Streaming twin of [`Self::run_turn_with_cancel`]. The TUI (M6) calls
@@ -327,7 +327,7 @@ Refs M6-03 Task 1"
           &self,
           prompt: &str,
           cancel: tokio_util::sync::CancellationToken,
-      ) -> Result<lingxi_traits::TurnOutcome, lingxi_traits::OrchestratorError> {
+      ) -> Result<lingxi_platform_api::TurnOutcome, lingxi_platform_api::OrchestratorError> {
           self.orch
               .run_turn_streaming_with_cancel(prompt, cancel)
               .await
@@ -358,7 +358,7 @@ Refs M6-03 Task 1"
 - [ ] **Step 7: Commit**
 
   ```bash
-  git add lingxi-code/crates/traits/src/orchestrator.rs lingxi-code/crates/orchestrator/src/handle_impl.rs
+  git add lingxi-code/crates/platform-api/src/orchestrator.rs lingxi-code/crates/orchestrator/src/handle_impl.rs
   git commit -m "feat(traits): add run_turn_streaming_with_cancel to OrchestratorHandle
 
 Default impl returns Unimplemented so existing stdio REPL impl
@@ -383,7 +383,7 @@ Refs M6-03 Task 2"
   #[cfg(test)]
   mod bridge_tests {
       use super::*;
-      use lingxi_traits::OutputStream;
+      use lingxi_platform_api::OutputStream;
       use tokio::sync::mpsc;
 
       #[tokio::test]
@@ -414,10 +414,10 @@ Refs M6-03 Task 2"
       async fn bridge_translates_emit_end_turn_to_turn_ended_endturn() {
           let (tx, mut rx) = mpsc::unbounded_channel();
           let bridge = BridgeOutputStream::new(tx);
-          let cost = lingxi_traits::CostSnapshot::default();
+          let cost = lingxi_platform_api::CostSnapshot::default();
           bridge.emit_end_turn("end_turn", &cost).await;
           let ev = rx.recv().await.unwrap();
-          assert!(matches!(ev, TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn)));
+          assert!(matches!(ev, TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn)));
       }
   }
   ```
@@ -436,7 +436,7 @@ Refs M6-03 Task 2"
 
   ```rust
   use async_trait::async_trait;
-  use lingxi_traits::{CostSnapshot, OutputStream, TurnOutcome};
+  use lingxi_platform_api::{CostSnapshot, OutputStream, TurnOutcome};
   use tokio::sync::mpsc::UnboundedSender;
 
   /// Events flowing from the orchestrator into the TUI render loop.
@@ -1059,7 +1059,7 @@ Refs M6-03 Task 6"
           let mut s = new_state();
           let n = Notify::new();
           s.streaming = Some(StreamingState::new());
-          apply_event(&mut s, TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn), &n);
+          apply_event(&mut s, TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn), &n);
           assert!(s.streaming.is_none());
       }
 
@@ -1207,7 +1207,7 @@ Refs M6-03 Task 7"
           apply_event(&mut state, TurnEvent::TextDelta(c.into()), &notify);
           tokio::time::sleep(std::time::Duration::from_millis(50)).await;
       }
-      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn), &notify);
+      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn), &notify);
 
       assert_eq!(state.messages.len(), 1);
       match state.messages.last().unwrap() {
@@ -1226,7 +1226,7 @@ Refs M6-03 Task 7"
       assert!(!should_mount_spinner(&state));
       apply_event(&mut state, TurnEvent::TurnStarted, &notify);
       assert!(should_mount_spinner(&state));
-      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn), &notify);
+      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn), &notify);
       assert!(!should_mount_spinner(&state));
   }
 
@@ -1248,7 +1248,7 @@ Refs M6-03 Task 7"
       // The orchestrator task will detect cancellation and eventually emit
       // TurnEnded. Simulate that path:
       tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::Cancelled), &notify);
+      apply_event(&mut state, TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::Cancelled), &notify);
 
       assert!(cancel.is_cancelled());
       assert!(state.streaming.is_none());
@@ -1287,7 +1287,7 @@ Refs M6-03 Task 7"
   /// `state.cancel_token`) and the bridge receiver. The caller (REPL
   /// screen) feeds receiver events into `apply_event`.
   pub fn spawn_streaming_turn(
-      handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
+      handle: std::sync::Arc<dyn lingxi_platform_api::OrchestratorHandle>,
       prompt: String,
   ) -> (
       tokio_util::sync::CancellationToken,
@@ -1324,20 +1324,20 @@ Refs M6-03 Task 7"
               .run_turn_streaming_with_cancel(&prompt, cancel_clone)
               .await;
           let ev = match outcome {
-              Ok(lingxi_traits::TurnOutcome::EndTurn) => {
-                  TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn)
+              Ok(lingxi_platform_api::TurnOutcome::EndTurn) => {
+                  TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn)
               }
-              Ok(lingxi_traits::TurnOutcome::MaxTurns) => {
-                  TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::MaxTurns)
+              Ok(lingxi_platform_api::TurnOutcome::MaxTurns) => {
+                  TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::MaxTurns)
               }
-              Ok(lingxi_traits::TurnOutcome::Cancelled) => {
-                  TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::Cancelled)
+              Ok(lingxi_platform_api::TurnOutcome::Cancelled) => {
+                  TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::Cancelled)
               }
               Err(_e) => {
                   // Surface as TurnEnded(EndTurn) for now; full error UI
                   // is M7. Log for visibility.
                   tracing::error!(error = ?_e, "streaming turn failed");
-                  TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn)
+                  TurnEvent::TurnEnded(lingxi_platform_api::TurnOutcome::EndTurn)
               }
           };
           let _ = tx_clone.send(ev);
@@ -1957,7 +1957,7 @@ The plan's gate criteria explicitly cover two surfaces:
 
 - [x] **Buffering OutputStream adapter:** `BridgeOutputStream` in
   `crates/tui/src/events/orchestrator_bridge.rs` implements
-  `lingxi_traits::OutputStream` and forwards every callback as a
+  `lingxi_platform_api::OutputStream` and forwards every callback as a
   `TurnEvent` on an unbounded mpsc channel. **Wired** through
   `cli::init::build_runtime_for_tui`.
 - [x] **Real adapter from `OrchestratorHandle` to `ConversationOrchestrator`:**

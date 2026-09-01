@@ -61,9 +61,9 @@ use base64::Engine as _;
 use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
 use client_protocol::events::{AudioOpDto, ClientEvent};
 use tokio::sync::{oneshot, Mutex};
-use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-use traits::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-use traits::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
+use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 
 /// Deadline for a pure state read (`IsRecording`).
 ///
@@ -614,9 +614,9 @@ mod tests {
     use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
     use client_protocol::events::{AudioOpDto, ClientEvent};
     use tokio::sync::mpsc;
-    use traits::stt::{SpeechToText, SttError, SttOpts};
-    use traits::tts::{TextToSpeech, TtsError, TtsOpts};
-    use traits::voice::{VoiceError, VoiceRecorder, VoiceRecordingOpts};
+    use platform_api::stt::{SpeechToText, SttError, SttOpts};
+    use platform_api::tts::{TextToSpeech, TtsError, TtsOpts};
+    use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecordingOpts};
 
     use super::{
         new_audio_bridge, synthesis_deadline, AudioBridge, AudioRequestSink, AudioResponder,

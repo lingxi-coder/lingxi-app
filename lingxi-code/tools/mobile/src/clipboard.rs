@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::clipboard::ClipboardError;
+use platform_api::clipboard::ClipboardError;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -180,7 +180,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use traits::clipboard::Clipboard;
+    use platform_api::clipboard::Clipboard;
 
     /// Fake `Clipboard` that records the last written text and serves a
     /// configurable read value.
@@ -208,8 +208,8 @@ mod tests {
         }
     }
 
-    fn empty_output() -> traits::process::ProcessOutput {
-        traits::process::ProcessOutput {
+    fn empty_output() -> platform_api::process::ProcessOutput {
+        platform_api::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

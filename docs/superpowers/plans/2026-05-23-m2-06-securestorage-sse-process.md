@@ -18,7 +18,7 @@
   - `claude-code/src/utils/Shell.ts` lines 281-441 — the spawn-env contract, file-mode stdio with `O_NOFOLLOW`, cwd readback with `readFileSync` to keep the post-await microtask race tight.
   - `claude-code/src/utils/ShellCommand.ts` lines 337-347 — `treeKill(pid, 'SIGKILL')`.
   - `claude-code/src/utils/shell/bashProvider.ts` lines 39-56 and 156-187 — the extglob-disable strings and `pwd -P >| <cwd>` tail.
-- Trait definitions: `lingxi-code/crates/traits/src/secure_storage.rs` (`SecureStorage`, `SecureStorageBackend`, `SecureStorageError`), `lingxi-code/crates/traits/src/http.rs` (`HttpTransport`, `SseStream`, `HttpError`), `lingxi-code/crates/traits/src/process.rs` (`ProcessRunner`, `ProcessHandle`, `ProcessOutput`, `ProcessError`), `lingxi-code/crates/traits/src/sandbox.rs` (`SandboxedCommand`, `ProcessCommand`).
+- Trait definitions: `lingxi-code/crates/platform-api/src/secure_storage.rs` (`SecureStorage`, `SecureStorageBackend`, `SecureStorageError`), `lingxi-code/crates/platform-api/src/http.rs` (`HttpTransport`, `SseStream`, `HttpError`), `lingxi-code/crates/platform-api/src/process.rs` (`ProcessRunner`, `ProcessHandle`, `ProcessOutput`, `ProcessError`), `lingxi-code/crates/platform-api/src/sandbox.rs` (`SandboxedCommand`, `ProcessCommand`).
 - Existing state: `lingxi-code/platforms/posix/src/secure_storage.rs` (PlainTextSecureStorage only), `lingxi-code/platforms/posix/src/http.rs::stream_sse` (returns `InvalidRequest`), `lingxi-code/platforms/posix/src/process.rs` (foreground `run` works; `spawn_background` returns `Unsupported`, no `kill_tree`), `lingxi-code/crates/api-client/src/types.rs::StreamEvent` (only `Text` + `InputJsonDelta` content deltas; `Thinking` block exists but no `ServerToolUse`/`ConnectorText`/`AdvisorToolResult`), `lingxi-code/crates/secret/src/keychain_prefetch.rs` (already plumbed through the trait — only needs to be invoked against the new macOS impl).
 
 **Dependencies:** Plan M2-01 (worktree/sandbox/swarm/bridge corrections) must be complete. Independent of M2-02 / M2-03 / M2-04 / M2-05 — can land in parallel with any of them.
@@ -168,7 +168,7 @@ Create `lingxi-code/platforms/posix/src/secure_storage/mod.rs`:
 //! Secure storage backends for desktop hosts.
 //!
 //! `PlainTextSecureStorage` (Linux + fallback) and `MacOsKeychainStorage`
-//! (macOS, via the `security` CLI) implement `lingxi-traits::SecureStorage`.
+//! (macOS, via the `security` CLI) implement `lingxi-platform_api::SecureStorage`.
 //! The [`factory::secure_storage_for_platform`] helper picks the best
 //! backend per OS, with a documented plaintext fallback warning when the
 //! preferred backend cannot initialise.
@@ -208,7 +208,7 @@ Create empty stubs (filled in by Tasks 2-9):
 ```rust
 //! Filled in by Task 9.
 
-use lingxi_traits::{SecureStorage, SecureStorageError};
+use lingxi_platform_api::{SecureStorage, SecureStorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -518,7 +518,7 @@ use crate::secure_storage::helpers::{
 };
 use async_trait::async_trait;
 use lingxi_protocol::SecureStorageData;
-use lingxi_traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use lingxi_platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -705,7 +705,7 @@ Create `lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs`
 
 use lingxi_platform_posix::secure_storage::MacOsKeychainStorage;
 use lingxi_protocol::SecureStorageData;
-use lingxi_traits::SecureStorage;
+use lingxi_platform_api::SecureStorage;
 use std::path::PathBuf;
 
 fn unique_account() -> String {
@@ -917,7 +917,7 @@ async fn run_security_argv(args: &[&str]) -> Result<std::process::ExitStatus, Se
 }
 ```
 
-Check the `SecureStorageBackend` enum has a `MacOsKeychain` variant. If it does not, add it in `lingxi-code/crates/traits/src/secure_storage.rs` (and re-run `cargo check`):
+Check the `SecureStorageBackend` enum has a `MacOsKeychain` variant. If it does not, add it in `lingxi-code/crates/platform-api/src/secure_storage.rs` (and re-run `cargo check`):
 
 ```rust
 pub enum SecureStorageBackend {
@@ -947,7 +947,7 @@ Expected: store succeeds; `retrieve` fails with the placeholder error (Task 5 wi
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-code/platforms/posix/src/secure_storage/macos.rs lingxi-code/crates/traits/src/secure_storage.rs lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
+git add lingxi-code/platforms/posix/src/secure_storage/macos.rs lingxi-code/crates/platform-api/src/secure_storage.rs lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): MacOsKeychainStorage::store via `security -i` stdin
 
@@ -995,7 +995,7 @@ Create `lingxi-code/platforms/posix/tests/keychain_macos_cache_test.rs`:
 
 use lingxi_platform_posix::secure_storage::{MacOsKeychainStorage, KEYCHAIN_CACHE_TTL};
 use lingxi_protocol::SecureStorageData;
-use lingxi_traits::SecureStorage;
+use lingxi_platform_api::SecureStorage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1376,7 +1376,7 @@ Replace `lingxi-code/platforms/posix/src/secure_storage/factory.rs` body with:
 //! `// TODO: add libsecret support for Linux` placeholder — matches claude-code's
 //! Linux behavior (`auth.ts` falls back to plaintext under the same comment).
 
-use lingxi_traits::{SecureStorage, SecureStorageError};
+use lingxi_platform_api::{SecureStorage, SecureStorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1572,7 +1572,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use lingxi_protocol::SecureStorageData;
-    use lingxi_traits::SecureStorageBackend;
+    use lingxi_platform_api::SecureStorageBackend;
     use std::sync::Mutex;
 
     struct MockStorage {
@@ -1948,7 +1948,7 @@ use hyper::{server::conn::http1, service::service_fn, Response};
 use hyper_util::rt::TokioIo;
 use lingxi_platform_posix::PosixHttp;
 use lingxi_protocol::{HttpMethod, HttpRequest};
-use lingxi_traits::HttpTransport;
+use lingxi_platform_api::HttpTransport;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -2301,7 +2301,7 @@ pub use wrap::{
 ```rust
 //! Filled in by Task 15.
 
-use lingxi_traits::ProcessError;
+use lingxi_platform_api::ProcessError;
 
 pub async fn kill_tree_unix(_pid: u32) -> Result<(), ProcessError> {
     Err(ProcessError::Unsupported)
@@ -2555,7 +2555,7 @@ Replace `lingxi-code/platforms/posix/src/process/kill_tree.rs`:
 //! `treeKill(pid, 'SIGKILL')` semantics but with a polite SIGTERM first
 //! (the node `tree-kill` library's default sequence is similar).
 
-use lingxi_traits::ProcessError;
+use lingxi_platform_api::ProcessError;
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use std::time::Duration;
@@ -2875,7 +2875,7 @@ Create `lingxi-code/platforms/posix/tests/process_spawn_background_test.rs`:
 #![cfg(unix)]
 
 use lingxi_platform_posix::process::{task_output_path, PosixProcess};
-use lingxi_traits::{ProcessCommand, ProcessRunner, SandboxedCommand, SandboxedTag, SandboxBackend};
+use lingxi_platform_api::{ProcessCommand, ProcessRunner, SandboxedCommand, SandboxedTag, SandboxBackend};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -2933,7 +2933,7 @@ Create `lingxi-code/platforms/posix/tests/process_spawn_env_test.rs`:
 #![cfg(unix)]
 
 use lingxi_platform_posix::process::PosixProcess;
-use lingxi_traits::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
+use lingxi_platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 use std::collections::HashMap;
 
 fn mk(command: &str, args: Vec<&str>, env: HashMap<String, String>) -> SandboxedCommand {
@@ -2999,7 +2999,7 @@ use crate::process::wrap::{
     ENV_SHELL,
 };
 use async_trait::async_trait;
-use lingxi_traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
+use lingxi_platform_api::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -3216,7 +3216,7 @@ Create `lingxi-code/platforms/windows/src/process/kill_tree.rs`:
 ```rust
 //! Tree-kill on Windows via `taskkill /T /F /PID`.
 
-use lingxi_traits::ProcessError;
+use lingxi_platform_api::ProcessError;
 use tokio::process::Command;
 
 /// Terminate the process tree rooted at `pid`.
@@ -3547,13 +3547,13 @@ Every value below must appear literally in the implementation. Diverging from an
 - The `// TODO: add libsecret support for Linux` quote in `factory.rs` — verbatim from claude-code source per spec §6.6 wording.
 - `// Filled in by Task X` markers in Task 13's stubs — resolved by Tasks 14-17.
 
-**Type-name consistency** — Verified `ProcessHandle { task_id, pid }` matches `crates/traits/src/process.rs`. `SandboxedCommand::__new_sandboxed` and `SandboxedTag::Wrapped { backend }` / `SandboxedTag::BypassAuditedWithReason { reason }` match `crates/traits/src/sandbox.rs`. The `SandboxBackend::None` variant assumed in test fixtures exists in `crates/traits/src/sandbox.rs`; if not, use a workspace-existing variant or add `None` in a tiny Task 13a edit. `SecureStorageError::Backend` exists per `crates/traits/src/secure_storage.rs`. `SecureStorageBackend::MacOsKeychain` may need to be added in Task 4 step 3 — flagged inline.
+**Type-name consistency** — Verified `ProcessHandle { task_id, pid }` matches `crates/platform-api/src/process.rs`. `SandboxedCommand::__new_sandboxed` and `SandboxedTag::Wrapped { backend }` / `SandboxedTag::BypassAuditedWithReason { reason }` match `crates/platform-api/src/sandbox.rs`. The `SandboxBackend::None` variant assumed in test fixtures exists in `crates/platform-api/src/sandbox.rs`; if not, use a workspace-existing variant or add `None` in a tiny Task 13a edit. `SecureStorageError::Backend` exists per `crates/platform-api/src/secure_storage.rs`. `SecureStorageBackend::MacOsKeychain` may need to be added in Task 4 step 3 — flagged inline.
 
 **Concerns / risks called out:**
 
 1. **`nix 0.27` Rust 1.82 compatibility** — `nix 0.27.x` MSRV is 1.69 per its `Cargo.toml`. The `signal`/`process` features are minimal. Risk surfaces only if a transitive dep pulls edition2024 — apply the `cargo update --precise` pattern from spec §7.1 if so. No action required up-front.
 2. **`SandboxBackend::None` test fixture** — the test in Task 17 uses `SandboxedTag::Wrapped { backend: SandboxBackend::None }`. If the actual `SandboxBackend` enum doesn't have a `None` variant, swap to whichever variant the M1 `posix-minimal` tests already use (likely `SandboxBackend::Unsandboxed` or similar). One-line edit at test time.
-3. **`SecureStorageBackend::MacOsKeychain`** — spec §6.6 references this variant. If `crates/traits/src/secure_storage.rs` only has `PlainText` today, add the variant in Task 4 (one-line enum addition).
+3. **`SecureStorageBackend::MacOsKeychain`** — spec §6.6 references this variant. If `crates/platform-api/src/secure_storage.rs` only has `PlainText` today, add the variant in Task 4 (one-line enum addition).
 4. **`hyper` 1.x dev-dep** — workspace might still pin hyper 0.14. The `[dev-dependencies]` block uses 1.x and `hyper-util` 0.1; check `lingxi-code/Cargo.toml`'s workspace deps for collisions. If they collide, downgrade test to use `tiny_http` 0.12 or `wiremock` 0.6 — either is a one-line change.
 5. **`unsafe { setsid() }`** — the closure inside `pre_exec` allocates nothing and calls one syscall. Async-signal-safe per POSIX. Documented inline in Task 14.
 

@@ -2,7 +2,7 @@
  * Microphone capture for the desktop renderer.
  *
  * This is the client side of the engine's `VoiceRecorder` trait
- * (`lingxi-code/traits/src/voice.rs`), proxied over the wire by
+ * (`lingxi-code/platform-api/src/voice.rs`), proxied over the wire by
  * `lingxi-code/apps/bridge-server/src/audio_bridge.rs`'s `AudioBridge`: the
  * engine has no microphone of its own on desktop, so it asks the connected
  * client (`AudioOpDto::StartRecording` / `StopRecording`) and this module is

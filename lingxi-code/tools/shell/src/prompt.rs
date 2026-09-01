@@ -97,10 +97,10 @@ fn prepend_bullets(items: &[Bullet]) -> Vec<String> {
 /// Port of `isEnvTruthy` for the one env var this module gates on. claude-code's
 /// `isEnvTruthy` (`envUtils.ts:32-37`) is a strict allowlist: unset/empty ⇒
 /// false; otherwise the lowercased, trimmed value must be one of
-/// `1`/`true`/`yes`/`on`. Delegates to the canonical [`traits::env::is_env_truthy`]
+/// `1`/`true`/`yes`/`on`. Delegates to the canonical [`platform_api::env::is_env_truthy`]
 /// so the gating cannot drift from the single shared allowlist.
 fn is_env_truthy(name: &str) -> bool {
-    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Port of claude-code `areBackgroundTasksDisabled` (2.1.238 `WA()`:
@@ -606,7 +606,7 @@ fn commit_and_pr_instructions() -> String {
     // task tools are enabled (default) and `TodoWrite` when
     // `LINGXI_ENABLE_TASKS` is a defined-falsy value — the same `tH()`/`TE()`
     // gate `is_todo_v2_enabled` uses. The agent tool (`gi`) is always `Agent`.
-    let task_tool = if traits::env::is_env_defined_falsy(
+    let task_tool = if platform_api::env::is_env_defined_falsy(
         std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ) {
         "TodoWrite"

@@ -18,7 +18,7 @@ This checklist turns the 17-phase migration plan in §9.1 of the design doc into
 |---|---|---|---|
 | P0 repo rename → lingxi-code | ✅ DONE | `ff0cc0f` | path-form refs only; cargo name + telemetry literal left for P2 |
 | P1 drop crates/ wrapper | ✅ DONE | `543380c` | recon missed 9 internal `../../platforms` deps + had wrong path arithmetic (`../../crates/X`→`../../X`, not `../X`); test-harness path walks needed one fewer `.parent()` |
-| P2 drop lingxi- prefix | ✅ DONE | `d92301f` | **`core` collides with sysroot `core`** (thiserror emits `::core::fmt`) → renamed to **`engine`**. Local-module vs crate collisions fixed with `::telemetry::`/`::mcp::`/`::lsp::`. tui insta snapshots + trybuild .stderr regenerated (rename artifacts). |
+| P2 drop lingxi- prefix | ✅ DONE | `d92301f` | **`core` collides with sysroot `core`** (thiserror emits `::lingxi_core::fmt`) → renamed to **`engine`**. Local-module vs crate collisions fixed with `::telemetry::`/`::mcp::`/`::lsp::`. tui insta snapshots + trybuild .stderr regenerated (rename artifacts). |
 | P3 extract tool-api | ✅ DONE | `4d979f1` | 5 files moved (tool_trait/context/registry/progress/content_replacement); tools/ is a re-export shim |
 | P4 engine → tool-api | ✅ DONE | `df28c09` | **ToolInvoker NOT deleted** — `traits→tool-api` would cycle (`tool-api→permission→traits`). ToolInvoker kept as the dependency-inversion seam. 7 engine crates decoupled from tools monolith. |
 | P5a BuiltinToolContext → tool-api | ✅ DONE | `01efe96` | enabling step for tool split; tool-api gains traits/telemetry/sandbox/api-client/mcp/lsp deps (cycle-safe) |
@@ -30,7 +30,7 @@ This checklist turns the 17-phase migration plan in §9.1 of the design doc into
 | P7 final: dissolve monolith | ✅ DONE | `(this commit)` | **Deleted the `tools` monolith entirely.** Recon found its runtime modules (`dispatcher`/`permissions`/`result_storage`/`streaming_exec`) + the `register_all_builtin_commands`-style `register_all_builtin_tools` aggregator were **orphaned** (no code consumer outside the monolith — the orchestrator + engine-desktop never used them), and its only real consumers were `test-harness` (12 parity drivers reading `tools::builtin::<mod>::<CONST>`) + a dead `permission` dev-dep. Repointed all 12 parity drivers to the per-crate paths (`tools::builtin::team::X` → `tool_team::team::X`, `tools::shared::output_truncation` → `tool_api::util::output_truncation`, `tools::builtin::shell_events` → `telemetry::tengu::tool`, etc.); `git rm`'d `tools/{Cargo.toml,src,tests}` (the 20 `tools/<x>` subcrates stay); removed the dead `permission` dev-dep + the workspace member. All 56 migrated parity tests pass; gate now 72 crates. |
 | P8 skill split | ✅ DONE | `(this commit)` | **Split the monolithic `skills` crate into `skill-api` + `skill-builtin`.** `skill-api` (root crate) holds the abstraction/data/loader: `model` (`Skill`/`SkillFrontmatter`/`SkillSource`/`LoadedFrom`), `registry` (`SkillRegistry` + trigger discovery; gained `names()`/`len()`/`is_empty()`), `frontmatter` (`parse_skill_markdown`/`SkillLoadError`), `mcp_builders`, `prefetch` — deps trimmed to protocol/traits/serde/serde_yaml/thiserror (the old agent/sidequery/mcp/permission/tokio deps were only for the dead `skill_tool.rs`). `skill-builtin` (`skills/builtin/`, name `skill-builtin`) exposes `register_desktop`/`register_mobile` + empty `BUILTIN_DESKTOP`/`BUILTIN_MOBILE` tables + `parse_builtin` plumbing. **Dropped `skills/src/skill_tool.rs`** (dead — model-visible `SkillTool` lives in `tool-skill`/P7; legacy `StateMachinePool` delegate had no external callers). Repointed sole consumer `plugin` (`skills`→`skill-api`, `use skills::SkillRegistry`→`skill_api`). Wired the composition root: `engine_desktop::desktop_skill_registry()` calls `skill_builtin::register_desktop`. No new speculative `SkillProvider` trait — kept the concrete `Skill` record for continuity. Moved `discover_matches_trigger` test passes byte-for-byte; skill-builtin len tests + plugin tests green. |
 | P9 command split | ✅ DONE | `(this commit)` | **Split the monolithic `commands` crate into `command-api` + `command-core` + `command-desktop` + `command-mobile`.** `command-api` (root) = the runtime: `model`/`parser`/`argument_substitution`/`dispatcher`/`registry` (generic `CommandRegistry` only) + `builtin_support::{names, help_render, list_render, unimplemented}` (the locked 99-name table + byte-locked `/help` renderer + per-name stub). `command-core` (`commands/core/`, name `command-core`) = the 18 real handlers + `core_placeholders` + `templates` + `register_all_builtin_commands`/`register_core_batch_1`/`register_core_batch_2` (moved out of `registry.rs`); build.rs (git SHA for `/version`) moved here. `command-desktop`/`command-mobile` = placeholder `register()` no-ops (their command names stay command-core unimplemented stubs in M8). **Kept `/doctor` in command-core** (its `render_doctor` is parity-tested; desktop placeholder stays empty). **Key insight that preserved the byte-locked `/help`:** keeping `names`+`help_render` together in `command-api::builtin_support` means `render_help_screen()` stays self-contained (reads the constant) — no signature reshape, golden unchanged. Rewired 5 consumers (cli, engine-desktop, plugin, tui, test-harness): runtime types→`command_api`, handlers→`command_core`, name table→`command_api::builtin_support::names`. engine_desktop now also calls `command_desktop::register`. **Deviations:** (a) register fns kept their names (`register_core_batch_1/2`) to minimise call-site churn; (b) command-api's dispatcher test reseeds stubs directly from `builtin_support` (can't call the moved `register_all_builtin_commands` — would cycle); (c) doctor stayed in core (not desktop) since its renderer is parity-locked. Verification: full `--all-targets` green; command-api (32) + command-core (79 + batch/dispatch e2e) + 6 test-harness parity suites (incl. **99-name lock** + **`/help` golden** + doctor + init-template) + tui (609) + plugin + cli all pass; fmt clean. |
-| P10 mobile platforms + device traits | ✅ DONE | `(this commit)` | **Added the 4 device-capability traits + the `Platform` aggregate to `traits/`, and stood up `platform-ios` + `platform-android` skeletons.** New `traits/src/`: `computer_control.rs` (`ComputerControl`/`Screenshot`/`ComputerError`), `camera.rs` (`CameraControl`/`CapturePhotoOpts`/`CapturedImage`/`CameraPosition`/`CameraError`), `voice.rs` (`VoiceRecorder`/`VoiceRecordingOpts`/`VoiceRecording`/`VoiceError`), `share.rs` (`SharingService`/`SharePayload`/`ShareResult`/`ShareError`), `platform.rs` (`Platform` aggregate: `filesystem/http/clock/process/sandbox/worktree` + `camera/voice/share/computer_control` defaulting `None`). `platform-ios` (`IosPlatform`/`IosPlatformInputs`) + `platform-android` (`AndroidPlatform`/`AndroidPlatformInputs`) impl `Platform`, reusing `platform-posix-minimal`'s portable handles (std::fs/std::time/Unsupported stubs) and injecting the native camera/voice/share trait objects. **Deviations:** (a) **UniFFI `#[uniffi::export(callback_interface)]` deferred to P12** — defining them now would pull `uniffi` into `traits` (a crate everything depends on); the trait *contracts* are defined here, the export layer lands with the binding crates. (b) **No lib-level `#[cfg(target_os)]` gate** — the skeletons are portable Rust, so they compile + are host-verified (better than the cfg-gated-empty-lib plan; the design's per-platform fs/http divergence lands in M9). (c) No separate `MobileSurface` trait (Q-DOC-1: capabilities are `Platform` accessors). Verification: `traits`, `platform-ios`, `platform-android` build clean; cfg-scatter guard clean; full `--all-targets` green. |
+| P10 mobile platforms + device traits | ✅ DONE | `(this commit)` | **Added the 4 device-capability traits + the `Platform` aggregate to `traits/`, and stood up `platform-ios` + `platform-android` skeletons.** New `platform-api/src/`: `computer_control.rs` (`ComputerControl`/`Screenshot`/`ComputerError`), `camera.rs` (`CameraControl`/`CapturePhotoOpts`/`CapturedImage`/`CameraPosition`/`CameraError`), `voice.rs` (`VoiceRecorder`/`VoiceRecordingOpts`/`VoiceRecording`/`VoiceError`), `share.rs` (`SharingService`/`SharePayload`/`ShareResult`/`ShareError`), `platform.rs` (`Platform` aggregate: `filesystem/http/clock/process/sandbox/worktree` + `camera/voice/share/computer_control` defaulting `None`). `platform-ios` (`IosPlatform`/`IosPlatformInputs`) + `platform-android` (`AndroidPlatform`/`AndroidPlatformInputs`) impl `Platform`, reusing `platform-posix-minimal`'s portable handles (std::fs/std::time/Unsupported stubs) and injecting the native camera/voice/share trait objects. **Deviations:** (a) **UniFFI `#[uniffi::export(callback_interface)]` deferred to P12** — defining them now would pull `uniffi` into `traits` (a crate everything depends on); the trait *contracts* are defined here, the export layer lands with the binding crates. (b) **No lib-level `#[cfg(target_os)]` gate** — the skeletons are portable Rust, so they compile + are host-verified (better than the cfg-gated-empty-lib plan; the design's per-platform fs/http divergence lands in M9). (c) No separate `MobileSurface` trait (Q-DOC-1: capabilities are `Platform` accessors). Verification: `traits`, `platform-ios`, `platform-android` build clean; cfg-scatter guard clean; full `--all-targets` green. |
 | P11 mobile tools + engine-mobile | ✅ DONE | `(this commit)` | **3 mobile tool crates + the mobile composition root.** `tool-camera` (`camera`), `tool-voice` (`voice`), `tool-share` (`share`) — pure-Rust tools routing to the new `ctx.camera`/`ctx.voice`/`ctx.share` handles (added to `BuiltinToolContext` as `Option<Arc<dyn …>>`, consistent with `mcp_registry`/etc.; desktop sets them `None`). `apps/engine-mobile` (`engine-mobile`) mirrors engine-desktop: `mobile_tool_registry(ctx)` assembles the **cross-platform subset** (file/task/web/plan/meta/cron/ui/skill = 27 tools) **+ camera/voice/share** = 30 tools, `mobile_skill_registry()` → `skill_builtin::register_mobile`, `mobile_command_registry()` → core + `command_mobile::register`. `platform-ios`/`platform-android` are `[target.'cfg(...)']`-gated deps. Snapshot test `mobile_tool_list_snapshot.rs` locks the set + asserts it omits Bash/Agent/MCP/LSP/Team/Worktree + computer/android_use/ios_use. **Note:** P10 already created the camera/voice/share traits + Platform accessors, so P11 here is tools + composition only. |
 | P11b device-control tools | ✅ DONE | `(this commit)` | **3 device-control tool skeletons** routing to `ctx.computer_control` (`Arc<dyn ComputerControl>`): `tool-computer-use` (`computer` — screenshot/click/type/key/scroll/display_size, full desktop automation surface), `tool-android-use` (`android_use` — screenshot/tap/type/key), `tool-ios-use` (`ios_use` — same mobile shape). Pure-Rust dispatch; the backend (desktop automation or mobile UniFFI accessibility impl) is injected. **Not** registered by the base engine-mobile set (they're opt-in / specialized-agent tools per the drift spec). All 6 P11/P11b crates build clean; full `--all-targets` green. |
 | P12 UniFFI packager crates + Swift/Kotlin | ✅ DONE | `(this commit)` | **Created `apps/ios-framework` (`ios-framework`) + `apps/android-aar` (`android-aar`)** — the FFI boundary wrapping `engine-mobile`. Each exposes the opaque-handle shape UniFFI exports: `MobileEngineError`, `PlatformImpls` (the Swift/Kotlin camera/voice/share callback objects + sandbox root), `MobileEngineHandle` (`skill_count()`/`create_session()`), and `build_mobile_engine(PlatformImpls)` — which under `cfg(target_os = "ios"/"android")` constructs the platform from the foreign callbacks and returns the handle (this is the bidirectional seam: **Rust calls back into Swift/Kotlin** for native capabilities), and on the host returns `NotOnIos`/`NotOnAndroid` so it still compiles + is host-verified. Shipped `uniffi.toml` (bindgen config) + Swift skeletons (`Package.swift` + `LingxiCode.swift` + `Camera/Voice/Share Impl.swift`) + Kotlin skeletons (`build.gradle.kts` + `LingxiCode.kt` + `Camera/Voice/Share Impl.kt`) — each native impl `implements` the Rust-declared callback interface with M9 TODO bodies. Deleted the legacy `uniffi-bridge` crate (unreferenced; its `EngineHandle`/`EngineError` shape folded in). **Deviation (hard constraint):** the `uniffi` crate dep + `#[uniffi::export]` annotations + `uniffi-bindgen` are **deferred to M9** — `uniffi` is not in the offline cargo cache, and adding it (even optional) would break the `--offline` build gate this milestone runs under. The Rust surface is shaped *exactly* as UniFFI exports it, so M9 is purely additive (add dep + annotate + run bindgen). Both crates build clean on the host; `--all-targets` green. |
@@ -122,7 +122,7 @@ none — P0 is the entry-point phase of the M8 migration.
 
 2. **Patch root README** `/Users/luolingfeng/Projects/LingXi-Next/README.md`. Single edit: line 1 H1 `# LingXi Core` → `# LingXi Code`. README has no `lingxi-core/` path strings. Leave `lingxi-cli` binary name, `lingxi-demo`, and the historic design-doc filename `2026-05-22-lingxi-core-rust-engine-design.md` (line 88) alone — those reference cargo crate name + an immutable file slug.
 
-3. **Patch root CHANGELOG** `/Users/luolingfeng/Projects/LingXi-Next/CHANGELOG.md`. Only line 178: `lingxi-core/crates/tui/Cargo.toml` → `lingxi-code/crates/tui/Cargo.toml`. Lines 359, 516, 533, 609 reference the cargo crate name (`lingxi-core::settings`, "users of lingxi-core as a library") — LEAVE for P2.
+3. **Patch root CHANGELOG** `/Users/luolingfeng/Projects/LingXi-Next/CHANGELOG.md`. Only line 178: `lingxi-core/crates/tui/Cargo.toml` → `lingxi-code/crates/tui/Cargo.toml`. Lines 359, 516, 533, 609 reference the cargo crate name (`lingxi_core::settings`, "users of lingxi-core as a library") — LEAVE for P2.
 
 4. **Patch root workspace manifest** `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/Cargo.toml` — exactly two field edits:
    - Line 99: `authors = ["LingXi Core Contributors"]` → `authors = ["LingXi Code Contributors"]`
@@ -165,7 +165,7 @@ none — P0 is the entry-point phase of the M8 migration.
    grep -nE 'lingxi-core/|# LingXi Core' /Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/releases/*.md
    ```
 
-9. **Patch 65 plan docs** under `/Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/plans/`. Bulk rewrite every `lingxi-core/` directory reference (paths like `lingxi-core/crates/...`, `lingxi-core/platforms/...`, `lingxi-core/Cargo.toml`, `cd .../lingxi-core`) to the `lingxi-code/` form. The three largest are `2026-05-22-lingxi-core-m1-01-foundation.md`, `2026-05-25-m5-09-commands-surface.md`, and `2026-05-29-m7-16-release-v0.8.0.md`. **Leave alone**: legacy plan filenames (e.g. `2026-05-22-lingxi-core-m1-11-cron.md`); cargo-name strings (`name = "lingxi-core"`, `-p lingxi-core`, `lingxi-core::SessionState`, telemetry `lingxi_core_*`).
+9. **Patch 65 plan docs** under `/Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/plans/`. Bulk rewrite every `lingxi-core/` directory reference (paths like `lingxi-core/crates/...`, `lingxi-core/platforms/...`, `lingxi-core/Cargo.toml`, `cd .../lingxi-core`) to the `lingxi-code/` form. The three largest are `2026-05-22-lingxi-core-m1-01-foundation.md`, `2026-05-25-m5-09-commands-surface.md`, and `2026-05-29-m7-16-release-v0.8.0.md`. **Leave alone**: legacy plan filenames (e.g. `2026-05-22-lingxi-core-m1-11-cron.md`); cargo-name strings (`name = "lingxi-core"`, `-p lingxi-core`, `lingxi_core::SessionState`, telemetry `lingxi_core_*`).
    ```bash
    grep -rl 'lingxi-core/' /Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/plans/
    ```
@@ -766,7 +766,7 @@ All path/name references below assume P0–P2 have already landed; P3 runs again
 
 4. **Adjust intra-crate imports in the moved files.** After `git mv` the source files compile because the relative `use crate::progress`/`use crate::registry`/`use crate::content_replacement` references still resolve inside the new crate root. Cross-crate imports stay:
    - `tool_trait.rs` keeps `use permission::PermissionResult;` (post-P2 name)
-   - `context.rs` keeps `use core::SessionState;` and `use protocol::{AgentId, McpConnectionId, ToolUseId};`
+   - `context.rs` keeps `use lingxi_core::SessionState;` and `use protocol::{AgentId, McpConnectionId, ToolUseId};`
    - `registry.rs` keeps `use protocol::{McpConnectionId, PluginId};`
    - `progress.rs` keeps `use protocol::ToolUseId;`
    - `content_replacement.rs` keeps `use protocol::ToolUseId;`
@@ -790,7 +790,7 @@ All path/name references below assume P0–P2 have already landed; P3 runs again
    pub mod result_storage;   // unchanged
    pub mod shared;           // unchanged
    pub mod streaming_exec;   // unchanged
-   pub mod tool_invoker_impl;// unchanged — deleted in P4 together with traits/src/tool_invoker.rs
+   pub mod tool_invoker_impl;// unchanged — deleted in P4 together with platform-api/src/tool_invoker.rs
    pub use builtin::{
        register_all_builtin_tools, BuiltinToolContext, FileEditTool, FileReadTool,
        FileWriteTool, GlobTool, GrepTool, NotebookEditTool, WebFetchTool, WebSearchTool,
@@ -835,7 +835,7 @@ All path/name references below assume P0–P2 have already landed; P3 runs again
 
    These keep using `use tools::registry::ToolRegistry;` (or via the shim's `pub mod registry`) and stay green. P4 is the phase that migrates them to `use tool_api::…` directly.
 
-10. **No deletions in P3.** The §13 ledger entries marked `DELETE` (`tools/src/registry.rs`, `tools/src/dispatcher.rs`, `tools/src/tool_invoker_impl.rs`, `traits/src/tool_invoker.rs`) all happen in P4. `traits/src/tool_invoker.rs` stays untouched here; `RegistryToolInvoker` still references `crate::registry::ToolRegistry` which now flows through the shim's `pub mod registry` re-export.
+10. **No deletions in P3.** The §13 ledger entries marked `DELETE` (`tools/src/registry.rs`, `tools/src/dispatcher.rs`, `tools/src/tool_invoker_impl.rs`, `platform-api/src/tool_invoker.rs`) all happen in P4. `platform-api/src/tool_invoker.rs` stays untouched here; `RegistryToolInvoker` still references `crate::registry::ToolRegistry` which now flows through the shim's `pub mod registry` re-export.
 
 #### Workspace Cargo.toml diff
 
@@ -906,7 +906,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **`tool_trait.rs` carries `ToolError` and `ValidationError` inline.** The §5 design wants `tool-api/src/error.rs`. Splitting them inside this phase risks churning every consumer that does `use tools::tool_trait::ToolError;`. Keep them in `tool_trait.rs` for P3; defer the `error.rs`/`schema.rs` split.
 - **`crate::*` references inside the moved files.** After `git mv`, intra-`tool-api` references stay valid; cross-references back into the old `tools::shared::*` or `tools::permissions` don't appear in the moved files (verified — none of the four files reach down into the leftovers), so no circular-dep risk.
 - **`tools/tests/*.rs` and `orchestrator/tests/*.rs` use `lingxi_tools::tool_trait::{…}` heavily.** Post-P2 they read `tools::tool_trait::{…}`. The shim's `pub mod tool_trait` re-export keeps them building without an edit-storm; a clippy `clippy::wildcard_imports` warning may surface on `pub use tool_trait::*` — already allowed at workspace level.
-- **`RegistryToolInvoker` round-trip.** Lives in `tools/src/tool_invoker_impl.rs`, depends on `crate::registry::ToolRegistry` and `crate::context::ToolUseContext`. Post-P3 it needs `tool_api::registry::ToolRegistry` and `tool_api::context::ToolUseContext`. Step 6's `sed` handles both. `traits::tool_invoker::ToolInvoker` (the contract this impls) stays in `traits/` until P4 deletes it.
+- **`RegistryToolInvoker` round-trip.** Lives in `tools/src/tool_invoker_impl.rs`, depends on `crate::registry::ToolRegistry` and `crate::context::ToolUseContext`. Post-P3 it needs `tool_api::registry::ToolRegistry` and `tool_api::context::ToolUseContext`. Step 6's `sed` handles both. `platform_api::tool_invoker::ToolInvoker` (the contract this impls) stays in `traits/` until P4 deletes it.
 - **Cargo-deny / `scripts/check-deps.sh` arrive in P14.** No CI rule will yet catch the temporary `tool-api → core` edge from the SessionState risk above. Add a one-liner to `tools/Cargo.toml`'s P3 commit body so the next phase's reviewer remembers to revisit.
 - **Naming collision.** None — the new crate is `tool-api`, the existing crate is `tools`. They are clearly distinct in `Cargo.lock` and import paths.
 
@@ -922,7 +922,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 #### Summary
 
-Phase P4 (~1d) migrates engine-side crates (`orchestrator`, `agent`, `core`, `hooks`, `coordinator`, `plugin`, `sidequery`, `skills`, `commands`) from the monolithic `tools` crate to the new `tool-api` crate created in P3, then deletes the `ToolInvoker` indirection trait (`traits/src/tool_invoker.rs`, `tools/src/tool_invoker_impl.rs`) and the orchestrator-owned `tools/src/dispatcher.rs`. The recursion-lock seam in `SubagentInheritance` collapses from `Arc<dyn ToolInvoker>` to `Arc<ToolRegistry>` so the child reuses the parent registry directly. Engine code stays building because P3 already moved the trait/registry surface into `tool-api` and re-exported it from `tools` (transitional shim).
+Phase P4 (~1d) migrates engine-side crates (`orchestrator`, `agent`, `core`, `hooks`, `coordinator`, `plugin`, `sidequery`, `skills`, `commands`) from the monolithic `tools` crate to the new `tool-api` crate created in P3, then deletes the `ToolInvoker` indirection trait (`platform-api/src/tool_invoker.rs`, `tools/src/tool_invoker_impl.rs`) and the orchestrator-owned `tools/src/dispatcher.rs`. The recursion-lock seam in `SubagentInheritance` collapses from `Arc<dyn ToolInvoker>` to `Arc<ToolRegistry>` so the child reuses the parent registry directly. Engine code stays building because P3 already moved the trait/registry surface into `tool-api` and re-exported it from `tools` (transitional shim).
 
 #### Prerequisites
 
@@ -934,7 +934,7 @@ Phase P4 (~1d) migrates engine-side crates (`orchestrator`, `agent`, `core`, `ho
 1. **Repoint engine crate Cargo.toml deps from `tools` to `tool-api`** (keep `tools` only where engine code still touches concrete builtins, none expected here):
    - `orchestrator/Cargo.toml` — drop `tools = { path = "../tools" }`, add `tool-api = { path = "../tool-api" }`.
    - `agent/Cargo.toml` — same swap (`tools` → `tool-api`).
-   - `hooks/Cargo.toml` — no current dep; nothing to do (the `lingxi_traits::tool_invoker` import in `hooks/src/agent_executor.rs` is via `traits`, will be addressed in step 5).
+   - `hooks/Cargo.toml` — no current dep; nothing to do (the `lingxi_platform_api::tool_invoker` import in `hooks/src/agent_executor.rs` is via `traits`, will be addressed in step 5).
    - `coordinator/Cargo.toml` — `tools` → `tool-api`.
    - `plugin/Cargo.toml` — `tools` → `tool-api`.
    - `sidequery/Cargo.toml` — `tools` → `tool-api`.
@@ -955,10 +955,10 @@ Phase P4 (~1d) migrates engine-side crates (`orchestrator`, `agent`, `core`, `ho
    - `commands/src/builtin/cost.rs` and `commands/src/builtin/compact.rs` — replace `tools::registry::ToolRegistry::new()` with `tool_api::ToolRegistry::new()` (these are test fixtures inside `#[cfg(test)]` blocks but live in `src/`).
 
 3. **Delete `ToolInvoker` from `traits/`**:
-   - Delete file: `git rm crates/traits/src/tool_invoker.rs`.
-   - Edit `traits/src/lib.rs`: remove `pub mod tool_invoker;` (line 32) and `pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};` (line 73).
+   - Delete file: `git rm crates/platform-api/src/tool_invoker.rs`.
+   - Edit `platform-api/src/lib.rs`: remove `pub mod tool_invoker;` (line 32) and `pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};` (line 73).
 
-4. **Reshape `traits/src/subagent_spawn.rs` to drop the `ToolInvoker` field**. The recursion-lock invariant becomes "child reuses parent's `Arc<ToolRegistry>`" carried directly, not behind an invoker trait:
+4. **Reshape `platform-api/src/subagent_spawn.rs` to drop the `ToolInvoker` field**. The recursion-lock invariant becomes "child reuses parent's `Arc<ToolRegistry>`" carried directly, not behind an invoker trait:
    - Remove `use crate::tool_invoker::ToolInvoker;` (line 12).
    - Change `SubagentInheritance.tool_invoker: Arc<dyn ToolInvoker>` to `pub registry: Arc<tool_api::ToolRegistry>` (this introduces a `tool-api` dep from `traits/`; alternative is to keep it generic via `Arc<dyn std::any::Any + Send + Sync>` opaque carrier — flagged as risk).
    - Update doc comments around §SubagentInheritance accordingly.
@@ -969,7 +969,7 @@ Phase P4 (~1d) migrates engine-side crates (`orchestrator`, `agent`, `core`, `ho
    - Edit `tools/src/lib.rs`: remove `pub mod tool_invoker_impl;`, `pub mod dispatcher;`, `pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};`, `pub use tool_invoker_impl::RegistryToolInvoker;`.
 
 6. **Reshape `tools/src/builtin/agent.rs` to construct the new `SubagentInheritance`**:
-   - Remove the `let invoker: Arc<dyn lingxi_traits::tool_invoker::ToolInvoker> = Arc::new(RegistryToolInvoker::new(parent_registry.clone()));` block (lines 346-348).
+   - Remove the `let invoker: Arc<dyn lingxi_platform_api::tool_invoker::ToolInvoker> = Arc::new(RegistryToolInvoker::new(parent_registry.clone()));` block (lines 346-348).
    - `SubagentInheritance { tool_invoker: invoker, budget }` → `SubagentInheritance { registry: parent_registry.clone(), budget }`.
    - Update the test (`recursion_lock_child_inherits_parent_tool_registry_arc`, lines ~454-499) to compare `Arc::ptr_eq(&parent_registry, &invocations[0].inherit.registry)` directly (no downcast through `as_any` needed).
 
@@ -1031,7 +1031,7 @@ cargo build -p sidequery
 cargo build -p skills
 cargo build -p commands
 cargo build -p tools          # must still compile after dispatcher + invoker delete
-cargo build -p traits         # must still compile after tool_invoker delete
+cargo build -p platform-api         # must still compile after tool_invoker delete
 
 ### Parity tests (per P4's "parity tests" verification gate in §9.1).
 cargo test -p test-harness
@@ -1283,7 +1283,7 @@ P6 introduces the desktop **composition root** by creating `apps/engine-desktop/
 
 - **P5** (split first two `tools/*` crates — `tools/file/` and `tools/shell/` — and have `tool-api/` published with `register_all` helpers ready to call). Without P5's `tool_file::register_all` etc., the desktop composition root has nothing to register.
 - Transitive: **P0** (repo rename to `lingxi-code`), **P1** (drop `crates/` wrapper — engine crates live flat at root), **P2** (drop `lingxi-` Cargo name prefix → `cli`, `protocol`, `core`, `tools`, `platform-posix-minimal`, etc.), **P3** (`tool-api/` extracted; `ToolRegistry`, `Tool`, `ToolCtx` live there), **P4** (engine subsystems import `tool_api` instead of `tools`, `ToolInvoker` trait deleted).
-- The `core::Engine` + `core::EngineBuilder` types from §5.4 must exist (added during P3/P4) — if they're not yet landed, P6 must add the builder skeleton in `core/` before wiring `engine-desktop`.
+- The `lingxi_core::Engine` + `lingxi_core::EngineBuilder` types from §5.4 must exist (added during P3/P4) — if they're not yet landed, P6 must add the builder skeleton in `core/` before wiring `engine-desktop`.
 
 #### Steps
 
@@ -1298,12 +1298,12 @@ P6 introduces the desktop **composition root** by creating `apps/engine-desktop/
      ```rust
      #![forbid(unsafe_code)]
      use std::sync::Arc;
-     use core::Engine;
+     use lingxi_core::Engine;
      use tool_api::ToolRegistry;
-     use traits::Platform;
+     use platform_api::Platform;
      pub struct DesktopEngineConfig { /* model, permission_policy, cost_budget */ }
      pub fn build(platform: Arc<dyn Platform>, config: DesktopEngineConfig)
-         -> Result<Engine, core::EngineBuildError> {
+         -> Result<Engine, lingxi_core::EngineBuildError> {
          Engine::builder()
              .platform(platform)
              .tools(desktop_tool_registry())
@@ -1320,7 +1320,7 @@ P6 introduces the desktop **composition root** by creating `apps/engine-desktop/
    - Path: `core/src/engine.rs` (formerly `crates/core/src/engine.rs` after P1).
    - Define `Engine { platform, tools, skills, commands, orchestrator }` plus `EngineBuilder` with `.platform(...)`, `.tools(...)`, `.skills(...)`, `.commands(...)`, `.model(...)`, `.permission_policy(...)`, `.build()` per §5.4.
    - Define `EngineBuildError::PlatformRequired` (and any other variants discovered while wiring).
-   - Re-export `pub use engine::{Engine, EngineBuilder, EngineBuildError};` from `core/src/lib.rs`.
+   - Re-export `pub use lingxi_core::{Engine, EngineBuilder, EngineBuildError};` from `core/src/lib.rs`.
    - **Risk:** today the orchestrator is constructed by `crates/cli/src/init.rs` via `ConversationOrchestrator::new(...)` with ~14 dependencies (api_client, tools, hooks, perms, output, memory, cwd, cost_tracker, mcp_registry, hook_registry, agent_catalog, compactor). The `EngineBuilder::build()` must absorb that wiring. For P6 the cleanest move is to add `.api_client(...)`, `.output(...)`, `.cwd(...)`, `.hooks(...)`, `.permission_policy(...)`, `.memory(...)`, `.cost_tracker(...)`, `.mcp_registry(...)`, `.hook_registry(...)`, `.agent_catalog(...)`, `.compactor(...)` setters to `EngineBuilder`, or accept a richer `EngineConfig` struct passed into `build()`. Sketch this with the CLI's needs as the contract.
 
 4. **Move `crates/cli/` → `apps/cli/`.**
@@ -1459,14 +1459,14 @@ find . -path ./target -prune -o -name '*.rs' -print \
 #### Risks
 
 - **Binary name collision with existing tests.** All `assert_cmd::cargo_bin("lingxi-cli")` call sites (5+ files in `apps/cli/tests/` plus 3 files in `crates/tui/tests/`) depend on `[[bin]] name = "lingxi-cli"`. If the binary is renamed to `cli` per §4.2, every test must be updated atomically; if the rename is deferred (recommended), Cargo's `name = "cli"` package + `[[bin]] name = "lingxi-cli"` mismatch should be documented in `apps/cli/Cargo.toml`.
-- **`Platform` aggregate trait may not exist yet.** §5.3 puts `Platform` in `traits/`, but the design doc lists its addition in P3's checklist (`traits/src/platform.rs` CREATE). P6 *consumes* the trait via `Arc<dyn Platform>` so it must already be merged. If P3 didn't land it, P6 must either add it or use a degraded shape (`Engine::builder().fs(...).http(...)...`) — the latter contradicts the design and should be avoided.
+- **`Platform` aggregate trait may not exist yet.** §5.3 puts `Platform` in `traits/`, but the design doc lists its addition in P3's checklist (`platform-api/src/platform.rs` CREATE). P6 *consumes* the trait via `Arc<dyn Platform>` so it must already be merged. If P3 didn't land it, P6 must either add it or use a degraded shape (`Engine::builder().fs(...).http(...)...`) — the latter contradicts the design and should be avoided.
 - **`platforms/posix-minimal/` lacks an aggregate impl.** Today it exposes individual `PosixHttp`/`PosixClock`/etc. but no `Platform` struct. P6 must add one (`PosixMinimalPlatform` impl `Platform`) or call sites in `init.rs` will not type-check.
 - **`EngineBuilder` is a thin shell in §5.4.** The CLI's `build_runtime` wires 14+ dependencies into `ConversationOrchestrator` (hooks, perms, cost_tracker, mcp_registry, hook_registry, agent_catalog, compactor, output, memory, cwd, ...). Either (a) `EngineBuilder` gains setters for all of those, or (b) `Engine::build()` accepts a beefy `EngineConfig` struct. The §5.4 sketch omits this — flag it as a design gap; recommend extending the builder API in this phase. Tracking this growth in a deny-list of "all required setters" prevents accidental loss of orchestrator features.
 - **Cargo path-prefix migration error.** Moving `crates/cli/` → `apps/cli/` deepens the relative paths in `Cargo.toml` from `../protocol` to `../../protocol`. Easy to miss one — use `grep -n 'path = "..' apps/cli/Cargo.toml` to verify every dep was rewritten. `cargo metadata` will report `package not found` on misses.
 - **`build.rs` git path.** `apps/cli/build.rs` walks back to `.git/HEAD` via two `..`; one more is now needed. Otherwise the rerun-if-changed hint silently breaks and `LINGXI_GIT_SHA_SHORT` may go stale (still compiles, but `/version` shows `unknown`).
 - **Snapshot drift between CLI's tool list and `engine_desktop::build()`.** Today the CLI initializes `Arc::new(ToolRegistry::new())` (literally empty — no tools registered). Moving to `engine_desktop::build()` will start registering real tools (file + shell from P5, plus the still-monolithic `tools::register_all_builtin_tools` if we proxy it). The wire surface for the orchestrator therefore changes from "0 tools" to "N tools". §14 criterion 7 ("desktop CLI behaves identically to M7") needs careful interpretation — the CLI was already broken w.r.t. tools registration; P6 is the first phase to *fix* that. Document this in the phase commit message.
 - **Command registry construction needs an `OrchestratorHandle`.** `register_core_batch_1` and `register_core_batch_2` both take an `Arc<dyn OrchestratorHandle>` that the orchestrator itself implements. Inside `engine_desktop::build()` the orchestrator must therefore be constructed *before* the command registry — chicken/egg solvable by building the orchestrator first, then commands using `orch.clone()`. The §5.4 builder sketch hides this ordering.
-- **Cargo-deny rules forbid engine→tools edges (§8.1).** `engine-desktop` is an app, not engine, so depending on tools/* is legal. But if `core::EngineBuilder` ends up pulling a tool crate transitively (e.g. via a default impl of `EngineConfig`), the §14 cargo-deny gate (added P14) will reject it. Keep `core/` referencing only `tool-api::ToolRegistry`, never concrete tool crates.
+- **Cargo-deny rules forbid engine→tools edges (§8.1).** `engine-desktop` is an app, not engine, so depending on tools/* is legal. But if `lingxi_core::EngineBuilder` ends up pulling a tool crate transitively (e.g. via a default impl of `EngineConfig`), the §14 cargo-deny gate (added P14) will reject it. Keep `core/` referencing only `tool-api::ToolRegistry`, never concrete tool crates.
 
 #### Estimated hours
 
@@ -1486,7 +1486,7 @@ P7 finishes the tool extraction kicked off in P5 by splitting the remaining 27 b
 
 - **P0** — repo rename `lingxi-core → lingxi-code`.
 - **P1** — `crates/*` flattened to root.
-- **P2** — `lingxi-` prefix stripped (so re-exports below say `traits::`, `permission::`, `telemetry::`, `protocol::`, `mcp::`, `lsp::`).
+- **P2** — `lingxi-` prefix stripped (so re-exports below say `platform_api::`, `permission::`, `telemetry::`, `protocol::`, `mcp::`, `lsp::`).
 - **P3** — `tool-api/` crate exists with `Tool`, `ToolCtx`, `ToolRegistry`, `ToolError`.
 - **P4** — engine deps point at `tool_api`, not `tools`; `ToolInvoker` trait deleted.
 - **P5** — `tools/file/` and `tools/shell/` already extracted (sets the crate template, the Cargo.toml shape, and the lib.rs `register_all()` convention). Provides the precedent for how `BuiltinToolContext` is collapsed onto `ToolCtx`.
@@ -1532,7 +1532,7 @@ For each of the 12 crates: create the directory + `Cargo.toml`, `git mv` the too
    git mv crates/tools/src/builtin/sleep.rs             tools/ui/src/sleep.rs
    git mv crates/tools/src/builtin/synthetic_output.rs  tools/ui/src/synthetic_output.rs
    ```
-   `sleep.rs` imports `crate::builtin::shell_events::{SLEEP_*}` — replace that `shell_events` re-export with a direct `use telemetry::tengu::tool::{SLEEP_*}` (the design ledger calls for `shared/` helpers to split per category; the shell_events façade was just a re-export). `synthetic_output.rs` imports `crate::shared::MAX_TOOL_OUTPUT_LENGTH` — copy `output_truncation.rs` into `tools/ui/src/shared.rs`, OR (recommendation) move `MAX_TOOL_OUTPUT_LENGTH` to `tool-api/src/util.rs` and reference from there. Pick the second (one place; design §13 explicitly nominates `tool-api/src/util.rs` as the home for cross-category helpers). `send_message.rs` needs `traits::mailbox`.
+   `sleep.rs` imports `crate::builtin::shell_events::{SLEEP_*}` — replace that `shell_events` re-export with a direct `use telemetry::tengu::tool::{SLEEP_*}` (the design ledger calls for `shared/` helpers to split per category; the shell_events façade was just a re-export). `synthetic_output.rs` imports `crate::shared::MAX_TOOL_OUTPUT_LENGTH` — copy `output_truncation.rs` into `tools/ui/src/shared.rs`, OR (recommendation) move `MAX_TOOL_OUTPUT_LENGTH` to `tool-api/src/util.rs` and reference from there. Pick the second (one place; design §13 explicitly nominates `tool-api/src/util.rs` as the home for cross-category helpers). `send_message.rs` needs `platform_api::mailbox`.
 
 6. **`tools/meta/`** (cross-OS) — `ToolSearch`, `Config`.
    ```bash
@@ -1559,7 +1559,7 @@ For each of the 12 crates: create the directory + `Cargo.toml`, `git mv` the too
    git mv crates/tools/src/builtin/agent.rs              tools/agent/src/agent.rs
    git mv crates/tools/src/builtin/agent_test_support.rs tools/agent/src/agent_test_support.rs
    ```
-   Deps: `traits::{budget, mailbox, subagent_spawn, task_registry}`, `telemetry`, `permission`. The `agent_test_support` module is public — keep it `pub mod` (it is also consumed by the `tests/agent_task_integration_test.rs` integration test → move that test fixture too, see Step 14).
+   Deps: `platform_api::{budget, mailbox, subagent_spawn, task_registry}`, `telemetry`, `permission`. The `agent_test_support` module is public — keep it `pub mod` (it is also consumed by the `tests/agent_task_integration_test.rs` integration test → move that test fixture too, see Step 14).
 
 10. **`tools/mcp/`** (desktop-only) — `MCPTool`, `McpAuthTool`, `ListMcpResourcesTool`, `ReadMcpResourceTool`.
     ```bash
@@ -1774,7 +1774,7 @@ Without P3 there is no `*-api/` convention to copy; without P7 the `tools/skill/
 
 4. **Create the `skills/builtin/` plugin crate.**
    - `mkdir -p skills/builtin/src`
-   - `skills/builtin/Cargo.toml`: `name = "skill-builtin"`, deps = `skill-api = { path = "../../skill-api" }`, `protocol = { path = "../../protocol" }`, `traits = { path = "../../traits" }`, `serde`, `serde_yaml`, `tracing`, `once_cell`.
+   - `skills/builtin/Cargo.toml`: `name = "skill-builtin"`, deps = `skill-api = { path = "../../skill-api" }`, `protocol = { path = "../../protocol" }`, `platform-api = { path = "../../platform-api" }`, `serde`, `serde_yaml`, `tracing`, `once_cell`.
    - `skills/builtin/src/lib.rs`: `#![forbid(unsafe_code)]`, two entry points per the design (§4.1 comment "Provides register_desktop() / register_mobile()" and §6.3 `skill_builtin::register_mobile(&mut r)`):
      ```rust
      pub fn register_desktop(reg: &mut skill_api::SkillRegistry) { /* TODO: iterate BUILTIN_DESKTOP, register each */ }
@@ -1873,7 +1873,7 @@ find . -path ./target -prune -o -name '*.rs' -print | \
 - **Name collision on `Skill`.** The design's §5.2 specifies a `trait Skill`, but the existing crate already uses `Skill` as the **data record** (`crates/skills/src/model.rs`). Both cannot share the name. Recommendation: keep the existing `Skill` struct as `Skill` (it is widely referenced — `mcp_builders.rs`, `frontmatter.rs`, `registry.rs`, and external `lingxi_skills::SkillRegistry` consumers), and introduce the §5.2 callable trait as `trait SkillProvider` (or `DynSkill`). Note this in the phase-completion notes so P9 / P11 / engine-mobile snapshot tests reference the right symbol.
 - **`SkillTool` divergence.** The repo has *two* `SkillTool` implementations today: `crates/skills/src/skill_tool.rs` (depends on `lingxi_agent::StateMachinePool`, `lingxi_permission`, `lingxi_tools` — the abandoned subagent-pool path) and `crates/tools/src/builtin/skill.rs` (the production path used by `register_all_builtin_tools` with the `SkillLoader` seam). The §4.1 layout shows the model-visible `Skill` tool lives in `tools/skill/` (P7); the skills crate keeps **only** the registry + loader + frontmatter. P8 must delete `skills/src/skill_tool.rs`, not migrate it.
 - **`crates/skills/src/skill_tool.rs` pulls in `lingxi_agent`, `lingxi_sidequery`, `lingxi_mcp`, `lingxi_permission`, `lingxi_tools`.** These dependencies appear in `crates/skills/Cargo.toml`. After P8 these are dropped — `skill-api` depends only on `protocol`, `traits`, and serde/tokio/once_cell. Confirm with `cargo tree -p skill-api` that none of those engine crates appear.
-- **`mcp_builders.rs` depends on `lingxi_traits::McpToolDto`.** After P2 this is `traits::McpToolDto`. `skill-api` therefore depends on `traits`, which is the §8.1-permitted edge. No issue, but worth noting because it means `skill-api` is *slightly* heavier than `tool-api`, which only requires `traits` for `ToolCtx`.
+- **`mcp_builders.rs` depends on `lingxi_platform_api::McpToolDto`.** After P2 this is `platform_api::McpToolDto`. `skill-api` therefore depends on `traits`, which is the §8.1-permitted edge. No issue, but worth noting because it means `skill-api` is *slightly* heavier than `tool-api`, which only requires `traits` for `ToolCtx`.
 - **Mobile-only skill filtering rule is undefined.** §4.1 says `skills/builtin/` "Provides register_desktop() / register_mobile()" but the design never lists which skills belong on mobile. Without explicit guidance the safe default is "both registries are empty in M8 and will be populated in M9 alongside the mobile tools". Flag this for the parent so they can confirm before P11 (engine-mobile composition root) tries to snapshot-assert a non-empty mobile skill set.
 - **`PluginManager` is the only engine-internal consumer.** `crates/plugin/src/manager.rs` line 25 is the one production `use lingxi_skills::SkillRegistry` outside the moved crate. A single import rename + Cargo.toml dep swap covers it, but P8 must verify `cargo test -p plugin` still passes the materialisation tests in `crates/plugin/tests/` (none currently reference `SkillRegistry` directly, but `cargo build -p plugin` is the canary).
 - **`crates/tools/src/builtin/skill.rs` doc-string drift.** This file *mentions* `lingxi_skills::registry` and `lingxi_skills::model::Skill` only in `///` comments — no actual import. After P7 moves the file to `tools/skill/src/`, P8 still needs to refresh those comments to `skill_api::SkillRegistry` / `skill_api::Skill`. Easy to miss because no compilation failure surfaces it.
@@ -1966,7 +1966,7 @@ Split the monolithic `commands/` crate (was `crates/commands`, renamed to `comma
     - `test-harness/tests/parity_init_template.rs`: `lingxi_commands::builtin::OLD_INIT_PROMPT` → `command_core::OLD_INIT_PROMPT`.
     - `test-harness/tests/parity_doctor_report.rs`: `lingxi_commands::builtin::doctor::render_doctor` → `command_desktop::doctor::render_doctor` (since doctor moved to desktop).
     - `test-harness/tests/parity_slash_commands.rs`: imports of `BUILTIN_COMMAND_NAMES`, `BUILTIN_CORE_NAMES`, `RegistrySlashDispatcher`, `register_all_builtin_commands`, `CommandRegistry` redirect to `command_api::builtin_support::names::*` (constants) and `command_api::{RegistrySlashDispatcher, CommandRegistry}` + `command_core::register` (replacing `register_all_builtin_commands`).
-    - `traits/src/commands.rs` and `traits/src/auth.rs` doc strings: `lingxi-commands` → `command-api` in the prose.
+    - `platform-api/src/commands.rs` and `platform-api/src/auth.rs` doc strings: `lingxi-commands` → `command-api` in the prose.
 12. **Wire registrations in CLI init** (assuming P6 already moved `cli` to `apps/cli/`):
     - In `apps/cli/src/init.rs`, replace:
       ```rust
@@ -2063,7 +2063,7 @@ git diff --exit-code crates/test-harness/src/parity/fixtures/parity_help_screen.
 - **Test relocation breaks `CARGO_MANIFEST_DIR` paths**: `dump_help_golden.rs` hard-codes `env!("CARGO_MANIFEST_DIR").join("../test-harness/...")`. After moving the test from `commands/tests/` to `commands/core/tests/`, the relative path is now `../../test-harness/...` (one extra level). Easy to miss.
 - **Plugin crate stays at engine level (Q5)**: `plugin/src/manager.rs` calls `CommandRegistry::register_plugin_commands` — `plugin/` must depend on `command-api` (the runtime), not `command-core` (the impls). Double-check the new Cargo.toml.
 - **`tui/` palette parity**: `palette.rs` uses `BUILTIN_COMMAND_NAMES` to render the slash-command popup. If we split the constant per-crate, the TUI popup loses commands. Mitigation: keep the merged constant table in `command-api::builtin_support::names` (driven from impl crates at compile time via a `linkme`-style mechanism, or simply duplicated as a single source of truth for now).
-- **Circular dep risk**: `command-core` calls into `OrchestratorHandle` (`lingxi_traits::OrchestratorHandle`) → `traits/` only. `commands/desktop/` may want `tool-shell`/`tool-team`/`tool-worktree` for future `/commit`-style commands; depending on those tool crates is fine because `tool-api` and `commands/*` are sibling plugin crates with `traits/` in common. No circular risk if `tool-*` crates don't depend on `command-api`.
+- **Circular dep risk**: `command-core` calls into `OrchestratorHandle` (`lingxi_platform_api::OrchestratorHandle`) → `traits/` only. `commands/desktop/` may want `tool-shell`/`tool-team`/`tool-worktree` for future `/commit`-style commands; depending on those tool crates is fine because `tool-api` and `commands/*` are sibling plugin crates with `traits/` in common. No circular risk if `tool-*` crates don't depend on `command-api`.
 - **Doc-comment drift**: `crates/commands/src/lib.rs` carries M5-era count narrative ("99 = 18 core + 81 unimplemented"). Move the narrative into `commands/core/src/lib.rs` so the runtime crate's docs stay implementation-agnostic.
 
 #### Estimated hours
@@ -2087,15 +2087,15 @@ P10 stands up the two mobile platform crates `platforms/ios/` and `platforms/and
 
 #### Steps
 
-1. **Add `ComputerControl` to `traits/`** — new file `traits/src/computer_control.rs` containing the trait surface from design §5.6 (`screenshot`, `mouse_move`, `left_click`, `right_click`, `double_click`, `type_text`, `key`, `scroll`, `display_size`) plus the `Screenshot` struct and a `ComputerError` enum (`PermissionDenied`, `Unsupported`, `Other(String)`). Annotate with `#[uniffi::export(callback_interface)]` and `#[async_trait]`; mark `Screenshot` as `#[derive(uniffi::Record)]` and `ComputerError` as `#[derive(uniffi::Error, thiserror::Error)]`. Add `pub mod computer_control;` and `pub use computer_control::{ComputerControl, ComputerError, Screenshot};` to `traits/src/lib.rs`. `shell: touch traits/src/computer_control.rs`
+1. **Add `ComputerControl` to `traits/`** — new file `platform-api/src/computer_control.rs` containing the trait surface from design §5.6 (`screenshot`, `mouse_move`, `left_click`, `right_click`, `double_click`, `type_text`, `key`, `scroll`, `display_size`) plus the `Screenshot` struct and a `ComputerError` enum (`PermissionDenied`, `Unsupported`, `Other(String)`). Annotate with `#[uniffi::export(callback_interface)]` and `#[async_trait]`; mark `Screenshot` as `#[derive(uniffi::Record)]` and `ComputerError` as `#[derive(uniffi::Error, thiserror::Error)]`. Add `pub mod computer_control;` and `pub use computer_control::{ComputerControl, ComputerError, Screenshot};` to `platform-api/src/lib.rs`. `shell: touch platform-api/src/computer_control.rs`
 
-2. **Add `CameraControl` to `traits/`** — new file `traits/src/camera.rs` per design §5.5 (lines 599-628): trait methods `capture_photo(opts)` and `pick_from_library()`, records `CapturePhotoOpts`, `CapturedImage`, enum `CameraPosition { Front, Back }`, error `CameraError { PermissionDenied, Cancelled, DeviceUnavailable, Other(String) }`. All carry `#[uniffi::export(callback_interface)]` (trait) and `#[derive(uniffi::Record)]` / `#[derive(uniffi::Error, thiserror::Error)]`. Add to `traits/src/lib.rs`.
+2. **Add `CameraControl` to `traits/`** — new file `platform-api/src/camera.rs` per design §5.5 (lines 599-628): trait methods `capture_photo(opts)` and `pick_from_library()`, records `CapturePhotoOpts`, `CapturedImage`, enum `CameraPosition { Front, Back }`, error `CameraError { PermissionDenied, Cancelled, DeviceUnavailable, Other(String) }`. All carry `#[uniffi::export(callback_interface)]` (trait) and `#[derive(uniffi::Record)]` / `#[derive(uniffi::Error, thiserror::Error)]`. Add to `platform-api/src/lib.rs`.
 
-3. **Add `VoiceRecorder` to `traits/`** — new file `traits/src/voice.rs` mirroring the camera shape: trait methods `start_recording(opts)`, `stop_recording()`, `is_recording()`, plus records `VoiceRecordingOpts` (sample rate, format), `VoiceRecording` (audio bytes, mime), and `VoiceError` enum. Same `uniffi` attributes. Wire into `traits/src/lib.rs`.
+3. **Add `VoiceRecorder` to `traits/`** — new file `platform-api/src/voice.rs` mirroring the camera shape: trait methods `start_recording(opts)`, `stop_recording()`, `is_recording()`, plus records `VoiceRecordingOpts` (sample rate, format), `VoiceRecording` (audio bytes, mime), and `VoiceError` enum. Same `uniffi` attributes. Wire into `platform-api/src/lib.rs`.
 
-4. **Add `SharingService` to `traits/`** — new file `traits/src/share.rs`: trait method `share(payload)` returning success/cancelled, plus `SharePayload` record (text + optional image bytes + optional URL), `ShareResult { Success, Cancelled }`, `ShareError`. Same `uniffi` attributes. Wire into `traits/src/lib.rs`.
+4. **Add `SharingService` to `traits/`** — new file `platform-api/src/share.rs`: trait method `share(payload)` returning success/cancelled, plus `SharePayload` record (text + optional image bytes + optional URL), `ShareResult { Success, Cancelled }`, `ShareError`. Same `uniffi` attributes. Wire into `platform-api/src/lib.rs`.
 
-5. **Add `Platform` aggregate trait (if not present from P3)** — confirm `traits/src/platform.rs` exists with mobile-capability accessors `camera()`, `voice()`, `share()`, `computer_control()` defaulting to `None`. If P3 created it without these, extend it now; otherwise this step is a no-op. (Q-DOC-1 notes the design's reference to `traits/src/mobile.rs` `MobileSurface` is a typo — the surface is methods on `Platform`. Do NOT create a separate `MobileSurface` trait.)
+5. **Add `Platform` aggregate trait (if not present from P3)** — confirm `platform-api/src/platform.rs` exists with mobile-capability accessors `camera()`, `voice()`, `share()`, `computer_control()` defaulting to `None`. If P3 created it without these, extend it now; otherwise this step is a no-op. (Q-DOC-1 notes the design's reference to `platform-api/src/mobile.rs` `MobileSurface` is a typo — the surface is methods on `Platform`. Do NOT create a separate `MobileSurface` trait.)
 
 6. **Update workspace `Cargo.toml` `[workspace.dependencies]`** — add `uniffi = "=0.27.3"` and `uniffi_bindgen = "=0.27.3"` so `traits` (and later mobile crates) can pin a consistent version. (The actual `uniffi` dep is added to `traits/Cargo.toml` as a workspace-pinned dep.)
 
@@ -2159,7 +2159,7 @@ cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
 
 ### 1. Workspace still builds on the host.
 cargo build --workspace
-cargo test -p traits  # the new computer_control / camera / voice / share modules compile + their uniffi attrs parse.
+cargo test -p platform-api  # the new computer_control / camera / voice / share modules compile + their uniffi attrs parse.
 
 ### 2. New crates build standalone on the host (empty libs under cfg gate).
 cargo check -p platform-ios
@@ -2184,11 +2184,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 #### Risks
 
 - **`reqwest` TLS backend** — Any engine crate depending on `reqwest` with `default-features = true` (i.e. `native-tls`) blocks the iOS cross-compile because `openssl-sys` does not cross to `aarch64-apple-ios` without extra work. Audit `api-client/Cargo.toml` and any other reqwest user during P10; force `default-features = false, features = ["rustls-tls"]`.
-- **Q-DOC-1 ambiguity** — design §13 lists `traits/src/mobile.rs (MobileSurface trait)` as a P10 deliverable, but §5 / §7 define the mobile capability surface as accessors on `Platform`. Recommendation: treat as typo, skip the separate `MobileSurface` trait, surface camera/voice/share as `Option<Arc<dyn X>>` methods on the existing aggregate `Platform` trait. Confirmed in implementation checklist Q-DOC-1.
-- **UniFFI 0.27 async callback support** — the design assumes async callback interfaces. If the version chosen does not support async callback interfaces, the three new traits need a sync fallback that internally `tokio::spawn_blocking` to the foreign closure. Test by attempting `cargo build -p traits` after wiring the `#[uniffi::export(callback_interface)]` attribute.
+- **Q-DOC-1 ambiguity** — design §13 lists `platform-api/src/mobile.rs (MobileSurface trait)` as a P10 deliverable, but §5 / §7 define the mobile capability surface as accessors on `Platform`. Recommendation: treat as typo, skip the separate `MobileSurface` trait, surface camera/voice/share as `Option<Arc<dyn X>>` methods on the existing aggregate `Platform` trait. Confirmed in implementation checklist Q-DOC-1.
+- **UniFFI 0.27 async callback support** — the design assumes async callback interfaces. If the version chosen does not support async callback interfaces, the three new traits need a sync fallback that internally `tokio::spawn_blocking` to the foreign closure. Test by attempting `cargo build -p platform-api` after wiring the `#[uniffi::export(callback_interface)]` attribute.
 - **`platforms/posix-minimal` parity drift** — the Unsupported impls in `platforms/ios|android` clone the surface of `platforms/posix-minimal`. If `posix-minimal` adds a method later, the mobile stubs must follow; consider adding `tests/trait_surface_smoke.rs` that constructs each impl and proves it compiles. (Out of scope for P10 if running short on time.)
 - **Cross-compile toolchain in CI** — CI does not currently install `aarch64-apple-ios` / `aarch64-linux-android`. Update workflows in a follow-up commit (or in P14) so the cross-build gate runs.
-- **Naming collision risk** — `traits/src/computer_control.rs` is consumed by `tool-computer-use` (P11b) and implemented by `platforms/posix` / `platforms/windows` later. Keep the module flat in `traits` so importers can write `use traits::ComputerControl;` without churn.
+- **Naming collision risk** — `platform-api/src/computer_control.rs` is consumed by `tool-computer-use` (P11b) and implemented by `platforms/posix` / `platforms/windows` later. Keep the module flat in `traits` so importers can write `use platform_api::ComputerControl;` without churn.
 - **`#![cfg(target_os = …)]` at lib level + default-members** — adding the iOS/Android crates to `default-members` is safe because cfg-gated lib bodies compile to empty crates on the host. If clippy complains about empty crates on macOS/Linux, fall back to listing them only under `members`, not `default-members`.
 
 #### Estimated hours
@@ -2207,7 +2207,7 @@ P11 introduces the three mobile-exclusive tool crates (`tools/camera/`, `tools/v
 
 #### Prerequisites
 
-- **P10** — `platforms/ios/` + `platforms/android/` skeletons must exist with `IosPlatform::new(IosPlatformInputs { camera, voice, share, secure_storage, .. })`-shaped constructors, so `engine-mobile::build()` can receive an `Arc<dyn Platform>` that *already* carries the mobile callback objects. P10 is also where `traits/src/computer_control.rs` lands; P11 adds the sibling `camera.rs` / `voice.rs` / `share.rs` files next to it.
+- **P10** — `platforms/ios/` + `platforms/android/` skeletons must exist with `IosPlatform::new(IosPlatformInputs { camera, voice, share, secure_storage, .. })`-shaped constructors, so `engine-mobile::build()` can receive an `Arc<dyn Platform>` that *already* carries the mobile callback objects. P10 is also where `platform-api/src/computer_control.rs` lands; P11 adds the sibling `camera.rs` / `voice.rs` / `share.rs` files next to it.
 - **P9** — `command-api/`, `commands/core/`, `commands/mobile/` exist (the mobile composition root calls `command_core::register_all` and `command_mobile::register_all`).
 - **P8** — `skill-api/` and `skills/builtin/` exist with `skill_builtin::register_mobile(&mut SkillRegistry)`.
 - **P7** — All cross-OS tool crates referenced by mobile (`tool-file`, `tool-task`, `tool-web`, `tool-skill`, `tool-ui`, `tool-meta`, `tool-cron`, `tool-plan`) ship `register_all(&mut ToolRegistry)`.
@@ -2221,20 +2221,20 @@ P11 introduces the three mobile-exclusive tool crates (`tools/camera/`, `tools/v
    # Manual edit to lingxi-code/Cargo.toml — see "Workspace Cargo.toml diff" below.
    ```
 
-2. **Create `traits/src/camera.rs`** declaring the `CameraControl` callback interface. The file must export:
+2. **Create `platform-api/src/camera.rs`** declaring the `CameraControl` callback interface. The file must export:
    - `#[uniffi::export(callback_interface)] #[async_trait] pub trait CameraControl: Send + Sync` with `capture_photo(&self, opts: CapturePhotoOpts) -> Result<CapturedImage, CameraError>` and `pick_from_library(&self) -> Result<CapturedImage, CameraError>` (design §5.5).
    - `#[derive(uniffi::Record)] pub struct CapturePhotoOpts { camera_position: CameraPosition, allow_editing: bool }`
    - `#[derive(uniffi::Enum)] pub enum CameraPosition { Front, Back }`
    - `#[derive(uniffi::Record)] pub struct CapturedImage { jpeg_bytes: Vec<u8>, width: u32, height: u32, mime_type: String }`
    - `#[derive(uniffi::Error, thiserror::Error, Debug)] pub enum CameraError { PermissionDenied, Cancelled, DeviceUnavailable, Other(String) }`
 
-3. **Create `traits/src/voice.rs`** mirroring §5.5 for `VoiceRecorder` (start/stop/cancel) with the same `#[uniffi::export(callback_interface)]` shape. Define `VoiceRecording`, `VoiceError`, `VoiceFormat` records.
+3. **Create `platform-api/src/voice.rs`** mirroring §5.5 for `VoiceRecorder` (start/stop/cancel) with the same `#[uniffi::export(callback_interface)]` shape. Define `VoiceRecording`, `VoiceError`, `VoiceFormat` records.
 
-4. **Create `traits/src/share.rs`** with `SharingService::share(text, attachments) -> Result<ShareOutcome, ShareError>`. Define `Attachment` record (bytes + mime), `ShareOutcome`, `ShareError`.
+4. **Create `platform-api/src/share.rs`** with `SharingService::share(text, attachments) -> Result<ShareOutcome, ShareError>`. Define `Attachment` record (bytes + mime), `ShareOutcome`, `ShareError`.
 
-5. **Wire the three new modules into `traits/src/lib.rs`** under feature flags and re-export the public types. Add gated `pub mod camera; pub mod voice; pub mod share;` plus `pub use camera::*; pub use voice::*; pub use share::*;`. Gate each behind `#[cfg(feature = "mobile-callbacks")]` (recommended) or under `#[cfg(any(target_os = "ios", target_os = "android"))]` so the desktop build does not pull in `uniffi`.
+5. **Wire the three new modules into `platform-api/src/lib.rs`** under feature flags and re-export the public types. Add gated `pub mod camera; pub mod voice; pub mod share;` plus `pub use camera::*; pub use voice::*; pub use share::*;`. Gate each behind `#[cfg(feature = "mobile-callbacks")]` (recommended) or under `#[cfg(any(target_os = "ios", target_os = "android"))]` so the desktop build does not pull in `uniffi`.
 
-6. **Extend `traits/src/platform.rs`** (created in earlier phase per §5.3) so that `Platform::camera() -> Option<Arc<dyn CameraControl>>`, `Platform::voice() -> Option<Arc<dyn VoiceRecorder>>`, `Platform::share() -> Option<Arc<dyn SharingService>>` default-return `None` on desktop. If P10's stub did not yet include these accessors (only `computer_control()`), add them here. Mark this as a follow-on to verify during P11 recon — design §5.3 lists all four together.
+6. **Extend `platform-api/src/platform.rs`** (created in earlier phase per §5.3) so that `Platform::camera() -> Option<Arc<dyn CameraControl>>`, `Platform::voice() -> Option<Arc<dyn VoiceRecorder>>`, `Platform::share() -> Option<Arc<dyn SharingService>>` default-return `None` on desktop. If P10's stub did not yet include these accessors (only `computer_control()`), add them here. Mark this as a follow-on to verify during P11 recon — design §5.3 lists all four together.
 
 7. **Update `traits/Cargo.toml`** to add an optional `uniffi = { workspace = true, optional = true }` dependency and a `mobile-callbacks` feature: `[features] mobile-callbacks = ["dep:uniffi"]`.
 
@@ -2334,10 +2334,10 @@ cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code && cargo fmt --all -- --c
 - **`ToolCtx` field for the `Platform` handle** — design §5.1 lists individual handles on `ToolCtx` (`fs`, `http`, `process`, ...) but does NOT list `platform` directly. Camera tool body needs access to `Arc<dyn CameraControl>`. Two options: (a) add `pub camera: Option<Arc<dyn CameraControl>>` to `ToolCtx` (mirrors other handles); or (b) add `pub platform: Arc<dyn Platform>` and access via `ctx.platform.camera()`. Recommend (b) — fewer ToolCtx fields, matches the aggregate-trait pattern. Confirm during P11 work; this is a `tool-api` change that may have been deferred from P3.
 - **`Tool::call()` `Err(ToolError::Unimplemented)` variant** — design §11 references "skeletons … return `Err(Unimplemented)`" for both P11 and P11b. Verify `ToolError` (defined in P3's `tool-api/src/error.rs`) has this variant; if not, add it. Risk if P3 used a generic `Other(String)` only — the snapshot test will need to assert on a string, which is brittle.
 - **Composition-drift snapshot test (§step 13) may fail before P9 lands every `command-mobile` command** — register_all_mobile may be empty in M8. Mitigation: the snapshot asserts on the *tool* list only; command set is checked as a length-only sanity check.
-- **`uniffi` crate is heavyweight to build on the desktop workspace** — `tools/camera` / `tools/voice` / `tools/share` pull `uniffi` macros via `traits` even on Linux. Mitigation: gate the `mobile-callbacks` feature on the `traits` crate; tool crates that need the callback traits depend on `traits = { features = ["mobile-callbacks"] }`. Other engine crates do NOT enable the feature, so they don't compile the UniFFI dependency.
+- **`uniffi` crate is heavyweight to build on the desktop workspace** — `tools/camera` / `tools/voice` / `tools/share` pull `uniffi` macros via `traits` even on Linux. Mitigation: gate the `mobile-callbacks` feature on the `platform-api` crate; tool crates that need the callback traits depend on `traits = { features = ["mobile-callbacks"] }`. Other engine crates do NOT enable the feature, so they don't compile the UniFFI dependency.
 - **`apps/engine-mobile` referencing `platform-ios`/`platform-android` paths that P10 created** — confirm path strings: `path = "../../platforms/ios"` from `apps/engine-mobile/`. Naming collision risk: design §4.2 fixes Cargo names to `platform-ios` / `platform-android`. Make sure P10's `Cargo.toml` set those names.
 - **Workspace `default-members` growth** — adding 4 new crates to `default-members` makes the default `cargo build` slower; per design §10.1 dev profile `codegen-units = 256` keeps it tolerable.
-- **`engine-mobile::build()` does not exist on the desktop engine builder yet** — design §5.4 introduces `Engine::builder()` in `core/`; if P3/P4 did not actually create the `EngineBuilder`, this phase has nothing to call. Verify `core::Engine::builder()` exists before step 11. If missing, escalate — should not be a P11 fix.
+- **`engine-mobile::build()` does not exist on the desktop engine builder yet** — design §5.4 introduces `Engine::builder()` in `core/`; if P3/P4 did not actually create the `EngineBuilder`, this phase has nothing to call. Verify `lingxi_core::Engine::builder()` exists before step 11. If missing, escalate — should not be a P11 fix.
 
 #### Estimated hours
 
@@ -2358,7 +2358,7 @@ Create three empty device-control tool crates — `tools/computer-use/`, `tools/
 - **P11** (creating `tools/camera/`, `tools/voice/`, `tools/share/` and `apps/engine-mobile/`) — both the implementation-checklist commit graph (line 57) and design doc §9.1 list P11b as following P11.
 - **Transitively** therefore P0–P11 (the entire repo rename → `crates/` flatten → `lingxi-` prefix drop → `tool-api` extract → engine-deps migrated → first tool splits → `apps/engine-desktop/` created → remaining tool splits → skills + commands split → mobile platform stubs + `ComputerControl` trait added in P10 → mobile-exclusive tools + `engine-mobile` in P11).
 - **Critical incoming surface from P3**: the `tool-api` crate must already export `Tool`, `ToolCtx`, `ToolRegistry`, `ToolResult`, `ToolError` (the design's variant set must include an `Unimplemented` arm — confirm in P3 recon; if absent, add `ToolError::Unimplemented(&'static str)` in P3 since multiple P11/P11b stubs need it).
-- **Critical incoming surface from P10**: `traits/src/computer_control.rs` defining `ComputerControl` (used as the eventual M9 backend for `tool-computer-use`; P11b imports the type only so the schema doc-comments compile, but does NOT call into it).
+- **Critical incoming surface from P10**: `platform-api/src/computer_control.rs` defining `ComputerControl` (used as the eventual M9 backend for `tool-computer-use`; P11b imports the type only so the schema doc-comments compile, but does NOT call into it).
 - **Critical incoming surface from P6**: `apps/engine-desktop/src/lib.rs` must already contain a `fn desktop_tool_registry() -> ToolRegistry` block where `tool_computer_use::register_all(&mut r);` lines can be inserted (per design §6.4 lines 1029–1032).
 
 #### Steps
@@ -2514,7 +2514,7 @@ P12 creates two app-layer packager crates — `apps/ios-framework/` (Rust + Swif
 
 - **P11** (mobile tool skeletons + `apps/engine-mobile/`) — provides the `engine_mobile::build(platform, config)` entry point that this phase's UniFFI shim calls, plus the `CameraControl` / `VoiceRecorder` / `SharingService` traits in `traits/` annotated with `#[uniffi::export(callback_interface)]`.
 - **P10** (mobile platform skeletons) — provides `platforms/ios/` and `platforms/android/` with `IosPlatform::new(IosPlatformInputs)` and the Android equivalent that consume the Swift/Kotlin-supplied trait objects.
-- **P3** (`tool-api` + `Platform` aggregate trait) — `traits::Platform` and its mobile capability accessors (`camera()`, `voice()`, `share()`) must exist.
+- **P3** (`tool-api` + `Platform` aggregate trait) — `platform_api::Platform` and its mobile capability accessors (`camera()`, `voice()`, `share()`) must exist.
 - Transitively: P0, P1, P2 (repo rename, drop `crates/` wrapper, drop `lingxi-` prefix) — paths and crate names in this plan assume the post-P2 flat layout.
 
 #### Steps
@@ -2524,7 +2524,7 @@ P12 creates two app-layer packager crates — `apps/ios-framework/` (Rust + Swif
    mkdir -p apps/ios-framework/src apps/ios-framework/swift/Sources/LingxiCode apps/ios-framework/swift/Sources/LingxiCodeBindings
    ```
 
-2. **Write the Rust UniFFI surface.** `apps/ios-framework/src/lib.rs` calls `uniffi::setup_scaffolding!()` and `#[uniffi::export]`s a `MobileEngineHandle` struct plus a top-level `build_mobile_engine(platform_impls: PlatformImpls) -> Arc<MobileEngineHandle>` function. `PlatformImpls` is a `#[derive(uniffi::Record)]` carrying `Arc<dyn CameraControl>`, `Arc<dyn VoiceRecorder>`, `Arc<dyn SharingService>`, `Arc<dyn SecureStorage>`, plus the `app_sandbox_root: String`. `MobileEngineHandle` wraps the `core::Engine` produced by `engine_mobile::build()` and re-exposes session lifecycle (`create_session(model) -> SessionRef`, `send_user_message(session, text) -> EngineEvent`). Use the same opaque-handle shape as the legacy `crates/uniffi-bridge/src/engine_handle.rs` and `session_handle.rs` (both use `Arc<Mutex<Inner>>`).
+2. **Write the Rust UniFFI surface.** `apps/ios-framework/src/lib.rs` calls `uniffi::setup_scaffolding!()` and `#[uniffi::export]`s a `MobileEngineHandle` struct plus a top-level `build_mobile_engine(platform_impls: PlatformImpls) -> Arc<MobileEngineHandle>` function. `PlatformImpls` is a `#[derive(uniffi::Record)]` carrying `Arc<dyn CameraControl>`, `Arc<dyn VoiceRecorder>`, `Arc<dyn SharingService>`, `Arc<dyn SecureStorage>`, plus the `app_sandbox_root: String`. `MobileEngineHandle` wraps the `lingxi_core::Engine` produced by `engine_mobile::build()` and re-exposes session lifecycle (`create_session(model) -> SessionRef`, `send_user_message(session, text) -> EngineEvent`). Use the same opaque-handle shape as the legacy `crates/uniffi-bridge/src/engine_handle.rs` and `session_handle.rs` (both use `Arc<Mutex<Inner>>`).
 
 3. **Write the Rust composition builder.** `apps/ios-framework/src/builder.rs` translates the foreign-supplied `PlatformImpls` into `platform_ios::IosPlatformInputs`, calls `IosPlatform::new(inputs)`, wraps the result as `Arc<dyn Platform>`, then `engine_mobile::build(platform, MobileEngineConfig::default())?`. Mirrors the flow diagram in §5.5 "Construction flow".
 

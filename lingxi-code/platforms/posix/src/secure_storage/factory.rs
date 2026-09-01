@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::OnceCell;
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 const FALLBACK_TOMBSTONE_KIND: &str = "lingxi_deleted_credential_tombstone";
 

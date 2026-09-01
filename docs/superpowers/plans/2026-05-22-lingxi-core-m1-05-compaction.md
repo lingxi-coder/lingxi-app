@@ -37,7 +37,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-cost = { path = "../cost" }

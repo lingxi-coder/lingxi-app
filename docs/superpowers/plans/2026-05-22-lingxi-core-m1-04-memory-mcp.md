@@ -25,15 +25,15 @@ crates/mcp/
 ├── Cargo.toml
 └── src/{lib, registry, connection, capabilities, oauth, approval, transport_spec, agent_scope}.rs
 
-crates/traits/src/mcp.rs       ← NEW: McpTransport trait
-crates/traits/src/filesystem.rs ← MODIFY: add watch method
+crates/platform-api/src/mcp.rs       ← NEW: McpTransport trait
+crates/platform-api/src/filesystem.rs ← MODIFY: add watch method
 ```
 
 ---
 
 ## Task 1: McpTransport trait (in lingxi-traits)
 
-**Files:** Create `crates/traits/src/mcp.rs`, modify `lib.rs`.
+**Files:** Create `crates/platform-api/src/mcp.rs`, modify `lib.rs`.
 
 - [ ] **Step 1: mcp.rs**
 
@@ -145,7 +145,7 @@ pub enum McpError {
 
 - [ ] **Step 2: Extend FileSystem with `watch`**
 
-In `crates/traits/src/filesystem.rs`, add to the trait:
+In `crates/platform-api/src/filesystem.rs`, add to the trait:
 
 ```rust
 #[async_trait]
@@ -195,7 +195,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-api-client = { path = "../api-client" }
 serde.workspace = true
 serde_json.workspace = true
@@ -355,7 +355,7 @@ impl MemorySelector {
 ```rust
 // prefetch.rs
 use crate::selector::MemorySelector;
-use lingxi_traits::RuntimeSpawner;
+use lingxi_platform_api::RuntimeSpawner;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -443,7 +443,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -459,7 +459,7 @@ workspace = true
 
 ```rust
 use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{McpTransportSpec, McpToolDto, McpResourceDto, McpPromptDto, ServerCapabilitiesDto};
+use lingxi_platform_api::{McpTransportSpec, McpToolDto, McpResourceDto, McpPromptDto, ServerCapabilitiesDto};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -517,7 +517,7 @@ impl McpConnectionState {
 ```rust
 use crate::connection::*;
 use lingxi_protocol::{AgentId, McpConnectionId};
-use lingxi_traits::{McpError, McpTransport};
+use lingxi_platform_api::{McpError, McpTransport};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -657,7 +657,7 @@ impl McpApprovalPolicy {
 
 ```rust
 // capabilities.rs — re-export trait DTOs for ergonomics
-pub use lingxi_traits::{McpToolDto, McpResourceDto, McpPromptDto, ServerCapabilitiesDto};
+pub use lingxi_platform_api::{McpToolDto, McpResourceDto, McpPromptDto, ServerCapabilitiesDto};
 ```
 
 ```rust
@@ -704,7 +704,7 @@ git commit -m "feat(mcp): connection state machine + registry + oauth/approval s
 ```rust
 use async_trait::async_trait;
 use lingxi_protocol::McpConnectionId;
-use lingxi_traits::*;
+use lingxi_platform_api::*;
 use serde_json::Value;
 use std::sync::Mutex;
 
@@ -768,7 +768,7 @@ impl McpTransport for MockMcpTransport {
 ```rust
 use lingxi_mcp::{McpRegistry, McpServerConfig, ConfigScope};
 use lingxi_test_harness::mocks::MockMcpTransport;
-use lingxi_traits::McpTransportSpec;
+use lingxi_platform_api::McpTransportSpec;
 use std::sync::Arc;
 
 #[tokio::test]

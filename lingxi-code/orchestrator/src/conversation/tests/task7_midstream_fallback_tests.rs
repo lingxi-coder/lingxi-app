@@ -113,7 +113,7 @@ async fn midstream_529_triggers_nonstreaming_fallback() {
     let texts: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            traits::OutputEvent::Text { text } => Some(text.as_str()),
+            platform_api::OutputEvent::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect();

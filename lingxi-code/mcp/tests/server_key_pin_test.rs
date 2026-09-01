@@ -22,7 +22,7 @@
 #![allow(clippy::unwrap_used)]
 
 use mcp::oauth;
-use traits::{McpHeaders, McpTransportSpec};
+use platform_api::{McpHeaders, McpTransportSpec};
 
 #[test]
 fn server_key_is_frozen_because_it_keys_every_stored_oauth_token() {
@@ -84,7 +84,7 @@ fn server_key_is_frozen_because_it_keys_every_stored_oauth_token() {
         oauth::server_key("other-server", &http),
         "header insertion order stopped affecting server_key — McpHeaders \
          must stay an order-preserving map (see McpHeaders doc comments in \
-         traits/src/mcp.rs), or stored OAuth tokens keyed under the old \
+         platform-api/src/mcp.rs), or stored OAuth tokens keyed under the old \
          order silently orphan"
     );
 }

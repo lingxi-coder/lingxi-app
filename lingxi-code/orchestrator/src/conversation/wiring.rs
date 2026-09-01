@@ -31,7 +31,7 @@ impl ConversationOrchestrator {
         // prompt/request semantics are distinct from the permission-gate
         // transport, so TUI/REPL sessions can carry interactive guidance even
         // when `interactive_permissions` remains on the headless default.
-        traits::session_flags::set_non_interactive_session(!config.interactive_session);
+        platform_api::session_flags::set_non_interactive_session(!config.interactive_session);
         // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
         // request builder branches `tool_reference` normalization on the SESSION
         // decision, not on whether a given request's toolset carries a
@@ -40,7 +40,7 @@ impl ConversationOrchestrator {
         // per-request assembly refreshes it once the model/profile are known, so
         // any side query fired before the first main-loop turn still sees the
         // session's mode+provider decision rather than the bare `false` default.
-        traits::session_flags::set_tool_search_enabled(
+        platform_api::session_flags::set_tool_search_enabled(
             tools.deferral().mode().is_enabled()
                 && tool_search_supported_for_request(&config.model, None),
         );
@@ -49,8 +49,8 @@ impl ConversationOrchestrator {
         let current_effort = config.effort.clone();
         let current_reasoning_selection = current_effort
             .as_ref()
-            .map(|effort| traits::ReasoningSelection::Level { id: effort.clone() })
-            .unwrap_or(traits::ReasoningSelection::Automatic);
+            .map(|effort| platform_api::ReasoningSelection::Level { id: effort.clone() })
+            .unwrap_or(platform_api::ReasoningSelection::Automatic);
         let current_effort_explicit = current_effort.is_some();
         Self {
             config,
@@ -66,8 +66,8 @@ impl ConversationOrchestrator {
                 invoked_skill_session_id,
             ),
             turn_gate: Arc::new(Mutex::new(())),
-            dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::default(),
-            workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState::default(),
+            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::default(),
+            workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState::default(),
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             prompt_probe_cwd_resolver: None,
@@ -226,7 +226,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_dynamic_workflows_gate(
         mut self,
-        gate: traits::session_flags::DynamicWorkflowsGate,
+        gate: platform_api::session_flags::DynamicWorkflowsGate,
     ) -> Self {
         self.dynamic_workflows_gate = gate;
         self
@@ -237,7 +237,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_workflow_size_guideline(
         mut self,
-        state: traits::session_flags::WorkflowSizeGuidelineState,
+        state: platform_api::session_flags::WorkflowSizeGuidelineState,
     ) -> Self {
         self.workflow_size_guideline = state;
         self
@@ -269,7 +269,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_mobile_runtime_environment(
         mut self,
-        environment: traits::mobile_runtime_environment::MobileRuntimeEnvironment,
+        environment: platform_api::mobile_runtime_environment::MobileRuntimeEnvironment,
     ) -> Self {
         self.mobile_runtime_environment_message = Some(ConversationMessage::user_meta(
             MessageId::new(),
@@ -631,7 +631,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_fork_spawner(
         mut self,
-        spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner>,
+        spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     ) -> Self {
         self.fork_spawner = Some(spawner);
         self
@@ -642,7 +642,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_fork_budget(
         mut self,
-        budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
+        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
     ) -> Self {
         self.fork_budget = Some(budget);
         self
@@ -656,7 +656,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_bg_session_forker(
         mut self,
-        forker: Arc<dyn traits::bg_session_forker::BgSessionForker>,
+        forker: Arc<dyn platform_api::bg_session_forker::BgSessionForker>,
     ) -> Self {
         self.bg_session_forker = Some(forker);
         self
@@ -665,7 +665,7 @@ impl ConversationOrchestrator {
     /// Attach the composition-root catalog reconciler used by
     /// [`Self::register_repo_root`].
     #[must_use]
-    pub fn with_repo_root_reloader(mut self, reloader: Arc<dyn traits::RepoRootReloader>) -> Self {
+    pub fn with_repo_root_reloader(mut self, reloader: Arc<dyn platform_api::RepoRootReloader>) -> Self {
         self.repo_root_reloader = Some(reloader);
         self
     }
@@ -707,7 +707,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_new_diagnostics_source(
         mut self,
-        source: Arc<dyn traits::NewDiagnosticsSource>,
+        source: Arc<dyn platform_api::NewDiagnosticsSource>,
     ) -> Self {
         self.prompt_runtime.new_diagnostics_source = Some(source);
         self
@@ -769,7 +769,7 @@ impl ConversationOrchestrator {
     ///
     /// The REPL checks this after each dispatch and breaks the loop if
     /// `true`. The flag is set via
-    /// [`traits::OrchestratorHandle::request_exit`]; once set it
+    /// [`platform_api::OrchestratorHandle::request_exit`]; once set it
     /// never resets (idempotent `/exit`).
     pub fn current_should_exit(&self) -> bool {
         self.should_exit.load(std::sync::atomic::Ordering::SeqCst)

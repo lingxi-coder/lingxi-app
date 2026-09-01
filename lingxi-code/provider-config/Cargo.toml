@@ -14,7 +14,7 @@ cost = { path = "../cost" }
 # library level, so a test-only dependency no longer resolves. The test doubles
 # in `availability.rs` that originally justified the dev-only entry still work —
 # a normal dependency is visible to tests too.
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

@@ -937,12 +937,12 @@ git commit -m "feat(protocol): add Effect/EffectResult/EffectError (M1.1 subset)
 
 **Files:**
 - Create: `crates/traits/Cargo.toml`
-- Create: `crates/traits/src/lib.rs`
-- Create: `crates/traits/src/http.rs`
-- Create: `crates/traits/src/clock.rs`
-- Create: `crates/traits/src/runtime.rs`
-- Create: `crates/traits/src/effect_handler.rs`
-- Create: `crates/traits/src/filesystem.rs`
+- Create: `crates/platform-api/src/lib.rs`
+- Create: `crates/platform-api/src/http.rs`
+- Create: `crates/platform-api/src/clock.rs`
+- Create: `crates/platform-api/src/runtime.rs`
+- Create: `crates/platform-api/src/effect_handler.rs`
+- Create: `crates/platform-api/src/filesystem.rs`
 
 - [ ] **Step 1: Cargo.toml**
 
@@ -994,7 +994,7 @@ pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 - [ ] **Step 3: HttpTransport trait + tests**
 
 ```rust
-// crates/traits/src/http.rs
+// crates/platform-api/src/http.rs
 //! HTTP transport abstraction. Provider-neutral; the api-client crate uses
 //! this trait so it never imports reqwest directly.
 
@@ -1051,7 +1051,7 @@ mod tests {
 - [ ] **Step 4: Clock trait**
 
 ```rust
-// crates/traits/src/clock.rs
+// crates/platform-api/src/clock.rs
 use std::time::{Duration, SystemTime};
 
 pub trait Clock: Send + Sync {
@@ -1070,7 +1070,7 @@ pub trait Clock: Send + Sync {
 - [ ] **Step 5: RuntimeSpawner trait**
 
 ```rust
-// crates/traits/src/runtime.rs
+// crates/platform-api/src/runtime.rs
 //! Background task spawning abstraction. Engine code MUST NOT call
 //! tokio::spawn directly — see D17.
 
@@ -1114,7 +1114,7 @@ pub enum RuntimeError {
 - [ ] **Step 6: EffectHandler trait**
 
 ```rust
-// crates/traits/src/effect_handler.rs
+// crates/platform-api/src/effect_handler.rs
 use async_trait::async_trait;
 use lingxi_protocol::{Effect, EffectError, EffectResult};
 
@@ -1128,7 +1128,7 @@ pub trait EffectHandler: Send + Sync {
 - [ ] **Step 7: FileSystem trait (signatures only — impls in later plans)**
 
 ```rust
-// crates/traits/src/filesystem.rs
+// crates/platform-api/src/filesystem.rs
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1876,7 +1876,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -1893,7 +1893,7 @@ workspace = true
 ```rust
 //! Anthropic / OpenAI-compatible API client.
 //!
-//! All network I/O routes through `lingxi_traits::HttpTransport`. The client
+//! All network I/O routes through `lingxi_platform_api::HttpTransport`. The client
 //! itself is purely about request shape + SSE parsing + retry policy.
 
 #![forbid(unsafe_code)]
@@ -2116,7 +2116,7 @@ pub struct ErrorPayload {
 - [ ] **Step 2: error.rs**
 
 ```rust
-use lingxi_traits::HttpError;
+use lingxi_platform_api::HttpError;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -2331,7 +2331,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-api-client = { path = "../api-client" }
 serde.workspace = true
@@ -2383,7 +2383,7 @@ pub use mock_runtime::MockRuntimeSpawner;
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use lingxi_protocol::{HttpRequest, HttpResponse, SseEvent};
-use lingxi_traits::{HttpError, HttpTransport};
+use lingxi_platform_api::{HttpError, HttpTransport};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -2449,7 +2449,7 @@ impl HttpTransport for MockHttpTransport {
     async fn stream_sse(
         &self,
         req: HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, HttpError> {
+    ) -> Result<lingxi_platform_api::http::SseStream, HttpError> {
         self.received.lock().unwrap().push(req);
         match self.queue.lock().unwrap().pop_front() {
             Some(ScriptedResponse::Stream(events)) => {
@@ -2484,7 +2484,7 @@ impl Stream for ScriptedSseStream {
 
 ```rust
 // crates/test-harness/src/mocks/mock_clock.rs
-use lingxi_traits::Clock;
+use lingxi_platform_api::Clock;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2521,7 +2521,7 @@ impl Clock for MockClock {
 //! place in the workspace allowed to import tokio outside of dev-deps.
 
 use async_trait::async_trait;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

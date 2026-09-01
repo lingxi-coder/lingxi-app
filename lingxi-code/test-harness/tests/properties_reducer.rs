@@ -1,7 +1,7 @@
 //! Property tests for `reduce`. These run with proptest at 256 cases by
 //! default; the CI `--features 10k-iterations` profile bumps to 10K.
 
-use engine::{reduce, ConversationState, Event, SessionState};
+use lingxi_core::{reduce, ConversationState, Event, SessionState};
 use proptest::prelude::*;
 use protocol::{MessageId, RequestId, SessionId};
 

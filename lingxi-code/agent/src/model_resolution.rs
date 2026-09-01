@@ -51,7 +51,7 @@
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
 use llm_client::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
-use traits::env::is_env_truthy;
+use platform_api::env::is_env_truthy;
 
 /// Managed model-restriction context threaded into the plan-mode upgrade swap
 /// (binary `RF`) and the subagent model-request gate (binary `ble`/`Qly`). Boot

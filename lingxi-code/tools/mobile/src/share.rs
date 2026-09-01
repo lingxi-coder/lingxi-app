@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::share::{ShareError, SharePayload, ShareResult};
+use platform_api::share::{ShareError, SharePayload, ShareResult};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;

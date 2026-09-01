@@ -32,7 +32,7 @@ use client_protocol::events::ClientEvent;
 use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use orchestrator::StreamingApiClient;
 use tokio::sync::Mutex;
-use traits::{
+use platform_api::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
     SecureStorage, SharingService, VoiceRecorder, WorktreeManager,
 };

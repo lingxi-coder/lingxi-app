@@ -22,7 +22,7 @@
 //! still runs, just in this context.
 
 use session::forked_skill::ForkedSkillScoping;
-use traits::task_registry::TaskRecord;
+use platform_api::task_registry::TaskRecord;
 
 /// Whether a forking skill should run in the BACKGROUND (claude `KCo`).
 ///

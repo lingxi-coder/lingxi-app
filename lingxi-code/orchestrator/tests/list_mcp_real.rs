@@ -7,7 +7,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::McpConnectionId as ConnId;
 use serde_json::Value;
 use std::sync::Arc;
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpStatus, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, OrchestratorHandle,

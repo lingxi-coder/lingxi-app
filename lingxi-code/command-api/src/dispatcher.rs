@@ -1,4 +1,4 @@
-//! Implementation of [`traits::SlashCommandDispatcher`] that routes
+//! Implementation of [`platform_api::SlashCommandDispatcher`] that routes
 //! `/<name> <args>` into the in-crate [`CommandRegistry`].
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// Supplies the per-dispatch [`HookContext`] (session id, cwd, transcript path,
 /// permission mode) for the `UserPromptExpansion` hook. The dispatcher does not
@@ -648,7 +648,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
 }
 
 fn bind_mcp_prompt_arguments(
-    declarations: &[traits::McpPromptArgumentDto],
+    declarations: &[platform_api::McpPromptArgumentDto],
     positional: &[String],
 ) -> Result<Map<String, Value>, String> {
     if positional.len() > declarations.len() {
@@ -1226,32 +1226,32 @@ mod tests {
 
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
-        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+    impl platform_api::HttpTransport for UnusedHttp {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: Duration) {}
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -1454,12 +1454,12 @@ mod tests {
                 connection_id,
                 prompt_name: "review".to_string(),
                 arguments: vec![
-                    traits::McpPromptArgumentDto {
+                    platform_api::McpPromptArgumentDto {
                         name: "repository".to_string(),
                         description: None,
                         required: true,
                     },
-                    traits::McpPromptArgumentDto {
+                    platform_api::McpPromptArgumentDto {
                         name: "focus".to_string(),
                         description: None,
                         required: false,

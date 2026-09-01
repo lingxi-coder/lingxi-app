@@ -92,9 +92,9 @@ pub struct AuthState {
     /// Single-flight refresh lock.
     pub(crate) refresh_lock: Arc<Mutex<()>>,
     /// Proactive task handle.
-    pub(crate) proactive_handle: RwLock<Option<traits::BackgroundTaskHandle>>,
-    pub(crate) http: Arc<dyn traits::HttpTransport>,
-    pub(crate) clock: Arc<dyn traits::Clock>,
+    pub(crate) proactive_handle: RwLock<Option<platform_api::BackgroundTaskHandle>>,
+    pub(crate) http: Arc<dyn platform_api::HttpTransport>,
+    pub(crate) clock: Arc<dyn platform_api::Clock>,
     pub(crate) bus: Option<Arc<telemetry::AnalyticsBus>>,
     pub(crate) credentials: Option<Arc<secret::CredentialManager>>,
 }
@@ -110,8 +110,8 @@ impl AuthState {
         expires_at: SystemTime,
         account_id: Option<String>,
         fedramp: bool,
-        http: Arc<dyn traits::HttpTransport>,
-        clock: Arc<dyn traits::Clock>,
+        http: Arc<dyn platform_api::HttpTransport>,
+        clock: Arc<dyn platform_api::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
     ) -> Arc<Self> {
@@ -162,12 +162,12 @@ impl AuthState {
     }
 
     /// Borrow the proactive task handle if one has been spawned.
-    pub async fn proactive_handle(&self) -> Option<traits::BackgroundTaskHandle> {
+    pub async fn proactive_handle(&self) -> Option<platform_api::BackgroundTaskHandle> {
         self.proactive_handle.read().await.clone()
     }
 
     /// Cancel the proactive refresh task.
-    pub async fn shutdown(&self, spawner: &dyn traits::RuntimeSpawner) {
+    pub async fn shutdown(&self, spawner: &dyn platform_api::RuntimeSpawner) {
         let handle = self.proactive_handle.write().await.take();
         let Some(handle) = handle else {
             return;
@@ -276,24 +276,24 @@ impl AuthState {
 /// Null HTTP transport used by [`AuthState::new_for_test`].
 struct NullTransport;
 #[async_trait]
-impl traits::HttpTransport for NullTransport {
+impl platform_api::HttpTransport for NullTransport {
     async fn request(
         &self,
         _req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, traits::HttpError> {
+    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
         panic!("NullTransport: test forgot to inject a real transport");
     }
     async fn stream_sse(
         &self,
         _req: protocol::HttpRequest,
-    ) -> Result<traits::http::SseStream, traits::HttpError> {
+    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
         panic!("NullTransport: test forgot to inject a real transport");
     }
 }
 
 /// Null clock — always returns [`SystemTime::UNIX_EPOCH`].
 struct NullClock;
-impl traits::Clock for NullClock {
+impl platform_api::Clock for NullClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH
     }
@@ -312,7 +312,7 @@ impl RefreshDriver {
     }
 
     /// Stop proactive refresh and invalidate this driver's in-memory token.
-    pub async fn invalidate(&self, spawner: &dyn traits::RuntimeSpawner) {
+    pub async fn invalidate(&self, spawner: &dyn platform_api::RuntimeSpawner) {
         self.state.shutdown(spawner).await;
         self.state.invalidate().await;
     }
@@ -561,7 +561,7 @@ impl RefreshDriver {
     /// Spawn the proactive refresh task.
     pub async fn spawn_proactive(
         state: Arc<AuthState>,
-        spawner: Arc<dyn traits::RuntimeSpawner>,
+        spawner: Arc<dyn platform_api::RuntimeSpawner>,
     ) -> Result<(), OAuthError> {
         let task_state = state.clone();
         let task_spawner = spawner.clone();
@@ -580,7 +580,7 @@ impl RefreshDriver {
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry.
 /// Also fires early if `last_refresh` is older than 8 days.
-async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeSpawner>) {
+async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn platform_api::RuntimeSpawner>) {
     let driver = RefreshDriver::new(state.clone());
     loop {
         // Read current expiry + token_hash + last_refresh.
@@ -671,7 +671,7 @@ mod refresh_tests {
         let clock = TestClock::new(2_000);
         let storage = MemStorage::new();
         let credentials =
-            mem_credential_manager(storage.clone(), clock.clone() as Arc<dyn traits::Clock>);
+            mem_credential_manager(storage.clone(), clock.clone() as Arc<dyn platform_api::Clock>);
 
         let state = AuthState::new(
             OpenAiOAuthConfig::default(),
@@ -680,8 +680,8 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
             Some("acc_XYZ".into()),
             false,
-            http.clone() as Arc<dyn traits::HttpTransport>,
-            clock.clone() as Arc<dyn traits::Clock>,
+            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             Some(credentials.clone()),
         );
@@ -729,8 +729,8 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
             None,
             false,
-            http.clone() as Arc<dyn traits::HttpTransport>,
-            clock.clone() as Arc<dyn traits::Clock>,
+            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -793,8 +793,8 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
-            http as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -825,8 +825,8 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
-            http as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -859,8 +859,8 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             None,
             false,
-            http.clone() as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -892,15 +892,15 @@ mod refresh_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(2),
             None,
             false,
-            http.clone() as Arc<dyn traits::HttpTransport>,
-            clock.clone() as Arc<dyn traits::Clock>,
+            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
         let spawner = InstantSpawner::new();
         RefreshDriver::spawn_proactive(
             state.clone(),
-            spawner.clone() as Arc<dyn traits::RuntimeSpawner>,
+            spawner.clone() as Arc<dyn platform_api::RuntimeSpawner>,
         )
         .await
         .expect("spawn ok");

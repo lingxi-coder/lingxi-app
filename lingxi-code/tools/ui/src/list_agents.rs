@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::task_registry::TaskRecord;
+use platform_api::task_registry::TaskRecord;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -104,8 +104,8 @@ impl ListAgentsTool {
     }
 
     async fn self_note(&self, ctx: &ToolUseContext) -> Option<String> {
-        let name = traits::live_sessions::process_name().or_else(|| ctx.agent_name.clone())?;
-        let self_id = traits::live_sessions::process_session_id().unwrap_or_default();
+        let name = platform_api::live_sessions::process_name().or_else(|| ctx.agent_name.clone())?;
+        let self_id = platform_api::live_sessions::process_session_id().unwrap_or_default();
         let rref = session_ref(&self_id, 0);
         Some(format!(
             "This session is {name} [{rref}] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself)."
@@ -157,10 +157,10 @@ impl ListAgentsTool {
     }
 
     fn peer_rows(&self) -> Vec<String> {
-        let Some(dir) = traits::live_sessions::process_dir() else {
+        let Some(dir) = platform_api::live_sessions::process_dir() else {
             return Vec::new();
         };
-        let self_id = traits::live_sessions::process_session_id();
+        let self_id = platform_api::live_sessions::process_session_id();
         let Ok(live) = dir.list_live() else {
             return Vec::new();
         };
@@ -264,7 +264,7 @@ impl Tool for ListAgentsTool {
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        traits::live_sessions::cross_session_messaging_enabled()
+        platform_api::live_sessions::cross_session_messaging_enabled()
     }
 
     fn is_read_only(&self, _: &Value) -> bool {
@@ -319,9 +319,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
-    use traits::process::ProcessOutput;
-    use traits::task_registry::{
+    use platform_api::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
+    use platform_api::process::ProcessOutput;
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,
     };
@@ -428,11 +428,11 @@ mod tests {
     async fn empty_listing_without_any_sources() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        traits::live_sessions::set_process_dir(traits::live_sessions::LiveSessionDir::at(
+        platform_api::live_sessions::set_process_dir(platform_api::live_sessions::LiveSessionDir::at(
             temp.path().join("sessions"),
         ));
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
 
         let tool = ListAgentsTool::new(shell_test_ctx(dummy_out()));
         let result = tool
@@ -449,10 +449,10 @@ mod tests {
     async fn listing_includes_self_in_process_and_peer_statuses() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
 
         std::fs::create_dir_all(dir.root()).unwrap();
         let peer_path = dir.root().join("222.json");

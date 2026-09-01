@@ -8,8 +8,8 @@
 //! permission-context mode. In claude-code every permission check the child runs
 //! consults `toolPermissionContext.mode = ve`; in LingXi that override is threaded
 //! into the subagent tool-dispatch permission gate (see
-//! [`traits::tool_invoker::SubagentInvocationContext::mode_override`] →
-//! [`traits::permission_gate::PermissionCheckContext::mode_override`]).
+//! [`platform_api::tool_invoker::SubagentInvocationContext::mode_override`] →
+//! [`platform_api::permission_gate::PermissionCheckContext::mode_override`]).
 //!
 //! `AgentPermissionMode` (`definition.rs`) is re-exported for callers that build
 //! agent definitions.

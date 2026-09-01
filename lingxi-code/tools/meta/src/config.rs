@@ -113,9 +113,9 @@ const PERMISSION_DEFAULT_MODES: &[&str] = &["default", "plan", "acceptEdits", "d
 /// 2.1.201). Default is `never` (block on the user; no auto-continue).
 const ASK_USER_QUESTION_TIMEOUTS: &[&str] = &["60s", "5m", "10m", "never"];
 /// `dialogExpiry` — 2.1.232 `_Vp`.
-const DIALOG_EXPIRY: &[&str] = traits::live_sessions::DIALOG_EXPIRY_OPTIONS;
+const DIALOG_EXPIRY: &[&str] = platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS;
 /// `crossSessionInbound` — 2.1.232 `bVp`.
-const CROSS_SESSION_INBOUND: &[&str] = traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS;
+const CROSS_SESSION_INBOUND: &[&str] = platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS;
 
 /// Storage source for a setting. Both currently back to the single
 /// `~/.lingxi/settings.json` file in this Rust stub.
@@ -854,7 +854,7 @@ impl Tool for ConfigTool {
             return Err(e);
         }
         if setting == "agentPushNotifEnabled" {
-            traits::session_flags::set_agent_push_notif_enabled(
+            platform_api::session_flags::set_agent_push_notif_enabled(
                 final_value.as_bool().unwrap_or(false),
             );
         }
@@ -905,7 +905,7 @@ async fn emit_completed(
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

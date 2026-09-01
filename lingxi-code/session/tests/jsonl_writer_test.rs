@@ -7,7 +7,7 @@ use session::jsonl::schema::JsonlMessage;
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
     JsonlMessage {

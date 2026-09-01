@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use traits::{FileSystem, FileSystemCacheIdentity};
+use platform_api::{FileSystem, FileSystemCacheIdentity};
 use uuid::Uuid;
 
 /// Metadata for one resumable session row (uuid + title + activity time + visible-message count).

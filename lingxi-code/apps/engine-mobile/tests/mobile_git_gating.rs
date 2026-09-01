@@ -10,7 +10,7 @@
 
 use engine_mobile::mobile_tool_registry;
 use tool_api::{AndroidGitToolCtx, BuiltinToolContext};
-use traits::process::ProcessOutput;
+use platform_api::process::ProcessOutput;
 
 fn base_ctx() -> BuiltinToolContext {
     tool_api::test_support::shell_test_ctx(ProcessOutput {

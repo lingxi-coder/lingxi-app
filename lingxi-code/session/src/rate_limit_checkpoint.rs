@@ -89,7 +89,7 @@
 //!   `telemetry` dependency. Both spellings live in [`CheckpointSkipReason`] /
 //!   [`CheckpointTrigger`] so wiring an emitter later needs no new vocabulary.
 
-use engine::session::{TodoItem, TodoState};
+use lingxi_core::session::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -363,7 +363,7 @@ fn truncate_utf16_units(text: &str, max_units: usize) -> Option<String> {
 /// ```
 ///
 /// Rebrands, per repo precedent: the product noun is [`branding::PRODUCT_NAME`]
-/// (as in `engine::settings::enterprise`) and the invocation is
+/// (as in `lingxi_core::settings::enterprise`) and the invocation is
 /// `lingxi --resume <id>` — the exact spelling the port's own
 /// "Session … saved. Resume with:" hint already prints
 /// (`apps/cli/src/mode.rs`). Every other byte is the oracle's.

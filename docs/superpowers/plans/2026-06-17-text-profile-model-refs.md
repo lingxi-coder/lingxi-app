@@ -4,7 +4,7 @@
 
 **Goal:** Let the non-picker model-setting paths (`/model <text>`, mobile/bridge `SetModel`, config `default_model`) accept a `profile/model` reference that routes deterministically, and make the ambiguous-id error suggest the qualified forms.
 
-**Architecture:** A pure `traits::parse_model_ref(input, &[ModelListing]) -> (model, Option<profile>)` (first-`/` splits off a profile only when the prefix is a known profile and the remainder is a model under it; else the whole string is a bare id — handles openrouter `/`-in-ids). Each entry point lists models, parses, and calls the existing `switch_model(model, Option<profile>)`. Reuses the merged profile-qualified-routing seam (`SessionState.model_profile` → `resolve_in`).
+**Architecture:** A pure `platform_api::parse_model_ref(input, &[ModelListing]) -> (model, Option<profile>)` (first-`/` splits off a profile only when the prefix is a known profile and the remainder is a model under it; else the whole string is a bare id — handles openrouter `/`-in-ids). Each entry point lists models, parses, and calls the existing `switch_model(model, Option<profile>)`. Reuses the merged profile-qualified-routing seam (`SessionState.model_profile` → `resolve_in`).
 
 **Tech Stack:** Rust workspace (`lingxi-code/`). `cargo test` with `CARGO_PROFILE_DEV_DEBUG=0` (disk near-full).
 
@@ -13,8 +13,8 @@
 **Working dir:** `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code`. Branch: `text-profile-model-refs`.
 
 ## Verified anchors
-- `ModelListing` (`traits/src/orchestrator.rs:273`): `{ display_model, request_model, provider_id (= profile name), provider_label }`.
-- `OrchestratorHandle::switch_model(&self, model: &str, profile: Option<&str>)` (`traits/src/orchestrator.rs:306`) — already takes the profile. `list_model_listings() -> Vec<ModelListing>` (`:374`).
+- `ModelListing` (`platform-api/src/orchestrator.rs:273`): `{ display_model, request_model, provider_id (= profile name), provider_label }`.
+- `OrchestratorHandle::switch_model(&self, model: &str, profile: Option<&str>)` (`platform-api/src/orchestrator.rs:306`) — already takes the profile. `list_model_listings() -> Vec<ModelListing>` (`:374`).
 - `ModelRegistry::resolve_in` ambiguous arm (`llm-client/src/registry.rs:~120-128`): `Err(LlmError::InvalidRequest { message: format!("model reference '{requested}' is ambiguous across profiles: {}", … join(", ")) })`. Existing assertions: `llm-client/tests/profile_qualified_resolution_test.rs:20` (`message.contains("ambiguous")`), `llm-client/tests/registry_test.rs:56` (`resolve_rejects_ambiguous_model_references`).
 - `/model` handler (`commands/core/src/model.rs:53`): `self.handle.switch_model(trimmed, None)`.
 - mobile `SetModel` (`apps/engine-mobile/src/host.rs:954` + a 2nd site ~`:1124`): `handle.switch_model(&model, None)`.
@@ -24,7 +24,7 @@
 ---
 
 ## File Structure
-- Modify: `traits/src/orchestrator.rs` (`parse_model_ref` + unit tests)
+- Modify: `platform-api/src/orchestrator.rs` (`parse_model_ref` + unit tests)
 - Modify: `llm-client/src/registry.rs` (ambiguous-error suggestion) + `llm-client/tests/registry_test.rs` if it asserts the exact message
 - Modify: `commands/core/src/model.rs` (`/model` switch branch + test)
 - Modify: `apps/engine-mobile/src/host.rs`, `apps/bridge-server/src/router.rs` (`SetModel`)
@@ -34,7 +34,7 @@
 
 ## Task 1: `parse_model_ref` pure function
 
-**Files:** Modify `traits/src/orchestrator.rs`.
+**Files:** Modify `platform-api/src/orchestrator.rs`.
 
 - [ ] **Step 1: Write the failing tests.** Add a `#[cfg(test)] mod parse_model_ref_tests` near `ModelListing` (or extend an existing test mod):
 
@@ -94,7 +94,7 @@ mod parse_model_ref_tests {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** (`parse_model_ref` undefined): `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p traits parse_model_ref 2>&1 | tail -10`
+- [ ] **Step 2: Run, expect FAIL** (`parse_model_ref` undefined): `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p platform-api parse_model_ref 2>&1 | tail -10`
 
 - [ ] **Step 3: Implement** (place near `ModelListing`, as a free `pub fn`):
 
@@ -120,8 +120,8 @@ pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Optio
 }
 ```
 
-- [ ] **Step 4: Run, expect PASS.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p traits parse_model_ref 2>&1 | tail -8`
-- [ ] **Step 5: Commit:** `git add traits/src/orchestrator.rs && git commit -m "feat(traits): parse_model_ref for profile/model text references"`
+- [ ] **Step 4: Run, expect PASS.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p platform-api parse_model_ref 2>&1 | tail -8`
+- [ ] **Step 5: Commit:** `git add platform-api/src/orchestrator.rs && git commit -m "feat(traits): parse_model_ref for profile/model text references"`
 
 ---
 
@@ -200,7 +200,7 @@ async fn model_switch_parses_profile_qualified_ref() {
         // Switch mode. Resolve an optional `profile/model` qualifier so a shared
         // id (offered by multiple providers) routes deterministically.
         let listings = self.handle.list_model_listings().await;
-        let (model, profile) = traits::parse_model_ref(trimmed, &listings);
+        let (model, profile) = platform_api::parse_model_ref(trimmed, &listings);
         match self.handle.switch_model(&model, profile.as_deref()).await {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
@@ -209,7 +209,7 @@ async fn model_switch_parses_profile_qualified_ref() {
             Err(e) => { /* unchanged error arm, but use {model} in any echo if present */ }
         }
 ```
-(Keep the existing error arm; the display now shows the resolved bare `model`. Confirm `traits` is a dependency of `command-core` — it is, via `traits::OrchestratorHandle` already imported.)
+(Keep the existing error arm; the display now shows the resolved bare `model`. Confirm `traits` is a dependency of `command-core` — it is, via `platform_api::OrchestratorHandle` already imported.)
 
 - [ ] **Step 4: Run, expect PASS.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p command-core model 2>&1 | grep -E "test result:|FAILED" | tail`
 - [ ] **Step 5: Commit:** `git add commands/core/src/model.rs && git commit -m "feat(/model): accept profile/model qualified references"`
@@ -224,7 +224,7 @@ async fn model_switch_parses_profile_qualified_ref() {
 
 ```rust
                     let listings = handle.list_model_listings().await;
-                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                    let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
                     handle
                         .switch_model(&model_id, profile.as_deref())
                         .await
@@ -236,7 +236,7 @@ async fn model_switch_parses_profile_qualified_ref() {
 ```rust
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
-                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
                 match self.handle.switch_model(&model_id, profile.as_deref()).await {
                     Ok(()) => sink.emit(ClientEvent::ModelChanged { model: model_id }).await,
                     Err(e) => { /* unchanged error arm */ }
@@ -261,12 +261,12 @@ Context: `orch_cfg.model.clone_from(&cfg.default_model)` (`:1694`) seeds the ini
 ```rust
     // Resolve an optional `profile/model` qualifier in the configured default
     // model so a shared id routes deterministically on the first turn.
-    let default_listings: Vec<traits::ModelListing> = assembled
+    let default_listings: Vec<platform_api::ModelListing> = assembled
         .client_config
         .providers
         .iter()
         .flat_map(|p| {
-            p.models.iter().map(move |m| traits::ModelListing {
+            p.models.iter().map(move |m| platform_api::ModelListing {
                 display_model: m.display_model.clone(),
                 request_model: m.request_model.clone(),
                 provider_id: p.profile_name.clone(),
@@ -275,7 +275,7 @@ Context: `orch_cfg.model.clone_from(&cfg.default_model)` (`:1694`) seeds the ini
         })
         .collect();
     let (default_model_id, default_model_profile) =
-        traits::parse_model_ref(&cfg.default_model, &default_listings);
+        platform_api::parse_model_ref(&cfg.default_model, &default_listings);
     orch_cfg.model = default_model_id.clone();
 ```
 (Confirm `assembled` and `provider_profile_label` are in scope at this point — `assembled` is built around `:1574`; if it's defined AFTER `:1694`, move this block to just after `assembled` is available but before `ConversationOrchestrator::new` at `:2711`. Verify ordering and place accordingly. `ModelProfile`'s field names `display_model`/`request_model` match `ModelListing` — confirm against `llm-client` `ModelProfile`.)
@@ -302,8 +302,8 @@ Context: `orch_cfg.model.clone_from(&cfg.default_model)` (`:1694`) seeds the ini
 ## Task 6: full verification
 
 - [ ] **Step 1: Workspace build.** `CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace 2>&1 | tail -3`. Expected `Finished`.
-- [ ] **Step 2: Affected-crate tests.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p traits -p llm-client -p command-core -p engine-mobile -p bridge-server -p engine-desktop 2>&1 | grep -E "test result:|FAILED|error\[|error:" | grep -v "0 passed; 0 failed"`. Expected: only `test result: ok` (the known-pre-existing `pty_smoke::print_mode_unaffected_by_tui_routing` in `tui` is NOT in this set; if it appears, it's unrelated/environmental).
-- [ ] **Step 3: Clippy touched crates.** `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p traits -p llm-client -p command-core 2>&1 | grep -E "^warning:|^error:" | grep -v "unused manifest key"`. Fix any NEW lints in the files you changed (ignore pre-existing lints in untouched code).
+- [ ] **Step 2: Affected-crate tests.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p platform-api -p llm-client -p command-core -p engine-mobile -p bridge-server -p engine-desktop 2>&1 | grep -E "test result:|FAILED|error\[|error:" | grep -v "0 passed; 0 failed"`. Expected: only `test result: ok` (the known-pre-existing `pty_smoke::print_mode_unaffected_by_tui_routing` in `tui` is NOT in this set; if it appears, it's unrelated/environmental).
+- [ ] **Step 3: Clippy touched crates.** `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p platform-api -p llm-client -p command-core 2>&1 | grep -E "^warning:|^error:" | grep -v "unused manifest key"`. Fix any NEW lints in the files you changed (ignore pre-existing lints in untouched code).
 
 No further commit. Feature complete.
 

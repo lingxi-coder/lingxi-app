@@ -4,7 +4,7 @@
 //! T35: the orchestrator folds a `<task-notification>` reminder into each turn
 //! (see [`ConversationOrchestrator::task_notification_reminder_message`]) by
 //! draining the registry's terminal-not-notified tasks. The orchestrator names
-//! the registry only through the narrow `traits::task_registry::TaskRegistryHandle`
+//! the registry only through the narrow `platform_api::task_registry::TaskRegistryHandle`
 //! seam (it has no dependency on the `tasks` crate), so this adapter closes the
 //! seam from the orchestrator side: it owns an `Arc<dyn TaskRegistryHandle>` —
 //! the SAME registry handle the composition root hands the tool context — and
@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use traits::task_registry::{TaskNotification, TaskRegistryHandle};
+use platform_api::task_registry::{TaskNotification, TaskRegistryHandle};
 
 use crate::prompt::task_notification::TaskNotificationProvider;
 
@@ -63,7 +63,7 @@ impl TaskNotificationProvider for RegistryTaskNotifications {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskUpdatePatch,
     };

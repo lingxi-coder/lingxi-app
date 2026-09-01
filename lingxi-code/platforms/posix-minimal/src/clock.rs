@@ -1,7 +1,7 @@
 //! Posix [`Clock`] backed by `std::time::SystemTime`.
 
 use std::time::SystemTime;
-use traits::Clock;
+use platform_api::Clock;
 
 /// Standard system clock (real wall-clock time).
 #[derive(Default)]

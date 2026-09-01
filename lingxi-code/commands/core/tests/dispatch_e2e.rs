@@ -9,7 +9,7 @@ use command_api::RegistrySlashDispatcher;
 use command_core::register_all_builtin_commands;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 fn build_dispatcher() -> RegistrySlashDispatcher {
     let mut reg = CommandRegistry::new();

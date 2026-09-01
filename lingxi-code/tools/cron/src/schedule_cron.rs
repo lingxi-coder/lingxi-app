@@ -925,7 +925,7 @@ impl Tool for CronCreateTool {
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

@@ -26,7 +26,7 @@ use client_protocol::local_apps::{
     AppSurfaceDto, PluginCommandDto,
 };
 use client_protocol::permission::PermissionResponseDto;
-use traits::{SttError, TtsError, VoiceError};
+use platform_api::{SttError, TtsError, VoiceError};
 
 /// `SendPrompt` — the core inbound command. Carries the text, an optional
 /// prompt mode, inline image bytes (decision §0.8), and an optional client
@@ -1072,7 +1072,7 @@ fn recording_state_has_no_engine_defined_failure_channel() {
     assert_eq!(json["recording"], false);
 }
 
-/// Map one `traits::SttError` variant to its `AudioErrorKindDto`. The `match`
+/// Map one `platform_api::SttError` variant to its `AudioErrorKindDto`. The `match`
 /// has NO wildcard arm, so adding a new `SttError` variant upstream fails
 /// THIS compile rather than silently falling through to `Other`.
 fn stt_error_kind(error: &SttError) -> AudioErrorKindDto {
@@ -1086,7 +1086,7 @@ fn stt_error_kind(error: &SttError) -> AudioErrorKindDto {
     }
 }
 
-/// Map one `traits::VoiceError` variant to its `AudioErrorKindDto`. Same
+/// Map one `platform_api::VoiceError` variant to its `AudioErrorKindDto`. Same
 /// exhaustive-match-with-no-wildcard totality guarantee as `stt_error_kind`.
 fn voice_error_kind(error: &VoiceError) -> AudioErrorKindDto {
     match error {
@@ -1097,7 +1097,7 @@ fn voice_error_kind(error: &VoiceError) -> AudioErrorKindDto {
     }
 }
 
-/// Map one `traits::TtsError` variant to its `AudioErrorKindDto`. Same
+/// Map one `platform_api::TtsError` variant to its `AudioErrorKindDto`. Same
 /// exhaustive-match-with-no-wildcard totality guarantee as `stt_error_kind`.
 fn tts_error_kind(error: &TtsError) -> AudioErrorKindDto {
     match error {
@@ -1175,7 +1175,7 @@ fn tts_name(error: &TtsError) -> &'static str {
     }
 }
 
-/// Every variant of all three trait error enums (`traits::{SttError,
+/// Every variant of all three trait error enums (`platform_api::{SttError,
 /// VoiceError, TtsError}`) must survive a round trip through
 /// `AudioErrorKindDto` and come back as the SAME variant.
 ///
@@ -1268,7 +1268,7 @@ fn audio_error_kind_round_trips_every_source_variant() {
 /// (e.g. `SttError::Busy` drifting from `Busy` to `Other`) is caught even
 /// though it would still compile AND still round-trip if the reverse map drifted
 /// with it. `SttError::Busy` and `VoiceError::Busy` intentionally share one kind
-/// (`traits::SttError::Busy`'s own doc comment: a caller branching on one
+/// (`platform_api::SttError::Busy`'s own doc comment: a caller branching on one
 /// contention should not have to also recognize the other) — the ONE place two
 /// source variants legitimately meet, and they come from different enums so the
 /// round trip above is unaffected.

@@ -766,7 +766,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 10: extend `CostSnapshot` + project the new fields
 
 **Files:**
-- Modify: `traits/src/orchestrator.rs` (`CostSnapshot` struct)
+- Modify: `platform-api/src/orchestrator.rs` (`CostSnapshot` struct)
 - Modify: `orchestrator/src/conversation.rs:2923` (`snapshot_cost_real`) and any other `CostSnapshot { … }` construction sites.
 - Test: `orchestrator` snapshot test.
 
@@ -804,12 +804,12 @@ For the empty/no-tracker early-return branch (`conversation.rs:2926`), use `Dura
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `cargo test -p orchestrator snapshot_projects_new_cost_fields` then `cargo build -p orchestrator -p traits`
+Run: `cargo test -p orchestrator snapshot_projects_new_cost_fields` then `cargo build -p orchestrator -p platform-api`
 Expected: PASS + clean build.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add traits/src/orchestrator.rs orchestrator/src/conversation.rs
+git add platform-api/src/orchestrator.rs orchestrator/src/conversation.rs
 git commit -m "feat: CostSnapshot carries api-duration, code-lines, by-model, unknown-models
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -945,7 +945,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 Run:
 ```bash
-cargo build -p cost -p traits -p orchestrator -p command-core -p tui
+cargo build -p cost -p platform-api -p orchestrator -p command-core -p tui
 cargo test -p cost -p orchestrator -p command-core -p tui
 ```
 Expected: clean build, all green.

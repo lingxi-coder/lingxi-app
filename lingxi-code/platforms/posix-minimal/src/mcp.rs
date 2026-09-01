@@ -5,7 +5,7 @@ use futures_util::stream::empty;
 use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
-use traits::mcp::{
+use platform_api::mcp::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,

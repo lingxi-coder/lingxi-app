@@ -14,7 +14,7 @@
 //! `coordinator/src/tool_send_message.rs`, adapted so `parse_recipient`
 //! resolves a teammate *name* (the TS contract) rather than a bare UUID.
 //!
-//! Delivery routes through the injected [`traits::mailbox::MailboxRouterHandle`]
+//! Delivery routes through the injected [`platform_api::mailbox::MailboxRouterHandle`]
 //! seam for teammates. Canonical `session:<uuid>` recipients use the local live
 //! session registry with UDS first and a JSONL inbox fallback.
 //!
@@ -35,7 +35,7 @@ use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED};
 use telemetry::AnalyticsBus;
-use traits::mailbox::{MailboxMessage, MailboxRouterHandle};
+use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -84,10 +84,10 @@ fn truncate_preview(s: &str, max_width: usize) -> String {
 /// `isAgentSwarmsEnabled()` gate: Anthropic-internal runs are on by default,
 /// while external runs require the experimental env opt-in. `SendMessage`
 /// mirrors that runtime gate and additionally requires a live mailbox router.
-/// Delegates to the SHARED [`traits::env::agent_swarms_enabled`] (one
+/// Delegates to the SHARED [`platform_api::env::agent_swarms_enabled`] (one
 /// implementation with `tool-task`'s `is_agent_swarms_enabled`).
 fn agent_swarms_enabled() -> bool {
-    traits::env::agent_swarms_enabled()
+    platform_api::env::agent_swarms_enabled()
 }
 
 static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);
@@ -286,7 +286,7 @@ impl SendMessageTool {
                     )
                 })
             }),
-            Recipient::Session(id) => traits::live_sessions::process_session_id()
+            Recipient::Session(id) => platform_api::live_sessions::process_session_id()
                 .filter(|self_id| self_id == id)
                 .map(|_| format!("'{to_display}' is this session's own address.")),
             Recipient::Teammate(_) => {
@@ -294,15 +294,15 @@ impl SendMessageTool {
                 if ctx.agent_name.as_deref().is_some_and(|name| name == trimmed) {
                     return Some(format!("Not sent — '{trimmed}' is this session's own name."));
                 }
-                if traits::live_sessions::process_name()
+                if platform_api::live_sessions::process_name()
                     .as_deref()
                     .is_some_and(|name| name == trimmed)
                 {
                     return Some(format!("Not sent — '{trimmed}' is this session's own name."));
                 }
-                traits::live_sessions::process_dir()
+                platform_api::live_sessions::process_dir()
                     .and_then(|dir| dir.find_exact(trimmed, None))
-                    .zip(traits::live_sessions::process_session_id())
+                    .zip(platform_api::live_sessions::process_session_id())
                     .and_then(|(rec, self_id)| {
                         (rec.sid() == self_id).then(|| {
                             format!(
@@ -457,18 +457,18 @@ impl SendMessageTool {
 
         let live_target = match recipient {
             Recipient::Session(session_id) => {
-                traits::live_sessions::process_dir().and_then(|dir| {
+                platform_api::live_sessions::process_dir().and_then(|dir| {
                     dir.find_by_session_id(
                         session_id,
-                        traits::live_sessions::process_session_id().as_deref(),
+                        platform_api::live_sessions::process_session_id().as_deref(),
                     )
                     .map(|peer| (dir, peer))
                 })
             }
-            Recipient::Teammate(_) => traits::live_sessions::process_dir().and_then(|dir| {
+            Recipient::Teammate(_) => platform_api::live_sessions::process_dir().and_then(|dir| {
                 dir.find_exact(
                     to_display,
-                    traits::live_sessions::process_session_id().as_deref(),
+                    platform_api::live_sessions::process_session_id().as_deref(),
                 )
                 .map(|peer| (dir, peer))
             }),
@@ -476,10 +476,10 @@ impl SendMessageTool {
         };
         if let Some((dir, peer)) = live_target {
             let from_name =
-                traits::live_sessions::process_name().unwrap_or_else(|| from.to_string());
-            let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+                platform_api::live_sessions::process_name().unwrap_or_else(|| from.to_string());
+            let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
             let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
-            let message = traits::live_sessions::outbound_peer_message(
+            let message = platform_api::live_sessions::outbound_peer_message(
                 &from_name, &from_sid, content, summary,
             );
             let sock = peer
@@ -487,10 +487,10 @@ impl SendMessageTool {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from)
-                .filter(|p| traits::uds_inbox::is_canonical_inbox_sock(p));
+                .filter(|p| platform_api::uds_inbox::is_canonical_inbox_sock(p));
             let uds_error = sock
                 .as_deref()
-                .map(|path| traits::uds_inbox::send_peer_message(path, &message))
+                .map(|path| platform_api::uds_inbox::send_peer_message(path, &message))
                 .and_then(Result::err);
             if sock.is_none() || uds_error.is_some() {
                 dir.send_inbox(peer.sid(), &message).map_err(|e| {
@@ -505,7 +505,7 @@ impl SendMessageTool {
             let subscribed = if notify_when_idle {
                 dir.append_idle_subscription(
                     peer.sid(),
-                    &traits::live_sessions::IdleNotificationRequest {
+                    &platform_api::live_sessions::IdleNotificationRequest {
                         from: from_name.clone(),
                         from_session_id: from_sid.clone(),
                         summary: summary.map(str::to_string),
@@ -565,15 +565,15 @@ impl SendMessageTool {
         summary: Option<&str>,
         sender: &str,
     ) -> Result<Value, ToolError> {
-        let Some((dir, peer)) = traits::live_sessions::process_dir().and_then(|d| {
+        let Some((dir, peer)) = platform_api::live_sessions::process_dir().and_then(|d| {
             let peer = match recipient {
                 Recipient::Session(session_id) => d.find_by_session_id(
                     session_id,
-                    traits::live_sessions::process_session_id().as_deref(),
+                    platform_api::live_sessions::process_session_id().as_deref(),
                 ),
                 Recipient::Teammate(_) => d.find_exact(
                     to_display,
-                    traits::live_sessions::process_session_id().as_deref(),
+                    platform_api::live_sessions::process_session_id().as_deref(),
                 ),
                 _ => None,
             };
@@ -583,11 +583,11 @@ impl SendMessageTool {
                 "notify_when_idle is only supported for local live sessions".into(),
             ));
         };
-        let from_name = traits::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
-        let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+        let from_name = platform_api::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
+        let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
         dir.append_idle_subscription(
             peer.sid(),
-            &traits::live_sessions::IdleNotificationRequest {
+            &platform_api::live_sessions::IdleNotificationRequest {
                 from: from_name,
                 from_session_id: from_sid,
                 summary: summary.map(str::to_string),
@@ -1051,7 +1051,7 @@ Send a message to another agent.
 | `"main"` | The main conversation (background subagents only) |
 "#,
         );
-        if traits::live_sessions::cross_session_messaging_enabled() {
+        if platform_api::live_sessions::cross_session_messaging_enabled() {
             body.push_str(
                 r#"
 | `"worker"` | Any agent from `ListAgents` — subagent, another local Claude session |
@@ -1381,9 +1381,9 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::mailbox::{MailboxError, RouteAck};
-    use traits::process::ProcessOutput;
-    use traits::task_registry::{
+    use platform_api::mailbox::{MailboxError, RouteAck};
+    use platform_api::process::ProcessOutput;
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
@@ -1678,10 +1678,10 @@ mod tests {
     async fn validate_rejects_sending_to_self() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("111.json"),
@@ -1716,10 +1716,10 @@ mod tests {
     async fn notify_when_idle_sends_immediately_and_subscribes_once() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),
@@ -1761,7 +1761,7 @@ mod tests {
         let delivered = dir.drain_inbox("peer-session").unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(
-            traits::live_sessions::extract_cross_session_inner(&delivered[0].content),
+            platform_api::live_sessions::extract_cross_session_inner(&delivered[0].content),
             "check this when free"
         );
         assert_eq!(delivered[0].summary.as_deref(), Some("later"));
@@ -1777,10 +1777,10 @@ mod tests {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let peer_session_id = "11111111-2222-3333-4444-555555555555";
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),
@@ -1791,7 +1791,7 @@ mod tests {
                 "kind": "interactive",
                 "startedAt": 0,
                 "status": "idle",
-                "messagingSocketPath": traits::uds_inbox::default_socket_path(222).to_string_lossy()
+                "messagingSocketPath": platform_api::uds_inbox::default_socket_path(222).to_string_lossy()
             }))
             .unwrap(),
         )
@@ -1820,7 +1820,7 @@ mod tests {
         let messages = dir.drain_inbox(peer_session_id).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            traits::live_sessions::extract_cross_session_inner(&messages[0].content),
+            platform_api::live_sessions::extract_cross_session_inner(&messages[0].content),
             "hello by stable id"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1831,10 +1831,10 @@ mod tests {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let peer_session_id = "22222222-3333-4444-8555-666666666666";
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        traits::live_sessions::set_process_dir(dir.clone());
-        traits::live_sessions::set_process_session_id("self-session");
-        traits::live_sessions::set_process_name("lead");
+        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        platform_api::live_sessions::set_process_dir(dir.clone());
+        platform_api::live_sessions::set_process_session_id("self-session");
+        platform_api::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),

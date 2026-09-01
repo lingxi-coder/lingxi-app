@@ -143,7 +143,7 @@ impl LspDiagnosticRegistry {
 }
 
 #[async_trait::async_trait]
-impl traits::NewDiagnosticsSource for LspDiagnosticRegistry {
+impl platform_api::NewDiagnosticsSource for LspDiagnosticRegistry {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         LspDiagnosticRegistry::take_new_diagnostics_block(self).await
     }

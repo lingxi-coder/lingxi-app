@@ -39,8 +39,8 @@ use llm_client::{
 };
 use protocol::{HttpRequest, HttpResponse, MediaAnalysis};
 use std::sync::Arc;
-use traits::http::{RawByteStream, SseStream};
-use traits::{HttpError, HttpTransport};
+use platform_api::http::{RawByteStream, SseStream};
+use platform_api::{HttpError, HttpTransport};
 
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -636,7 +636,7 @@ mod tests {
 
     /// Minimal in-process [`HttpTransport`] that returns a single scripted
     /// 200 body. Kept local so the sidequery crate needs no extra
-    /// dev-dependency (mirrors the `OneShot` template in `traits/src/http.rs`).
+    /// dev-dependency (mirrors the `OneShot` template in `platform-api/src/http.rs`).
     struct StubTransport {
         body: String,
         received: Mutex<Vec<HttpRequest>>,

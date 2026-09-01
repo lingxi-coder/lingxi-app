@@ -6,7 +6,7 @@
 
 **Architecture:** Mirror the existing `/connect` shape: pure picker/config reducers in `tui/src/screens`, small synchronous render helpers, and async root pumps for persistence/testing. Add a shared config/resolver layer in `tools/web` so TUI and runtime use the same active-provider + credential/settings resolution.
 
-**Tech Stack:** Rust, iocraft TUI, `tool-api`/`traits::HttpTransport`, `secret::CredentialManager`, existing `~/.lingxi/settings.json` helpers, `cargo test`.
+**Tech Stack:** Rust, iocraft TUI, `tool-api`/`platform_api::HttpTransport`, `secret::CredentialManager`, existing `~/.lingxi/settings.json` helpers, `cargo test`.
 
 ---
 

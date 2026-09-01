@@ -99,14 +99,14 @@ async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cance
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
     let orch = Arc::new(build_orch(api));
-    let handle: Arc<dyn traits::OrchestratorHandle> = orch;
+    let handle: Arc<dyn platform_api::OrchestratorHandle> = orch;
     let cancel = CancellationToken::new();
     cancel.cancel();
     let outcome = handle
         .run_turn_streaming_with_cancel("hi", cancel)
         .await
         .unwrap();
-    assert!(matches!(outcome, traits::TurnOutcome::Cancelled));
+    assert!(matches!(outcome, platform_api::TurnOutcome::Cancelled));
 }
 
 // ============================================================================

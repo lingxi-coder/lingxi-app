@@ -6,8 +6,8 @@ use crate::manifest::{AppLayout, AppRuntimeProfileBinding};
 use crate::types::APPS_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use traits::rooted_fs::{self, AtomicWriteOptions};
-use traits::FsError;
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 
 const JOURNAL_FILE: &str = "runtime-profile-migration.json";
 const MAX_JOURNAL_BYTES: u64 = 64 * 1024;

@@ -52,7 +52,7 @@ This plan ships:
     - `run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError>` (batched).
   - `lingxi-code/crates/orchestrator/src/turn_loop.rs` — `execute_one_turn(&orch)` + `dispatch_tool_uses(&orch, &tool_uses)` + `translate_response_blocks(&content)` + `cost_snapshot_from_session(&s)`. Task 13 of this plan calls `dispatch_tool_uses` from a NEW streaming-tool-dispatch helper (reuses pre-tool hook + permission gate + post-tool hook logic verbatim — the streaming path differs only in WHEN dispatch fires, not HOW).
   - `lingxi-code/crates/orchestrator/src/test_support.rs` — already holds `MockApiClient`, `MockOutputStream`, `NoOpHookExecutor`, `NoOpPermissionGate`. This plan adds `MockStreamingApiClient` and `ScriptedSseStream` next to them. The two mocks coexist (one for batched tests, one for streaming tests).
-  - `lingxi-traits::OutputStream::emit_text(&self, text: &str)` — already async, already takes a borrowed string. **No trait surface change**. M5-02 calls it once per Text block (whole body); M5-04 calls it once per `text_delta` (per-token). The behavioral semantic shift is documented in the doc comment on the trait (M5-02 wrote: *"M5-04 will switch to per-SSE-delta emission without changing this signature."*).
+  - `lingxi-platform_api::OutputStream::emit_text(&self, text: &str)` — already async, already takes a borrowed string. **No trait surface change**. M5-02 calls it once per Text block (whole body); M5-04 calls it once per `text_delta` (per-token). The behavioral semantic shift is documented in the doc comment on the trait (M5-02 wrote: *"M5-04 will switch to per-SSE-delta emission without changing this signature."*).
   - `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — created by M5-02 with the 3 conversation_* events. Task 16 of this plan adds 2 more constants + extends `NAMES`. The submodule grows but stays a single file.
 - Repo conventions:
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code; integration tests live under `crates/orchestrator/tests/<name>_test.rs`.
@@ -474,7 +474,7 @@ Re-run when drift suspected.
       ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
   };
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::path::PathBuf;
   use std::sync::Arc;
 
@@ -1164,7 +1164,7 @@ Re-run when drift suspected.
   use super::StreamingError;
   use lingxi_api_client::types::{ContentBlockApi, ContentDelta, StreamEvent};
   use lingxi_protocol::{ContentBlock, ToolUseId};
-  use lingxi_traits::OutputStream;
+  use lingxi_platform_api::OutputStream;
   use std::sync::Arc;
 
   /// Result of routing one `StreamEvent`. The streaming loop acts on each.
@@ -1425,7 +1425,7 @@ Re-run when drift suspected.
   use futures::stream::{BoxStream, StreamExt};
   use lingxi_api_client::{types::StreamEvent, ApiError};
   use lingxi_protocol::{ContentBlock, ToolUseId};
-  use lingxi_traits::OutputStream;
+  use lingxi_platform_api::OutputStream;
   use serde_json::Value;
   use std::sync::Arc;
 
@@ -1638,7 +1638,7 @@ Re-run when drift suspected.
       ConversationOrchestrator, OrchestratorConfig,
   };
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::path::PathBuf;
   use std::sync::Arc;
 
@@ -1785,7 +1785,7 @@ Re-run when drift suspected.
   }
   ```
 
-  **Note on `HttpTransport::stream_sse`:** confirm at Task 11 step 1.5 whether the transport already has a `stream_sse` method (M3-03 may have shipped it). Run `grep -rn "fn stream_sse\|fn sse_stream" lingxi-code/crates/traits/src/http.rs lingxi-code/crates/api-client/src/` — if the method exists with a different name (e.g. `sse_stream`), update the call. If no SSE streaming method exists yet, you must extend `HttpTransport` first (and likely M3-03 should have done so). In that case, add a minimal `stream_sse` to `lingxi-traits::HttpTransport`:
+  **Note on `HttpTransport::stream_sse`:** confirm at Task 11 step 1.5 whether the transport already has a `stream_sse` method (M3-03 may have shipped it). Run `grep -rn "fn stream_sse\|fn sse_stream" lingxi-code/crates/platform-api/src/http.rs lingxi-code/crates/api-client/src/` — if the method exists with a different name (e.g. `sse_stream`), update the call. If no SSE streaming method exists yet, you must extend `HttpTransport` first (and likely M3-03 should have done so). In that case, add a minimal `stream_sse` to `lingxi-platform_api::HttpTransport`:
   ```rust
   async fn stream_sse(
       &self,
@@ -1793,8 +1793,8 @@ Re-run when drift suspected.
       body: &serde_json::Value,
       headers: &[(String, String)],
   ) -> Result<
-      futures::stream::BoxStream<'static, Result<lingxi_protocol::SseEvent, lingxi_traits::HttpError>>,
-      lingxi_traits::HttpError,
+      futures::stream::BoxStream<'static, Result<lingxi_protocol::SseEvent, lingxi_platform_api::HttpError>>,
+      lingxi_platform_api::HttpError,
   >;
   ```
   with a default impl that returns `Err(HttpError::Unsupported)` so existing impls don't break, then implement the real transport variant in `lingxi-bridge` (or wherever the production transport lives). Document the deviation in the commit message.
@@ -2316,7 +2316,7 @@ Re-run when drift suspected.
   use lingxi_orchestrator::test_support_stream::scripted;
   use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::path::PathBuf;
   use std::sync::Arc;
 
@@ -2445,7 +2445,7 @@ Re-run when drift suspected.
   use lingxi_orchestrator::test_support_stream::scripted;
   use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::path::PathBuf;
   use std::sync::Arc;
 
@@ -2505,7 +2505,7 @@ Re-run when drift suspected.
   use lingxi_orchestrator::test_support_stream::scripted;
   use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
   use lingxi_tools::registry::ToolRegistry;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use std::path::PathBuf;
   use std::sync::Arc;
 

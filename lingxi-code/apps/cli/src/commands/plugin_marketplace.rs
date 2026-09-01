@@ -164,11 +164,11 @@ fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), St
         .map_err(|e| format!("Failed to serialize registry: {e}"))?;
     std::fs::create_dir_all(plugins_dir)
         .map_err(|e| format!("Failed to create {}: {e}", plugins_dir.display()))?;
-    traits::rooted_fs::atomic_write(
+    platform_api::rooted_fs::atomic_write(
         plugins_dir,
         Path::new("known_marketplaces.json"),
         serialized.as_bytes(),
-        traits::AtomicWriteOptions::default(),
+        platform_api::AtomicWriteOptions::default(),
     )
     .map_err(|e| {
         format!(
@@ -1120,7 +1120,7 @@ fn write_marketplace_unlocked(
 ) -> Result<String, String> {
     let settings_path = target.path(home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
-    let previous_registry = traits::rooted_fs::read_to_string_limited(
+    let previous_registry = platform_api::rooted_fs::read_to_string_limited(
         plugins_dir,
         Path::new("known_marketplaces.json"),
         16 * 1024 * 1024,
@@ -1169,14 +1169,14 @@ fn write_marketplace_unlocked(
     ))
 }
 
-fn lock_marketplace_state(plugins_dir: &Path) -> Result<traits::RootedFileLock, String> {
+fn lock_marketplace_state(plugins_dir: &Path) -> Result<platform_api::RootedFileLock, String> {
     std::fs::create_dir_all(plugins_dir)
         .map_err(|error| format!("Failed to create plugin state root: {error}"))?;
-    traits::rooted_fs::lock_exclusive(
+    platform_api::rooted_fs::lock_exclusive(
         plugins_dir,
         Path::new(".marketplace.lock"),
-        traits::rooted_fs::PRIVATE_DIR_MODE,
-        traits::rooted_fs::PRIVATE_FILE_MODE,
+        platform_api::rooted_fs::PRIVATE_DIR_MODE,
+        platform_api::rooted_fs::PRIVATE_FILE_MODE,
     )
     .map_err(|error| format!("Failed to lock marketplace state: {error}"))
 }
@@ -1197,13 +1197,13 @@ fn restore_snapshot(path: &Path, snapshot: Option<&[u8]>) {
 
 fn restore_registry_snapshot(plugins_dir: &Path, snapshot: Option<&[u8]>) {
     let result = match snapshot {
-        Some(bytes) => traits::rooted_fs::atomic_write(
+        Some(bytes) => platform_api::rooted_fs::atomic_write(
             plugins_dir,
             Path::new("known_marketplaces.json"),
             bytes,
-            traits::AtomicWriteOptions::default(),
+            platform_api::AtomicWriteOptions::default(),
         ),
-        None => traits::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json")),
+        None => platform_api::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json")),
     };
     if let Err(error) = result {
         tracing::warn!(%error, "failed to restore marketplace registry");

@@ -40,8 +40,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex, Semaphore};
 use tokio::time::{sleep, timeout, Duration};
-use traits::mobile_linux::guest_paths;
-use traits::{
+use platform_api::mobile_linux::guest_paths;
+use platform_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
 
@@ -787,7 +787,7 @@ pub(crate) struct SessionCatalog {
     /// The engine's per-profile data dir — `projects/` hangs off it.
     pub(crate) lingxi_home: std::path::PathBuf,
     /// The filesystem transcripts are read and appended through.
-    pub(crate) fs: Arc<dyn traits::FileSystem>,
+    pub(crate) fs: Arc<dyn platform_api::FileSystem>,
 }
 
 /// The latest effective `custom-title` for `session_id` in a transcript: the
@@ -934,7 +934,7 @@ pub(crate) fn latest_custom_title_is_mobile_placeholder(
 pub(crate) async fn reconcile_app_init_session_title(
     lingxi_home: &std::path::Path,
     data_root: &std::path::Path,
-    fs: Arc<dyn traits::FileSystem>,
+    fs: Arc<dyn platform_api::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<bool, String> {
     // Clause 1. Today no production state can reach this with a name that
@@ -1046,7 +1046,7 @@ pub(crate) struct LocalAppsHostBroker {
     /// supply one: the reminder is all it sees, and the reminder's device
     /// vocabulary (`phone`/`tablet`) does not name an iOS form factor.
     /// Unattached — desktop embedders and host tests — means no context.
-    host_environment: OnceLock<traits::MobileHostEnvironment>,
+    host_environment: OnceLock<platform_api::MobileHostEnvironment>,
     /// Host-owned app Agent execution seam, attached by the mobile composition
     /// root after the app service and MCP host are ready.
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
@@ -1484,8 +1484,8 @@ impl LocalAppsHostBroker {
     /// call site as [`Self::attach_agent_executor`].
     pub(crate) fn attach_host_environment(
         &self,
-        environment: traits::MobileHostEnvironment,
-    ) -> Result<(), traits::MobileHostEnvironment> {
+        environment: platform_api::MobileHostEnvironment,
+    ) -> Result<(), platform_api::MobileHostEnvironment> {
         self.host_environment.set(environment)
     }
 
@@ -1596,11 +1596,11 @@ impl LocalAppsHostBroker {
         let mut body = serde_json::to_vec_pretty(candidate)
             .map_err(|error| format!("serialize MCP candidate: {error}"))?;
         body.push(b'\n');
-        traits::rooted_fs::atomic_write(
+        platform_api::rooted_fs::atomic_write(
             &self.root,
             &path,
             &body,
-            traits::rooted_fs::AtomicWriteOptions::default(),
+            platform_api::rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
     }
@@ -1612,7 +1612,7 @@ impl LocalAppsHostBroker {
     ) -> Result<PersistedMcpCandidate, String> {
         let path =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        let body = traits::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
+        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
             .map_err(|error| {
                 local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
             })?;
@@ -1626,9 +1626,9 @@ impl LocalAppsHostBroker {
         let rel = layout
             .workspace_rel()
             .join(".lingxi/mcp-flow-contexts.json");
-        let body = traits::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
             .map_err(|error| match error {
-                traits::FsError::NotFound(_) => {
+                platform_api::FsError::NotFound(_) => {
                     "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
                 }
                 other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
@@ -1755,7 +1755,7 @@ impl LocalAppsHostBroker {
             .join(app_id)
             .join(workflow_run_id)
             .join("validated-selection.json");
-        let body = traits::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
             .map_err(|error| format!("validated_selection_missing: {error}"))?;
         let value: Value = serde_json::from_str(&body)
             .map_err(|error| format!("validated_selection_invalid: {error}"))?;
@@ -6128,8 +6128,8 @@ impl LocalAppsHostBroker {
         create_seed: Option<CreateScaffoldSeed>,
     ) -> Result<
         (
-            traits::rooted_fs::RootedFileLock,
-            traits::rooted_fs::RootedFileLock,
+            platform_api::rooted_fs::RootedFileLock,
+            platform_api::rooted_fs::RootedFileLock,
             local_apps::storage::ScaffoldRecoveryHandle,
         ),
         String,
@@ -6172,8 +6172,8 @@ impl LocalAppsHostBroker {
             move ||
                 -> Result<
                     (
-                        traits::rooted_fs::RootedFileLock,
-                        traits::rooted_fs::RootedFileLock,
+                        platform_api::rooted_fs::RootedFileLock,
+                        platform_api::rooted_fs::RootedFileLock,
                         local_apps::storage::ScaffoldRecoveryHandle,
                     ),
                     String,
@@ -6922,10 +6922,10 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         tool_input: Value,
-        definition: &traits::McpToolDefinitionDto,
+        definition: &platform_api::McpToolDefinitionDto,
         binding: &local_apps::AppMcpFlowBinding,
         context: &local_apps::AppMcpFlowContext,
-        catalog_ceiling: traits::McpPermissionCeiling,
+        catalog_ceiling: platform_api::McpPermissionCeiling,
         mode: BoundMcpFlowMode,
     ) -> Result<BoundMcpExecution, String> {
         let input_bytes = serde_json::to_vec(&tool_input)
@@ -6962,8 +6962,8 @@ impl LocalAppsHostBroker {
                     .into(),
             );
         }
-        if matches!(derived_ceiling, traits::McpPermissionCeiling::Deny)
-            || matches!(catalog_ceiling, traits::McpPermissionCeiling::Deny)
+        if matches!(derived_ceiling, platform_api::McpPermissionCeiling::Deny)
+            || matches!(catalog_ceiling, platform_api::McpPermissionCeiling::Deny)
         {
             return Err("permission_ceiling: Host denied this MCP Flow".into());
         }
@@ -7204,7 +7204,7 @@ impl LocalAppsHostBroker {
                 "unknown_tool: Local App tool is not in the active catalog".to_string()
             })?;
         let definition_value = entry.get("definition").unwrap_or(entry);
-        let definition: traits::McpToolDefinitionDto =
+        let definition: platform_api::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let binding_value = entry.get("flow").cloned().ok_or_else(|| {
@@ -7251,7 +7251,7 @@ impl LocalAppsHostBroker {
         let catalog_ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(traits::McpPermissionCeiling::from_policy_str)
+            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "permission_ceiling: active tool ceiling is invalid".to_string())?;
         Ok(self
             .execute_bound_mcp_flow(
@@ -9326,9 +9326,9 @@ fn optional_json_string<T: Serialize>(value: Option<&T>) -> Result<Option<String
 }
 
 fn mcp_tool_surface(
-    definition: traits::McpToolDefinitionDto,
+    definition: platform_api::McpToolDefinitionDto,
     flow: Value,
-    ceiling: traits::McpPermissionCeiling,
+    ceiling: platform_api::McpPermissionCeiling,
 ) -> Result<LocalAppMcpToolSurfaceDto, String> {
     Ok(LocalAppMcpToolSurfaceDto {
         name: definition.name,
@@ -9342,9 +9342,9 @@ fn mcp_tool_surface(
         visible_meta_json: optional_json_string(definition.meta.as_ref())?,
         semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
         permission_ceiling: match ceiling {
-            traits::McpPermissionCeiling::Allow => "allow",
-            traits::McpPermissionCeiling::Ask => "ask",
-            traits::McpPermissionCeiling::Deny => "deny",
+            platform_api::McpPermissionCeiling::Allow => "allow",
+            platform_api::McpPermissionCeiling::Ask => "ask",
+            platform_api::McpPermissionCeiling::Deny => "deny",
         }
         .into(),
     })
@@ -9359,7 +9359,7 @@ fn mcp_tool_surfaces_from_catalog(
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     let mut tools = Vec::with_capacity(entries.len());
     for entry in entries {
-        let definition: traits::McpToolDefinitionDto =
+        let definition: platform_api::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let flow = entry
@@ -9369,7 +9369,7 @@ fn mcp_tool_surfaces_from_catalog(
         let ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(traits::McpPermissionCeiling::from_policy_str)
+            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "catalog_invalid: active tool ceiling is invalid".to_string())?;
         tools.push(mcp_tool_surface(definition, flow, ceiling)?);
     }
@@ -10954,7 +10954,7 @@ mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tempfile::TempDir;
-    use traits::{
+    use platform_api::{
         LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
         NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
@@ -11138,7 +11138,7 @@ mod tests {
         async fn run(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<traits::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
             Self::enforce_network_policy(&request)?;
             Err(MobileLinuxError::Unsupported)
         }
@@ -11146,7 +11146,7 @@ mod tests {
         async fn run_isolated(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<traits::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
             *self.last_request.lock().await = Some(request.clone());
             self.isolated_requests.lock().await.push(request.clone());
             let build_mount = request.mounts.first().ok_or_else(|| {
@@ -11182,13 +11182,13 @@ mod tests {
                 && request.args.iter().any(|arg| arg == "--frozen-lockfile")
                 && self.fail_frozen_install.load(Ordering::SeqCst)
             {
-                return Ok(traits::LinuxCommandResult {
+                return Ok(platform_api::LinuxCommandResult {
                     stdout: String::new(),
                     stderr: "synthetic frozen install failure".into(),
                     exit_code: 1,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: traits::LinuxEnforcementReceipt {
+                    enforcement: platform_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -11197,13 +11197,13 @@ mod tests {
             if request.command == "/usr/bin/pnpm"
                 && request.args.iter().any(|arg| arg == "--lockfile-only")
             {
-                return Ok(traits::LinuxCommandResult {
+                return Ok(platform_api::LinuxCommandResult {
                     stdout: "lockfile resolved".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: traits::LinuxEnforcementReceipt {
+                    enforcement: platform_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -11211,13 +11211,13 @@ mod tests {
             }
             if request.command == "/usr/bin/node" {
                 if self.fail_build.load(Ordering::SeqCst) {
-                    return Ok(traits::LinuxCommandResult {
+                    return Ok(platform_api::LinuxCommandResult {
                         stdout: String::new(),
                         stderr: "synthetic build failure".into(),
                         exit_code: 1,
                         timed_out: false,
                         cancelled: false,
-                        enforcement: traits::LinuxEnforcementReceipt {
+                        enforcement: platform_api::LinuxEnforcementReceipt {
                             network_policy_enforced: self
                                 .enforcement_receipt
                                 .load(Ordering::SeqCst),
@@ -11243,13 +11243,13 @@ mod tests {
                 .map_err(|error| {
                     MobileLinuxError::Io(format!("write fake build output: {error}"))
                 })?;
-                return Ok(traits::LinuxCommandResult {
+                return Ok(platform_api::LinuxCommandResult {
                     stdout: "built".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: traits::LinuxEnforcementReceipt {
+                    enforcement: platform_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -11289,13 +11289,13 @@ mod tests {
                 react_manifest,
             )
             .map_err(|error| MobileLinuxError::Io(format!("write fake react manifest: {error}")))?;
-            Ok(traits::LinuxCommandResult {
+            Ok(platform_api::LinuxCommandResult {
                 stdout: "ok".into(),
                 stderr: String::new(),
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-                enforcement: traits::LinuxEnforcementReceipt {
+                enforcement: platform_api::LinuxEnforcementReceipt {
                     network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                 },
@@ -11769,7 +11769,7 @@ mod tests {
         )
         .expect("write flow contexts");
 
-        let mut definition = traits::McpToolDefinitionDto::new("runtime_status", input_schema);
+        let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.output_schema = Some(output_schema);
         let binding = json!({
             "flowId": "runtime-status-flow",
@@ -12081,8 +12081,8 @@ mod tests {
         let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
         assert!(broker
             .attach_host_environment(host_environment(
-                traits::MobileHostOs::Ios,
-                traits::MobileDeviceClass::Tablet,
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let record = service
@@ -12520,7 +12520,7 @@ mod tests {
             "additionalProperties": false,
         });
         let output_schema = runtime_record_output_schema();
-        let mut definition = traits::McpToolDefinitionDto::new("runtime_status", input_schema);
+        let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.title = Some("Runtime status".into());
         definition.description =
             Some("Read the current runtime status from the staged flow.".into());
@@ -12543,7 +12543,7 @@ mod tests {
             tools: vec![local_apps::HostValidatedMcpTool {
                 definition: definition.clone(),
                 flow,
-                ceiling: traits::McpPermissionCeiling::Allow,
+                ceiling: platform_api::McpPermissionCeiling::Allow,
             }],
             proposal_sha256: local_apps::approval_contract_sha256(
                 serde_json::to_value(&proposal).expect("serialize proposal"),
@@ -16977,15 +16977,15 @@ mod tests {
 
     /// Build the host facts a native client reports for one device.
     fn host_environment(
-        host_os: traits::MobileHostOs,
-        device_class: traits::MobileDeviceClass,
-    ) -> traits::MobileHostEnvironment {
-        traits::MobileHostEnvironment::new(
+        host_os: platform_api::MobileHostOs,
+        device_class: platform_api::MobileDeviceClass,
+    ) -> platform_api::MobileHostEnvironment {
+        platform_api::MobileHostEnvironment::new(
             host_os,
             Some("19.0".into()),
             device_class,
-            traits::MobileExecutionTarget::PhysicalDevice,
-            traits::MobileLaunchMode::Interactive,
+            platform_api::MobileExecutionTarget::PhysicalDevice,
+            platform_api::MobileLaunchMode::Interactive,
         )
     }
 
@@ -17009,8 +17009,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                traits::MobileHostOs::Ios,
-                traits::MobileDeviceClass::Phone,
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Phone,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Device").await;
@@ -17047,8 +17047,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                traits::MobileHostOs::Android,
-                traits::MobileDeviceClass::Tablet,
+                platform_api::MobileHostOs::Android,
+                platform_api::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Tablet").await;
@@ -17078,8 +17078,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                traits::MobileHostOs::Ios,
-                traits::MobileDeviceClass::Unknown,
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Unknown,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Unclassified").await;
@@ -17108,8 +17108,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                traits::MobileHostOs::Ios,
-                traits::MobileDeviceClass::Tablet,
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Ignored").await;
@@ -17482,7 +17482,7 @@ mod tests {
         service: Arc<AppService>,
         broker: Arc<LocalAppsHostBroker>,
         lingxi_home: PathBuf,
-        fs: Arc<dyn traits::FileSystem>,
+        fs: Arc<dyn platform_api::FileSystem>,
         app_id: String,
         init_session_id: String,
         /// Captured at creation so the transcript path is derived exactly the
@@ -17606,7 +17606,7 @@ mod tests {
         let root = TempDir::new().expect("tempdir");
         let lingxi_home = root.path().join(".lingxi");
         fs::create_dir_all(&lingxi_home).expect("create lingxi home");
-        let fs_impl: Arc<dyn traits::FileSystem> = Arc::new(
+        let fs_impl: Arc<dyn platform_api::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
         );
         let service = test_service(&root).await;

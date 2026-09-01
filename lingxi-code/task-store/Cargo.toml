@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 branding.workspace = true
-engine = { path = "../engine" }
+core = { path = "../core" }
 once_cell = "1"
 serde.workspace = true
 serde_json.workspace = true

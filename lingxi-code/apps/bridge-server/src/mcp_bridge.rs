@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "linear");
         match &cfgs[0].spec {
-            traits::McpTransportSpec::Stdio { command, args, .. } => {
+            platform_api::McpTransportSpec::Stdio { command, args, .. } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args, &vec!["-y".to_string(), "linear-mcp".to_string()]);
             }

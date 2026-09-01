@@ -23,7 +23,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// The `Otf` guidance text (binary 2.1.198, verbatim except the two branded
 /// `agents/` paths — `.claude` → [`branding::DOT_DIR`]). The `\u{2022}`

@@ -43,7 +43,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-tools = { path = "../tools" }
 lingxi-agent = { path = "../agent" }
 lingxi-sidequery = { path = "../sidequery" }
@@ -315,7 +315,7 @@ pub struct SkillDiscoveryPrefetch;
 ```rust
 // mcp_builders.rs — derive skills from MCP server tool descriptions
 use crate::model::{Skill, SkillFrontmatter, SkillSource, LoadedFrom};
-use lingxi_traits::McpToolDto;
+use lingxi_platform_api::McpToolDto;
 
 pub fn skill_from_mcp_tool(tool: &McpToolDto) -> Skill {
     Skill {
@@ -379,7 +379,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-tools = { path = "../tools" }
 serde.workspace = true

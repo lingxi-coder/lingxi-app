@@ -2,7 +2,7 @@
 //!
 //! The LIVE pins moved to `parity_claude_2_1_251.rs` when the parity target
 //! advanced to 2.1.251 (the mcp/plugin byte-alignment backlog). This file no
-//! longer asserts against `traits::CLAUDE_CODE_VERSION` — pinning a live
+//! longer asserts against `platform_api::CLAUDE_CODE_VERSION` — pinning a live
 //! constant to a superseded version is how a suite starts failing for being
 //! CORRECT, the same demotion 2.1.217 and 2.1.220 already took.
 //!
@@ -12,7 +12,7 @@
 
 #[test]
 fn version_facing_identifiers_share_one_source() {
-    let version = traits::CLAUDE_CODE_VERSION;
+    let version = platform_api::CLAUDE_CODE_VERSION;
     assert!(format!("claude-code_{}_agent", version.replace('.', "-"))
         .contains(&version.replace('.', "-")));
     assert!(

@@ -21,7 +21,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, 
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use traits::mcp::McpError;
+use platform_api::mcp::McpError;
 
 /// Literal `Accept` header value for Streamable HTTP. Matches claude-code's
 /// `MCP_STREAMABLE_HTTP_ACCEPT` const (`client.ts:471`) byte-for-byte.
@@ -112,7 +112,7 @@ where
 /// `jsonrpc::Connection`.
 ///
 /// `extra_headers` is generic over the map type so both an unordered `HashMap`
-/// and the insertion-ordered [`traits::McpHeaders`] (`IndexMap`) the MCP
+/// and the insertion-ordered [`platform_api::McpHeaders`] (`IndexMap`) the MCP
 /// transport specs now carry are accepted (header order is irrelevant to the
 /// emitted HTTP request).
 ///

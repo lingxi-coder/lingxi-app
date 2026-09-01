@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures_core::stream::Stream;
 use futures_util::stream::empty;
 use std::pin::Pin;
-use traits::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
+use platform_api::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 
 /// Stub bridge transport — every method returns `BridgeError::Unsupported`
 /// except `disconnect`, which is idempotent.

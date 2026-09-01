@@ -19,16 +19,16 @@ crates/lsp/
 ├── Cargo.toml
 └── src/{lib, config, connection, registry, transport, tool, action}.rs
 
-crates/traits/src/sandbox.rs ← NEW: Sandbox trait + SandboxedCommand newtype
-crates/traits/src/lsp.rs     ← NEW: LspTransport trait + DTOs
-crates/traits/src/process.rs ← MODIFY: ProcessRunner.run accepts only SandboxedCommand
+crates/platform-api/src/sandbox.rs ← NEW: Sandbox trait + SandboxedCommand newtype
+crates/platform-api/src/lsp.rs     ← NEW: LspTransport trait + DTOs
+crates/platform-api/src/process.rs ← MODIFY: ProcessRunner.run accepts only SandboxedCommand
 ```
 
 ---
 
 ## Task 1: SandboxedCommand newtype + Sandbox trait (A1)
 
-**Files:** `crates/traits/src/{sandbox,process}.rs`
+**Files:** `crates/platform-api/src/{sandbox,process}.rs`
 
 ```rust
 // sandbox.rs
@@ -199,7 +199,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-permission = { path = "../permission" }
 serde.workspace = true
 thiserror.workspace = true
@@ -212,7 +212,7 @@ workspace = true
 
 ```rust
 // policy.rs
-pub use lingxi_traits::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+pub use lingxi_platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
 
 /// Conservative default: no network, project-writable only, subprocess allowed.
 pub fn default_policy(workspace: std::path::PathBuf) -> SandboxPolicy {
@@ -234,7 +234,7 @@ pub fn default_policy(workspace: std::path::PathBuf) -> SandboxPolicy {
 ```rust
 // decision.rs
 use lingxi_permission::PermissionMode;
-use lingxi_traits::SandboxPolicy;
+use lingxi_platform_api::SandboxPolicy;
 
 #[derive(Debug, Clone)]
 pub enum SandboxDecision {
@@ -285,17 +285,17 @@ pub mod policy;
 
 pub use decision::{should_use_sandbox, ProjectTrustLevel, SandboxDecision};
 pub use policy::default_policy;
-pub use lingxi_traits::{
+pub use lingxi_platform_api::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 ```
 
 ```rust
 // canonicalize check helper — used by platform impls (A2)
-pub fn canonicalize_safely(path: &std::path::Path, workspace: &std::path::Path) -> Result<std::path::PathBuf, lingxi_traits::SandboxError> {
-    let canon = path.canonicalize().map_err(|e| lingxi_traits::SandboxError::PathCanonicalize(e.to_string()))?;
+pub fn canonicalize_safely(path: &std::path::Path, workspace: &std::path::Path) -> Result<std::path::PathBuf, lingxi_platform_api::SandboxError> {
+    let canon = path.canonicalize().map_err(|e| lingxi_platform_api::SandboxError::PathCanonicalize(e.to_string()))?;
     if !canon.starts_with(workspace) {
-        return Err(lingxi_traits::SandboxError::SymlinkEscape(path.display().to_string()));
+        return Err(lingxi_platform_api::SandboxError::SymlinkEscape(path.display().to_string()));
     }
     Ok(canon)
 }
@@ -312,7 +312,7 @@ git commit -m "feat(sandbox): policy + should_use_sandbox decision + symlink esc
 
 ## Task 3: LspTransport trait + DTOs
 
-**Files:** `crates/traits/src/lsp.rs`
+**Files:** `crates/platform-api/src/lsp.rs`
 
 ```rust
 use async_trait::async_trait;
@@ -389,7 +389,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-tools = { path = "../tools" }
 lingxi-permission = { path = "../permission" }
 serde.workspace = true
@@ -406,7 +406,7 @@ workspace = true
 ```rust
 // connection.rs
 use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{LspServerCapabilities, LspServerConfig};
+use lingxi_platform_api::{LspServerCapabilities, LspServerConfig};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
@@ -449,7 +449,7 @@ pub struct LspResponse(pub serde_json::Value);
 // registry.rs
 use crate::connection::LspConnectionState;
 use lingxi_protocol::{McpConnectionId, PluginId};
-use lingxi_traits::{LspError, LspServerConfig, LspTransport};
+use lingxi_platform_api::{LspError, LspServerConfig, LspTransport};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

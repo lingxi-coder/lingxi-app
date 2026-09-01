@@ -12,7 +12,7 @@
 //!   `InProcessTeammateHandler` (the T13 escape-hatch registration that attaches
 //!   the status sink), whose `TaskRegistry::spawn(..)` (T01) is the real handler
 //!   dispatch the hollow `create()` never performed,
-//! * `TaskRegistry as traits::team_spawn::TeamSpawnSeam` (T04),
+//! * `TaskRegistry as platform_api::team_spawn::TeamSpawnSeam` (T04),
 //! * the coordinator `TeamCreate` tool from
 //!   `coordinator::internal_tools::coordinator_internal_tools(..)` (T03/T05) —
 //!   the exact factory `desktop_tool_registry` assembles in coordinator mode,
@@ -54,9 +54,9 @@ use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
 use tasks::TaskType;
-use traits::filesystem::FileSystem;
-use traits::team_spawn::TeamSpawnSeam;
-use traits::{OutputStream, RuntimeSpawner};
+use platform_api::filesystem::FileSystem;
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 
 // ---------------------------------------------------------------------------
 // Scripted SubagentApiClient — one round-trip per `messages_create`, returning
@@ -450,7 +450,7 @@ async fn anti_hollow_create_path_emits_nothing() {
 // ---------------------------------------------------------------------------
 
 fn stub_ctx() -> tool_api::BuiltinToolContext {
-    tool_api::test_support::shell_test_ctx(traits::process::ProcessOutput {
+    tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 0,

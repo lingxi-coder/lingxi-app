@@ -93,7 +93,7 @@ The real `BypassEnv` impl uses `libc::geteuid()` (libc already a workspace dep o
 ## Component 3: CLI flags + wiring (`argv.rs`, `lib.rs`)
 
 - `argv.rs`: add `pub dangerously_skip_permissions: bool` and `pub permission_mode: Option<String>` with the long flags `--dangerously-skip-permissions` (bool) and `--permission-mode <mode>` (value). Parse in the existing argv loop following the established pattern; document the security posture on the field.
-- `run_cli` pre-REPL (the migrations / deprecation-notice point): read the merged settings (the same `engine::settings::Settings::load` seam the CLI already uses for output-style) to build `CliModeSettings { default_mode, bypass_disabled }`; call `initial_permission_mode_from_cli`; then `enforce_bypass_safety(&RealBypassEnv).await` → on `Err(msg)` print to stderr and exit 1 (`exit_codes`); on success, if `notice` is `Some`, `eprintln!` it (same channel as the deprecation/migration notices); thread the resolved `mode` into `DesktopConfig.permission_mode`.
+- `run_cli` pre-REPL (the migrations / deprecation-notice point): read the merged settings (the same `lingxi_core::settings::Settings::load` seam the CLI already uses for output-style) to build `CliModeSettings { default_mode, bypass_disabled }`; call `initial_permission_mode_from_cli`; then `enforce_bypass_safety(&RealBypassEnv).await` → on `Err(msg)` print to stderr and exit 1 (`exit_codes`); on success, if `notice` is `Some`, `eprintln!` it (same channel as the deprecation/migration notices); thread the resolved `mode` into `DesktopConfig.permission_mode`.
 
 ## Component 4: mode threading + execution semantics (engine-desktop)
 
@@ -135,7 +135,7 @@ Print / non-TTY paths show no dialog (TS gates it inside `interactiveHelpers`, T
 - `argv.rs`: both flags parse; `--permission-mode plan` captured.
 - engine-desktop: `DesktopConfig.permission_mode` reaches `BuiltinToolContext`; under enforcement, a `BypassPermissions` cfg feeds the policy (allow-all unless killswitch) — assert via the existing policy test seam.
 - TUI `startup_bypass.rs`: `handle_key` accept/decline outcomes; render-string exact-match; gate predicate (skipDangerous already set → dialog skipped).
-- Gates: `cargo test -p permission -p cli -p engine -p tui` (touched areas) + the telemetry count-sweep RUN set (telemetry/orchestrator-diagnostics/tui vim+behavior_palette/test-harness parity_tengu_events) for the +1 event; `clippy -D warnings` on touched crates; `cargo test --workspace --no-run` struct-trap; both engines build; `cargo tree -p engine-mobile | grep -c` for the new code = 0; `git diff main -- traits protocol` empty.
+- Gates: `cargo test -p permission -p cli -p core -p tui` (touched areas) + the telemetry count-sweep RUN set (telemetry/orchestrator-diagnostics/tui vim+behavior_palette/test-harness parity_tengu_events) for the +1 event; `clippy -D warnings` on touched crates; `cargo test --workspace --no-run` struct-trap; both engines build; `cargo tree -p engine-mobile | grep -c` for the new code = 0; `git diff main -- traits protocol` empty.
 
 ## Out of scope (documented follow-ups)
 

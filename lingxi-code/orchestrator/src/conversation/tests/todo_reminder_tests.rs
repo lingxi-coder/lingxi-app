@@ -4,7 +4,7 @@ use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use engine::{TodoItem, TodoState};
+use lingxi_core::{TodoItem, TodoState};
 use std::sync::Arc;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;

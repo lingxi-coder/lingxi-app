@@ -16,7 +16,7 @@
 - `LlmRequest` (`llm-client/src/protocol.rs:28`): `#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]`, first field `pub model: String`. `LlmRequest::new(model)` at :63.
 - `ModelRegistry::resolve` (`llm-client/src/registry.rs:83`): matches `requested` vs each model's `display_model`/`request_model`/`aliases` across all providers; `[]`→`ModelUnavailable`, `[one]`→route, `multiple`→`InvalidRequest "ambiguous across profiles: …"`.
 - `DefaultLlmClient::prepare_at` (`llm-client/src/client.rs`): calls `self.registry.resolve(&request.model)` (then `validate_capabilities`, `encode_request`, `authenticate_at`).
-- `OrchestratorHandle::switch_model(&self, model: &str)` (`traits/src/orchestrator.rs:303`); test mock at `:1036`.
+- `OrchestratorHandle::switch_model(&self, model: &str)` (`platform-api/src/orchestrator.rs:303`); test mock at `:1036`.
 - `OrchestratorApiClient` request methods (impls in `orchestrator/src/provider_adapter.rs`): `messages_create` (:1322), `count_tokens` (:1340), `messages_create_with_opts` (:1356), `messages_create_with_fallback`; all take `model: &str`. Private `build_request(model, system, msgs, tools, stream, max_tokens)` at :389 builds the `LlmRequest`.
 - `handle_impl::switch_model` (`orchestrator/src/handle_impl.rs:98`): `let mut s = self.session.lock().await; s.model = model.to_string();`
 - `SessionState.model: String` (`orchestrator/src/config.rs:37`).
@@ -251,9 +251,9 @@ async fn prepare_routes_shared_id_by_profile() {
 
 ## Task 4: `switch_model` carries the profile (traits + orchestrator state)
 
-**Files:** Modify `traits/src/orchestrator.rs`, `orchestrator/src/config.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`.
+**Files:** Modify `platform-api/src/orchestrator.rs`, `orchestrator/src/config.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`.
 
-- [ ] **Step 1: Change the trait signature.** In `traits/src/orchestrator.rs:303`:
+- [ ] **Step 1: Change the trait signature.** In `platform-api/src/orchestrator.rs:303`:
 
 ```rust
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
@@ -288,16 +288,16 @@ Update any `SessionState { … }` literal constructors in the crate to include `
 
 - [ ] **Step 4: Update the `test_support.rs` mock** (`orchestrator/src/test_support.rs:792`): add the `profile: Option<&str>` param (store it if the mock tracks model, else ignore with `_`). Match the real impl's behavior the mock emulates.
 
-- [ ] **Step 5: Build the crates** (compile errors reveal remaining callers): `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p traits -p orchestrator 2>&1 | tail -15`. Fix any `switch_model(` call site the compiler flags (there should be none outside tui yet; tui is Task 6).
-- [ ] **Step 6: Commit:** `git add traits/src/orchestrator.rs orchestrator/src/config.rs orchestrator/src/handle_impl.rs orchestrator/src/test_support.rs && git commit -m "feat(orchestrator): switch_model carries provider profile into SessionState"`
+- [ ] **Step 5: Build the crates** (compile errors reveal remaining callers): `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p platform-api -p orchestrator 2>&1 | tail -15`. Fix any `switch_model(` call site the compiler flags (there should be none outside tui yet; tui is Task 6).
+- [ ] **Step 6: Commit:** `git add platform-api/src/orchestrator.rs orchestrator/src/config.rs orchestrator/src/handle_impl.rs orchestrator/src/test_support.rs && git commit -m "feat(orchestrator): switch_model carries provider profile into SessionState"`
 
 ---
 
 ## Task 5: thread the profile through the turn loop → request
 
-**Files:** Modify `traits/src/orchestrator.rs` (`OrchestratorApiClient` sigs), `orchestrator/src/provider_adapter.rs`, `orchestrator/src/turn_loop.rs`, `orchestrator/src/test_support.rs` + `test_support_stream.rs` (mocks).
+**Files:** Modify `platform-api/src/orchestrator.rs` (`OrchestratorApiClient` sigs), `orchestrator/src/provider_adapter.rs`, `orchestrator/src/turn_loop.rs`, `orchestrator/src/test_support.rs` + `test_support_stream.rs` (mocks).
 
-- [ ] **Step 1: Add `profile: Option<&str>` to the `OrchestratorApiClient` request methods.** In the trait def (in `traits/src/orchestrator.rs` — grep `trait OrchestratorApiClient`), add `profile: Option<&str>` as the 2nd param (after `model: &str`) to: `messages_create`, `messages_create_with_opts`, `messages_create_with_fallback`, `count_tokens`. (Leave non-request methods alone.)
+- [ ] **Step 1: Add `profile: Option<&str>` to the `OrchestratorApiClient` request methods.** In the trait def (in `platform-api/src/orchestrator.rs` — grep `trait OrchestratorApiClient`), add `profile: Option<&str>` as the 2nd param (after `model: &str`) to: `messages_create`, `messages_create_with_opts`, `messages_create_with_fallback`, `count_tokens`. (Leave non-request methods alone.)
 
 - [ ] **Step 2: Thread into `build_request`.** In `orchestrator/src/provider_adapter.rs`, change `build_request`'s signature to take `profile: Option<&str>` (after `model`) and set it on the request:
 
@@ -335,7 +335,7 @@ Thread the new `model_profile` (an `Option<String>`) to the call sites (~656/660
 - [ ] **Step 5: Build + test the orchestrator.** `CARGO_PROFILE_DEV_DEBUG=0 cargo build -p orchestrator 2>&1 | tail -15` then `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p orchestrator 2>&1 | grep -E "test result:|FAILED|error\[" | grep -v "0 passed; 0 failed" | tail`. Fix any remaining callers the compiler flags.
 
 - [ ] **Step 6: Add an orchestrator regression test.** Add a unit test (in `provider_adapter.rs` test mod, mirroring `build_request_sets_two_cache_breakpoints_by_default` at :1880) asserting `build_request("gpt-5.2", Some("github-copilot"), …)` yields a request with `req.profile.as_deref() == Some("github-copilot")` and `req.model == "gpt-5.2"`. Run it.
-- [ ] **Step 7: Commit:** `git add orchestrator/ traits/src/orchestrator.rs && git commit -m "feat(orchestrator): thread model profile through the turn loop into LlmRequest"`
+- [ ] **Step 7: Commit:** `git add orchestrator/ platform-api/src/orchestrator.rs && git commit -m "feat(orchestrator): thread model profile through the turn loop into LlmRequest"`
 
 ---
 
@@ -372,7 +372,7 @@ Thread the new `model_profile` (an `Option<String>`) to the call sites (~656/660
 
 - [ ] **Step 1: Grep for stragglers.** `grep -rn "switch_model(" --include="*.rs" . | grep -v "/target/" | grep -v "profile"` — every hit must now pass a profile arg. Same for `OrchestratorApiClient` request-method callers across `apps/`, `coordinator/`, `agent/` (grep `messages_create(` / `messages_create_with_opts(` / `messages_create_with_fallback(` / `\.count_tokens(`). Update any to the new signatures (pass `None` where no profile context exists).
 - [ ] **Step 2: Workspace build.** `CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace 2>&1 | tail -3`. Expected: `Finished`, zero errors.
-- [ ] **Step 3: Affected-crate tests.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p llm-client -p traits -p orchestrator -p tui 2>&1 | grep -E "test result:|FAILED|error\[|error:" | grep -v "0 passed; 0 failed"`. Expected: only `test result: ok`.
+- [ ] **Step 3: Affected-crate tests.** `CARGO_PROFILE_DEV_DEBUG=0 cargo test -p llm-client -p platform-api -p orchestrator -p tui 2>&1 | grep -E "test result:|FAILED|error\[|error:" | grep -v "0 passed; 0 failed"`. Expected: only `test result: ok`.
 - [ ] **Step 4: Clippy the touched crates.** `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p llm-client -p orchestrator -p tui 2>&1 | grep -E "^warning:|^error:" | grep -v "unused manifest key"`. Fix new lints (field docs / etc.).
 - [ ] **Step 5: Commit** any sweep fixes: `git add -A && git commit -m "chore: update switch_model / OrchestratorApiClient callers for profile param"` (stage only the touched source files — NOT untracked junk; list them explicitly if `-A` would sweep unrelated files).
 

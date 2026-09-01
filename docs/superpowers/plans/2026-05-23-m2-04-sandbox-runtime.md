@@ -6,7 +6,7 @@
 
 **Architecture:** A new `runtime_config.rs` module in `crates/sandbox/` carries the wire-shape struct (field names byte-for-byte from claude-code's `entrypoints/sandboxTypes.ts`). A `policy_convert.rs` module walks `SettingsJson.permissions.{allow,deny}` (Edit/Read/Bash/WebFetch rules) and merges into `filesystem.{allowWrite,denyWrite,allowRead,denyRead}` / `network.allowedDomains` / `excludedCommands`. A `dependency_check.rs` module probes `sandbox-exec`, `bwrap`, `socat` via `which::which()` and returns claude-code's exact error-string set. A WSL1/WSL2 detector reads `/proc/version`. A `violation_store.rs` module exposes a bounded ring buffer of `SandboxViolationEvent`. A `wrap.rs` module dispatches to per-platform wrappers (Linux/WSL2 → `bwrap+socat`; macOS → SBPL template file passed to `sandbox-exec -f`; Windows/WSL1 → `Err(Unsupported)`). The `decision.rs::should_use_sandbox` function gains compound-command splitting and iterative `BINARY_HIJACK_VARS` + safe-wrapper stripping with fixed-point. Finally `platforms/posix/src/sandbox.rs` is rewritten as a real `Sandbox` trait impl that calls into all of the above. `platforms/windows/src/sandbox.rs` is already an Unsupported stub from M2-01 and does not change in M2-04.
 
-**Tech Stack:** Rust 2021 (rust-version 1.82), `serde` + `serde_json` (camelCase rename), `which = "6"` (shell-out dependency probe via `$PATH`), `tempfile = "3"` (SBPL profile file on macOS), `tokio::sync::RwLock`, `std::collections::VecDeque` (bounded ring buffer), existing `lingxi-traits::Sandbox` + `SandboxedCommand` + `SandboxedTag` types from M1 Plan 12.
+**Tech Stack:** Rust 2021 (rust-version 1.82), `serde` + `serde_json` (camelCase rename), `which = "6"` (shell-out dependency probe via `$PATH`), `tempfile = "3"` (SBPL profile file on macOS), `tokio::sync::RwLock`, `std::collections::VecDeque` (bounded ring buffer), existing `lingxi-platform_api::Sandbox` + `SandboxedCommand` + `SandboxedTag` types from M1 Plan 12.
 
 **Depends on:** M2-01 (v0.2.0 corrections — `platforms/windows/src/sandbox.rs` is already an `Unsupported` stub).
 
@@ -71,7 +71,7 @@ Replace the `[dependencies]` block in `lingxi-code/crates/sandbox/Cargo.toml`:
 ```toml
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-permission = { path = "../permission" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -444,7 +444,7 @@ pub mod runtime_config;
 pub use decision::{
     is_obviously_dangerous, should_use_sandbox, ProjectTrustLevel, SandboxDecision,
 };
-pub use lingxi_traits::{
+pub use lingxi_platform_api::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
     SandboxedCommand, SandboxedTag,
 };
@@ -2918,7 +2918,7 @@ Create `lingxi-code/platforms/posix/tests/sandbox_real_impl_test.rs`:
 
 ```rust
 use lingxi_platform_posix::sandbox::PosixSandbox;
-use lingxi_traits::{
+use lingxi_platform_api::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     SandboxedTag,
 };
@@ -3033,7 +3033,7 @@ use lingxi_sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
 use lingxi_sandbox::wrap::wrap_with_sandbox;
-use lingxi_traits::{
+use lingxi_platform_api::{
     NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -3403,7 +3403,7 @@ Create `lingxi-code/platforms/posix/tests/sandbox_prepare_e2e_test.rs`:
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use lingxi_platform_posix::sandbox::PosixSandbox;
-use lingxi_traits::{
+use lingxi_platform_api::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxedTag, SandboxPolicy,
 };
 use std::collections::HashMap;

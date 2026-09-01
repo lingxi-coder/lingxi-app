@@ -13,8 +13,8 @@
 use crate::config::OrchestratorConfig;
 use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, OrchestratorApiClient};
 use crate::test_support::{HookExecutor, PermissionGate};
-use engine::session::ActiveGoalState;
-use engine::SessionState;
+use lingxi_core::session::ActiveGoalState;
+use lingxi_core::SessionState;
 use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde_json::Value;
 use session::jsonl::{
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use telemetry::tengu::session::RESUMED;
 use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
-use traits::{FileSystem, OutputStream};
+use platform_api::{FileSystem, OutputStream};
 use uuid::Uuid;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
@@ -66,7 +66,7 @@ impl ReplayedSession {
     /// hot-resume. Keeping this conversion beside replay prevents individual
     /// hosts from restoring only a subset of compaction state.
     #[must_use]
-    pub fn handle_runtime_snapshot(&self) -> traits::ResumeRuntimeSnapshot {
+    pub fn handle_runtime_snapshot(&self) -> platform_api::ResumeRuntimeSnapshot {
         let tracking = &self.runtime_metadata.compaction_tracking;
         // Only present a model in the snapshot when a REAL assistant model row
         // was recovered from the transcript (same filter the replay uses:
@@ -81,7 +81,7 @@ impl ReplayedSession {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
-        traits::ResumeRuntimeSnapshot {
+        platform_api::ResumeRuntimeSnapshot {
             model: if model_recovered {
                 self.state.model.clone()
             } else {
@@ -130,7 +130,7 @@ pub struct ResumeRuntimeMetadata {
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
     /// Structured reasoning selection persisted by newer runtimes.
-    pub reasoning_selection: Option<traits::ReasoningSelection>,
+    pub reasoning_selection: Option<platform_api::ReasoningSelection>,
     /// Persisted main-thread agent name, when the session selected one.
     pub main_thread_agent_type: Option<String>,
     /// Integrity-checked immutable resolved agent definition, when available.
@@ -140,7 +140,7 @@ pub struct ResumeRuntimeMetadata {
     /// Reconstructed rapid-refill/autocompact tracking state.
     pub compaction_tracking: compaction::AutoCompactTrackingState,
     /// Deferred hook tools that were persisted but never produced a result.
-    pub deferred_tools: Vec<traits::DeferredToolReplay>,
+    pub deferred_tools: Vec<platform_api::DeferredToolReplay>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -510,7 +510,7 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
 #[must_use]
 pub fn deferred_tool_replays_from_messages(
     messages: &[JsonlMessage],
-) -> Vec<traits::DeferredToolReplay> {
+) -> Vec<platform_api::DeferredToolReplay> {
     let mut resolved: HashSet<&str> = HashSet::new();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut deferred = Vec::new();
@@ -548,7 +548,7 @@ pub fn deferred_tool_replays_from_messages(
         let Some(tool_input) = attachment.get("toolInput") else {
             continue;
         };
-        deferred.push(traits::DeferredToolReplay {
+        deferred.push(platform_api::DeferredToolReplay {
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
             tool_input: tool_input.clone(),
@@ -575,7 +575,7 @@ struct DeferredReplayOutcome {
 
 async fn replay_deferred_tool_after_resume(
     orch: &ConversationOrchestrator,
-    deferred: traits::DeferredToolReplay,
+    deferred: platform_api::DeferredToolReplay,
 ) -> Result<DeferredReplayOutcome, crate::OrchestratorError> {
     let tool_use_id = ToolUseId::from(deferred.tool_use_id);
     let trace_context = deferred.traceparent.as_deref().map(|traceparent| {
@@ -633,7 +633,7 @@ async fn replay_deferred_tool_after_resume(
 /// Replay all persisted deferred hook tools after a cold or in-place resume.
 pub async fn replay_deferred_tools_after_resume(
     orch: &ConversationOrchestrator,
-    deferred_tools: Vec<traits::DeferredToolReplay>,
+    deferred_tools: Vec<platform_api::DeferredToolReplay>,
 ) -> Result<(), crate::OrchestratorError> {
     // ONE user message carrying EVERY replayed result, exactly as the normal
     // dispatch path batches a turn's results. Emitting one message per tool
@@ -693,10 +693,10 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
     if message.message_type == "attachment" {
         let attachment = message.extra.get("attachment")?;
         if attachment.get("type").and_then(serde_json::Value::as_str) == Some("goal_status") {
-            let status: traits::GoalStatusAttachment =
+            let status: platform_api::GoalStatusAttachment =
                 serde_json::from_value(attachment.clone()).ok()?;
             return match status.status {
-                traits::GoalStatusKind::Set => status.goal_state.map(|goal| {
+                platform_api::GoalStatusKind::Set => status.goal_state.map(|goal| {
                     Some(ActiveGoalState {
                         condition: goal.condition,
                         set_at: goal.set_at,
@@ -705,7 +705,7 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
                         tokens_at_start: goal.tokens_at_start,
                     })
                 }),
-                traits::GoalStatusKind::Cleared | traits::GoalStatusKind::Achieved => Some(None),
+                platform_api::GoalStatusKind::Cleared | platform_api::GoalStatusKind::Achieved => Some(None),
             };
         }
     }

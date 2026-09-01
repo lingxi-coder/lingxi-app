@@ -14,11 +14,11 @@ license.workspace = true
 [dependencies]
 branding.workspace = true
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 # #39 UserPromptExpansion: the dispatcher fires the `UserPromptExpansion` hook
 # the moment it expands a markdown / MCP-prompt slash command (claude-code
 # `WFa`→`b$t`). `hooks` does NOT depend on `command-api` (it pulls protocol /
-# telemetry / traits / engine / permission), so this edge is acyclic.
+# telemetry / platform-api / core / permission), so this edge is acyclic.
 hooks = { path = "../hooks" }
 serde.workspace = true
 serde_json.workspace = true

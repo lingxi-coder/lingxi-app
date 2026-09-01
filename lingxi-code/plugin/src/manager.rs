@@ -51,7 +51,7 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
-use traits::{FileSystem, HttpTransport, RuntimeSpawner};
+use platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
 
 /// Failure modes for [`PluginManager`] operations.
 #[derive(Debug, Clone, Error)]
@@ -1046,7 +1046,7 @@ impl PluginManager {
                 // shell — reject the server (byte-faithful msg). `args` / `env`
                 // ARE safe to substitute (discrete argv / env block), so only
                 // the `command` field is gated.
-                if let traits::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
+                if let platform_api::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
                     if user_config::references_user_config(command) {
                         tracing::warn!(
                             "{}",
@@ -1343,7 +1343,7 @@ fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
 /// left untouched. A no-op when the substitution context is empty (the common
 /// no-userConfig case), so a plugin without userConfig is byte-unchanged.
 fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
-    use traits::McpTransportSpec;
+    use platform_api::McpTransportSpec;
     if ctx.is_empty() {
         return;
     }
@@ -1388,7 +1388,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
 /// names for third-party plugin compatibility and the LingXi aliases for local
 /// plugins authored against this port.
 fn substitute_lsp_config(
-    cfg: &mut traits::LspServerConfig,
+    cfg: &mut platform_api::LspServerConfig,
     ctx: &Map<String, Value>,
     install_dir: &Path,
     plugin_data_dir: Option<&Path>,
@@ -1724,7 +1724,7 @@ mod unload_tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tool_api::ToolRegistry;
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
         McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -1781,7 +1781,7 @@ mod unload_tests {
         async fn list_resource_templates(
             &self,
             _c: &McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, McpError> {
             unreachable!("unused in unload test")
         }
 
@@ -1933,8 +1933,8 @@ mod unload_tests {
                         experimental: HashMap::new(),
                         extensions: HashMap::new(),
                     },
-                    negotiated: traits::McpNegotiatedProtocol {
-                        era: traits::McpProtocolEra::Legacy,
+                    negotiated: platform_api::McpNegotiatedProtocol {
+                        era: platform_api::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: vec![],

@@ -53,11 +53,11 @@ mobile OAuth credentials are plaintext files under the app UID
 
 ## Context (verified against the codebase)
 
-- `traits::Sandbox` / `traits::ProcessRunner` boundary as described in the
+- `platform_api::Sandbox` / `platform_api::ProcessRunner` boundary as described in the
   superseded spec; `SandboxedCommand` is the only runner input
-  (`traits/src/sandbox.rs:179-232`).
+  (`platform-api/src/sandbox.rs:179-232`).
 - `SandboxedTag::Wrapped` carries only `backend` — no plan payload
-  (`traits/src/sandbox.rs:193-205`). Hence D7.
+  (`platform-api/src/sandbox.rs:193-205`). Hence D7.
 - Desktop `BashTool` never calls `Sandbox::prepare()`: it wraps the command
   string via `ctx.sandbox_runner.wrap(...)` then always mints the command with
   `bypass_with_audit(pcmd, "bash_tool_call")`
@@ -68,7 +68,7 @@ mobile OAuth credentials are plaintext files under the app UID
   both hard-disabled); `engine-mobile` omits shell tools and its
   `register_mobile_tools` is synchronous (`apps/engine-mobile/src/lib.rs:101`).
 - `ProcessError` is `{Unsupported, Io(String), Timeout}` — too coarse for
-  policy diagnostics (`traits/src/process.rs:76`).
+  policy diagnostics (`platform-api/src/process.rs:76`).
 - **Mobile OAuth credentials are plaintext**: the mobile host wires
   `PlainTextSecureStorage` into the credential manager
   (`apps/engine-mobile/src/host.rs:287`). Load-bearing for D11.
@@ -185,8 +185,8 @@ remains a documented fallback shape if real-device soak ever disproves this
 
 ```text
 lingxi-code/platforms/android/src/
-├── sandbox.rs        AndroidMinijailSandbox (traits::Sandbox)
-├── process.rs        AndroidMinijailProcessRunner (traits::ProcessRunner)
+├── sandbox.rs        AndroidMinijailSandbox (platform_api::Sandbox)
+├── process.rs        AndroidMinijailProcessRunner (platform_api::ProcessRunner)
 ├── capabilities.rs   one-shot probe + session cache
 ├── policy.rs         SandboxPolicy → AndroidSandboxPlan mapping + profiles
 └── receipt.rs        AndroidSandboxReceipt
@@ -201,7 +201,7 @@ No `helper_protocol.rs`, no `sandbox-runner` crate: there is no trampoline
 ## Trait extensions (minimal churn)
 
 ```rust
-// traits/src/sandbox.rs
+// platform-api/src/sandbox.rs
 pub struct SandboxedCommand {
     inner: ProcessCommand,
     tag: SandboxedTag,
@@ -215,7 +215,7 @@ pub struct BackendPlanHandle(Arc<dyn Any + Send + Sync>);
 
 pub enum SandboxBackend { …, AndroidMinijail }   // NEW variant
 
-// traits/src/process.rs
+// platform-api/src/process.rs
 pub enum ProcessError {
     Unsupported,
     PolicyUnsupported(String),         // NEW: names the unenforceable guarantee
@@ -538,7 +538,7 @@ app-writable-root rejection, hash match, legacy-packaging flag regression,
 - Superseded: `docs/superpowers/specs/2026-06-12-android-minijail-sandbox-design.md`
 - Minijail analysis: `third_party/minijail/graphify-out/GRAPH_REPORT.md`
 - [Android 10 behavior changes: removed execute permission for app home directory](https://developer.android.com/about/versions/10/behavior-changes-10#execute-permission)
-- Codebase anchors: `traits/src/sandbox.rs`, `traits/src/process.rs`,
+- Codebase anchors: `platform-api/src/sandbox.rs`, `platform-api/src/process.rs`,
   `tools/shell/src/bash.rs`, `apps/engine-mobile/src/lib.rs`,
   `apps/engine-mobile/src/host.rs:287,342-344`,
   `platforms/android/src/lib.rs`

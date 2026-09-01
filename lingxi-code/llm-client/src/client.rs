@@ -1219,9 +1219,9 @@ fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &Rout
     route.provider_id == ProviderId::AnthropicFirstParty
         && entry.protocol == ProtocolFamily::AnthropicMessages
         && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
-        && traits::model_capabilities::has_capability(
+        && platform_api::model_capabilities::has_capability(
             &route.request_model,
-            traits::model_capabilities::ModelCapability::FastMode,
+            platform_api::model_capabilities::ModelCapability::FastMode,
         )
 }
 

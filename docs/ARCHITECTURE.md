@@ -11,7 +11,7 @@ and the M8 composition-root restructure (the layout described below) in
 The same core agent logic runs on every OS; only the *assembly* differs. Library
 crates make no shipping choices — they expose capabilities (`tool-*`, `skill-*`,
 `command-*`) and abstractions (`tool-api`, `skill-api`, `command-api`,
-`traits::Platform`). Two **composition-root** libraries under `apps/` decide what
+`platform_api::Platform`). Two **composition-root** libraries under `apps/` decide what
 ships by naming a different subset of capability crates via Cargo dependency
 edges:
 
@@ -33,12 +33,15 @@ The platform-agnostic core. None of these depend on `tools/*`, `skills/*`,
 `commands/*`, `platforms/*`, or `apps/*` (enforced by the §8.1 gate).
 
 - `protocol` — shared DTOs, IDs, Effect/Event envelopes
-- `engine` — state machine, reducer, prompt assembly, session model + the
+- `core` — state machine, reducer, prompt assembly, session model + the
   `settings/` tree (schema, 3-prefix env parser, 4-layer loader, merger, tracer).
-  (Renamed from `core` in M8-P2 — `core` collided with the sysroot crate.)
-- `traits` — platform abstraction traits, incl. the `Platform` aggregate and the
-  mobile/device callback traits (`CameraControl`, `VoiceRecorder`,
-  `SharingService`, `ComputerControl`)
+  Directory and cargo package name `core` (`cargo test -p core`); rust ident
+  `lingxi_core` so it does not shadow sysroot `libcore`. Does not depend on
+  `platform-api`. Composition roots stay `engine-desktop` / `engine-mobile`.
+- `platform-api` — platform abstraction traits, incl. the `Platform` aggregate
+  and the mobile/device callback traits (`CameraControl`, `VoiceRecorder`,
+  `SharingService`, `ComputerControl`). Implemented by `platforms/*`. Also
+  holds cycle-breaking service traits (`OrchestratorHandle`, `SubagentSpawner`).
 - `tool-api` / `skill-api` / `command-api` — the three plugin **abstraction**
   crates (Tool/Skill/Command traits + registries + shared scaffolding). Kept
   impl-free so the composition roots can assemble any subset.

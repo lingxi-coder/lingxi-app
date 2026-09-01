@@ -7,7 +7,7 @@
 //! handler renders (one row per check) into the Summary text panel.
 
 use std::path::Path;
-use traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
 /// Run all doctor checks against the supplied config-dir root (the `tr()`-rooted
 /// config-home tree) plus the global config file (`~/.lingxi.json`, passed

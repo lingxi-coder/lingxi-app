@@ -18,7 +18,7 @@
 use protocol::SecureStorageData;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use traits::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
+use platform_api::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
 
 /// Result delivered by the background prefetch task.
 type PrefetchResult = Result<Option<SecureStorageData>, SecureStorageError>;
@@ -80,7 +80,7 @@ mod tests {
     use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
     use std::sync::Mutex;
     use std::time::Duration;
-    use traits::{BackgroundTaskHandle, SecureStorageBackend};
+    use platform_api::{BackgroundTaskHandle, SecureStorageBackend};
 
     struct MockStorage {
         invocations: Mutex<Vec<(String, String)>>,

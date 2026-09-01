@@ -64,7 +64,7 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
 use command_core::{
     ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
-use engine::settings::enterprise::{check_org_membership, ForceLoginOrgPin, OrgMembershipCheck};
+use lingxi_core::settings::enterprise::{check_org_membership, ForceLoginOrgPin, OrgMembershipCheck};
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::transport::BoxFuture;
@@ -73,7 +73,7 @@ use platform_posix::PosixHttp;
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::Value;
 use std::sync::Mutex as StdMutex;
-use traits::{AuthHandle, HttpTransport};
+use platform_api::{AuthHandle, HttpTransport};
 
 /// Credential id under which the GitHub Copilot OAuth token is stored. Matches
 /// the catalog preset's `profile_name`.
@@ -447,7 +447,7 @@ impl OAuthConnectDriver for EngineOAuthConnect {
                         }
                     }
                 }
-                Err(traits::AuthError::Cancelled) => Err(ConnectError::Cancelled),
+                Err(platform_api::AuthError::Cancelled) => Err(ConnectError::Cancelled),
                 Err(e) => Err(ConnectError::Network(e.to_string())),
             },
             "openai-chatgpt" => self.chatgpt.connect().await,
@@ -483,7 +483,7 @@ impl command_core::LoginOrgPolicy for DesktopLoginOrgPolicy {
 mod oauth_connect_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use traits::{AuthError, AuthHandle, LoginInfo};
+    use platform_api::{AuthError, AuthHandle, LoginInfo};
 
     struct OkAuth;
     #[async_trait]
@@ -690,7 +690,7 @@ mod tests {
     use protocol::SecureStorageData;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use traits::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
+    use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
 
     /// In-memory `(service, account) -> data` store. The real
     /// `platform_posix` secure storage backend is keychain/OS-backed and not

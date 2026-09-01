@@ -96,11 +96,11 @@ use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_workflow::WorkflowLauncher as _;
-use traits::http::{
+use platform_api::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
 };
-use traits::{
+use platform_api::{
     AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
     SlashCommandDispatcher,
@@ -140,7 +140,7 @@ impl HttpTransport for DynHttp {
     async fn request_with_resolved_addrs(
         &self,
         req: protocol::HttpRequest,
-        resolved: Option<traits::ResolvedAddressOverride>,
+        resolved: Option<platform_api::ResolvedAddressOverride>,
     ) -> Result<protocol::HttpResponse, HttpError> {
         self.0.request_with_resolved_addrs(req, resolved).await
     }
@@ -269,7 +269,7 @@ pub struct MobileConfig {
     /// Stable native host facts used to render the fixed mobile runtime
     /// reminder. `None` keeps desktop-style prompt assembly semantics for host
     /// tests and non-mobile embedder scenarios.
-    pub host_environment: Option<traits::MobileHostEnvironment>,
+    pub host_environment: Option<platform_api::MobileHostEnvironment>,
     /// Whether non-vision primary models may delegate image analysis to an
     /// internal vision model. Defaults to `true` across mobile hosts.
     pub vision_delegation_enabled: bool,
@@ -491,7 +491,7 @@ pub struct MobileRuntime {
     /// preload silently warn-and-skip on mobile.
     #[cfg(test)]
     pub(crate) wired_subagent_skill_loader_cell:
-        Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
+        Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -570,7 +570,7 @@ pub struct MobileRuntime {
     ///
     /// Desktop needs no equivalent: its picker gates the same static catalog on
     /// per-provider availability maps that mobile does not have.
-    pub routable_listings: Vec<traits::ModelListing>,
+    pub routable_listings: Vec<platform_api::ModelListing>,
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -683,11 +683,11 @@ impl MobileAppAgentExecutor {
         let call_budget = scoped
             .call_budget()
             .ok_or_else(|| "app Agent MCP budget was not attached".to_string())?;
-        let registry = McpRegistry::new(Arc::new(scoped) as Arc<dyn traits::McpTransport>);
+        let registry = McpRegistry::new(Arc::new(scoped) as Arc<dyn platform_api::McpTransport>);
         registry
             .connect(McpServerConfig {
                 name: LOCAL_APPS_REGISTRY_KEY.into(),
-                spec: traits::McpTransportSpec::InProcess {
+                spec: platform_api::McpTransportSpec::InProcess {
                     registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
                 },
                 scope: McpConfigScope::Managed,
@@ -834,39 +834,39 @@ struct SlashAuthoritySnapshot {
     catalog: Vec<SlashCommandDto>,
 }
 
-fn lower_reasoning_selection(selection: &traits::ReasoningSelection) -> ReasoningSelectionDto {
+fn lower_reasoning_selection(selection: &platform_api::ReasoningSelection) -> ReasoningSelectionDto {
     match selection {
-        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
-        traits::ReasoningSelection::TokenBudget { tokens } => {
+        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
 }
 
-fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> traits::ReasoningSelection {
+fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> platform_api::ReasoningSelection {
     match selection {
-        ReasoningSelectionDto::Automatic => traits::ReasoningSelection::Automatic,
-        ReasoningSelectionDto::Disabled => traits::ReasoningSelection::Disabled,
-        ReasoningSelectionDto::Enabled => traits::ReasoningSelection::Enabled,
-        ReasoningSelectionDto::Level { id } => traits::ReasoningSelection::Level { id },
+        ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
+        ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
+        ReasoningSelectionDto::Enabled => platform_api::ReasoningSelection::Enabled,
+        ReasoningSelectionDto::Level { id } => platform_api::ReasoningSelection::Level { id },
         ReasoningSelectionDto::TokenBudget { tokens } => {
-            traits::ReasoningSelection::TokenBudget { tokens }
+            platform_api::ReasoningSelection::TokenBudget { tokens }
         }
-        _ => traits::ReasoningSelection::Automatic,
+        _ => platform_api::ReasoningSelection::Automatic,
     }
 }
 
-fn lower_reasoning_spec_dto(spec: &traits::ReasoningControlSpec) -> ReasoningControlSpecDto {
+fn lower_reasoning_spec_dto(spec: &platform_api::ReasoningControlSpec) -> ReasoningControlSpecDto {
     let options = spec
         .available
         .iter()
         .cloned()
         .map(|selection| ReasoningOptionDto {
             persistable: spec.selections_persistable
-                && !matches!(selection, traits::ReasoningSelection::Level { ref id } if id == "max"),
+                && !matches!(selection, platform_api::ReasoningSelection::Level { ref id } if id == "max"),
             selection: lower_reasoning_selection(&selection),
         })
         .collect();
@@ -893,7 +893,7 @@ fn lower_reasoning_spec_dto(spec: &traits::ReasoningControlSpec) -> ReasoningCon
 }
 
 fn lower_controls(
-    controls: traits::ConversationControls,
+    controls: platform_api::ConversationControls,
     requested_permission: String,
 ) -> ConversationControlsDto {
     let spec = controls.reasoning_spec;
@@ -924,7 +924,7 @@ fn lower_controls(
     }
 }
 
-fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
+fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
     client_adapter::lowering::lower_model_details(listing)
 }
 
@@ -1012,8 +1012,8 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                traits::is_curated_model(&listing.provider_id, &listing.request_model)
-                    || !traits::provider_has_curated_list(&listing.provider_id)
+                platform_api::is_curated_model(&listing.provider_id, &listing.request_model)
+                    || !platform_api::provider_has_curated_list(&listing.provider_id)
             })
             .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
@@ -1303,8 +1303,8 @@ pub struct MobileOAuthManager {
     openai: Arc<openai_oauth::OpenAiOAuthHandle>,
     anthropic_refresh: Option<Arc<RefreshDriver>>,
     openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-    anthropic_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
-    openai_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+    anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+    openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
     http: Arc<dyn HttpTransport>,
     pending: Mutex<Option<PendingMobileOAuthSession>>,
 }
@@ -1315,8 +1315,8 @@ impl MobileOAuthManager {
         openai: Arc<openai_oauth::OpenAiOAuthHandle>,
         anthropic_refresh: Option<Arc<RefreshDriver>>,
         openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-        anthropic_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
-        openai_refresh_spawner: Option<Arc<dyn traits::RuntimeSpawner>>,
+        anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+        openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
         http: Arc<dyn HttpTransport>,
     ) -> Self {
         Self {
@@ -1745,16 +1745,16 @@ fn lower_mobile_linux_mode(mode: MobileLinuxRuntimeMode) -> String {
     }
 }
 
-fn lower_mobile_linux_backend(backend: traits::SandboxBackend) -> String {
+fn lower_mobile_linux_backend(backend: platform_api::SandboxBackend) -> String {
     match backend {
-        traits::SandboxBackend::LinuxNamespaces => "linux-namespaces",
-        traits::SandboxBackend::LinuxFirejail => "linux-firejail",
-        traits::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
-        traits::SandboxBackend::WindowsJobObject => "windows-job-object",
-        traits::SandboxBackend::AndroidMinijail => "android-minijail",
-        traits::SandboxBackend::AndroidProot => "android-proot",
-        traits::SandboxBackend::IosIsh => "ios-ish",
-        traits::SandboxBackend::None => "none",
+        platform_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        platform_api::SandboxBackend::LinuxFirejail => "linux-firejail",
+        platform_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        platform_api::SandboxBackend::WindowsJobObject => "windows-job-object",
+        platform_api::SandboxBackend::AndroidMinijail => "android-minijail",
+        platform_api::SandboxBackend::AndroidProot => "android-proot",
+        platform_api::SandboxBackend::IosIsh => "ios-ish",
+        platform_api::SandboxBackend::None => "none",
     }
     .to_string()
 }
@@ -1809,48 +1809,48 @@ fn gate_mobile_git_ctx(
 }
 
 fn build_mobile_runtime_environment(
-    host_environment: Option<&traits::MobileHostEnvironment>,
+    host_environment: Option<&platform_api::MobileHostEnvironment>,
     shell_ctx: Option<&tool_api::MobileShellToolCtx>,
     capability: Option<&MobileLinuxCapability>,
     session_cwd: &SessionCwd,
-) -> Option<traits::MobileRuntimeEnvironment> {
+) -> Option<platform_api::MobileRuntimeEnvironment> {
     let host_environment = host_environment?.clone();
     let enabled_shell = shell_ctx.filter(|ctx| ctx.enabled);
     let tool_runtime = if capability
         .is_some_and(|cap| matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && cap.available)
         || enabled_shell.is_some_and(|ctx| ctx.force_platform_sandbox)
     {
-        traits::MobileToolRuntime::MobileLinuxGuest
+        platform_api::MobileToolRuntime::MobileLinuxGuest
     } else if enabled_shell.is_some() {
-        traits::MobileToolRuntime::AndroidLegacy
+        platform_api::MobileToolRuntime::AndroidLegacy
     } else {
-        traits::MobileToolRuntime::Unavailable
+        platform_api::MobileToolRuntime::Unavailable
     };
     let network_policy = match tool_runtime {
-        traits::MobileToolRuntime::MobileLinuxGuest => {
-            traits::MobileNetworkPolicy::PermissionMediated
+        platform_api::MobileToolRuntime::MobileLinuxGuest => {
+            platform_api::MobileNetworkPolicy::PermissionMediated
         }
-        traits::MobileToolRuntime::AndroidLegacy => traits::MobileNetworkPolicy::DeniedByHost,
-        traits::MobileToolRuntime::Unavailable => traits::MobileNetworkPolicy::DeniedByHost,
+        platform_api::MobileToolRuntime::AndroidLegacy => platform_api::MobileNetworkPolicy::DeniedByHost,
+        platform_api::MobileToolRuntime::Unavailable => platform_api::MobileNetworkPolicy::DeniedByHost,
     };
     let lifecycle_policy = match host_environment.launch_mode {
-        traits::MobileLaunchMode::ScheduledHeadless => {
-            traits::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
+        platform_api::MobileLaunchMode::ScheduledHeadless => {
+            platform_api::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
         }
-        traits::MobileLaunchMode::Interactive => match host_environment.host_os {
-            traits::MobileHostOs::Ios => {
-                traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
+        platform_api::MobileLaunchMode::Interactive => match host_environment.host_os {
+            platform_api::MobileHostOs::Ios => {
+                platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
             }
-            traits::MobileHostOs::Android => {
-                traits::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
+            platform_api::MobileHostOs::Android => {
+                platform_api::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
             }
         },
-        traits::MobileLaunchMode::Unknown => traits::MobileLifecyclePolicy::UnknownBestEffort,
+        platform_api::MobileLaunchMode::Unknown => platform_api::MobileLifecyclePolicy::UnknownBestEffort,
     };
 
-    let guest_cwd = matches!(tool_runtime, traits::MobileToolRuntime::MobileLinuxGuest)
+    let guest_cwd = matches!(tool_runtime, platform_api::MobileToolRuntime::MobileLinuxGuest)
         .then(|| session_cwd.cwd().to_string_lossy().to_string());
-    Some(traits::MobileRuntimeEnvironment::new(
+    Some(platform_api::MobileRuntimeEnvironment::new(
         host_environment,
         tool_runtime,
         guest_cwd,
@@ -1861,26 +1861,26 @@ fn build_mobile_runtime_environment(
     ))
 }
 
-fn mobile_launch_is_interactive(host_environment: Option<&traits::MobileHostEnvironment>) -> bool {
+fn mobile_launch_is_interactive(host_environment: Option<&platform_api::MobileHostEnvironment>) -> bool {
     !host_environment.is_some_and(|environment| {
         matches!(
             environment.launch_mode,
-            traits::MobileLaunchMode::ScheduledHeadless
+            platform_api::MobileLaunchMode::ScheduledHeadless
         )
     })
 }
 
 fn model_visible_mobile_cwd(
     path: &std::path::Path,
-    mounts: &[traits::MountSpec],
+    mounts: &[platform_api::MountSpec],
     has_mobile_linux_guest: bool,
 ) -> Option<String> {
     if !has_mobile_linux_guest {
         return None;
     }
-    traits::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
+    platform_api::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
         path.to_str()
-            .and_then(traits::mobile_runtime_environment::normalize_mobile_guest_cwd)
+            .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
     })
 }
 
@@ -1894,7 +1894,7 @@ fn subagent_env_platform_name(rust_os: &str) -> &str {
 
 fn build_mobile_subagent_env_renderer(
     probe_cwd: std::path::PathBuf,
-    mobile_runtime_environment: Option<&traits::MobileRuntimeEnvironment>,
+    mobile_runtime_environment: Option<&platform_api::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: agent::handle::MobileWorkspaceCwdProvider,
 ) -> agent::handle::SubagentEnvRenderer {
     if mobile_runtime_environment.is_none() {
@@ -1913,9 +1913,9 @@ fn build_mobile_subagent_env_renderer(
         .or_else(|| {
             probe_cwd
                 .to_str()
-                .and_then(traits::mobile_runtime_environment::normalize_mobile_guest_cwd)
+                .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
         })
-        .unwrap_or_else(|| traits::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string());
+        .unwrap_or_else(|| platform_api::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string());
 
     Arc::new(
         move |model_id: &str, cwd_override: Option<&std::path::Path>| {
@@ -1923,7 +1923,7 @@ fn build_mobile_subagent_env_renderer(
                 .or_else(|| {
                     cwd_override.and_then(|path| {
                         path.to_str().and_then(
-                            traits::mobile_runtime_environment::normalize_mobile_guest_cwd,
+                            platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd,
                         )
                     })
                 })
@@ -1949,7 +1949,7 @@ mod mobile_tool_gate_tests {
     fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
         MobileLinuxCapability {
             available: false,
-            backend: traits::SandboxBackend::IosIsh,
+            backend: platform_api::SandboxBackend::IosIsh,
             mode: MobileLinuxRuntimeMode::MobileLinux,
             reason: Some("runtime unavailable".into()),
             streaming_output: false,
@@ -1988,13 +1988,13 @@ mod mobile_tool_gate_tests {
         assert!(!gated.enabled);
     }
 
-    fn ios_host() -> traits::MobileHostEnvironment {
-        traits::MobileHostEnvironment::new(
-            traits::MobileHostOs::Ios,
+    fn ios_host() -> platform_api::MobileHostEnvironment {
+        platform_api::MobileHostEnvironment::new(
+            platform_api::MobileHostOs::Ios,
             Some("19.0".into()),
-            traits::MobileDeviceClass::Phone,
-            traits::MobileExecutionTarget::PhysicalDevice,
-            traits::MobileLaunchMode::Interactive,
+            platform_api::MobileDeviceClass::Phone,
+            platform_api::MobileExecutionTarget::PhysicalDevice,
+            platform_api::MobileLaunchMode::Interactive,
         )
     }
 
@@ -2024,7 +2024,7 @@ mod mobile_tool_gate_tests {
 
         assert_eq!(
             environment.tool_runtime,
-            traits::MobileToolRuntime::Unavailable
+            platform_api::MobileToolRuntime::Unavailable
         );
         assert_eq!(environment.guest_cwd(), None);
         let reminder = environment.render_body();
@@ -2034,11 +2034,11 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn workspace_prompt_paths_are_guest_only() {
-        let mounts = [traits::MountSpec {
+        let mounts = [platform_api::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: traits::MountPurpose::Workspace,
+            purpose: platform_api::MountPurpose::Workspace,
         }];
 
         assert_eq!(
@@ -2071,25 +2071,25 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn mobile_subagent_env_renderer_uses_guest_paths_only() {
-        let mounts = vec![traits::MountSpec {
+        let mounts = vec![platform_api::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: traits::MountPurpose::Workspace,
+            purpose: platform_api::MountPurpose::Workspace,
         }];
         let provider_mounts = mounts.clone();
         let provider = Arc::new(move |override_cwd: Option<&std::path::Path>| {
             let cwd = override_cwd.unwrap_or_else(|| std::path::Path::new("/native/workspace"));
             model_visible_mobile_cwd(cwd, &provider_mounts, true)
         });
-        let environment = traits::MobileRuntimeEnvironment::new(
+        let environment = platform_api::MobileRuntimeEnvironment::new(
             ios_host(),
-            traits::MobileToolRuntime::MobileLinuxGuest,
+            platform_api::MobileToolRuntime::MobileLinuxGuest,
             Some("/workspace/app".into()),
             Some("/bin/sh".into()),
             Some("mobile-linux".into()),
-            traits::MobileNetworkPolicy::PermissionMediated,
-            traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+            platform_api::MobileNetworkPolicy::PermissionMediated,
+            platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
         );
         let renderer = build_mobile_subagent_env_renderer(
             std::path::PathBuf::from(
@@ -2122,10 +2122,10 @@ mod mobile_tool_gate_tests {
     fn only_explicit_scheduled_launches_use_headless_prompt_semantics() {
         let mut host = ios_host();
         assert!(mobile_launch_is_interactive(Some(&host)));
-        host.launch_mode = traits::MobileLaunchMode::Unknown;
+        host.launch_mode = platform_api::MobileLaunchMode::Unknown;
         assert!(mobile_launch_is_interactive(Some(&host)));
         assert!(mobile_launch_is_interactive(None));
-        host.launch_mode = traits::MobileLaunchMode::ScheduledHeadless;
+        host.launch_mode = platform_api::MobileLaunchMode::ScheduledHeadless;
         assert!(!mobile_launch_is_interactive(Some(&host)));
     }
 }
@@ -2165,7 +2165,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         reasoning: true,
         structured_output: true,
     };
-    // Every id `traits::is_curated_model` lists under the "anthropic" arm must
+    // Every id `platform_api::is_curated_model` lists under the "anthropic" arm must
     // appear here, otherwise the client picker's ANTHROPIC section renders only
     // the subset this registry happens to route (the section used to show just
     // Sonnet 4.6 + Haiku 4.5 while Sonnet 5 / Opus 4.8 / Fable 5 were curated
@@ -2230,14 +2230,14 @@ fn anthropic_route_id(model_ref: &str) -> Option<String> {
     (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
 }
 
-/// The assembled provider profiles flattened into the [`traits::ModelListing`]s
-/// that [`resolve_default_model_ref`] and [`traits::parse_model_ref`] resolve
+/// The assembled provider profiles flattened into the [`platform_api::ModelListing`]s
+/// that [`resolve_default_model_ref`] and [`platform_api::parse_model_ref`] resolve
 /// against.
 ///
 /// `display_model` / `provider_label` are immaterial to parsing, so
 /// `request_model` and the profile name stand in for both. Shared with the
 /// tests so they cannot drift from the shape production actually feeds in.
-fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<traits::ModelListing> {
+fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<platform_api::ModelListing> {
     llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
         providers: providers.to_vec(),
     })
@@ -2257,7 +2257,7 @@ fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<traits::Mode
 /// A client persists its last-picked model and hands it back on the next
 /// launch, so a client-side bug can hand us a reference no profile serves (iOS
 /// re-qualified an already-qualified id into `anthropic/deepseek/deepseek-v4-
-/// flash`). [`traits::parse_model_ref`] then returns the whole string as a bare
+/// flash`). [`platform_api::parse_model_ref`] then returns the whole string as a bare
 /// id, which boots the session onto an unroutable model: the picker shows a
 /// junk row and the first turn fails `ModelUnavailable`. Rewriting it to a
 /// model that IS registered keeps the session usable and lets the user re-pick.
@@ -2271,13 +2271,13 @@ fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<traits::Mode
 /// there would swap one unroutable ref for another while the log claimed the
 /// session was repaired. The chosen profile is returned too — a bare
 /// `ClientEvent::ModelList { current }` matches none of the provider-qualified
-/// rows `traits::curated_model_refs` emits, so the client's picker would render
+/// rows `platform_api::curated_model_refs` emits, so the client's picker would render
 /// with nothing selected.
 fn resolve_default_model_ref(
     default_model: &str,
-    listings: &[traits::ModelListing],
+    listings: &[platform_api::ModelListing],
 ) -> (String, Option<String>) {
-    let (model, profile) = traits::parse_model_ref(default_model, listings);
+    let (model, profile) = platform_api::parse_model_ref(default_model, listings);
     // `parse_model_ref` returns `Some(profile)` only after matching a listing on
     // that exact `(provider_id, request_model)` pair, so a qualified ref is
     // already proven routable and keeps its profile as-is.
@@ -2299,7 +2299,7 @@ fn resolve_default_model_ref(
         (Some(only), None) => return (model, Some(only.provider_id.clone())),
         (None, _) => {}
     }
-    let healed = traits::provider_default_model("anthropic")
+    let healed = platform_api::provider_default_model("anthropic")
         .and_then(|boot| {
             listings
                 .iter()
@@ -2499,8 +2499,8 @@ fn mobile_mcp_preflight(
         if config.config_error.is_none()
             && matches!(
                 config.spec,
-                traits::McpTransportSpec::Sse { oauth: Some(_), .. }
-                    | traits::McpTransportSpec::Http { oauth: Some(_), .. }
+                platform_api::McpTransportSpec::Sse { oauth: Some(_), .. }
+                    | platform_api::McpTransportSpec::Http { oauth: Some(_), .. }
             )
         {
             config.config_error =
@@ -2715,7 +2715,7 @@ async fn mobile_mcp_run_reload_job(
 
 fn mobile_mcp_oauth_authorization_callback(
     slot: Arc<StdMutex<Option<String>>>,
-    opener: Option<Arc<dyn traits::DeepLinkOpener>>,
+    opener: Option<Arc<dyn platform_api::DeepLinkOpener>>,
 ) -> mcp::oauth::OnAuthorizationUrl {
     Arc::new(move |url| {
         // Record before attempting the native opener. A successful open is
@@ -2817,10 +2817,10 @@ async fn build_mobile_inner_with_ask(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
-    let storage: Arc<dyn traits::SecureStorage> = platform
+    let storage: Arc<dyn platform_api::SecureStorage> = platform
         .secure_storage()
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
-    let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
+    let oauth_supported = platform_api::SecureStorage::is_encrypted(storage.as_ref());
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
@@ -2830,7 +2830,7 @@ async fn build_mobile_inner_with_ask(
     let mcp_auth_callback =
         mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
     let mut mcp_registry = McpRegistry::with_raw_conn(
-        mobile_mcp.clone() as Arc<dyn traits::McpTransport>,
+        mobile_mcp.clone() as Arc<dyn platform_api::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_headers_helper_cwd(cwd.clone())
@@ -2860,7 +2860,7 @@ async fn build_mobile_inner_with_ask(
     mcp_registry
         .connect(McpServerConfig {
             name: LOCAL_APPS_REGISTRY_KEY.into(),
-            spec: traits::McpTransportSpec::InProcess {
+            spec: platform_api::McpTransportSpec::InProcess {
                 registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
             },
             scope: McpConfigScope::Managed,
@@ -2998,9 +2998,9 @@ async fn build_mobile_inner_with_ask(
         openai_oauth_client,
         credentials.clone(),
     ));
-    let anthropic_refresh_spawner: Arc<dyn traits::RuntimeSpawner> =
+    let anthropic_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
-    let openai_refresh_spawner: Arc<dyn traits::RuntimeSpawner> =
+    let openai_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
 
     let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
@@ -3375,7 +3375,7 @@ async fn build_mobile_inner_with_ask(
     // (empty when no Read-deny rule ⇒ unchanged default).
     let mut read_deny_exclude_globs: Vec<String> = Vec::new();
     // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the domain-blocklist
-    // preflight. Mobile has no `engine::settings::Settings::load` seam (no `engine`
+    // preflight. Mobile has no `lingxi_core::settings::Settings::load` seam (no `engine`
     // dep), so it reads the key directly from the SAME settings.json tiers the perms
     // loop below reads, scalar-override (later tier wins). `false` by default.
     let mut skip_web_fetch_preflight = false;
@@ -3390,7 +3390,7 @@ async fn build_mobile_inner_with_ask(
     // Read from the SAME settings.json tiers as the perms loop below,
     // scalar-override (later tier wins). `false` by default (agent view enabled;
     // the env half still applies independently). Threaded into
-    // `register_core_batch_8` via `traits::agent_view::is_enabled_with_setting`.
+    // `register_core_batch_8` via `platform_api::agent_view::is_enabled_with_setting`.
     let mut disable_agent_view = false;
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
@@ -3438,7 +3438,7 @@ async fn build_mobile_inner_with_ask(
     // >1 we keep the engine cwd, i.e. today's behavior.
     let workspace_mounts: Vec<_> = mobile_linux_mounts
         .iter()
-        .filter(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
+        .filter(|m| matches!(m.purpose, platform_api::MountPurpose::Workspace))
         .collect();
     // THE workspace mount, chosen once. `model_cwd` below reuses this instead
     // of running its own `.find()`: a bare `.find()` takes table order, so with
@@ -3466,7 +3466,7 @@ async fn build_mobile_inner_with_ask(
             // Canonical forms are used ONLY to decide. BOTH returned values are
             // raw, and that is load-bearing: `translate_model_path` resolves a
             // guest path to `mount.host_path.join(rest)` with NO
-            // canonicalization (`traits::mobile_linux::find_guest_mount` is
+            // canonicalization (`platform_api::mobile_linux::find_guest_mount` is
             // pure path math). Returning the canonicalized spelling here would
             // leave `FsRoots.cwd` as `/private/var/...` while every translated
             // path arrives as `/var/...`; `path_matches_rule_pattern`
@@ -3625,7 +3625,7 @@ async fn build_mobile_inner_with_ask(
                     .extend(permission::additional_directories_from_settings_json(&raw));
             }
         }
-        traits::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
+        platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
@@ -3725,7 +3725,7 @@ async fn build_mobile_inner_with_ask(
     // the SAME settings tiers, concat-deduped (CC merges these arrays across
     // sources). Stay `None` until a tier declares the key (⇒ no restriction); an
     // explicit `[]` sets `Some(empty)` (⇒ block ALL HTTP hooks for
-    // allowedHttpHookUrls). Mobile has no `engine::settings::Settings::load`
+    // allowedHttpHookUrls). Mobile has no `lingxi_core::settings::Settings::load`
     // seam, so read the keys directly like the `skipWebFetchPreflight` path.
     let mut allowed_http_hook_urls: Option<Vec<String>> = None;
     let mut http_hook_allowed_env_vars: Option<Vec<String>> = None;
@@ -3785,7 +3785,7 @@ async fn build_mobile_inner_with_ask(
     //        child processes through the SAME platform-sourced runner + sandbox
     //        the tools use (a device-jailed runner on Android, the host runner on
     //        iOS/CI). Both are required — the runner only accepts a
-    //        `traits::SandboxedCommand`, which only the sandbox can mint.
+    //        `platform_api::SandboxedCommand`, which only the sandbox can mint.
     //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
     //        single-turn `prompt` hooks over the SAME `api_client` the
     //        orchestrator drives (shared provider routing / auth / telemetry).
@@ -3806,7 +3806,7 @@ async fn build_mobile_inner_with_ask(
             hook_registry.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn traits::RuntimeSpawner>,
+                as Arc<dyn platform_api::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(disable_all_hooks)
         .with_process_runner(process.clone(), sandbox.clone())
@@ -3922,7 +3922,7 @@ async fn build_mobile_inner_with_ask(
                 .is_some_and(|environment| {
                     matches!(
                         environment.tool_runtime,
-                        traits::MobileToolRuntime::MobileLinuxGuest
+                        platform_api::MobileToolRuntime::MobileLinuxGuest
                     )
                 });
         Arc::new(move |override_cwd: Option<&std::path::Path>| {
@@ -3986,8 +3986,8 @@ async fn build_mobile_inner_with_ask(
     // the SAME shared registry + `TuiBridgeResolver` channel as the main
     // session.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
-        Arc::new(platform_posix_minimal::PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
-        traits::subagent_spawn::max_concurrent_subagents(),
+        Arc::new(platform_posix_minimal::PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+        platform_api::subagent_spawn::max_concurrent_subagents(),
     ));
     let subagent_hook_session_id = protocol::SessionId::new();
     let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
@@ -4052,13 +4052,13 @@ async fn build_mobile_inner_with_ask(
     let subagent_provider_first_party_resolver_cell =
         subagent_spawner_concrete.provider_first_party_resolver_handle();
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
-    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
 
     // (c) Budget enforcer over the session CostTracker (desktop parity —
     // background subagents halt at the same session ceiling as the main loop;
     // with no configured ceiling this stays unlimited).
-    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
         Arc::new(cost::BudgetEnforcer::new(
             cost::BudgetConfig {
                 max_session_nano_usd: orch_cfg.max_budget_nano_usd,
@@ -4092,7 +4092,7 @@ async fn build_mobile_inner_with_ask(
     let local_workflow_handler = Arc::new(
         tasks::handlers::LocalWorkflowHandler::new(
             subagent_spawner.clone(),
-            local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+            local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
             budget_enforcer.clone(),
             task_registry_inner.output_manager.clone(),
         )
@@ -4187,7 +4187,7 @@ async fn build_mobile_inner_with_ask(
         subagent_spawner: Some(subagent_spawner.clone()),
         agent_name_registry: None,
         task_registry: Some(
-            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: None,
         budget_enforcer: Some(budget_enforcer.clone()),
@@ -4293,7 +4293,7 @@ async fn build_mobile_inner_with_ask(
             fs.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn traits::RuntimeSpawner>,
+                as Arc<dyn platform_api::RuntimeSpawner>,
             credentials.clone(),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             shared_command_registry.clone(),
@@ -4317,7 +4317,7 @@ async fn build_mobile_inner_with_ask(
         shared_command_registry.clone(),
     ));
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
-    let agent_skill_loader: Arc<dyn traits::skill_loader::SkillLoader> = live_skill_loader;
+    let agent_skill_loader: Arc<dyn platform_api::skill_loader::SkillLoader> = live_skill_loader;
     // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
     // same breath as the Skill loader above, and retain both handles on the
     // returned `MobileRuntime`. There is then exactly ONE construction site per
@@ -4377,13 +4377,13 @@ async fn build_mobile_inner_with_ask(
         plugin_workflows: plugin_workflow_registry.clone(),
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
-    let workflow_size_guideline_state = traits::session_flags::WorkflowSizeGuidelineState::new(
+    let workflow_size_guideline_state = platform_api::session_flags::WorkflowSizeGuidelineState::new(
         workflow_size_guideline.as_wire(),
         false,
         workflow_size_guideline_is_default,
     )
     .expect("mobile workflowSizeGuideline must be valid");
-    let dynamic_workflows_gate = traits::session_flags::DynamicWorkflowsGate::new(
+    let dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
     );
@@ -4549,7 +4549,7 @@ async fn build_mobile_inner_with_ask(
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
     let memdir_prefetch =
-        if traits::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref()) {
+        if platform_api::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref()) {
             // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
             // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
             let home = cfg
@@ -4562,7 +4562,7 @@ async fn build_mobile_inner_with_ask(
                 Some(cfg.api_base.clone()),
                 http.clone(),
                 Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                    as Arc<dyn traits::RuntimeSpawner>,
+                    as Arc<dyn platform_api::RuntimeSpawner>,
                 &home,
             ))
         } else {
@@ -4654,7 +4654,7 @@ async fn build_mobile_inner_with_ask(
     // into the per-turn `<task-notification>` reminder — the model learns a
     // launched workflow finished on the next turn (desktop mirror).
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )))
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
@@ -4684,7 +4684,7 @@ async fn build_mobile_inner_with_ask(
     // added later still resolve.
     orch_inner = if let Some(runtime) = mobile_linux.clone() {
         orch_inner.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
-            traits::mobile_linux::map_guest_path_to_host(
+            platform_api::mobile_linux::map_guest_path_to_host(
                 &path.to_string_lossy(),
                 &runtime.current_mounts(),
             )
@@ -4697,7 +4697,7 @@ async fn build_mobile_inner_with_ask(
         let runtime = mobile_linux.clone();
         let has_mobile_linux_guest = matches!(
             environment.tool_runtime,
-            traits::MobileToolRuntime::MobileLinuxGuest
+            platform_api::MobileToolRuntime::MobileLinuxGuest
         );
         let resolver = Arc::new(move |path: &std::path::Path| {
             let mounts = runtime
@@ -4820,7 +4820,7 @@ async fn build_mobile_inner_with_ask(
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
     reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
     // `/stop`): wired here in the uniffi composition root because it needs the
@@ -5118,7 +5118,7 @@ pub struct MobileEngineHandle {
     /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
     /// `fs` the orchestrator's tools use — captured from the `Platform` so the
     /// session listing reads through the device's real backend.
-    fs: Arc<dyn traits::FileSystem>,
+    fs: Arc<dyn platform_api::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
     /// ([`Self::run_due_cron_now`]) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -5493,10 +5493,10 @@ impl MobileSessionAgentObserver {
 }
 
 #[async_trait::async_trait]
-impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
-    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
+    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
         match event {
-            traits::subagent_spawn::SubagentObservation::Allocated {
+            platform_api::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 name,
@@ -5531,7 +5531,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserve
                     })
                     .await;
             }
-            traits::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
+            platform_api::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
                 if !session_agent_conversation_is_visible(&message) {
                     return;
                 }
@@ -5575,7 +5575,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserve
                     })
                     .await;
             }
-            traits::subagent_spawn::SubagentObservation::Completed { agent_id, .. } => {
+            platform_api::subagent_spawn::SubagentObservation::Completed { agent_id, .. } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -5597,7 +5597,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserve
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            traits::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
+            platform_api::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -5619,7 +5619,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserve
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            traits::subagent_spawn::SubagentObservation::Killed { agent_id } => {
+            platform_api::subagent_spawn::SubagentObservation::Killed { agent_id } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -5641,8 +5641,8 @@ impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserve
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            traits::subagent_spawn::SubagentObservation::Progress { .. } => {}
-            traits::subagent_spawn::SubagentObservation::Retry { .. } => {}
+            platform_api::subagent_spawn::SubagentObservation::Progress { .. } => {}
+            platform_api::subagent_spawn::SubagentObservation::Retry { .. } => {}
         }
     }
 }
@@ -6407,7 +6407,7 @@ impl MobileEngineHandle {
                             replayed.state.history.clone(),
                             replayed.last_message_uuid.map(|id| id.to_string()),
                             replayed.state.active_goal.clone().map(|goal| {
-                                traits::ActiveGoalSnapshot {
+                                platform_api::ActiveGoalSnapshot {
                                     condition: goal.condition,
                                     set_at: goal.set_at,
                                     last_reason: goal.last_reason,
@@ -6503,7 +6503,7 @@ impl MobileEngineHandle {
                         Vec::new(),
                         None,
                         None,
-                        traits::ResumeRuntimeSnapshot::default(),
+                        platform_api::ResumeRuntimeSnapshot::default(),
                     )
                     .await
                 {
@@ -8035,10 +8035,10 @@ impl MobileEngineHandle {
                             controls.reasoning_spec.selections_persistable,
                         )
                     })
-                    .unwrap_or((traits::ReasoningSelection::Automatic, true));
+                    .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
                 let persisted_default = persistable
                     .then_some(effective)
-                    .unwrap_or(traits::ReasoningSelection::Automatic);
+                    .unwrap_or(platform_api::ReasoningSelection::Automatic);
                 if let Err(error) = command_core::effort::persist_reasoning_default_selection_at(
                     &settings_path,
                     Some(&persisted_default),
@@ -8046,14 +8046,14 @@ impl MobileEngineHandle {
                     let rollback = previous
                         .as_ref()
                         .map(|(requested, _, _)| requested.clone())
-                        .unwrap_or(traits::ReasoningSelection::Automatic);
+                        .unwrap_or(platform_api::ReasoningSelection::Automatic);
                     let _ = handle.set_reasoning_selection(rollback.clone()).await;
                     let previous_default = previous.as_ref().map_or(
-                        traits::ReasoningSelection::Automatic,
+                        platform_api::ReasoningSelection::Automatic,
                         |(_, effective, persistable)| {
                             persistable
                                 .then_some(effective.clone())
-                                .unwrap_or(traits::ReasoningSelection::Automatic)
+                                .unwrap_or(platform_api::ReasoningSelection::Automatic)
                         },
                     );
                     let _ = command_core::effort::persist_reasoning_default_selection_at(
@@ -8189,12 +8189,12 @@ impl MobileEngineHandle {
                 if let Some(controls) = handle.conversation_controls().await {
                     if !matches!(
                         controls.requested_reasoning_selection,
-                        traits::ReasoningSelection::Automatic
+                        platform_api::ReasoningSelection::Automatic
                     ) && controls.requested_reasoning_selection
                         != controls.effective_reasoning_selection
                     {
                         let _ = handle
-                            .set_reasoning_selection(traits::ReasoningSelection::Automatic)
+                            .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
                             .await;
                     }
                 }
@@ -8212,7 +8212,7 @@ impl MobileEngineHandle {
                     .set_model(model_id.clone(), profile.clone());
                 let snapshot = handle.get_status_snapshot().await;
                 let selected =
-                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -8233,11 +8233,11 @@ impl MobileEngineHandle {
             ClientCommand::RunSlashCommand { raw, turn_id } => {
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
-                    traits::SlashDispatchResult::RunAsTurn { prompt } => {
+                    platform_api::SlashDispatchResult::RunAsTurn { prompt } => {
                         self.start_streaming_turn(prompt, None, Vec::new(), turn_id, false)
                             .await?;
                     }
-                    traits::SlashDispatchResult::Handled { display } => {
+                    platform_api::SlashDispatchResult::Handled { display } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -8246,7 +8246,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    traits::SlashDispatchResult::Unknown { display, .. } => {
+                    platform_api::SlashDispatchResult::Unknown { display, .. } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -8255,7 +8255,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    traits::SlashDispatchResult::NotASlashCommand => {
+                    platform_api::SlashDispatchResult::NotASlashCommand => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -8767,7 +8767,7 @@ impl MobileEngineHandle {
             // one `TaskRow` per record, one `TaskOutputChunk`, one
             // `TaskStatusChanged` after a stop.
             ClientCommand::TaskList { status_filter } => {
-                let filter = traits::task_registry::TaskListFilter {
+                let filter = platform_api::task_registry::TaskListFilter {
                     status: status_filter.map(|s| {
                         match s {
                             client_protocol::listings::TaskStatusDto::Pending => "pending",
@@ -8783,7 +8783,7 @@ impl MobileEngineHandle {
                         .to_string()
                     }),
                 };
-                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let records = registry
                     .list(filter)
@@ -8801,7 +8801,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskOutput { task_id, offset } => {
-                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let chunk = registry.output(&task_id, Some(offset)).await.map_err(|e| {
                     ClientError::Internal {
@@ -8821,7 +8821,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
-                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let record = registry
                     .kill(&task_id)
@@ -8841,7 +8841,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::ResumeWorkflow { task_id } => {
-                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let resume_session = self
                     .inner
@@ -9236,7 +9236,7 @@ impl MobileEngineHandle {
     /// fail-closed and strips every profile. Nothing is routable in that state
     /// whatever we show, so fall back to the static catalog rather than hand the
     /// client an empty picker it can neither act on nor explain.
-    async fn routable_model_listings(&self) -> Vec<traits::ModelListing> {
+    async fn routable_model_listings(&self) -> Vec<platform_api::ModelListing> {
         if !self.inner.routable_listings.is_empty() {
             return self.inner.routable_listings.clone();
         }
@@ -9261,7 +9261,7 @@ impl MobileEngineHandle {
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
     /// pair the orchestrator takes, REFUSING one no configured provider serves.
     ///
-    /// [`traits::parse_model_ref`] falls back to treating an unresolvable
+    /// [`platform_api::parse_model_ref`] falls back to treating an unresolvable
     /// reference as a bare wire id, so accepting one put `provider/model` —
     /// which is not a wire id at all — into `session.model`. Every turn of that
     /// session then 404'd, and because the transcript persists the session
@@ -9271,7 +9271,7 @@ impl MobileEngineHandle {
         model: &str,
     ) -> Result<(String, Option<String>), ClientError> {
         let listings = self.routable_model_listings().await;
-        let (model_id, profile) = traits::parse_model_ref(model, &listings);
+        let (model_id, profile) = platform_api::parse_model_ref(model, &listings);
         let routable = listings.iter().any(|listing| {
             listing.request_model == model_id
                 && profile
@@ -9606,7 +9606,7 @@ impl MobileEngineHandle {
                 .await
                 .as_uuid()
                 .to_string(),
-            model: traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            model: platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
             permission_mode: self
                 .inner
                 .orchestrator
@@ -9687,12 +9687,12 @@ impl MobileEngineHandle {
                 let available = handle.list_available_models().await;
                 let listings = self.routable_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
-                let curated = traits::curated_model_listings(
+                let curated = platform_api::curated_model_listings(
                     &listings,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let models = traits::curated_model_refs(
+                let models = platform_api::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
@@ -9700,7 +9700,7 @@ impl MobileEngineHandle {
                 );
                 let details = curated.iter().map(lower_model_details).collect();
                 let current =
-                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
                     .emit(ClientEvent::ModelList {
                         models,
@@ -9904,7 +9904,7 @@ fn command_source_string(source: command_api::model::CommandSource) -> &'static 
 /// bridge-server router's helper — kept private to the shared host so iOS /
 /// Android cannot drift).
 fn lower_auth_state(
-    info: Option<traits::auth::LoginInfo>,
+    info: Option<platform_api::auth::LoginInfo>,
 ) -> client_protocol::listings::AuthStateDto {
     match info {
         Some(li) => client_protocol::listings::AuthStateDto::SignedIn {
@@ -11025,7 +11025,7 @@ pub(crate) async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
     data_root: &std::path::Path,
-    fs: Arc<dyn traits::FileSystem>,
+    fs: Arc<dyn platform_api::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<String, String> {
     let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
@@ -11090,7 +11090,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
     backfill_home: std::path::PathBuf,
     backfill_cwd: String,
     backfill_root: std::path::PathBuf,
-    backfill_fs: Arc<dyn traits::FileSystem>,
+    backfill_fs: Arc<dyn platform_api::FileSystem>,
     backfill_service: Arc<local_apps::AppService>,
 ) {
     for record in backfill_service.records().await {
@@ -11634,8 +11634,8 @@ mod tests {
     use client_protocol::events::ClientEvent;
     use tokio::sync::Notify;
     use tool_skill::skill::{SkillCommandType, SkillLoader as _};
-    use traits::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
-    use traits::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
+    use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+    use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
 
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
@@ -11691,8 +11691,8 @@ mod tests {
                     .models
                     .iter()
                     .filter(|model| {
-                        traits::is_curated_model(&provider.profile_name, &model.request_model)
-                            || !traits::provider_has_curated_list(&provider.profile_name)
+                        platform_api::is_curated_model(&provider.profile_name, &model.request_model)
+                            || !platform_api::provider_has_curated_list(&provider.profile_name)
                     })
                     .map(|model| model.request_model.clone())
                     .collect::<Vec<_>>()
@@ -11734,7 +11734,7 @@ mod tests {
         let script_path = tmp.path().join("secret.js");
         std::fs::create_dir(&script_path).expect("directory path must be unreadable as a script");
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let permission_sink: Arc<dyn PermissionRequestSink> =
@@ -11969,7 +11969,7 @@ mod tests {
             .on_event(SubagentObservation::Completed {
                 agent_id,
                 content: serde_json::json!("done"),
-                usage: traits::SubagentUsage::default(),
+                usage: platform_api::SubagentUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
                 assistant_message_count: 0,
@@ -12151,7 +12151,7 @@ mod tests {
     #[test]
     fn provider_connection_maps_auth_failure_without_echoing_response_body() {
         let result = classify_provider_connection_response(
-            Err(traits::HttpError::Status {
+            Err(platform_api::HttpError::Status {
                 status: 401,
                 body: "secret-bearing upstream response".to_string(),
             }),
@@ -12172,7 +12172,7 @@ mod tests {
     fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
         for (response, status, expected_fragment) in [
             (
-                Err(traits::HttpError::Status {
+                Err(platform_api::HttpError::Status {
                     status: 403,
                     body: "private upstream detail".to_string(),
                 }),
@@ -12180,7 +12180,7 @@ mod tests {
                 "拒绝访问",
             ),
             (
-                Err(traits::HttpError::Status {
+                Err(platform_api::HttpError::Status {
                     status: 429,
                     body: "retry-after: 30".to_string(),
                 }),
@@ -12188,7 +12188,7 @@ mod tests {
                 "频率",
             ),
             (
-                Err(traits::HttpError::Timeout(std::time::Duration::from_secs(
+                Err(platform_api::HttpError::Timeout(std::time::Duration::from_secs(
                     1,
                 ))),
                 None,
@@ -12247,13 +12247,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl traits::SecureStorage for FakeEncryptedStore {
+    impl platform_api::SecureStorage for FakeEncryptedStore {
         async fn store(
             &self,
             service: &str,
             account: &str,
             data: protocol::SecureStorageData,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -12265,7 +12265,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -12278,7 +12278,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -12286,7 +12286,7 @@ mod tests {
             Ok(())
         }
 
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -12301,8 +12301,8 @@ mod tests {
             true
         }
 
-        fn backend(&self) -> traits::SecureStorageBackend {
-            traits::SecureStorageBackend::EncryptedFile
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::EncryptedFile
         }
     }
 
@@ -12317,7 +12317,7 @@ mod tests {
         assert_eq!(cfg.default_model, "anthropic/claude-sonnet-5");
         // The boot default must be a CURATED Anthropic id, so a client with no
         // configured provider lands inside the shortlist its picker renders.
-        assert!(traits::is_curated_model(
+        assert!(platform_api::is_curated_model(
             "anthropic",
             cfg.default_model.rsplit('/').next().unwrap_or_default()
         ));
@@ -12348,7 +12348,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(tmp.path().join(".lingxi")).expect("mk .lingxi");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let handle = new_engine_with_streaming(
             test_config(tmp.path()),
@@ -12419,7 +12419,7 @@ mod tests {
     #[tokio::test]
     async fn build_mobile_constructs_orchestrator() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -12432,7 +12432,7 @@ mod tests {
         // The orchestrator exists and exposes the `OrchestratorHandle` surface
         // the command registry binds to. Constructing it at all proves the full
         // mobile assembly (tool registry + command registry + adapter sinks).
-        let _handle: Arc<dyn traits::OrchestratorHandle> = rt.orchestrator.clone();
+        let _handle: Arc<dyn platform_api::OrchestratorHandle> = rt.orchestrator.clone();
 
         // SKILLLIST.1: the production composition must attach the listing
         // provider before the orchestrator is wrapped, and the provider's live
@@ -12504,7 +12504,7 @@ mod tests {
         )
         .expect("write loop decoy");
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -12779,7 +12779,7 @@ mod tests {
             agent_name,
         );
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -12915,7 +12915,7 @@ mod tests {
     #[tokio::test]
     async fn mobile_boot_materializes_the_builtin_bundle() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -13213,7 +13213,7 @@ mod tests {
         );
 
         // Inject an encrypted store → OAuth /login enabled.
-        let platform: Arc<dyn traits::Platform> = Arc::new(
+        let platform: Arc<dyn platform_api::Platform> = Arc::new(
             HostFakePlatform::new(tmp.path().to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -13262,7 +13262,7 @@ mod tests {
             ),
         )
         .expect("write MCP config");
-        let platform: Arc<dyn traits::Platform> = Arc::new(
+        let platform: Arc<dyn platform_api::Platform> = Arc::new(
             HostFakePlatform::new(tmp.path().to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -13290,7 +13290,7 @@ mod tests {
 
     #[test]
     fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
-        let oauth = traits::McpOAuthConfigDto {
+        let oauth = platform_api::McpOAuthConfigDto {
             client_id: Some("mobile-test".into()),
             callback_port: None,
             auth_server_metadata_url: None,
@@ -13299,9 +13299,9 @@ mod tests {
         };
         let config = McpServerConfig {
             name: "remote".into(),
-            spec: traits::McpTransportSpec::Http {
+            spec: platform_api::McpTransportSpec::Http {
                 url: "https://127.0.0.1:1/mcp".into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
                 oauth: Some(oauth),
             },
@@ -13324,12 +13324,12 @@ mod tests {
 
     #[test]
     fn mobile_mcp_reload_snapshot_is_complete_and_stable() {
-        let mut headers = traits::McpHeaders::new();
+        let mut headers = platform_api::McpHeaders::new();
         headers.insert("X-First".into(), "one".into());
         headers.insert("X-Second".into(), "two".into());
         let config = McpServerConfig {
             name: "remote".into(),
-            spec: traits::McpTransportSpec::Http {
+            spec: platform_api::McpTransportSpec::Http {
                 url: "https://example.test/mcp".into(),
                 headers,
                 headers_helper: Some("helper".into()),
@@ -13349,13 +13349,13 @@ mod tests {
         assert!(mobile_mcp_config_unchanged(&config, &same));
 
         let mut changed = config.clone();
-        if let traits::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
+        if let platform_api::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
             headers.insert("X-Third".into(), "three".into());
         }
         assert!(!mobile_mcp_config_unchanged(&config, &changed));
 
         let mut reordered = config.clone();
-        if let traits::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
+        if let platform_api::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
             let first = headers.shift_remove("X-First").unwrap();
             headers.insert("X-First".into(), first);
         }
@@ -13371,13 +13371,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl traits::DeepLinkOpener for RecordingDeepLinkOpener {
-        async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+    impl platform_api::DeepLinkOpener for RecordingDeepLinkOpener {
+        async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
             self.opened.lock().unwrap().push(url);
             if self.succeed {
                 Ok(())
             } else {
-                Err(traits::DeepLinkError::Unavailable)
+                Err(platform_api::DeepLinkError::Unavailable)
             }
         }
     }
@@ -13446,7 +13446,7 @@ mod tests {
     #[tokio::test]
     async fn mobile_runtime_binds_adapter_sinks() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let sink = Arc::new(RecordingPermissionSink::default());
@@ -13459,11 +13459,11 @@ mod tests {
         // The policy gate is the same enforcing gate injected into the mobile
         // builtin tool context. A headless ExitPlanMode check must deny before
         // it can mutate plan state rather than relying on a prompt transport.
-        let headless_ctx = traits::permission_gate::PermissionCheckContext {
+        let headless_ctx = platform_api::permission_gate::PermissionCheckContext {
             is_non_interactive_session: true,
             ..Default::default()
         };
-        let outcome = traits::permission_gate::PermissionGate::check_exit_plan_mode(
+        let outcome = platform_api::permission_gate::PermissionGate::check_exit_plan_mode(
             rt.permission_policy_gate.as_ref(),
             "1. Ship it",
             &headless_ctx,
@@ -13471,7 +13471,7 @@ mod tests {
         .await;
         assert!(matches!(
             outcome,
-            traits::permission_gate::PermissionOutcome::Deny { reason }
+            platform_api::permission_gate::PermissionOutcome::Deny { reason }
                 if reason.starts_with("Permission to use ExitPlanMode has been denied.")
         ));
 
@@ -13547,12 +13547,12 @@ mod tests {
     /// dispatched against (mobile sibling of the desktop test).
     #[tokio::test]
     async fn build_mobile_fires_session_start_against_a_registered_hook() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         write_project_hook(tmp.path(), "SessionStart");
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -13587,7 +13587,7 @@ mod tests {
         use tool_workflow::WorkflowLauncher as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -13651,7 +13651,7 @@ mod tests {
         );
 
         // Poll to a terminal status (the script thread is fast; bound the wait).
-        let registry: &dyn traits::task_registry::TaskRegistryHandle = &*rt.task_registry;
+        let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*rt.task_registry;
         let mut status = String::new();
         for _ in 0..100 {
             let record = registry
@@ -13707,7 +13707,7 @@ mod tests {
         use tool_workflow::WorkflowLauncher as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -13788,12 +13788,12 @@ mod tests {
     /// real registry wiring.)
     #[tokio::test]
     async fn build_mobile_fires_instructions_loaded_against_a_registered_hook() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         write_project_hook(tmp.path(), "InstructionsLoaded");
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -13837,7 +13837,7 @@ mod tests {
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
         ));
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -13885,7 +13885,7 @@ mod tests {
             "default config must leave memory_provider None (empty, deterministic)"
         );
 
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -13926,7 +13926,7 @@ mod tests {
     /// `api.anthropic.com` request — a test that wants a scripted success
     /// overrides it via `set_local_apps_model` before triggering.
     fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -14290,7 +14290,7 @@ mod tests {
         cfg: MobileConfig,
         root: &std::path::Path,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -14305,7 +14305,7 @@ mod tests {
     fn build_submit_handle_with_secure_store(
         root: &std::path::Path,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn traits::Platform> = Arc::new(
+        let platform: Arc<dyn platform_api::Platform> = Arc::new(
             HostFakePlatform::new(root.to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -14354,9 +14354,9 @@ mod tests {
                 mcp::connection::McpConnectionState::Connected {
                     config: desired.clone(),
                     connection_id,
-                    capabilities: traits::ServerCapabilitiesDto::default(),
-                    negotiated: traits::McpNegotiatedProtocol {
-                        era: traits::McpProtocolEra::Legacy,
+                    capabilities: platform_api::ServerCapabilitiesDto::default(),
+                    negotiated: platform_api::McpNegotiatedProtocol {
+                        era: platform_api::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: Vec::new(),
@@ -14396,9 +14396,9 @@ mod tests {
     fn mobile_reload_test_config(url: &str) -> McpServerConfig {
         McpServerConfig {
             name: "remote".into(),
-            spec: traits::McpTransportSpec::Http {
+            spec: platform_api::McpTransportSpec::Http {
                 url: url.into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
@@ -14435,64 +14435,64 @@ mod tests {
     }
 
     #[async_trait]
-    impl traits::McpTransport for BlockingMobileMcpTransport {
+    impl platform_api::McpTransport for BlockingMobileMcpTransport {
         async fn connect(
             &self,
-            _spec: &traits::McpTransportSpec,
-        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            _spec: &platform_api::McpTransportSpec,
+        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
             self.connect_calls.fetch_add(1, Ordering::SeqCst);
             self.connect_started.notify_one();
             if self.block_connect.load(Ordering::SeqCst) {
                 self.connect_release.notified().await;
             }
-            Ok(traits::McpRawConnection {
+            Ok(platform_api::McpRawConnection {
                 connection_id: protocol::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
-            Ok(traits::ServerCapabilitiesDto::default())
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
+            Ok(platform_api::ServerCapabilitiesDto::default())
         }
 
         async fn list_tools(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _conn: &traits::McpRawConnection,
+            _conn: &platform_api::McpRawConnection,
             _tool: &str,
             _input: serde_json::Value,
-        ) -> Result<traits::McpToolResultDto, traits::McpError> {
-            Err(traits::McpError::Internal("unused test tool call".into()))
+        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+            Err(platform_api::McpError::Internal("unused test tool call".into()))
         }
 
         async fn read_resource(
             &self,
-            _conn: &traits::McpRawConnection,
+            _conn: &platform_api::McpRawConnection,
             _uri: &str,
-        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
-            Err(traits::McpError::Internal(
+        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+            Err(platform_api::McpError::Internal(
                 "unused test resource read".into(),
             ))
         }
@@ -14500,35 +14500,35 @@ mod tests {
         async fn ping(
             &self,
             _connection_id: protocol::McpConnectionId,
-        ) -> Result<(), traits::McpError> {
+        ) -> Result<(), platform_api::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
             Ok(Box::pin(futures_util::stream::empty()))
         }
 
         async fn handle_elicitation(
             &self,
-            _conn: &traits::McpRawConnection,
-            _request: traits::ElicitRequestDto,
-        ) -> Result<traits::ElicitResultDto, traits::McpError> {
-            Err(traits::McpError::Internal("unused test elicitation".into()))
+            _conn: &platform_api::McpRawConnection,
+            _request: platform_api::ElicitRequestDto,
+        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+            Err(platform_api::McpError::Internal("unused test elicitation".into()))
         }
 
         async fn disconnect(
             &self,
             _connection_id: protocol::McpConnectionId,
-        ) -> Result<(), traits::McpError> {
+        ) -> Result<(), platform_api::McpError> {
             self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
-            vec![traits::McpTransportKind::Http]
+        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
+            vec![platform_api::McpTransportKind::Http]
         }
     }
 
@@ -14539,7 +14539,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn traits::McpTransport>
+                transport.clone() as Arc<dyn platform_api::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/startup-a");
@@ -14659,7 +14659,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn traits::McpTransport>
+                transport.clone() as Arc<dyn platform_api::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config = mobile_reload_test_config("http://127.0.0.1:1/repeated");
@@ -14786,7 +14786,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn traits::McpTransport>
+                transport.clone() as Arc<dyn platform_api::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -14847,7 +14847,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn traits::McpTransport>
+                transport.clone() as Arc<dyn platform_api::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -14906,7 +14906,7 @@ mod tests {
         runtime.block_on(async {
             let transport = BlockingMobileMcpTransport::new();
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn traits::McpTransport>
+                transport.clone() as Arc<dyn platform_api::McpTransport>
             ));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
             let mut disabled = config_a.clone();
@@ -15063,9 +15063,9 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
         let old_config = McpServerConfig {
             name: "remote".into(),
-            spec: traits::McpTransportSpec::Http {
+            spec: platform_api::McpTransportSpec::Http {
                 url: "http://127.0.0.1:1/old".into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
@@ -15174,9 +15174,9 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
         let old_config = McpServerConfig {
             name: "remote".into(),
-            spec: traits::McpTransportSpec::Http {
+            spec: platform_api::McpTransportSpec::Http {
                 url: "http://127.0.0.1:1/pending".into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
@@ -15319,7 +15319,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             assert!(
                 orch.dynamic_workflows_enabled().await,
                 "mobile should default enableWorkflows to true when no tier sets it"
@@ -15368,7 +15368,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             assert!(
                 !orch.dynamic_workflows_enabled().await,
                 "the local enableWorkflows=false override must disable workflows for the session"
@@ -15657,7 +15657,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let before: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let before: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             let before = before.get_status_snapshot().await;
 
             let result = handle
@@ -15670,7 +15670,7 @@ mod tests {
                 "switching to a non-configured provider must be rejected, got {result:?}"
             );
 
-            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             let after = orch.get_status_snapshot().await;
             assert_eq!(
                 (after.model, after.model_profile),
@@ -15695,7 +15695,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             let before = orch.current_session_id().await;
 
             let result = handle
@@ -15785,7 +15785,7 @@ mod tests {
                 })
                 .await
                 .expect("a custom provider's model must be selectable");
-            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
             let snapshot = orch.get_status_snapshot().await;
             assert_eq!(snapshot.model, "internal-7b");
             assert_eq!(snapshot.model_profile.as_deref(), Some("my-proxy"));
@@ -17002,7 +17002,7 @@ mod tests {
         use orchestrator::test_support_stream::MockStreamingApiClient;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -17276,7 +17276,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use traits::OrchestratorHandle;
+            use platform_api::OrchestratorHandle;
             let oh: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
             let before = oh.current_session_id().await.to_string();
 
@@ -17345,7 +17345,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use traits::OrchestratorHandle;
+            use platform_api::OrchestratorHandle;
 
             handle
                 .submit(ClientCommand::NewSession {
@@ -17409,7 +17409,7 @@ mod tests {
 
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
-            use traits::OrchestratorHandle;
+            use platform_api::OrchestratorHandle;
 
             handle
                 .submit(ClientCommand::ResumeSession {
@@ -17433,7 +17433,7 @@ mod tests {
         let expected = "dddddddd-4444-4444-8444-dddddddddddd";
 
         handle.runtime().block_on(async {
-            use traits::OrchestratorHandle;
+            use platform_api::OrchestratorHandle;
 
             handle
                 .resume_empty_session(expected.into(), "旧空会话".into())
@@ -17534,7 +17534,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use traits::OrchestratorHandle;
+            use platform_api::OrchestratorHandle;
 
             let result = handle
                 .submit(ClientCommand::ResumeSession {
@@ -17738,7 +17738,7 @@ mod tests {
         // from `assembled.client_config.providers` (display_model == request_model
         // on mobile; provider_label == profile_name).
         let listings = vec![
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-5.2".to_string(),
                 request_model: "gpt-5.2".to_string(),
                 provider_id: "openai".to_string(),
@@ -17749,7 +17749,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
             },
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-5.2".to_string(),
                 request_model: "gpt-5.2".to_string(),
                 provider_id: "github-copilot".to_string(),
@@ -17760,7 +17760,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
             },
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "claude-sonnet-4-20250514".to_string(),
                 request_model: "claude-sonnet-4-20250514".to_string(),
                 provider_id: "anthropic".to_string(),
@@ -17774,7 +17774,7 @@ mod tests {
         ];
 
         // Qualified: "openai/gpt-5.2" → bare id "gpt-5.2" + profile "openai"
-        let (id, profile) = traits::parse_model_ref("openai/gpt-5.2", &listings);
+        let (id, profile) = platform_api::parse_model_ref("openai/gpt-5.2", &listings);
         assert_eq!(id, "gpt-5.2", "qualified ref must strip the profile prefix");
         assert_eq!(
             profile.as_deref(),
@@ -17783,7 +17783,7 @@ mod tests {
         );
 
         // Bare: "claude-sonnet-4-20250514" → same id, no profile (no-op seed path)
-        let (id2, profile2) = traits::parse_model_ref("claude-sonnet-4-20250514", &listings);
+        let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-20250514", &listings);
         assert_eq!(
             id2, "claude-sonnet-4-20250514",
             "bare model id must pass through"
@@ -17791,7 +17791,7 @@ mod tests {
         assert!(profile2.is_none(), "bare model must yield None profile");
 
         // Shared id with two providers and explicit profile qualifier
-        let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-5.2", &listings);
+        let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-5.2", &listings);
         assert_eq!(id3, "gpt-5.2");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
@@ -17799,7 +17799,7 @@ mod tests {
     #[test]
     fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
         let listings = vec![
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-5.6-sol".into(),
                 request_model: "gpt-5.6-sol".into(),
                 provider_id: "openai".into(),
@@ -17810,7 +17810,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: true,
             },
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-5.6-sol".into(),
                 request_model: "gpt-5.6-sol".into(),
                 provider_id: "github-copilot".into(),
@@ -17823,7 +17823,7 @@ mod tests {
             },
         ];
 
-        let refs = traits::curated_model_refs(
+        let refs = platform_api::curated_model_refs(
             &listings,
             &["gpt-5.6-sol".into()],
             "gpt-5.6-sol",
@@ -18078,7 +18078,7 @@ mod tests {
             1,
         )
         .record;
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
         let init_id =
@@ -19094,7 +19094,7 @@ mod anthropic_model_registry_tests {
             "claude-haiku-4-5",
         ] {
             assert!(
-                traits::is_curated_model("anthropic", curated),
+                platform_api::is_curated_model("anthropic", curated),
                 "{curated} is no longer curated; update this test with the shortlist"
             );
             assert!(
@@ -19195,7 +19195,7 @@ mod anthropic_model_registry_tests {
 mod default_model_resolution_tests {
     use super::{anthropic_models, resolve_default_model_ref};
 
-    fn listings() -> Vec<traits::ModelListing> {
+    fn listings() -> Vec<platform_api::ModelListing> {
         let assembled = provider_config::assemble(provider_config::AssembleInputs {
             anthropic_api_base: "https://api.anthropic.com".to_string(),
             anthropic_models: anthropic_models("claude-sonnet-5"),
@@ -19240,7 +19240,7 @@ mod default_model_resolution_tests {
     /// reports the ambiguity rather than this function silently picking one.
     #[test]
     fn a_bare_id_served_by_two_profiles_stays_unscoped() {
-        let listing = |provider: &str| traits::ModelListing {
+        let listing = |provider: &str| platform_api::ModelListing {
             display_model: "claude-fable-5".to_string(),
             request_model: "claude-fable-5".to_string(),
             provider_id: provider.to_string(),
@@ -19270,7 +19270,7 @@ mod default_model_resolution_tests {
         // provider-qualified rows, so a bare `current` matches none of them and
         // the client's picker renders with nothing selected.
         assert_eq!(profile.as_deref(), Some("anthropic"));
-        assert!(traits::is_curated_model("anthropic", &model));
+        assert!(platform_api::is_curated_model("anthropic", &model));
     }
 
     #[test]
@@ -19288,7 +19288,7 @@ mod default_model_resolution_tests {
     /// unroutable ref for another while the warn log claimed a repair.
     #[test]
     fn fallback_is_taken_from_the_listings_when_anthropic_is_not_registered() {
-        let listings = vec![traits::ModelListing {
+        let listings = vec![platform_api::ModelListing {
             display_model: "deepseek-v4-flash".to_string(),
             request_model: "deepseek-v4-flash".to_string(),
             provider_id: "deepseek".to_string(),

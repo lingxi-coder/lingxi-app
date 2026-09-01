@@ -322,10 +322,10 @@ fn parse_one_provider(
             .as_str()
             .ok_or_else(|| format!("provider {name:?}: billingMode must be a string"))?;
         pricing.billing_mode = match raw {
-            "perToken" => traits::ModelBillingMode::PerToken,
-            "subscription" => traits::ModelBillingMode::Subscription,
-            "free" => traits::ModelBillingMode::Free,
-            "unknown" => traits::ModelBillingMode::Unknown,
+            "perToken" => platform_api::ModelBillingMode::PerToken,
+            "subscription" => platform_api::ModelBillingMode::Subscription,
+            "free" => platform_api::ModelBillingMode::Free,
+            "unknown" => platform_api::ModelBillingMode::Unknown,
             _ => {
                 return Err(format!(
                     "provider {name:?}: unsupported billingMode {raw:?}"
@@ -336,7 +336,7 @@ fn parse_one_provider(
     if !pricing.overrides.is_empty() {
         // A concrete per-model price sheet is stronger evidence than a broad
         // provider billing hint and must drive both cost lookup and display.
-        pricing.billing_mode = traits::ModelBillingMode::PerToken;
+        pricing.billing_mode = platform_api::ModelBillingMode::PerToken;
     }
     for (model_id, model_pricing) in display_overrides {
         if let Some(model) = models
@@ -516,7 +516,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             let metadata = obj
                 .get("metadata")
                 .cloned()
-                .map(serde_json::from_value::<traits::ModelMetadata>)
+                .map(serde_json::from_value::<platform_api::ModelMetadata>)
                 .transpose()
                 .map_err(|error| {
                     format!("provider {provider_name:?}: model {id:?} metadata is invalid: {error}")
@@ -580,7 +580,7 @@ fn parse_pricing_overrides(
     profile_name: &str,
     pricing_val: &Value,
     model_profiles: &[ModelProfile],
-) -> Result<(PricingConfig, Vec<(String, traits::ModelPricing)>), String> {
+) -> Result<(PricingConfig, Vec<(String, platform_api::ModelPricing)>), String> {
     const KNOWN_PRICING_KEYS: &[&str] = &[
         "inputPerMtok",
         "outputPerMtok",
@@ -670,8 +670,8 @@ fn parse_pricing_overrides(
         ));
         display_overrides.push((
             model_id.clone(),
-            traits::ModelPricing {
-                billing_mode: traits::ModelBillingMode::PerToken,
+            platform_api::ModelPricing {
+                billing_mode: platform_api::ModelBillingMode::PerToken,
                 input_per_million,
                 output_per_million,
                 cache_read_per_million,
@@ -686,9 +686,9 @@ fn parse_pricing_overrides(
     Ok((
         PricingConfig {
             billing_mode: if overrides.is_empty() {
-                traits::ModelBillingMode::Unknown
+                platform_api::ModelBillingMode::Unknown
             } else {
-                traits::ModelBillingMode::PerToken
+                platform_api::ModelBillingMode::PerToken
             },
             require_priced: false,
             overrides,
@@ -736,7 +736,7 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn anthropic_metadata(model: &str) -> traits::ModelMetadata {
+fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
     use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 
     let rates = match model {
@@ -747,23 +747,23 @@ fn anthropic_metadata(model: &str) -> traits::ModelMetadata {
         "claude-sonnet-4-6" => Some((3.0, 15.0, 0.3, 3.75)),
         _ => None,
     };
-    traits::ModelMetadata {
+    platform_api::ModelMetadata {
         input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
         output_modalities: vec!["text".to_string()],
         context_window_tokens: Some(context_window_for_model(model, &[])),
         max_output_tokens: Some(max_output_tokens_for_model(model)),
         pricing: rates.map(
-            |(input, output, cache_read, cache_write)| traits::ModelPricing {
-                billing_mode: traits::ModelBillingMode::PerToken,
+            |(input, output, cache_read, cache_write)| platform_api::ModelPricing {
+                billing_mode: platform_api::ModelBillingMode::PerToken,
                 input_per_million: Some(input),
                 output_per_million: Some(output),
                 cache_read_per_million: Some(cache_read),
                 cache_write_per_million: Some(cache_write),
                 source: Some("official".to_string()),
-                ..traits::ModelPricing::default()
+                ..platform_api::ModelPricing::default()
             },
         ),
-        ..traits::ModelMetadata::default()
+        ..platform_api::ModelMetadata::default()
     }
 }
 
@@ -867,7 +867,7 @@ pub fn anthropic_provider_profile(
         credential,
         models: anthropic_model_profiles(),
         pricing: PricingConfig {
-            billing_mode: traits::ModelBillingMode::PerToken,
+            billing_mode: platform_api::ModelBillingMode::PerToken,
             ..PricingConfig::default()
         },
         signing: None,
@@ -1260,7 +1260,7 @@ mod tests {
             .pricing
             .as_ref()
             .expect("display pricing override");
-        assert_eq!(display.billing_mode, traits::ModelBillingMode::PerToken);
+        assert_eq!(display.billing_mode, platform_api::ModelBillingMode::PerToken);
         assert_eq!(display.input_per_million, Some(1.0));
         assert_eq!(display.output_per_million, Some(2.0));
         assert_eq!(display.cache_read_per_million, Some(0.25));
@@ -1293,7 +1293,7 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            traits::ModelBillingMode::PerToken
+            platform_api::ModelBillingMode::PerToken
         );
         let display = profile.models[0]
             .metadata
@@ -1333,7 +1333,7 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            traits::ModelBillingMode::Subscription
+            platform_api::ModelBillingMode::Subscription
         );
         let model = &profile.models[0];
         assert_eq!(model.metadata.status.as_deref(), Some("beta"));

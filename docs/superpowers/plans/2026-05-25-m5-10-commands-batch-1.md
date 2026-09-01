@@ -14,9 +14,9 @@
 
 **Goal:** Replace the 6 M5-09 placeholder structs (`ClearHandler`, `CompactHandler`, `HelpHandler`, `ExitHandler`, `MemoryHandler`, `InitHandler`) with real implementations that wire into `OrchestratorHandle` (M5-02) and emit the right `CommandResult` variant. `/clear` → calls `OrchestratorHandle::clear_session` and returns `Done { display: "Conversation cleared." }`. `/compact` → calls `OrchestratorHandle::force_compact` and returns `Done` with a formatted summary line. `/help` → returns `Done` with a byte-locked rendering of the 102 commands sorted ASCII-ascending, two-column layout, one line per command, "(unimplemented in v0.6.0)" suffix on the 84 non-core entries. `/exit` → calls a NEW trait method `OrchestratorHandle::request_exit` and returns `Done { display: "Exiting." }`. `/memory` → calls a NEW trait method `OrchestratorHandle::open_memory_editor` (which spawns `$EDITOR` against `~/.claude/CLAUDE.md`) and returns `Done` with the editor exit status echoed back. `/init` → returns `InjectMessage { content: OLD_INIT_PROMPT }` where `OLD_INIT_PROMPT` is the 24-line markdown template byte-copied from `claude-code/src/commands/init.ts:6-30`. Ships **18 new telemetry events** (`tengu_command_<name>_started/completed/failed` × 6 commands), bringing `ALL_EVENT_NAMES.len()` from **258 → 276**. Adds new module `lingxi_telemetry::tengu::command`.
 
-**Architecture:** Six concrete handlers under `lingxi-commands/src/builtin/` (`clear.rs`, `compact.rs`, `help.rs`, `exit.rs`, `memory.rs`, `init.rs` — re-introduced as full impls; M5-09 deleted the old M1.15 stubs at Task 4). Each handler stores `Arc<dyn lingxi_traits::OrchestratorHandle>` in its struct (except `HelpHandler` which only needs `Arc<RwLock<CommandRegistry>>` for rendering, and `InitHandler` which has no deps). A new file `lingxi-commands/src/builtin/templates.rs` holds the **byte-locked** `OLD_INIT_PROMPT: &str` constant. A new file `lingxi-commands/src/builtin/help_render.rs` holds the `render_help_screen(reg) -> String` function with locked column layout. A new module `lingxi-telemetry/src/tengu/command.rs` defines 18 event-name constants + `NAMES: &[&str; 18]`. The `tengu/mod.rs` aggregator `ALL_EVENT_NAMES` formula grows from `258` to `276`. `lingxi-traits::orchestrator::OrchestratorHandle` grows two new methods: `request_exit(&self)` and `open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError>` (with `MemoryEditorOutcome { exit_code: i32, edited_path: PathBuf }`). A new `register_core_batch_1(reg, handle)` helper in `lingxi-commands::registry` overwrites the 6 batch-1 entries in the registry with their handle-bound real handlers. The M5-09 `register_all_builtin_commands(reg)` API stays unchanged — M5-12 (CLI binary) is responsible for calling both during init.
+**Architecture:** Six concrete handlers under `lingxi-commands/src/builtin/` (`clear.rs`, `compact.rs`, `help.rs`, `exit.rs`, `memory.rs`, `init.rs` — re-introduced as full impls; M5-09 deleted the old M1.15 stubs at Task 4). Each handler stores `Arc<dyn lingxi_platform_api::OrchestratorHandle>` in its struct (except `HelpHandler` which only needs `Arc<RwLock<CommandRegistry>>` for rendering, and `InitHandler` which has no deps). A new file `lingxi-commands/src/builtin/templates.rs` holds the **byte-locked** `OLD_INIT_PROMPT: &str` constant. A new file `lingxi-commands/src/builtin/help_render.rs` holds the `render_help_screen(reg) -> String` function with locked column layout. A new module `lingxi-telemetry/src/tengu/command.rs` defines 18 event-name constants + `NAMES: &[&str; 18]`. The `tengu/mod.rs` aggregator `ALL_EVENT_NAMES` formula grows from `258` to `276`. `lingxi-platform_api::orchestrator::OrchestratorHandle` grows two new methods: `request_exit(&self)` and `open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError>` (with `MemoryEditorOutcome { exit_code: i32, edited_path: PathBuf }`). A new `register_core_batch_1(reg, handle)` helper in `lingxi-commands::registry` overwrites the 6 batch-1 entries in the registry with their handle-bound real handlers. The M5-09 `register_all_builtin_commands(reg)` API stays unchanged — M5-12 (CLI binary) is responsible for calling both during init.
 
-**Tech stack:** Rust 2021, `tokio::process::Command` (for `$EDITOR` spawn), `tokio::fs` (for ensuring `~/.claude/CLAUDE.md` exists before launching the editor), `std::env::var_os` (for `EDITOR` lookup with fallback chain `EDITOR` → `VISUAL` → `vi`), `lingxi_traits::OrchestratorHandle` (M5-02), `lingxi_telemetry::tengu::command` (new in T1), `lingxi_commands::builtin::{core_placeholders, names}` (M5-09), `async_trait = "0.1"` (workspace).
+**Tech stack:** Rust 2021, `tokio::process::Command` (for `$EDITOR` spawn), `tokio::fs` (for ensuring `~/.claude/CLAUDE.md` exists before launching the editor), `std::env::var_os` (for `EDITOR` lookup with fallback chain `EDITOR` → `VISUAL` → `vi`), `lingxi_platform_api::OrchestratorHandle` (M5-02), `lingxi_telemetry::tengu::command` (new in T1), `lingxi_commands::builtin::{core_placeholders, names}` (M5-09), `async_trait = "0.1"` (workspace).
 
 ---
 
@@ -441,13 +441,13 @@ git commit -m "feat(M5-10 task 1): tengu::command module + 18 NAMES (6 cmds × 3
 ## Task 2: Extend `OrchestratorHandle` trait + impl on `ConversationOrchestrator`
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/orchestrator.rs` (add `request_exit`, `open_memory_editor`, `MemoryEditorOutcome`)
+- Modify: `lingxi-code/crates/platform-api/src/orchestrator.rs` (add `request_exit`, `open_memory_editor`, `MemoryEditorOutcome`)
 - Create: `lingxi-code/crates/orchestrator/src/handle_impl.rs` (impl block)
 - Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (re-export + wire module)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Append to `lingxi-code/crates/traits/src/orchestrator.rs` (after the existing trait definition + tests):
+  Append to `lingxi-code/crates/platform-api/src/orchestrator.rs` (after the existing trait definition + tests):
 
 ```rust
 #[cfg(test)]
@@ -486,7 +486,7 @@ cargo test -p lingxi-traits --lib m5_10_extension_tests 2>&1 | head -10
 
 - [ ] **Step 3: Add the new types + trait methods.**
 
-  Open `lingxi-code/crates/traits/src/orchestrator.rs`. Find the existing `OrchestratorHandle` trait (defined by M5-02). Add `MemoryEditorOutcome` and the two new trait methods:
+  Open `lingxi-code/crates/platform-api/src/orchestrator.rs`. Find the existing `OrchestratorHandle` trait (defined by M5-02). Add `MemoryEditorOutcome` and the two new trait methods:
 
 ```rust
 use std::path::PathBuf;
@@ -528,7 +528,7 @@ pub trait OrchestratorHandle: Send + Sync {
 }
 ```
 
-  Also add `pub use orchestrator::MemoryEditorOutcome;` to `lingxi-code/crates/traits/src/lib.rs`.
+  Also add `pub use orchestrator::MemoryEditorOutcome;` to `lingxi-code/crates/platform-api/src/lib.rs`.
 
 - [ ] **Step 4: Run the trait tests + watch pass.**
 
@@ -599,7 +599,7 @@ impl MockOrchestratorHandle {
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::session as session_evt;
-use lingxi_traits::{
+use lingxi_platform_api::{
     CompactionSummary, CostSnapshot, HandleError, MemoryEditorOutcome,
     OrchestratorHandle, SessionId,
 };
@@ -773,8 +773,8 @@ cargo clippy -p lingxi-traits -p lingxi-orchestrator --lib --tests -- -D warning
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-code/crates/traits/src/orchestrator.rs \
-        lingxi-code/crates/traits/src/lib.rs \
+git add lingxi-code/crates/platform-api/src/orchestrator.rs \
+        lingxi-code/crates/platform-api/src/lib.rs \
         lingxi-code/crates/orchestrator/src/handle_impl.rs \
         lingxi-code/crates/orchestrator/src/lib.rs \
         lingxi-code/crates/orchestrator/Cargo.toml \
@@ -872,7 +872,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 /// `/clear` handler — wipes the in-memory conversation.
@@ -973,7 +973,7 @@ mod tests {
     use crate::model::CommandResult;
     use crate::parser::ParsedSlashCommand;
     use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::CompactionSummary;
+    use lingxi_platform_api::CompactionSummary;
     use std::sync::Arc;
 
     fn args() -> ParsedSlashCommand {
@@ -1057,7 +1057,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1418,7 +1418,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1560,7 +1560,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1944,7 +1944,7 @@ mod batch_1_tests {
 /// they don't need orchestrator state.
 pub fn register_core_batch_1(
     reg: &mut CommandRegistry,
-    handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
+    handle: std::sync::Arc<dyn lingxi_platform_api::OrchestratorHandle>,
 ) {
     use crate::builtin::{
         ClearHandler, CompactHandler, ExitHandler, HelpHandler, InitHandler, MemoryHandler,
@@ -2239,7 +2239,7 @@ use lingxi_commands::registry::{
     register_all_builtin_commands, register_core_batch_1, CommandRegistry,
 };
 use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{CompactionSummary, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_platform_api::{CompactionSummary, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -2363,7 +2363,7 @@ git commit -m "test(M5-10 task 12): batch_1_e2e — 7 end-to-end dispatcher case
 
 **Files:**
 - Modify: `lingxi-code/crates/commands/src/lib.rs` (module docs)
-- Modify: `lingxi-code/crates/traits/src/lib.rs` (re-export note)
+- Modify: `lingxi-code/crates/platform-api/src/lib.rs` (re-export note)
 
 - [ ] **Step 1: Update commands crate docs.**
 
@@ -2375,11 +2375,11 @@ git commit -m "test(M5-10 task 12): batch_1_e2e — 7 end-to-end dispatcher case
 //! After [`register_core_batch_1`] runs, the 6 batch-1 commands are wired to
 //! real implementations:
 //!
-//! - `/clear` — calls [`lingxi_traits::OrchestratorHandle::clear_session`]
-//! - `/compact` — calls [`lingxi_traits::OrchestratorHandle::force_compact`]
+//! - `/clear` — calls [`lingxi_platform_api::OrchestratorHandle::clear_session`]
+//! - `/compact` — calls [`lingxi_platform_api::OrchestratorHandle::force_compact`]
 //! - `/help` — renders the locked 102-line table via [`builtin::help_render::render_help_screen`]
-//! - `/exit` — calls [`lingxi_traits::OrchestratorHandle::request_exit`]
-//! - `/memory` — calls [`lingxi_traits::OrchestratorHandle::open_memory_editor`]
+//! - `/exit` — calls [`lingxi_platform_api::OrchestratorHandle::request_exit`]
+//! - `/memory` — calls [`lingxi_platform_api::OrchestratorHandle::open_memory_editor`]
 //! - `/init` — emits [`crate::CommandResult::InjectMessage`] with the locked
 //!   [`builtin::OLD_INIT_PROMPT`] template
 //!

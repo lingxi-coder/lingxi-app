@@ -1,7 +1,7 @@
 //! Side effects emitted by the reducer.
 //!
 //! Each variant is a request to do something with the outside world.
-//! `EffectHandler` (in `lingxi-traits`) processes these. See spec §5.3.
+//! `EffectHandler` (in `platform-api`) processes these. See spec §5.3.
 //!
 //! M1.1 ships a subset: API, render, persistence. Later plans (Tools, Hooks,
 //! Memory, MCP, Agent, etc.) extend this enum.

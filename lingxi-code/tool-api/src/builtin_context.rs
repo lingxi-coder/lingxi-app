@@ -17,27 +17,27 @@ use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use telemetry::AnalyticsBus;
-use traits::agent_name_registry::AgentNameRegistry;
-use traits::budget::BudgetEnforcerHandle;
-use traits::camera::CameraControl;
-use traits::clipboard::Clipboard;
-use traits::clock::Clock;
-use traits::computer_control::ComputerControl;
-use traits::coordinator_mode::CoordinatorModeHandle;
-use traits::filesystem::FileSystem;
-use traits::http::HttpTransport;
-use traits::mailbox::MailboxRouterHandle;
-use traits::notification::NotificationService;
-use traits::permission_gate::PermissionGate;
-use traits::process::ProcessRunner;
-use traits::sandbox::Sandbox;
-use traits::share::SharingService;
-use traits::stt::SpeechToText;
-use traits::subagent_spawn::SubagentSpawner;
-use traits::task_registry::TaskRegistryHandle;
-use traits::tts::TextToSpeech;
-use traits::voice::VoiceRecorder;
-use traits::worktree::WorktreeManager;
+use platform_api::agent_name_registry::AgentNameRegistry;
+use platform_api::budget::BudgetEnforcerHandle;
+use platform_api::camera::CameraControl;
+use platform_api::clipboard::Clipboard;
+use platform_api::clock::Clock;
+use platform_api::computer_control::ComputerControl;
+use platform_api::coordinator_mode::CoordinatorModeHandle;
+use platform_api::filesystem::FileSystem;
+use platform_api::http::HttpTransport;
+use platform_api::mailbox::MailboxRouterHandle;
+use platform_api::notification::NotificationService;
+use platform_api::permission_gate::PermissionGate;
+use platform_api::process::ProcessRunner;
+use platform_api::sandbox::Sandbox;
+use platform_api::share::SharingService;
+use platform_api::stt::SpeechToText;
+use platform_api::subagent_spawn::SubagentSpawner;
+use platform_api::task_registry::TaskRegistryHandle;
+use platform_api::tts::TextToSpeech;
+use platform_api::voice::VoiceRecorder;
+use platform_api::worktree::WorktreeManager;
 
 /// A shared, live "current working directory" cell — the `getCwd()` /
 /// `setCwdState` analog (claude-code's single session-global `Pt.cwd`).
@@ -144,7 +144,7 @@ pub struct BuiltinToolContext {
     pub default_model: String,
     /// Runtime `/web` config loader for provider-agnostic client-side WebSearch.
     /// `None` preserves env-only fallback behavior.
-    pub web_search_config: Option<Arc<dyn traits::WebSearchConfigProvider>>,
+    pub web_search_config: Option<Arc<dyn platform_api::WebSearchConfigProvider>>,
     /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
     /// `platform_posix::PosixWorktreeManager`.
@@ -412,7 +412,7 @@ impl BuiltinToolContext {
             .sync_file_after_edit_in_workspace(path, text, &workspace_cwd)
             .await
         {
-            Ok(()) | Err(traits::LspError::Unavailable) => {}
+            Ok(()) | Err(platform_api::LspError::Unavailable) => {}
             Err(error) => tracing::warn!(
                 target: "lingxi_lsp::file_sync",
                 path = %path.display(),
@@ -711,7 +711,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
-    use traits::permission_gate::PermissionDecision;
+    use platform_api::permission_gate::PermissionDecision;
 
     struct LiveReadDenyGate;
 

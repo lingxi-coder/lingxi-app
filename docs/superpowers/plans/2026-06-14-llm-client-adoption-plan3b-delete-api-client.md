@@ -86,7 +86,7 @@ This is the api-client `AnthropicProvider` blocker. **Do NOT adopt llm-client's 
 Rebuild `ProviderSideQueryClient` on `DefaultLlmClient`:
 - Build from a `ClientConfig` passed by the engine (constructor + call site
   `engine-desktop/src/lib.rs:1426-1431` change); map `SideQueryRequest`→`LlmRequest`; add a
-  `Arc<dyn traits::HttpTransport>`→`llm_client::Transport` adapter (copy the 3a bridge);
+  `Arc<dyn platform_api::HttpTransport>`→`llm_client::Transport` adapter (copy the 3a bridge);
   repoint `MessageResponse`→`LlmResponse`, `ContentBlockApi`→`ContentBlock` (`ToolUse`→`ToolCall`);
   `SideQueryError::Api(#[from] ApiError)`→`Api(#[from] LlmError)` (LlmError is Clone → satisfies
   `SideQueryError: Clone`; downstream `memory/selector`, `compaction/autocompact`,

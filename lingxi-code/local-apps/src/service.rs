@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use traits::Clock;
+use platform_api::Clock;
 
 tokio::task_local! {
     /// Set for the duration of every event-delivery task; its presence at an

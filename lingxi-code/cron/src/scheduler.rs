@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
-use traits::task_registry::TaskRegistryHandle;
-use traits::{Clock, FileSystem, FsError, RuntimeSpawner};
+use platform_api::task_registry::TaskRegistryHandle;
+use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
 
 /// The session-scoped portion of a cron job. These records never touch the
 /// project tasks file; they live for exactly as long as the scheduler attached
@@ -384,7 +384,7 @@ pub struct CronScheduler {
     /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
     /// Defaults to [`DEFAULT_RECURRING_MAX_AGE`].
     recurring_max_age: Option<Duration>,
-    tick_handle: Mutex<Option<traits::BackgroundTaskHandle>>,
+    tick_handle: Mutex<Option<platform_api::BackgroundTaskHandle>>,
 }
 
 struct ClaimedCronJob {
@@ -616,7 +616,7 @@ impl CronScheduler {
 
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
     /// once; calling again replaces the handle without stopping the prior loop.
-    pub async fn start(self: Arc<Self>) -> Result<(), traits::RuntimeError> {
+    pub async fn start(self: Arc<Self>) -> Result<(), platform_api::RuntimeError> {
         let registry_key = task_registry_identity(&self.task_registry);
         LIVE_SCHEDULERS
             .lock()
@@ -725,7 +725,7 @@ impl CronScheduler {
     }
 
     /// Cancel the tick loop, if running. Idempotent.
-    pub async fn stop(&self) -> Result<(), traits::RuntimeError> {
+    pub async fn stop(&self) -> Result<(), platform_api::RuntimeError> {
         let cancel_result = if let Some(h) = self.tick_handle.lock().await.take() {
             self.runtime.cancel(&h).await
         } else {
@@ -1446,8 +1446,8 @@ mod scheduler_tick_tests {
     use tasks::registry::TaskRegistry;
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
     use tasks::{TaskSpawnInput, TaskType};
-    use traits::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
-    use traits::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use platform_api::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
 
     const NOW: u64 = 1_700_000_000;
     const TASKS_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
@@ -2154,7 +2154,7 @@ mod scheduler_tick_tests {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let concrete_registry = registry(fs.clone());
         let trait_registry =
-            concrete_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>;
+            concrete_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>;
         assert_eq!(
             super::task_registry_identity(&concrete_registry),
             super::task_registry_identity(&trait_registry)

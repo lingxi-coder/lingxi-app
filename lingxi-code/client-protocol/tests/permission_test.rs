@@ -1,7 +1,7 @@
 //! F1-04 — Permission DTO round-trip + reserved-variant tests.
 //!
 //! Freezes the permission request/response shape sourced from
-//! `traits::PermissionGate::check` (plan F1-04). Each `PermissionKindDto`
+//! `platform_api::PermissionGate::check` (plan F1-04). Each `PermissionKindDto`
 //! variant gets a serialize → assert-tag → deserialize → assert-eq round-trip
 //! so the wire shape is locked before the F1-08 snapshot golden is generated.
 //!

@@ -1,5 +1,5 @@
 //! `CliBgSessionForker` — the CLI composition root's concrete
-//! [`traits::bg_session_forker::BgSessionForker`] (2.1.212 `/fork` `vAd`).
+//! [`platform_api::bg_session_forker::BgSessionForker`] (2.1.212 `/fork` `vAd`).
 //!
 //! Copies the live conversation into a NEW background session and keeps the
 //! interactive session running:
@@ -22,8 +22,8 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::bg_session_forker::{BgForkError, BgSessionForker};
-use traits::FileSystem;
+use platform_api::bg_session_forker::{BgForkError, BgSessionForker};
+use platform_api::FileSystem;
 
 /// Concrete `/fork`-to-background forker bound to the resolved config/runtime
 /// dirs. Constructed in `init::resolve_desktop_config` and set on
@@ -74,7 +74,7 @@ impl CliBgSessionForker {
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
-        handoff: Option<&traits::BackgroundingSnapshot>,
+        handoff: Option<&platform_api::BackgroundingSnapshot>,
     ) -> Result<String, BgForkError> {
         // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
         // boot) so the snapshot path and the recorded job cwd agree.
@@ -150,7 +150,7 @@ impl BgSessionForker for CliBgSessionForker {
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
-        snapshot: &traits::BackgroundingSnapshot,
+        snapshot: &platform_api::BackgroundingSnapshot,
     ) -> Result<String, BgForkError> {
         self.fork_with_handoff(history, system_prompt, prompt, model, Some(snapshot))
             .await

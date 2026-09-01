@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the wire features the engine needs to llm-client (reasoning budget, prompt-cache control + system blocks, count_tokens) and bridge `traits::HttpTransport` to `llm_client::Transport` in platforms/common.
+**Goal:** Add the wire features the engine needs to llm-client (reasoning budget, prompt-cache control + system blocks, count_tokens) and bridge `platform_api::HttpTransport` to `llm_client::Transport` in platforms/common.
 
 **Architecture:** Spec `docs/superpowers/specs/2026-06-10-llm-client-engine-adoption-design.md` (rev2). This plan covers spec phases P1 and P2's transport bridge. The anthropic-oauth CredentialProvider impl (P2b) moves to Plan 2 alongside the orchestrator policy ports (P3) because both need those crates' internals read first; Plan 3 covers P4+P5. Deviation from spec noted in Task 6: `stream_sse` is a required trait method, so the "fall back to stream_raw_bytes + SseFrameSplitter" path is dead code and is not built (YAGNI).
 
@@ -619,8 +619,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use platforms_common::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::SseStream;
-use traits::{HttpError, HttpTransport};
+use platform_api::http::SseStream;
+use platform_api::{HttpError, HttpTransport};
 
 #[derive(Default)]
 struct FakeHttp {
@@ -742,7 +742,7 @@ Note: confirm the crate's package name with `grep '^name' platforms/common/Cargo
 Create `platforms/common/src/llm_transport.rs`:
 
 ```rust
-//! Bridge from `traits::HttpTransport` to `llm_client::Transport`.
+//! Bridge from `platform_api::HttpTransport` to `llm_client::Transport`.
 //!
 //! One generic adapter serves every platform HTTP implementation
 //! (`ReqwestHttp` on desktop, native transports on mobile).
@@ -754,10 +754,10 @@ use llm_client::{
     StreamingResponse,
 };
 use protocol::{HttpMethod, HttpRequest, HttpResponse};
-use traits::http::SseStream;
-use traits::{HttpError, HttpTransport};
+use platform_api::http::SseStream;
+use platform_api::{HttpError, HttpTransport};
 
-/// Adapter exposing a [`traits::HttpTransport`] as an [`llm_client::Transport`].
+/// Adapter exposing a [`platform_api::HttpTransport`] as an [`llm_client::Transport`].
 pub struct LlmTransportBridge<T> {
     inner: T,
 }
@@ -933,7 +933,7 @@ Expected: `4 passed; 0 failed` (the streaming tests arrive in Task 5).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-code/platforms/common lingxi-code/Cargo.lock && git commit -m "feat(platforms-common): LlmTransportBridge over traits::HttpTransport
+git add lingxi-code/platforms/common lingxi-code/Cargo.lock && git commit -m "feat(platforms-common): LlmTransportBridge over platform_api::HttpTransport
 
 Generic adapter exposing any platform HTTP transport as an
 llm_client::Transport; non-2xx (including HttpError::Status) stays data

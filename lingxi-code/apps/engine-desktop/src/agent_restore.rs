@@ -15,9 +15,9 @@
 //! the on-disk provenance marker is the only witness to the fork's identity.
 
 use async_trait::async_trait;
-use traits::fork_resume_gate::ForkResumeGate;
-use traits::parked_agent_store::ParkedAgentStore;
-use traits::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest, SubagentSpawner};
+use platform_api::fork_resume_gate::ForkResumeGate;
+use platform_api::parked_agent_store::ParkedAgentStore;
+use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest, SubagentSpawner};
 
 /// Writes and erases parked-agent rows under this session's `subagents/` dir.
 pub struct DesktopParkedAgentStore {
@@ -188,7 +188,7 @@ mod tests {
     use session::agent_rows::{write_row, ParkedAgentRow};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use traits::subagent_spawn::{
+    use platform_api::subagent_spawn::{
         AsyncLaunch, SelectedAgentMeta, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     };
 
@@ -301,13 +301,13 @@ mod tests {
 
     struct NoInvoker;
     #[async_trait]
-    impl traits::tool_invoker::ToolInvoker for NoInvoker {
+    impl platform_api::tool_invoker::ToolInvoker for NoInvoker {
         async fn invoke(
             &self,
             _n: &str,
             _i: serde_json::Value,
-            _c: traits::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+            _c: platform_api::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
             Ok(serde_json::Value::Null)
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -316,8 +316,8 @@ mod tests {
     }
     struct NoBudget;
     #[async_trait]
-    impl traits::budget::BudgetEnforcerHandle for NoBudget {
-        async fn check_and_charge(&self, _n: u64) -> Result<(), traits::budget::BudgetError> {
+    impl platform_api::budget::BudgetEnforcerHandle for NoBudget {
+        async fn check_and_charge(&self, _n: u64) -> Result<(), platform_api::budget::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {

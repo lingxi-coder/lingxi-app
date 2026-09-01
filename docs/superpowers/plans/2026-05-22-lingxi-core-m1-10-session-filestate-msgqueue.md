@@ -23,14 +23,14 @@ crates/msgqueue/
 ├── Cargo.toml
 └── src/{lib, queue, operations}.rs
 
-crates/traits/src/filesystem.rs ← MODIFY: add `append_file`, `truncate`, `file_mtime`, `file_size`, `delete_file`, `symlink`
+crates/platform-api/src/filesystem.rs ← MODIFY: add `append_file`, `truncate`, `file_mtime`, `file_size`, `delete_file`, `symlink`
 ```
 
 ---
 
 ## Task 1: Extend FileSystem trait
 
-**Files:** `crates/traits/src/filesystem.rs`
+**Files:** `crates/platform-api/src/filesystem.rs`
 
 Add the following methods. They are required by §22 SessionStorage fsync+flock semantics and §23 verify_file_state.
 
@@ -83,7 +83,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 serde.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
@@ -492,7 +492,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-filestate = { path = "../filestate" }
 serde.workspace = true
@@ -557,7 +557,7 @@ pub enum TranscriptEntry {
 
 ```rust
 use crate::transcript::TranscriptEntry;
-use lingxi_traits::{FileSystem, FsError};
+use lingxi_platform_api::{FileSystem, FsError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -599,7 +599,7 @@ pub async fn read_recover(fs: &dyn FileSystem, path: &str) -> Result<RecoveryRes
 use crate::jsonl::{read_recover, StorageError};
 use crate::metadata::SessionMetadata;
 use crate::transcript::TranscriptEntry;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -669,7 +669,7 @@ impl SessionStorage {
 ```rust
 use crate::storage::{LoadedSession, SessionStorage};
 use lingxi_filestate::FileStateCache;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::sync::Arc;
 use thiserror::Error;
 

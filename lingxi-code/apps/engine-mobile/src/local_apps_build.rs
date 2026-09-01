@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use traits::{
+use platform_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
 
@@ -578,7 +578,7 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
 fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> MountSpec {
     MountSpec {
         host_path: build_root.to_path_buf(),
-        guest_path: traits::mobile_linux::guest_paths::local_app_build_project(app_id, channel),
+        guest_path: platform_api::mobile_linux::guest_paths::local_app_build_project(app_id, channel),
         read_only: false,
         purpose: MountPurpose::LocalAppBuild,
     }
@@ -2525,8 +2525,8 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
-    use traits::mobile_linux::{guest_paths, map_guest_path_to_host};
-    use traits::{
+    use platform_api::mobile_linux::{guest_paths, map_guest_path_to_host};
+    use platform_api::{
         LinuxCommandResult, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
         MobileLinuxTaskSnapshot, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
         RootfsStatus, SandboxBackend,
@@ -2636,7 +2636,7 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-                enforcement: traits::LinuxEnforcementReceipt {
+                enforcement: platform_api::LinuxEnforcementReceipt {
                     network_policy_enforced: true,
                     memory_limit_enforced: true,
                 },
@@ -2646,11 +2646,11 @@ mod tests {
         async fn spawn_background(
             &self,
             _request: LinuxCommandRequest,
-        ) -> Result<traits::LinuxProcessHandle, MobileLinuxError> {
+        ) -> Result<platform_api::LinuxProcessHandle, MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &traits::LinuxProcessHandle) -> Result<(), MobileLinuxError> {
+        async fn kill(&self, _handle: &platform_api::LinuxProcessHandle) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
 
@@ -2716,7 +2716,7 @@ mod tests {
 
         async fn configure_mounts(
             &self,
-            _mounts: Vec<traits::MountSpec>,
+            _mounts: Vec<platform_api::MountSpec>,
         ) -> Result<(), MobileLinuxError> {
             Ok(())
         }
@@ -4009,9 +4009,9 @@ mod tests {
             None,
         );
         let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(traits::UnavailableMobileLinuxRuntime::unavailable(
-                traits::SandboxBackend::IosIsh,
-                traits::MobileLinuxRuntimeMode::MobileLinux,
+            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
+                platform_api::SandboxBackend::IosIsh,
+                platform_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",
@@ -4081,9 +4081,9 @@ mod tests {
             None,
         );
         let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(traits::UnavailableMobileLinuxRuntime::unavailable(
-                traits::SandboxBackend::IosIsh,
-                traits::MobileLinuxRuntimeMode::MobileLinux,
+            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
+                platform_api::SandboxBackend::IosIsh,
+                platform_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",

@@ -12,7 +12,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::{McpServerInfo, McpStatus, OrchestratorHandle};
+use platform_api::{McpServerInfo, McpStatus, OrchestratorHandle};
 
 /// `/mcp` handler — list mode.
 #[derive(Clone)]

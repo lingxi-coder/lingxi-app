@@ -301,7 +301,7 @@ passes the loader despite `.min(1,"Command cannot be empty")`; non-oracle alias
 `type:"websocket"` accepted; `request_timeout_ms` honoured for `ws` which the
 oracle `ws` schema strips; `disabled` read and acted on though absent from the
 recovered on-disk union.
-OAuth child (`traits/src/mcp.rs:160-182`): oracle wants a **positive** integer
+OAuth child (`platform-api/src/mcp.rs:160-182`): oracle wants a **positive** integer
 `callbackPort`, an `https://` `authServerMetadataUrl`, non-empty `scopes`; Rust
 accepts port `0`, an arbitrary string, an empty scope, and rejects
 schema-valid ports above `u16::MAX`.
@@ -786,7 +786,7 @@ fold into §11 and are not a separate finding.
 
 Two related observations do stand:
 
-- The port's `ServerCapabilitiesDto` (`traits/src/mcp.rs:200-211`) carries only
+- The port's `ServerCapabilitiesDto` (`platform-api/src/mcp.rs:200-211`) carries only
   `tools` / `resources` / `prompts` / `logging` / `experimental`, narrower than
   what the oracle inspects.
 - The oracle keeps a **server identity epoch** (`identityBaseline`,

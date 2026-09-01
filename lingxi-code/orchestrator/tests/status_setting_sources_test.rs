@@ -10,7 +10,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn build_orch(cwd: std::path::PathBuf) -> ConversationOrchestrator {
     ConversationOrchestrator::new(

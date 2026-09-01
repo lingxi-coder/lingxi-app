@@ -229,10 +229,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task B: Cross-crate wiring (settings `routing` + composition + `/model`)
 
-**Files:** `engine/src/settings/{schema.rs,merger.rs,tracer.rs}`, `apps/cli/src/init.rs`, `orchestrator/src/handle_impl.rs` (trace-first).
+**Files:** `core/src/settings/{schema.rs,merger.rs,tracer.rs}`, `apps/cli/src/init.rs`, `orchestrator/src/handle_impl.rs` (trace-first).
 
 - [ ] **Step 1 — engine settings `routing` field (mirror `providers`).**
-In `engine/src/settings/schema.rs`: add `pub routing: Option<serde_json::Value>` to the settings struct (camelCase `routing`, `#[serde(...)]` matching the `providers` field's attributes), and add `("routing", MergeStrategy::DeepMerge)` to the merge-strategies list (next to `("providers", …)`). In `merger.rs` + `tracer.rs`, mirror whatever the `providers` field required (likely nothing beyond the strategy entry + a tracer provenance line — match the `providers` pattern exactly). Add a `routing_field_roundtrips` test mirroring `providers_field_roundtrips`.
+In `core/src/settings/schema.rs`: add `pub routing: Option<serde_json::Value>` to the settings struct (camelCase `routing`, `#[serde(...)]` matching the `providers` field's attributes), and add `("routing", MergeStrategy::DeepMerge)` to the merge-strategies list (next to `("providers", …)`). In `merger.rs` + `tracer.rs`, mirror whatever the `providers` field required (likely nothing beyond the strategy entry + a tracer provenance line — match the `providers` pattern exactly). Add a `routing_field_roundtrips` test mirroring `providers_field_roundtrips`.
 
 - [ ] **Step 2 — `providers`: parse `RoutingConfig` from a settings Value.**
 Add `pub fn parse_routing(raw: Option<&serde_json::Value>) -> RoutingConfig` to `routing.rs` (and re-export): parse `{ "aliases": {a: "p/m"}, "fallback": {k: ["p/m"]}, "retry": {"maxAttempts": n, "backoffMs": n} }` into `RoutingConfig`, tolerating missing keys (default empty). Add a `parse_routing_reads_aliases_fallback_retry` test.
@@ -248,9 +248,9 @@ Record the trace finding in the commit message.
 
 - [ ] **Step 5 — gates + commit.**
 ```bash
-cargo test -p providers -p engine -p orchestrator
+cargo test -p providers -p core -p orchestrator
 cargo build --workspace
-git add lingxi-code/engine/ lingxi-code/apps/cli/ lingxi-code/orchestrator/ lingxi-code/providers/
+git add lingxi-code/core/ lingxi-code/apps/cli/ lingxi-code/orchestrator/ lingxi-code/providers/
 git commit -m "feat(llm-v2 P7): wire routing config from settings + /model enumeration
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -260,9 +260,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task C: Phase gates + tag
 
-- [ ] **Step 1:** `cargo test -p providers -p engine -p orchestrator -p test-harness` — all pass.
+- [ ] **Step 1:** `cargo test -p providers -p core -p orchestrator -p test-harness` — all pass.
 - [ ] **Step 2:** `cargo build --workspace` — Finished.
-- [ ] **Step 3:** `cargo clippy -p providers -p engine -p orchestrator --no-deps --all-targets -- -D warnings` — clean.
+- [ ] **Step 3:** `cargo clippy -p providers -p core -p orchestrator --no-deps --all-targets -- -D warnings` — clean.
 - [ ] **Step 4:** from `lingxi-code/`: `bash scripts/check-deps.sh` — OK 73 (no new deps).
 - [ ] **Step 5:** `git tag -a llm-v2-p7 -m "LLM Providers v2 P7: router + /model"`.
 

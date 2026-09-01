@@ -23,7 +23,7 @@ Each confirmed at the site the audit named as missing:
 | `GATE-WIRE-01` | `apps/cli/src/control_plane.rs:496` — `decision_reason_type` / `matched_ask_rule` on the wire |
 | `HOOK-ASKFLOOR-03` | `permission/src/policy_gate_test.rs:1391` |
 | `HOOKALLOW-01` | `permission/src/policy_gate.rs` ask-arm + tests at `policy_gate_test.rs:443,531` |
-| `GATE-SYSMSG-01` | `traits/src/permission_gate.rs:233,241` (+16 more sites) |
+| `GATE-SYSMSG-01` | `platform-api/src/permission_gate.rs:233,241` (+16 more sites) |
 | `AUTO-04` | 16 hits for `mcp_permission_mode_override` across `permission/` and `apps/` |
 | `SED-XWU` | `permission/src/sed_validation.rs` |
 | `AUTO-03` | `permission/src/policy.rs:2945` |

@@ -77,7 +77,7 @@ async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            traits::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "turn must end with stop_reason model_error; events={events:#?}"
     );

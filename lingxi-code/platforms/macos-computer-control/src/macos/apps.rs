@@ -8,7 +8,7 @@
 //! `/System/Applications/`, `~/Applications/`).
 
 use std::path::{Path, PathBuf};
-use traits::computer_control::AppInfo;
+use platform_api::computer_control::AppInfo;
 
 fn roots() -> Vec<PathBuf> {
     let mut roots = vec![

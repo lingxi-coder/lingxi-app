@@ -4,7 +4,7 @@
 
 **Goal:** Replace the flat `/model` picker (`tui/src/screens/model.rs`) with an opencode-style grouped picker — a **Recent** section, **provider-grouped** sections, and a **search** filter — consuming both the existing routable model list AND the new catalog listings (Phase 3-A's `OrchestratorHandle::list_model_listings()`), with recent selections persisted across sessions.
 
-**Architecture:** The picker merges two sources at open time: `list_available_models() -> Vec<String>` (currently-routable models — Anthropic/configured; MUST keep working) and `list_model_listings() -> Vec<traits::orchestrator::ModelListing>` (catalog, pretty display names + provider labels; routing via 3c). A pure `build_model_entries()` converts both into a uniform `Vec<ModelRow>`. `ModelScreenState` holds the rows + recent keys + a search query + the selected index; it computes a grouped, filtered visible list (Recent first, then provider groups — a model may appear in both, matching the screenshot). `handle_model_key` navigates with arrows (vim `j/k` is dropped so printable chars feed the query), filters on char/backspace, commits the highlighted row's wire id on Enter, cancels on Esc. Recent selections persist to `~/.claude/settings.json` (`recentModels` key) mirroring `theme_persist.rs`.
+**Architecture:** The picker merges two sources at open time: `list_available_models() -> Vec<String>` (currently-routable models — Anthropic/configured; MUST keep working) and `list_model_listings() -> Vec<platform_api::orchestrator::ModelListing>` (catalog, pretty display names + provider labels; routing via 3c). A pure `build_model_entries()` converts both into a uniform `Vec<ModelRow>`. `ModelScreenState` holds the rows + recent keys + a search query + the selected index; it computes a grouped, filtered visible list (Recent first, then provider groups — a model may appear in both, matching the screenshot). `handle_model_key` navigates with arrows (vim `j/k` is dropped so printable chars feed the query), filters on char/backspace, commits the highlighted row's wire id on Enter, cancels on Esc. Recent selections persist to `~/.claude/settings.json` (`recentModels` key) mirroring `theme_persist.rs`.
 
 **Tech Stack:** Rust, `iocraft` TUI, `serde_json`, existing `crate::screens` patterns (`memory.rs` char-input, `theme_persist.rs` persistence).
 
@@ -255,7 +255,7 @@ EOF
 
 **Files:** Modify `lingxi-code/tui/src/screens/model.rs` (add the type + function + tests; do NOT yet touch `ModelScreenState`).
 
-- [ ] **Step 1:** At the TOP of `model.rs` (after the module doc), add the row type + builder. Use the Phase 3-A DTO `traits::orchestrator::ModelListing`:
+- [ ] **Step 1:** At the TOP of `model.rs` (after the module doc), add the row type + builder. Use the Phase 3-A DTO `platform_api::orchestrator::ModelListing`:
 
 ```rust
 /// One selectable model row in the grouped picker.
@@ -289,7 +289,7 @@ fn existing_provider_label(prefix: &str) -> String {
 #[must_use]
 pub fn build_model_entries(
     existing: Vec<String>,
-    catalog: Vec<traits::orchestrator::ModelListing>,
+    catalog: Vec<platform_api::orchestrator::ModelListing>,
 ) -> Vec<ModelRow> {
     let mut rows = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -340,7 +340,7 @@ pub fn build_model_entries(
 #[cfg(test)]
 mod entries_tests {
     use super::*;
-    use traits::orchestrator::ModelListing;
+    use platform_api::orchestrator::ModelListing;
 
     #[test]
     fn merges_existing_and_catalog_with_groups() {
@@ -591,13 +591,13 @@ mod reducer_tests {
         build_model_entries(
             vec!["claude-opus-4-7".to_string()],
             vec![
-                traits::orchestrator::ModelListing {
+                platform_api::orchestrator::ModelListing {
                     display_model: "DeepSeek Chat".to_string(),
                     request_model: "deepseek-chat".to_string(),
                     provider_id: "deepseek".to_string(),
                     provider_label: "DeepSeek".to_string(),
                 },
-                traits::orchestrator::ModelListing {
+                platform_api::orchestrator::ModelListing {
                     display_model: "GPT-5.4 nano".to_string(),
                     request_model: "gpt-5.4-nano".to_string(),
                     provider_id: "github-copilot".to_string(),
@@ -739,7 +739,7 @@ mod render_tests {
     fn st() -> ModelScreenState {
         let rows = build_model_entries(
             vec!["claude-opus-4-7".to_string()],
-            vec![traits::orchestrator::ModelListing {
+            vec![platform_api::orchestrator::ModelListing {
                 display_model: "DeepSeek Chat".to_string(),
                 request_model: "deepseek-chat".to_string(),
                 provider_id: "deepseek".to_string(),
@@ -888,6 +888,6 @@ Run: `git diff parity-llm-client-3a -- lingxi-code/traits lingxi-code/protocol |
 
 **Placeholder scan:** complete code for the store, merge, reducer, render; precise edits for `open_model`/`pump_open_model`/commit path. The only judgment points: module-declaration location for `recent_models` (Task 1 Step 2 — grep `mod theme_persist`) and the build-ordering note (Tasks 3–5 compile together). ✓
 
-**Type consistency:** `ModelRow { display_model, request_model, provider_id, provider_label }`, `ModelScreenState { rows, recent: Vec<(String,String)>, current, query, selected }`, `ModelOutcome::Commit { provider_id, request_model }`, `VisibleLine::{Header,Item}`, `build_model_entries(Vec<String>, Vec<traits::orchestrator::ModelListing>)`, `RecentModel { provider_id, request_model }` are used identically across tasks. `render_model_to_string`/`handle_model_key`/`open_model` signatures match their call sites in `app.rs`/`root.rs`/`state.rs`. ✓
+**Type consistency:** `ModelRow { display_model, request_model, provider_id, provider_label }`, `ModelScreenState { rows, recent: Vec<(String,String)>, current, query, selected }`, `ModelOutcome::Commit { provider_id, request_model }`, `VisibleLine::{Header,Item}`, `build_model_entries(Vec<String>, Vec<platform_api::orchestrator::ModelListing>)`, `RecentModel { provider_id, request_model }` are used identically across tasks. `render_model_to_string`/`handle_model_key`/`open_model` signatures match their call sites in `app.rs`/`root.rs`/`state.rs`. ✓
 
 **Known risk:** Tasks 3–5 are interdependent (the crate only re-compiles green after Task 5). The plan flags this explicitly and instructs running the full `cargo test -p tui` after Task 5; per-task commits are still made, but the build-green checkpoint is Task 5 Step 4. An implementer executing strictly one-task-at-a-time should treat Tasks 3–5 as one compile unit.

@@ -5,7 +5,7 @@
 //! `Arc<McpClient>`, and [`crate::client::McpClient`] wraps an
 //! `Arc<jsonrpc::Connection>`. The transport privately owns that
 //! `Arc<Connection>` (e.g. inside `PosixMcpTransport`'s connection map), and
-//! [`crate::registry::McpRegistry`] only holds an `Arc<dyn traits::McpTransport>`
+//! [`crate::registry::McpRegistry`] only holds an `Arc<dyn platform_api::McpTransport>`
 //! — it cannot reach jsonrpc through the frozen `traits` boundary.
 //!
 //! This trait lives in the **`mcp` crate** (NOT `traits/`) precisely so it can

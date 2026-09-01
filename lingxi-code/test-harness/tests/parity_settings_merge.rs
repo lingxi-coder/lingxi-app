@@ -8,8 +8,8 @@
 //! - The `tengu_settings_loaded` telemetry event fires with the locked keys.
 
 use async_trait::async_trait;
-use engine::settings::schema::SettingsJson;
-use engine::settings::{LoadInputs, Settings};
+use lingxi_core::settings::schema::SettingsJson;
+use lingxi_core::settings::{LoadInputs, Settings};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Write;

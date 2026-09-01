@@ -12,7 +12,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::{CheckStatus, DoctorReport, OrchestratorHandle};
+use platform_api::{CheckStatus, DoctorReport, OrchestratorHandle};
 
 /// `/doctor` handler — renders the locked diagnostic panel.
 #[derive(Clone)]
@@ -72,7 +72,7 @@ pub fn render_doctor(r: &DoctorReport) -> String {
 mod tests {
     use super::*;
     use orchestrator::test_support::MockOrchestratorHandle;
-    use traits::{DoctorCheck, DoctorSummary};
+    use platform_api::{DoctorCheck, DoctorSummary};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

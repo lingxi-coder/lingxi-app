@@ -24,7 +24,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::voice::{VoiceError, VoiceRecordingOpts};
+use platform_api::voice::{VoiceError, VoiceRecordingOpts};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;

@@ -57,9 +57,9 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
   - `lingxi-code/crates/agent/src/pool.rs` (lines 57-85, `StateMachinePool::allocate` — the channel pair `event_tx / event_rx` and `out_tx / out_rx` are owned by the pool; `run_subagent` consumes `event_rx` and produces on `out_tx`).
   - `lingxi-code/crates/agent/src/context.rs` (full file — `SubagentContext` carries `agent_id`, `agent_definition`, `prompt_messages`, plus a dozen optional fields; M5-01 reads `agent_id` and `agent_definition.model` only).
   - `lingxi-code/crates/core/src/lib.rs` (lines 14-28) + `events.rs` (full file) + `reducer.rs` (`reduce(state, event) -> (new_state, effects)` at line 15) + `state_machine.rs` (5-variant `ConversationState`; `Terminated` is the absorbing terminal).
-  - `lingxi-code/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` trait + `SubagentInheritance { tool_invoker: Arc<dyn ToolInvoker>, budget: Arc<dyn BudgetEnforcerHandle> }`.
-  - `lingxi-code/crates/traits/src/tool_invoker.rs` — `ToolInvoker::invoke(name, input, ctx)` + `SubagentInvocationContext { parent_agent_id }` + `ToolInvokerError::{NotFound, InvalidInput, Internal}`.
-  - `lingxi-code/crates/traits/src/task_registry.rs` — `TaskRegistryHandle::output(id, offset) -> Result<TaskOutputChunk, TaskRegistryError>`.
+  - `lingxi-code/crates/platform-api/src/subagent_spawn.rs` — `SubagentSpawner` trait + `SubagentInheritance { tool_invoker: Arc<dyn ToolInvoker>, budget: Arc<dyn BudgetEnforcerHandle> }`.
+  - `lingxi-code/crates/platform-api/src/tool_invoker.rs` — `ToolInvoker::invoke(name, input, ctx)` + `SubagentInvocationContext { parent_agent_id }` + `ToolInvokerError::{NotFound, InvalidInput, Internal}`.
+  - `lingxi-code/crates/platform-api/src/task_registry.rs` — `TaskRegistryHandle::output(id, offset) -> Result<TaskOutputChunk, TaskRegistryError>`.
   - `lingxi-code/crates/tasks/src/registry.rs` (lines 26-44, `pub output_manager: Arc<TaskOutputManager>` is already on `TaskRegistry`).
   - `lingxi-code/crates/tasks/src/output_manager.rs` (lines 83-103, `TaskOutputManager::read(output_file, OutputOptions) -> Result<TaskOutput, OutputError>` is already implemented).
   - `lingxi-code/crates/tasks/src/handle.rs` (lines 209-228, current `output` stub).
@@ -72,8 +72,8 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
   - Telemetry constants are CAPITAL_SNAKE; production code references `lingxi_telemetry::tengu::tool::*` symbols, not literals. **M5-01 emits no telemetry — no new constants.**
   - Tool event-name suffix `_completed` (M3-06 lock) — irrelevant here (no new events).
 - M4-05 wiring artefacts already in place (verified at `2026-05-25`):
-  - `lingxi-code/crates/traits/src/tool_invoker.rs` — `ToolInvoker` trait + `SubagentInvocationContext` + `ToolInvokerError` (added in M4-05 wiring follow-up; commit `29dfe89` or later).
-  - `lingxi-code/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` + `SubagentInheritance` (same commit).
+  - `lingxi-code/crates/platform-api/src/tool_invoker.rs` — `ToolInvoker` trait + `SubagentInvocationContext` + `ToolInvokerError` (added in M4-05 wiring follow-up; commit `29dfe89` or later).
+  - `lingxi-code/crates/platform-api/src/subagent_spawn.rs` — `SubagentSpawner` + `SubagentInheritance` (same commit).
   - `lingxi-code/crates/tools/src/tool_invoker_impl.rs::RegistryToolInvoker::registry_arc()` — pub accessor that returns `&Arc<ToolRegistry>` (used by the M4-05 critical tests via downcast through `as_any()`).
   - `lingxi-code/crates/tools/src/builtin/agent_test_support.rs` — `MockSubagentSpawner`, `MockBudgetEnforcerHandle`, `MockTaskRegistryHandle`, `MockMailboxRouterHandle`, plus `arc_*` helpers.
   - `lingxi-code/crates/tasks/src/registry.rs` — `TaskRegistry::new(runtime, fs, output_manager)`, `TaskRegistry::create(task_type, _input, description) -> Result<String, TaskError>` (the `_input` arg is intentionally unused; this is fine).
@@ -1158,8 +1158,8 @@ Append to `lingxi-code/crates/tools/tests/agent_task_integration_test.rs`:
 async fn task_registry_handle_output_round_trip_via_real_output_manager() {
     use lingxi_tasks::output_manager::TaskOutputManager;
     use lingxi_tasks::TaskRegistry;
-    use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use lingxi_traits::task_registry::{TaskCreateInput, TaskRegistryHandle};
+    use lingxi_platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1257,7 +1257,7 @@ async fn task_registry_handle_output_round_trip_via_real_output_manager() {
     let missing = h.output("zzzbogus0", None).await;
     assert!(matches!(
         missing,
-        Err(lingxi_traits::task_registry::TaskRegistryError::NotFound(_))
+        Err(lingxi_platform_api::task_registry::TaskRegistryError::NotFound(_))
     ));
 }
 ```
@@ -1430,7 +1430,7 @@ Inside the `mod tests` block, append:
 ```rust
     #[tokio::test]
     async fn registry_invoker_routes_to_tool_call_and_returns_data() {
-        use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+        use lingxi_platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 
         let registry = registry_with_echo();
         let invoker = RegistryToolInvoker::new(registry.clone());
@@ -1454,7 +1454,7 @@ Inside the `mod tests` block, append:
 
     #[tokio::test]
     async fn registry_invoker_unknown_tool_surfaces_not_found() {
-        use lingxi_traits::tool_invoker::{
+        use lingxi_platform_api::tool_invoker::{
             SubagentInvocationContext, ToolInvoker, ToolInvokerError,
         };
 
@@ -1667,7 +1667,7 @@ Inside `tool_invoker_impl::tests`, append:
 
     #[tokio::test]
     async fn registry_invoker_preserves_subagent_registry_arc_into_tool_use_ctx() {
-        use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+        use lingxi_platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 
         let captured: Arc<StdMutex<Option<Option<Arc<crate::registry::ToolRegistry>>>>> =
             Arc::new(StdMutex::new(None));
@@ -1885,9 +1885,9 @@ The fallback recipes are necessary because three symbol names are theoretically 
 - `SubagentEvent` variants used: `Message { agent_id, message }`, `Completed { agent_id, result }`, `Killed { agent_id }`, `Failed { agent_id, error }`. Matches the enum at `lingxi-code/crates/agent/src/runner.rs:14-51`. `Progress` is NOT emitted by M5-01 (it lands when M5-04 wires streaming token counts).
 - `lingxi_core::Event` variants consumed: `UserMessage { message_id, request_id, content }`, `UserInterrupt`, `UserExit`, `ApiStreamStart { request_id }`, `ApiStreamDelta { request_id, text }`, `ApiStreamEnd { request_id, final_message, usage }`. Matches `lingxi-code/crates/core/src/events.rs:14-100`.
 - `ConversationState` variants pattern-matched: `Idle { session }`, `Terminated { session, reason }`. Other variants are not explicitly destructured (the loop only checks `is_terminal()`).
-- `TaskOutputChunk { task_id, content, total_lines, truncated }` shape consistent across Tasks 6, 7 and the trait surface `lingxi-code/crates/traits/src/task_registry.rs:48-58`.
+- `TaskOutputChunk { task_id, content, total_lines, truncated }` shape consistent across Tasks 6, 7 and the trait surface `lingxi-code/crates/platform-api/src/task_registry.rs:48-58`.
 - `OutputOptions { offset, limit }` shape from `lingxi-code/crates/tasks/src/output_manager.rs:36-42`. Task 6's call uses `OutputOptions { offset, limit: None }`.
-- `ToolInvokerError` variants used: `NotFound(String)`, `InvalidInput(String)`, `Internal(String)`. Matches `lingxi-code/crates/traits/src/tool_invoker.rs:29-41`.
+- `ToolInvokerError` variants used: `NotFound(String)`, `InvalidInput(String)`, `Internal(String)`. Matches `lingxi-code/crates/platform-api/src/tool_invoker.rs:29-41`.
 - `ToolUseContext` field list (Task 9 body): `options, messages, tool_use_id, agent_id, content_replacement_state, session, subagent_registry`. Matches the M4-05 fixture at `agent.rs::tests::fresh_ctx_with_registry`.
 - `Arc::ptr_eq` invocations: 4 total in this plan — 2 in M4-05's existing tests (preserved), 1 in Task 10's new `registry_invoker_preserves_subagent_registry_arc_into_tool_use_ctx`, 1 in the existing M4-05 `registry_invoker_preserves_arc_identity` test (preserved). All four hold throughout M5-01.
 

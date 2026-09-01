@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tasks::handlers::TaskStatusSink;
 use tasks::state::TaskStatus;
-use traits::OutputStream;
+use platform_api::OutputStream;
 
 /// The fixed activity label used when a teammate transitions to `Running`.
 ///
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use protocol::AgentId;
     use std::sync::Mutex as StdMutex;
-    use traits::CostSnapshot;
+    use platform_api::CostSnapshot;
 
     /// Spy [`OutputStream`] recording every `emit_coordinator_status` call as
     /// `(active_workers, team)`. All other emit methods are no-ops.

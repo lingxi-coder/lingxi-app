@@ -7,7 +7,7 @@
 # ⚠️ 一条条目断言的是「该文件里该 needle **至少命中一次**」，而不是你以为的
 # 那一次命中。已知的一处不对应：
 #
-#     G2	lingxi-code/traits/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
+#     G2	lingxi-code/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 #
 # 这一条钉住的是**测试**里 uds_inbox.rs:1116 的
 # `std::env::var_os("CLAUDE_CODE_TMPDIR")` 存档/还原，**不是** uds_inbox.rs:123
@@ -277,13 +277,13 @@ G1	lingxi-code/cron/src/autonomous_loop.rs	LINGXI
 G1	lingxi-code/cron/src/run_due.rs	\.lingxi
 G1	lingxi-code/cron/src/scheduler.rs	\.lingxi
 G1	lingxi-code/cron/src/tasks_file.rs	\.lingxi
-G1	lingxi-code/engine/src/settings/env_parser.rs	LINGXI
-G1	lingxi-code/engine/src/settings/merger.rs	LINGXI
-G1	lingxi-code/engine/src/settings/mod.rs	LINGXI
-G1	lingxi-code/engine/src/settings/mod.rs	\.lingxi
-G1	lingxi-code/engine/src/settings/tracer.rs	\.lingxi
-G1	lingxi-code/engine/tests/settings_4layer_test.rs	LINGXI
-G1	lingxi-code/engine/tests/settings_4layer_test.rs	\.lingxi
+G1	lingxi-code/core/src/settings/env_parser.rs	LINGXI
+G1	lingxi-code/core/src/settings/merger.rs	LINGXI
+G1	lingxi-code/core/src/settings/mod.rs	LINGXI
+G1	lingxi-code/core/src/settings/mod.rs	\.lingxi
+G1	lingxi-code/core/src/settings/tracer.rs	\.lingxi
+G1	lingxi-code/core/tests/settings_4layer_test.rs	LINGXI
+G1	lingxi-code/core/tests/settings_4layer_test.rs	\.lingxi
 G1	lingxi-code/hooks/src/attachment.rs	LINGXI
 G1	lingxi-code/hooks/src/executor.rs	LINGXI
 G1	lingxi-code/hooks/src/executor_test.rs	LINGXI
@@ -735,20 +735,20 @@ G1	lingxi-code/tools/worktree/src/worktree.rs	LINGXI
 G1	lingxi-code/tools/worktree/src/worktree.rs	LingXi
 G1	lingxi-code/tools/worktree/src/worktree.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	lingxi-code/tools/worktree/src/worktree.rs	\.lingxi
-G1	lingxi-code/traits/src/env.rs	LINGXI
-G1	lingxi-code/traits/src/fork_subagent.rs	LINGXI
-G1	lingxi-code/traits/src/live_sessions.rs	CLAUDE\.md
-G1	lingxi-code/traits/src/live_sessions.rs	LINGXI
-G1	lingxi-code/traits/src/live_sessions.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	lingxi-code/traits/src/mobile_runtime_environment.rs	LingXi
-G1	lingxi-code/traits/src/rooted_fs.rs	\.lingxi
-G1	lingxi-code/traits/src/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	lingxi-code/traits/src/subagent_output_guard.rs	\.claude\.json
-G1	lingxi-code/traits/src/subagent_output_guard.rs	\.lingxi
-G1	lingxi-code/traits/src/subagent_spawn.rs	LINGXI
-G1	lingxi-code/traits/src/traffic_mode.rs	LINGXI
-G1	lingxi-code/traits/src/uds_inbox.rs	LINGXI
-G1	lingxi-code/traits/src/worktree.rs	\.lingxi
+G1	lingxi-code/platform-api/src/env.rs	LINGXI
+G1	lingxi-code/platform-api/src/fork_subagent.rs	LINGXI
+G1	lingxi-code/platform-api/src/live_sessions.rs	CLAUDE\.md
+G1	lingxi-code/platform-api/src/live_sessions.rs	LINGXI
+G1	lingxi-code/platform-api/src/live_sessions.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	lingxi-code/platform-api/src/mobile_runtime_environment.rs	LingXi
+G1	lingxi-code/platform-api/src/rooted_fs.rs	\.lingxi
+G1	lingxi-code/platform-api/src/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	lingxi-code/platform-api/src/subagent_output_guard.rs	\.claude\.json
+G1	lingxi-code/platform-api/src/subagent_output_guard.rs	\.lingxi
+G1	lingxi-code/platform-api/src/subagent_spawn.rs	LINGXI
+G1	lingxi-code/platform-api/src/traffic_mode.rs	LINGXI
+G1	lingxi-code/platform-api/src/uds_inbox.rs	LINGXI
+G1	lingxi-code/platform-api/src/worktree.rs	\.lingxi
 G1	lingxi-code/tui-core/src/background_detach.rs	LINGXI
 G1	lingxi-code/tui-core/src/collapse/classify.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	lingxi-code/tui-core/src/collapse/classify.rs	\.lingxi
@@ -865,12 +865,12 @@ G2	lingxi-code/tools/skill/src/model_override.rs	CLAUDE_CODE_USE_VERTEX
 G2	lingxi-code/tools/skill/src/skill.rs	CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION
 G2	lingxi-code/tools/ui/src/brief.rs	CLAUDE_CODE_BRIEF
 G2	lingxi-code/tools/web/src/web_search.rs	CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION
-G2	lingxi-code/traits/src/fork_subagent.rs	CLAUDE_CODE_FORK_SUBAGENT
-G2	lingxi-code/traits/src/live_sessions.rs	CLAUDE_CODE_HARBOR_KITE
-G2	lingxi-code/traits/src/subagent_spawn.rs	CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS
-G2	lingxi-code/traits/src/subagent_spawn.rs	CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH
-G2	lingxi-code/traits/src/traffic_mode.rs	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
-G2	lingxi-code/traits/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
+G2	lingxi-code/platform-api/src/fork_subagent.rs	CLAUDE_CODE_FORK_SUBAGENT
+G2	lingxi-code/platform-api/src/live_sessions.rs	CLAUDE_CODE_HARBOR_KITE
+G2	lingxi-code/platform-api/src/subagent_spawn.rs	CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS
+G2	lingxi-code/platform-api/src/subagent_spawn.rs	CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH
+G2	lingxi-code/platform-api/src/traffic_mode.rs	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+G2	lingxi-code/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 G2	lingxi-code/tui/src/chat_widget.rs	CLAUDE_CODE_DISABLE_FAST_MODE
 G3	.gitignore	.lingxi
 G3	.gitignore	.lingxi-*
@@ -1050,10 +1050,10 @@ G3	lingxi-code/coordinator/src/tool_team_delete.rs	.lingxi
 G3	lingxi-code/cron/src/run_due.rs	.lingxi
 G3	lingxi-code/cron/src/scheduler.rs	.lingxi
 G3	lingxi-code/cron/src/tasks_file.rs	.lingxi
-G3	lingxi-code/engine/src/settings/merger.rs	LINGXI.md
-G3	lingxi-code/engine/src/settings/mod.rs	.lingxi
-G3	lingxi-code/engine/src/settings/tracer.rs	.lingxi
-G3	lingxi-code/engine/tests/settings_4layer_test.rs	.lingxi
+G3	lingxi-code/core/src/settings/merger.rs	LINGXI.md
+G3	lingxi-code/core/src/settings/mod.rs	.lingxi
+G3	lingxi-code/core/src/settings/tracer.rs	.lingxi
+G3	lingxi-code/core/tests/settings_4layer_test.rs	.lingxi
 G3	lingxi-code/hooks/src/executor_test.rs	.lingxi
 G3	lingxi-code/hooks/src/executor_test.rs	LINGXI.md
 G3	lingxi-code/hooks/src/hook_payload_test.rs	LINGXI.md
@@ -1327,13 +1327,13 @@ G3	lingxi-code/tools/workflow/src/lib.rs	.lingxi
 G3	lingxi-code/tools/workflow/src/workflow_input_schema.json	.lingxi
 G3	lingxi-code/tools/worktree/src/worktree.rs	.lingxi
 G3	lingxi-code/tools/worktree/src/worktree.rs	LINGXI.md
-G3	lingxi-code/traits/src/live_sessions.rs	LINGXI_CONFIG_DIR
-G3	lingxi-code/traits/src/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
-G3	lingxi-code/traits/src/rooted_fs.rs	.lingxi
-G3	lingxi-code/traits/src/rooted_fs.rs	.lingxi-*
-G3	lingxi-code/traits/src/subagent_output_guard.rs	.lingxi
-G3	lingxi-code/traits/src/subagent_output_guard.rs	.lingxi.json
-G3	lingxi-code/traits/src/worktree.rs	.lingxi
+G3	lingxi-code/platform-api/src/live_sessions.rs	LINGXI_CONFIG_DIR
+G3	lingxi-code/platform-api/src/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
+G3	lingxi-code/platform-api/src/rooted_fs.rs	.lingxi
+G3	lingxi-code/platform-api/src/rooted_fs.rs	.lingxi-*
+G3	lingxi-code/platform-api/src/subagent_output_guard.rs	.lingxi
+G3	lingxi-code/platform-api/src/subagent_output_guard.rs	.lingxi.json
+G3	lingxi-code/platform-api/src/worktree.rs	.lingxi
 G3	lingxi-code/tui-core/src/collapse/classify.rs	.lingxi
 G3	lingxi-code/tui-core/src/collapse/group.rs	.lingxi
 G3	lingxi-code/tui/src/bottom_pane/screen_view.rs	.lingxi

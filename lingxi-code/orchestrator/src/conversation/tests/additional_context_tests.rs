@@ -43,28 +43,28 @@ fn runtime_message(body: &str) -> ConversationMessage {
 }
 
 fn mobile_environment_with_runtime(
-    tool_runtime: traits::MobileToolRuntime,
+    tool_runtime: platform_api::MobileToolRuntime,
     cwd: Option<&str>,
-) -> traits::MobileRuntimeEnvironment {
-    traits::MobileRuntimeEnvironment::new(
-        traits::MobileHostEnvironment::new(
-            traits::MobileHostOs::Ios,
+) -> platform_api::MobileRuntimeEnvironment {
+    platform_api::MobileRuntimeEnvironment::new(
+        platform_api::MobileHostEnvironment::new(
+            platform_api::MobileHostOs::Ios,
             Some("19.0".into()),
-            traits::MobileDeviceClass::Phone,
-            traits::MobileExecutionTarget::PhysicalDevice,
-            traits::MobileLaunchMode::Interactive,
+            platform_api::MobileDeviceClass::Phone,
+            platform_api::MobileExecutionTarget::PhysicalDevice,
+            platform_api::MobileLaunchMode::Interactive,
         ),
         tool_runtime,
         cwd.map(str::to_string),
         Some("/bin/sh".into()),
         Some("Mobile Linux sh".into()),
-        traits::MobileNetworkPolicy::PermissionMediated,
-        traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        platform_api::MobileNetworkPolicy::PermissionMediated,
+        platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
     )
 }
 
-fn mobile_environment(cwd: &str) -> traits::MobileRuntimeEnvironment {
-    mobile_environment_with_runtime(traits::MobileToolRuntime::MobileLinuxGuest, Some(cwd))
+fn mobile_environment(cwd: &str) -> platform_api::MobileRuntimeEnvironment {
+    mobile_environment_with_runtime(platform_api::MobileToolRuntime::MobileLinuxGuest, Some(cwd))
 }
 
 #[tokio::test]
@@ -195,7 +195,7 @@ fn scheduled_mobile_runtime_uses_headless_prompt_guidance() {
     assert!(orch.prompt_is_interactive());
 
     let mut environment = mobile_environment("/workspace/a");
-    environment.host.launch_mode = traits::MobileLaunchMode::ScheduledHeadless;
+    environment.host.launch_mode = platform_api::MobileLaunchMode::ScheduledHeadless;
     orch.mobile_runtime_environment = Some(environment);
 
     assert!(!orch.prompt_is_interactive());
@@ -271,7 +271,7 @@ async fn non_guest_mobile_runtime_keeps_environment_re_emission_when_excluded() 
         std::env::temp_dir(),
     );
     orch.mobile_runtime_environment = Some(mobile_environment_with_runtime(
-        traits::MobileToolRuntime::AndroidLegacy,
+        platform_api::MobileToolRuntime::AndroidLegacy,
         None,
     ));
 

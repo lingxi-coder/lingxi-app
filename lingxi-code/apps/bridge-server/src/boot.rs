@@ -38,7 +38,7 @@ use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_posix::PosixFileSystem;
-use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
+use platform_api::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
@@ -294,12 +294,12 @@ fn load_settings_blocks() -> (
 ) {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let env: BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
+    let inputs = lingxi_core::settings::LoadInputs {
         env: &env,
         project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
+        defaults: lingxi_core::settings::schema::SettingsJson::default(),
     };
-    match engine::settings::Settings::load(inputs) {
+    match lingxi_core::settings::Settings::load(inputs) {
         Ok(eff) => (
             eff.settings.providers,
             eff.settings.routing,
@@ -598,16 +598,16 @@ impl BoundServer {
 /// lifecycle explicit and guarantees graceful cleanup without changing the
 /// engine wire protocol.
 struct LiveSessionGuard {
-    dir: traits::live_sessions::LiveSessionDir,
+    dir: platform_api::live_sessions::LiveSessionDir,
     session_id: String,
     inbox_started: bool,
-    _writer_claim: traits::live_sessions::SessionIdClaim,
+    _writer_claim: platform_api::live_sessions::SessionIdClaim,
 }
 
 impl Drop for LiveSessionGuard {
     fn drop(&mut self) {
         if self.inbox_started {
-            traits::uds_inbox::stop_process_inbox();
+            platform_api::uds_inbox::stop_process_inbox();
         }
         let _ = self.dir.unregister(&self.session_id);
     }
@@ -626,7 +626,7 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     let session_id = canonical_session_id(cfg.session_id_override.as_deref())?;
     cfg.session_id_override = Some(session_id.clone());
 
-    let dir = traits::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
+    let dir = platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
     let pid = std::process::id();
     // Only live records/PIDs participate in writer ownership. The persisted
     // `<session-id>.jsonl` transcript is intentionally ignored here because a
@@ -656,7 +656,7 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.trim().is_empty());
     let claim =
-        traits::live_sessions::install_process(dir.clone(), &session_id, display_name.as_deref());
+        platform_api::live_sessions::install_process(dir.clone(), &session_id, display_name.as_deref());
     if let Some(claim) = claim.as_ref() {
         if claim.notice.is_some() {
             tracing::debug!("bridge live-session display name was disambiguated");
@@ -664,27 +664,27 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     }
     if claim.is_none() {
         if let Some(name) = display_name.as_deref() {
-            traits::live_sessions::set_process_name(name);
+            platform_api::live_sessions::set_process_name(name);
         }
     }
 
     let permission_mode = cfg.permission_mode.wire_str().to_string();
-    traits::live_sessions::set_process_permission_mode(
+    platform_api::live_sessions::set_process_permission_mode(
         &permission_mode,
         cfg.allow_dangerously_skip_permissions,
     );
 
-    let socket = traits::uds_inbox::default_socket_path(pid);
-    let inbox_started = match traits::uds_inbox::start_process_inbox(socket) {
+    let socket = platform_api::uds_inbox::default_socket_path(pid);
+    let inbox_started = match platform_api::uds_inbox::start_process_inbox(socket) {
         Ok(path) => {
             live_session.inbox_started = true;
             dir.upsert_identity(
                 pid,
                 &session_id,
-                traits::live_sessions::process_name().as_deref(),
+                platform_api::live_sessions::process_name().as_deref(),
                 None,
                 Some(&path),
-                traits::live_sessions::process_permission_class().as_deref(),
+                platform_api::live_sessions::process_permission_class().as_deref(),
             )
             .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
             true
@@ -695,16 +695,16 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
             dir.upsert_identity(
                 pid,
                 &session_id,
-                traits::live_sessions::process_name().as_deref(),
+                platform_api::live_sessions::process_name().as_deref(),
                 None,
                 None,
-                traits::live_sessions::process_permission_class().as_deref(),
+                platform_api::live_sessions::process_permission_class().as_deref(),
             )
             .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
             false
         }
     };
-    traits::live_sessions::set_process_status("idle", None);
+    platform_api::live_sessions::set_process_status("idle", None);
     debug_assert_eq!(live_session.inbox_started, inbox_started);
     Ok(live_session)
 }
@@ -721,7 +721,7 @@ pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
 }
 
 async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<String, String> {
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
     let catalog = match session::jsonl::list_recent_sessions_with_diagnostics(
         lingxi_home,
         &cwd.to_string_lossy(),
@@ -1015,7 +1015,7 @@ pub async fn assemble_with_provider_keys(
         EngineCommandRouter::new(
             handle,
             runtime.auth.clone(),
-            runtime.task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            runtime.task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
             Some(dispatcher),
             Some(runtime.shared_command_registry.clone()),
         )
@@ -1063,7 +1063,7 @@ impl RegistrySlashDispatcherClone {
 
 #[async_trait::async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
-    async fn dispatch(&self, raw: &str) -> traits::SlashDispatchResult {
+    async fn dispatch(&self, raw: &str) -> platform_api::SlashDispatchResult {
         self.inner.dispatch(raw).await
     }
 }
@@ -1121,7 +1121,7 @@ pub fn publish_lockfile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::live_sessions::LiveSessionDir;
+    use platform_api::live_sessions::LiveSessionDir;
 
     #[test]
     fn parse_defaults_when_no_args() {

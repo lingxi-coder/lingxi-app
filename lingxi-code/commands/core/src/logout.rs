@@ -10,7 +10,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::AuthHandle;
+use platform_api::AuthHandle;
 
 /// `/logout` handler — drives [`AuthHandle::logout`].
 #[derive(Clone)]
@@ -58,7 +58,7 @@ impl BuiltinCommandHandler for LogoutHandler {
 mod tests {
     use super::*;
     use crate::login::tests::MockAuth;
-    use traits::{AuthError, LoginInfo};
+    use platform_api::{AuthError, LoginInfo};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

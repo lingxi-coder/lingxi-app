@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use protocol::SecureStorageData;
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Stub secure storage — declares the plaintext backend without persisting.
 #[derive(Default)]

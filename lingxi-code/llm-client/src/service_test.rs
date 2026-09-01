@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn api_service_interactivity_is_session_local() {
-        let prior = traits::session_flags::is_non_interactive_session();
-        traits::session_flags::set_non_interactive_session(false);
+        let prior = platform_api::session_flags::is_non_interactive_session();
+        platform_api::session_flags::set_non_interactive_session(false);
         let transport = FakeTransport::always(ProviderResponse {
             status: 200,
             headers: BTreeMap::new(),
@@ -245,7 +245,7 @@ mod tests {
 
         assert!(!headless.interactive_session_for_test());
         assert!(interactive.interactive_session_for_test());
-        traits::session_flags::set_non_interactive_session(prior);
+        platform_api::session_flags::set_non_interactive_session(prior);
     }
 
     fn make_adapter_for_protocol(
@@ -492,12 +492,12 @@ mod tests {
 
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
-        let prior = traits::session_flags::tool_search_enabled();
+        let prior = platform_api::session_flags::tool_search_enabled();
 
         // Session gate ON, EMPTY toolset (no `ToolSearch` declaration present):
         // the ENABLED branch filters the unavailable reference against the empty
         // availability set and emits the "tools no longer available" placeholder.
-        traits::session_flags::set_tool_search_enabled(true);
+        platform_api::session_flags::set_tool_search_enabled(true);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -517,7 +517,7 @@ mod tests {
 
         // Session gate OFF: the DISABLED branch strips every reference with the
         // "tool search not enabled" placeholder, regardless of the toolset.
-        traits::session_flags::set_tool_search_enabled(false);
+        platform_api::session_flags::set_tool_search_enabled(false);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -535,7 +535,7 @@ mod tests {
             "a tool-search-disabled session must take the disabled branch"
         );
 
-        traits::session_flags::set_tool_search_enabled(prior);
+        platform_api::session_flags::set_tool_search_enabled(prior);
     }
 
     #[test]
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[tokio::test]
     async fn bedrock_tool_search_beta_is_in_request_body() {
-        if traits::env::is_env_truthy(
+        if platform_api::env::is_env_truthy(
             std::env::var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
                 .ok()
                 .as_deref(),
@@ -1682,8 +1682,8 @@ mod tests {
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
 
     fn shared_slot(
-        snap: Option<traits::subscription::SubscriptionSnapshot>,
-    ) -> traits::subscription::SharedSubscription {
+        snap: Option<platform_api::subscription::SubscriptionSnapshot>,
+    ) -> platform_api::subscription::SharedSubscription {
         Arc::new(std::sync::RwLock::new(snap))
     }
 
@@ -1692,7 +1692,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
             .with_subscription(shared_slot(Some(
-                traits::subscription::SubscriptionSnapshot {
+                platform_api::subscription::SubscriptionSnapshot {
                     is_subscriber: true,
                     subscription_type: Some("enterprise".to_string()),
                     ..Default::default()
@@ -1731,7 +1731,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
             .with_subscription(shared_slot(Some(
-                traits::subscription::SubscriptionSnapshot {
+                platform_api::subscription::SubscriptionSnapshot {
                     is_subscriber: true,
                     subscription_type: Some("team".to_string()),
                     ..Default::default()
@@ -3565,7 +3565,7 @@ mod tests {
             },
         )
         .with_subscription(shared_slot(Some(
-            traits::subscription::SubscriptionSnapshot {
+            platform_api::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("pro".to_string()),
                 ..Default::default()

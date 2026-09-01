@@ -195,7 +195,7 @@ mandatory deslop 已完成，并严格遵守“先锁行为、再整理”的约
 | `mcp/src/discovery_cache.rs` | stale 判定、cache schema、env guard、collision-free store、并发 store 测试 |
 | `mcp/src/client.rs` | live capability 与 client acquisition 行为对齐 |
 | `mcp/src/config_diagnostics.rs` | test-only tracing capture stability |
-| `traits/src/mcp.rs` | `ServerCapabilitiesDto::directory_read` |
+| `platform-api/src/mcp.rs` | `ServerCapabilitiesDto::directory_read` |
 | `platforms/posix/src/mcp.rs` | `io.modelcontextprotocol/skills.directoryRead` 的准确解码 |
 | `platforms/posix-minimal/src/mcp.rs` | DTO 默认能力补齐 |
 | `platforms/windows/src/mcp.rs` | DTO 默认能力补齐 |

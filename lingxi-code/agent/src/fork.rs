@@ -4,7 +4,7 @@
 //! inherits the parent's FULL conversation context + system prompt for a
 //! byte-identical prompt-cache prefix. The pure, dependency-free helpers — the
 //! feature gate, recursion guard, cache-prefix message builders, and the
-//! boilerplate consts — live in the leaf [`traits::fork_subagent`] module so
+//! boilerplate consts — live in the leaf [`platform_api::fork_subagent`] module so
 //! BOTH `tool-agent` (where `AgentTool` builds the forked messages) and this
 //! `agent` crate (the spawner / runner) can reach them without a dependency
 //! cycle. The synthetic `FORK_AGENT` [`crate::definition::AgentDefinition`]
@@ -15,4 +15,4 @@
 //! This module re-exports the canonical consts from `traits` so any downstream
 //! that referenced the `agent::fork::` path stays stable.
 
-pub use traits::fork_subagent::{FORK_BOILERPLATE_TAG, FORK_DIRECTIVE_PREFIX, FORK_SUBAGENT_TYPE};
+pub use platform_api::fork_subagent::{FORK_BOILERPLATE_TAG, FORK_DIRECTIVE_PREFIX, FORK_SUBAGENT_TYPE};

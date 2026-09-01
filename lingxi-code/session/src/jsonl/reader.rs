@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use traits::{FileSystem, FsError};
+use platform_api::{FileSystem, FsError};
 
 /// A line whose outer `type` admits it into the conversation chain — 1:1 with
 /// `claude-code/src/utils/sessionStorage.ts:139` `isTranscriptMessage`. These

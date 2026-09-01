@@ -11,7 +11,7 @@ use protocol::ConversationMessage;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use traits::{CostSnapshot, OutputEvent, OutputStream};
+use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 
 // ============================================================================
 // MockApiClient (Task 6)
@@ -52,7 +52,7 @@ pub struct MockApiClient {
     /// The catalog returned by `list_model_listings()`. Empty by default (the
     /// trait default); tests that exercise provider-qualified model-ref parsing
     /// seed it with the rows they need.
-    model_listings: std::sync::Mutex<Vec<traits::ModelListing>>,
+    model_listings: std::sync::Mutex<Vec<platform_api::ModelListing>>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -91,9 +91,9 @@ impl MockApiClient {
     }
 
     /// Seed the catalog `list_model_listings()` returns, so a test can exercise
-    /// `traits::parse_model_ref` (which resolves a `profile/model` reference
+    /// `platform_api::parse_model_ref` (which resolves a `profile/model` reference
     /// only against real listings).
-    pub fn set_model_listings(&self, listings: Vec<traits::ModelListing>) {
+    pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
 
@@ -256,7 +256,7 @@ impl OrchestratorApiClient for MockApiClient {
 
     /// The catalog seeded by [`MockApiClient::set_model_listings`] (empty by
     /// default, matching the trait's own default).
-    fn list_model_listings(&self) -> Vec<traits::ModelListing> {
+    fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {
         self.model_listings.lock().unwrap().clone()
     }
 }
@@ -306,7 +306,7 @@ pub struct MockOutputStream {
     /// the trait method is DEFAULTED, so without this override the mock would
     /// inherit the no-op and every attachment test would pass whether or not
     /// the orchestrator emitted anything.
-    attachments: Arc<Mutex<Vec<traits::AttachmentKind>>>,
+    attachments: Arc<Mutex<Vec<platform_api::AttachmentKind>>>,
 }
 
 impl MockOutputStream {
@@ -321,7 +321,7 @@ impl MockOutputStream {
     }
 
     /// Snapshot the attachments emitted so far, in emission order.
-    pub async fn attachment_snapshot(&self) -> Vec<traits::AttachmentKind> {
+    pub async fn attachment_snapshot(&self) -> Vec<platform_api::AttachmentKind> {
         self.attachments.lock().await.clone()
     }
 
@@ -434,7 +434,7 @@ impl OutputStream for MockOutputStream {
             result: result.clone(),
         });
     }
-    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
         self.attachments.lock().await.push(attachment);
     }
 
@@ -501,7 +501,7 @@ impl OutputStream for MockOutputStream {
     /// emission so tests can assert the emit-on-change behaviour.
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the eleven-argument trait signature (see traits::OutputStream::emit_rate_limit)"
+        reason = "mirrors the eleven-argument trait signature (see platform_api::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -579,20 +579,20 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
+    impl platform_api::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest(
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest(
                 "noop hook executor — http arm is never called with an empty registry".into(),
             ))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest(
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest(
                 "noop hook executor — sse arm is never called".into(),
             ))
         }
@@ -600,28 +600,28 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal(
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal(
                 "noop hook executor — runtime arm is never called".into(),
             ))
         }
         async fn sleep(&self, _duration: std::time::Duration) {}
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
 
     let registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));
-    let http: Arc<dyn traits::HttpTransport> = Arc::new(UnusedHttp);
-    let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(UnusedRuntime);
+    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(UnusedHttp);
+    let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(UnusedRuntime);
     Arc::new(hooks::HookExecutorImpl::new(registry, http, runtime))
 }
 
@@ -632,7 +632,7 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 // directly).
 
 // M5-05 Task 2: PermissionGate + PermissionDecision are promoted to
-// lingxi-traits::permission_gate. We re-export them here so existing
+// lingxi-platform_api::permission_gate. We re-export them here so existing
 // orchestrator imports (crate::test_support::PermissionGate, …) keep
 // working unchanged.
 pub use permission::gate::{
@@ -711,7 +711,7 @@ pub use crate::test_support_stream::{
 // MockOrchestratorHandle (M5-10 Task 2)
 // ============================================================================
 //
-// Scripted mock of `traits::OrchestratorHandle` for the M5-10/M5-11
+// Scripted mock of `platform_api::OrchestratorHandle` for the M5-10/M5-11
 // slash-command handler tests. Captures every call as a flag/counter and
 // returns whatever the test pre-loaded via setter methods.
 
@@ -719,7 +719,7 @@ use protocol::SessionId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
-use traits::{
+use platform_api::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo,
     McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
@@ -762,9 +762,9 @@ pub struct MockOrchestratorHandle {
     /// Session-scoped fast-mode flag used by bridge routing tests.
     fast_mode: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
-    dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate,
+    dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size state exposed through the handle.
-    workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState,
+    workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState,
     /// If `Some`, the next `set_permission_mode` call returns `ActionFailed(_)`.
     permission_mode_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
@@ -780,7 +780,7 @@ pub struct MockOrchestratorHandle {
     cost_tokens: AtomicU64,
     /// Optional pre-loaded full cost snapshot returned by `snapshot_cost`.
     /// If `Some`, used verbatim (with `session_id` overwritten to mock's id).
-    cost_snapshot: StdMutex<Option<traits::CostSnapshot>>,
+    cost_snapshot: StdMutex<Option<platform_api::CostSnapshot>>,
     // M5-11 additions:
     /// Pre-loaded MCP server list returned by `list_mcp_servers`.
     mcp_servers: StdMutex<Vec<McpServerInfo>>,
@@ -809,7 +809,7 @@ pub struct MockOrchestratorHandle {
     /// Pre-loaded read-file-state cache keys returned by `files_in_context`.
     files_in_context: StdMutex<Vec<PathBuf>>,
     /// Pre-loaded model listings returned by `list_model_listings`.
-    model_listings: StdMutex<Vec<traits::ModelListing>>,
+    model_listings: StdMutex<Vec<platform_api::ModelListing>>,
 }
 
 impl MockOrchestratorHandle {
@@ -830,8 +830,8 @@ impl MockOrchestratorHandle {
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
-            dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::new(false, false),
-            workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState::default(),
+            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(false, false),
+            workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState::default(),
             permission_mode_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
@@ -944,7 +944,7 @@ impl MockOrchestratorHandle {
     /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
     /// the snapshot is returned verbatim (with `session_id` overwritten to
     /// the mock's stable id).
-    pub fn set_cost_snapshot(&self, s: traits::CostSnapshot) {
+    pub fn set_cost_snapshot(&self, s: platform_api::CostSnapshot) {
         *self.cost_snapshot.lock().unwrap() = Some(s);
     }
     // M5-11 setters:
@@ -1001,7 +1001,7 @@ impl MockOrchestratorHandle {
         *self.files_in_context.lock().unwrap() = files;
     }
     /// Pre-load the model listings returned by `list_model_listings`.
-    pub fn set_model_listings(&self, listings: Vec<traits::ModelListing>) {
+    pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
 }
@@ -1050,20 +1050,20 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.force_compact().await
     }
 
-    async fn snapshot_cost(&self) -> traits::CostSnapshot {
+    async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
         if let Some(s) = self.cost_snapshot.lock().unwrap().clone() {
             // Force the session id to match the mock's stable id for
             // consistency with other handle methods.
-            return traits::CostSnapshot {
+            return platform_api::CostSnapshot {
                 session_id: self.session_id,
                 ..s
             };
         }
-        traits::CostSnapshot {
+        platform_api::CostSnapshot {
             session_id: self.session_id,
             total_nano_usd: self.cost_nano_usd.load(Ordering::SeqCst),
             total_tokens: self.cost_tokens.load(Ordering::SeqCst),
-            ..traits::CostSnapshot::default()
+            ..platform_api::CostSnapshot::default()
         }
     }
 
@@ -1144,7 +1144,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn workflow_size_guideline_state(
         &self,
-    ) -> traits::session_flags::WorkflowSizeGuidelineSnapshot {
+    ) -> platform_api::session_flags::WorkflowSizeGuidelineSnapshot {
         self.workflow_size_guideline.snapshot()
     }
 
@@ -1265,7 +1265,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.available_models.lock().unwrap().clone()
     }
 
-    async fn list_model_listings(&self) -> Vec<traits::ModelListing> {
+    async fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {
         self.model_listings.lock().unwrap().clone()
     }
 
@@ -1280,8 +1280,8 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     async fn fork_conversation(
         &self,
         _directive: &str,
-    ) -> Result<traits::ForkOutcome, HandleError> {
-        Ok(traits::ForkOutcome {
+    ) -> Result<platform_api::ForkOutcome, HandleError> {
+        Ok(platform_api::ForkOutcome {
             name: "mock-fork".to_string(),
             agent_id: "mock-agent-abcd".to_string(),
         })
@@ -1297,15 +1297,15 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn background_conversation(
         &self,
-        _snapshot: traits::BackgroundingSnapshot,
+        _snapshot: platform_api::BackgroundingSnapshot,
     ) -> Result<String, HandleError> {
         Ok("Moved conversation into a background session (mock-bg-abcd).".to_string())
     }
 
     /// Deterministic recap text so wired-success tests can assert real output.
     /// (`/recap`'s handler gates on a qualifying transcript turn before calling.)
-    async fn generate_recap(&self) -> Result<traits::RecapOutcome, HandleError> {
-        Ok(traits::RecapOutcome::Text("mock recap".to_string()))
+    async fn generate_recap(&self) -> Result<platform_api::RecapOutcome, HandleError> {
+        Ok(platform_api::RecapOutcome::Text("mock recap".to_string()))
     }
 }
 

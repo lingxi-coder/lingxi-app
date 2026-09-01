@@ -603,7 +603,7 @@ fn non_claude_models_keep_full_harness_without_claude_metadata_leakage() {
     assert!(!prompt.contains("# Communicating with the user"));
     assert!(!prompt.contains("The most recent Claude models are"));
     assert_eq!(
-        traits::model_capabilities::prompt_profile_for(&context.model),
-        traits::model_capabilities::PromptProfile::FullHarness
+        platform_api::model_capabilities::prompt_profile_for(&context.model),
+        platform_api::model_capabilities::PromptProfile::FullHarness
     );
 }

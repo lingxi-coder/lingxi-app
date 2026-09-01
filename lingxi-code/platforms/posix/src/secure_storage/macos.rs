@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify, RwLock};
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 type CacheKey = (String, String);
 const SECURITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);

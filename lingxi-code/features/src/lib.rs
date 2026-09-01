@@ -18,7 +18,7 @@ use toml::Table;
 //
 // The under-development warning does NOT define an event type here: codex
 // returned a `codex_protocol::protocol::Event`, but LingXi's event types
-// (`engine::Event` is reducer input; `client-protocol::ClientEvent` is the
+// (`lingxi_core::Event` is reducer input; `client-protocol::ClientEvent` is the
 // wire-parity-locked client stream) are neither a clean fit nor a layer this
 // crate should depend on — and the warning is codex-specific (no claude-code
 // parity slot). So the function returns the warning *message* and leaves

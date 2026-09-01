@@ -194,7 +194,7 @@ struct CatalogReasoningSpec {
 }
 
 fn anthropic_spec(model: &str) -> ReasoningControlSpec {
-    use traits::model_capabilities::{has_capability, ModelCapability};
+    use platform_api::model_capabilities::{has_capability, ModelCapability};
 
     if !has_capability(model, ModelCapability::Effort) {
         return ReasoningControlSpec::automatic_only();

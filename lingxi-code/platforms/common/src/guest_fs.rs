@@ -30,8 +30,8 @@ use futures::Stream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use traits::mobile_linux::guest_paths;
-use traits::{
+use platform_api::mobile_linux::guest_paths;
+use platform_api::{
     FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime, MountSpec,
 };
 
@@ -64,7 +64,7 @@ impl GuestPathFileSystem {
     /// space / refused writes.
     fn resolve_translation(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let mounts = self.runtime.current_mounts();
-        if let Some((mount, host)) = traits::mobile_linux::find_guest_mount(path, &mounts) {
+        if let Some((mount, host)) = platform_api::mobile_linux::find_guest_mount(path, &mounts) {
             if write && mount.read_only {
                 return Err(FsError::PermissionDenied(format!(
                     "guest path is on a read-only mount ({}): {path}",
@@ -252,7 +252,7 @@ impl FileSystem for GuestPathFileSystem {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use traits::{
+    use platform_api::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, PtyOpenRequest, PtySessionHandle,
         RootfsStatus, SandboxBackend,
@@ -311,7 +311,7 @@ mod tests {
         async fn resize_pty(
             &self,
             _handle: &PtySessionHandle,
-            _size: traits::PtySize,
+            _size: platform_api::PtySize,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }

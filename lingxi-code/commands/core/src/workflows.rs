@@ -2,7 +2,7 @@
 //!
 //! The TUI intercepts this command and opens its interactive workflow picker.
 //! This handler is the shared registry/headless projection used by mobile and
-//! bridge clients: it reads the same [`traits::task_registry::TaskRegistryHandle`]
+//! bridge clients: it reads the same [`platform_api::task_registry::TaskRegistryHandle`]
 //! and renders the picker's snapshot as text.
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use command_api::parser::ParsedSlashCommand;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use traits::task_registry::{TaskRegistryHandle, WorkflowRecord};
+use platform_api::task_registry::{TaskRegistryHandle, WorkflowRecord};
 
 const DESCRIPTION: &str = "Browse running, paused, and completed workflows";
 const TITLE: &str = "Dynamic workflows";

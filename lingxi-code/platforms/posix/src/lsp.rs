@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::warn;
-use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 /// Per-connection bundle: the child process handle + the typed client.
 struct ConnectionEntry {

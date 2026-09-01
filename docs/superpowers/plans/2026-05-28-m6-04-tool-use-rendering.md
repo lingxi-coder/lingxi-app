@@ -6,7 +6,7 @@
 
 **Architecture:** Two new iocraft components live under `crates/tui/src/components/messages/` — `assistant_tool_use.rs` (header line with `●` marker, single-line JSON preview when collapsed, pretty-printed multi-line JSON when expanded) and `user_tool_result.rs` (`└ ` marker, dim-colored, 100-line / 4000-byte truncation budget with a footer when the budget bites). Bash output runs through a new sibling module `crates/tui/src/ansi.rs` — a deliberately tiny SGR parser that handles `reset` + `bold` + 8/16-color foreground + 8/16-color background and **skips every other CSI/OSC/control sequence without panicking**. A new dispatcher in `crates/tui/src/components/messages/mod.rs` routes each `ScrollbackEntry::AssistantToolCall { … }` and `ScrollbackEntry::UserToolResult { … }` to the right component. `AppState` (defined in M6-02 `crates/tui/src/app.rs`) grows two fields — `expanded: HashMap<ToolUseId, bool>` and `focused_tool_id: Option<ToolUseId>` — plus a key handler in `crates/tui/src/events/keymap.rs` that maps Up/Down (scrollback mode) to focus walking and `e` / `Enter` (when a tool is focused) to expanded-flag toggle. The orchestrator already emits `OutputEvent::ToolCall { tool, input }` and `OutputEvent::ToolResult { tool, result }` from M5-04; M6-04 plugs those events into `AppState::push_scrollback` via the existing orchestrator-bridge channel from M6-01.
 
-**Tech stack:** Rust 2021, `iocraft = "=0.6"` (pinned from M6-01), `serde_json` (existing workspace dep, used for `to_string_pretty` + single-line preview), `lingxi-protocol::ToolUseId` (existing newtype from `lingxi_protocol::ContentBlock`), `lingxi-traits::OutputEvent::{ToolCall, ToolResult}` (M5-04 — these are the locked variant names; the M6 spec's "ToolUseStart / ToolUseResult" labels in §3 alias these), `unicode-width = "0.1"` (already in tui Cargo.toml from M6-02 for prompt input), `insta` (existing dev-dep for snapshot tests).
+**Tech stack:** Rust 2021, `iocraft = "=0.6"` (pinned from M6-01), `serde_json` (existing workspace dep, used for `to_string_pretty` + single-line preview), `lingxi-protocol::ToolUseId` (existing newtype from `lingxi_protocol::ContentBlock`), `lingxi-platform_api::OutputEvent::{ToolCall, ToolResult}` (M5-04 — these are the locked variant names; the M6 spec's "ToolUseStart / ToolUseResult" labels in §3 alias these), `unicode-width = "0.1"` (already in tui Cargo.toml from M6-02 for prompt input), `insta` (existing dev-dep for snapshot tests).
 
 **Locked Types and Naming:**
 - `OutputEvent::ToolCall { tool: String, input: serde_json::Value }` — orchestrator emits this just before dispatch (M5-04 §1701 of streaming_loop tests).
@@ -36,7 +36,7 @@
 - `crates/tui/src/components/messages/mod.rs` (already listed above; same file gets the `enum ScrollbackEntry` variant additions: `AssistantToolCall { id, tool, input }` and `UserToolResult { id, tool, result }`). ~+25 lines for the enum branches.
 
 **Modified existing core crate (M5-04 surface — 1 file):**
-- `lingxi-code/crates/traits/src/orchestrator.rs` — add `id: lingxi_protocol::ToolUseId` field to `OutputEvent::ToolCall` and `OutputEvent::ToolResult` variants; update `OutputStream::emit_tool_call` / `emit_tool_result` trait signatures to `(&self, id: &ToolUseId, tool: &str, …)`; bump all impls (`MockOutputStream`, `SinkAdapter` in `crates/cli/src/output_adapter.rs`, `lingxi-orchestrator::streaming_loop` call sites). ~+15 lines net; covered in Task 2.
+- `lingxi-code/crates/platform-api/src/orchestrator.rs` — add `id: lingxi_protocol::ToolUseId` field to `OutputEvent::ToolCall` and `OutputEvent::ToolResult` variants; update `OutputStream::emit_tool_call` / `emit_tool_result` trait signatures to `(&self, id: &ToolUseId, tool: &str, …)`; bump all impls (`MockOutputStream`, `SinkAdapter` in `crates/cli/src/output_adapter.rs`, `lingxi-orchestrator::streaming_loop` call sites). ~+15 lines net; covered in Task 2.
 
 **Test files (5):**
 - `crates/tui/tests/render_assistant_tool_use.rs` — insta snapshot tests for collapsed + expanded `AssistantToolUseMessage`.
@@ -54,8 +54,8 @@
 - Read: `claude-code/src/components/messages/UserToolResultMessage/UserToolResultMessage.tsx` + `UserToolSuccessMessage.tsx`
 - Read: `claude-code/src/constants/figures.ts` (confirm `BLACK_CIRCLE = '●'`)
 - Read: `claude-code/src/components/messages/CollapsedReadSearchContent.tsx` (collapse/expand discipline)
-- Modify: `lingxi-code/crates/traits/src/orchestrator.rs:313-340` (`OutputEvent`)
-- Modify: `lingxi-code/crates/traits/src/orchestrator.rs:347-362` (`OutputStream` trait)
+- Modify: `lingxi-code/crates/platform-api/src/orchestrator.rs:313-340` (`OutputEvent`)
+- Modify: `lingxi-code/crates/platform-api/src/orchestrator.rs:347-362` (`OutputStream` trait)
 
 - [ ] **Step 1: Read the four claude-code references and lock literals.**
 
@@ -71,7 +71,7 @@
 
 - [ ] **Step 2: Write the failing test for `OutputEvent::ToolCall` carrying a `ToolUseId`.**
 
-  Create `lingxi-code/crates/traits/src/orchestrator.rs` tests addition:
+  Create `lingxi-code/crates/platform-api/src/orchestrator.rs` tests addition:
 
   ```rust
   #[test]
@@ -95,7 +95,7 @@
 
 - [ ] **Step 4: Extend `OutputEvent::ToolCall` and `OutputEvent::ToolResult` with `id: ToolUseId`.**
 
-  Edit `lingxi-code/crates/traits/src/orchestrator.rs` around lines 319-332:
+  Edit `lingxi-code/crates/platform-api/src/orchestrator.rs` around lines 319-332:
 
   ```rust
   #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,7 +158,7 @@
 - [ ] **Step 8: Commit.**
 
   ```bash
-  git add lingxi-code/crates/traits/src/orchestrator.rs \
+  git add lingxi-code/crates/platform-api/src/orchestrator.rs \
           lingxi-code/crates/cli/src/output.rs \
           lingxi-code/crates/cli/src/output_adapter.rs \
           lingxi-code/crates/orchestrator/src/test_support.rs \
@@ -1600,7 +1600,7 @@
 
   ```rust
   use lingxi_protocol::ToolUseId;
-  use lingxi_traits::OutputEvent;
+  use lingxi_platform_api::OutputEvent;
   use lingxi_tui::app::AppState;
   use lingxi_tui::components::messages::render_entry_to_string;
 

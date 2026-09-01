@@ -22,8 +22,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use traits::process::ProcessStreamSink;
-use traits::{
+use platform_api::process::ProcessStreamSink;
+use platform_api::{
     HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand,
     SandboxedTag,
 };
@@ -58,7 +58,7 @@ const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 async fn drain_observed<R>(
     r: &mut R,
     buf: &mut Vec<u8>,
-    observer: Option<&std::sync::Arc<dyn traits::HookOutputObserver>>,
+    observer: Option<&std::sync::Arc<dyn platform_api::HookOutputObserver>>,
     is_stderr: bool,
 ) -> std::io::Result<()>
 where
@@ -303,7 +303,7 @@ impl PosixProcess {
         //    Bash and the hook child (both spawn via `subprocessEnv()`), so a
         //    prompt-injected command can't read Anthropic/cloud/Actions creds in
         //    that CI mode. Inert (no-op) without the flag — the common case.
-        if traits::env::is_env_truthy(std::env::var(ENV_SUBPROCESS_ENV_SCRUB).ok().as_deref()) {
+        if platform_api::env::is_env_truthy(std::env::var(ENV_SUBPROCESS_ENV_SCRUB).ok().as_deref()) {
             for key in GHA_SUBPROCESS_SCRUB {
                 tcmd.env_remove(key);
                 tcmd.env_remove(format!("INPUT_{key}"));
@@ -505,7 +505,7 @@ impl ProcessRunner for PosixProcess {
     async fn run_foreground(
         &self,
         cmd: &SandboxedCommand,
-    ) -> Result<traits::ForegroundOutcome, ProcessError> {
+    ) -> Result<platform_api::ForegroundOutcome, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -587,7 +587,7 @@ impl ProcessRunner for PosixProcess {
 
         if !timed_out {
             let status = exit_status.expect("loop breaks with a status when not timed out");
-            return Ok(traits::ForegroundOutcome::Completed(ProcessOutput {
+            return Ok(platform_api::ForegroundOutcome::Completed(ProcessOutput {
                 stdout: String::from_utf8_lossy(&out_buf).into_owned(),
                 stderr: String::from_utf8_lossy(&err_buf).into_owned(),
                 exit_code: status.code().unwrap_or(-1),
@@ -630,7 +630,7 @@ impl ProcessRunner for PosixProcess {
                     () = &mut grace => break,
                 }
             }
-            return Ok(traits::ForegroundOutcome::Completed(ProcessOutput {
+            return Ok(platform_api::ForegroundOutcome::Completed(ProcessOutput {
                 stdout: String::from_utf8_lossy(&out_buf).into_owned(),
                 stderr: String::from_utf8_lossy(&err_buf).into_owned(),
                 exit_code: status.code().unwrap_or(-1),
@@ -680,7 +680,7 @@ impl ProcessRunner for PosixProcess {
             let _ = child.wait().await;
         });
 
-        Ok(traits::ForegroundOutcome::MovedToBackground(
+        Ok(platform_api::ForegroundOutcome::MovedToBackground(
             ProcessHandle { task_id, pid },
         ))
     }
@@ -707,7 +707,7 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
         default_async_timeout: std::time::Duration,
-        observer: Option<std::sync::Arc<dyn traits::HookOutputObserver>>,
+        observer: Option<std::sync::Arc<dyn platform_api::HookOutputObserver>>,
     ) -> Result<HookRunOutcome, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
@@ -955,7 +955,7 @@ mod async_hook_tests {
     use super::*;
     use std::collections::HashMap;
     use std::time::Duration;
-    use traits::ProcessCommand;
+    use platform_api::ProcessCommand;
 
     fn sh(script: &str) -> SandboxedCommand {
         let pcmd = ProcessCommand {
@@ -1111,7 +1111,7 @@ mod async_hook_tests {
 mod hook_env_tests {
     use super::*;
     use std::collections::HashMap;
-    use traits::ProcessCommand;
+    use platform_api::ProcessCommand;
 
     /// A sentinel pre-seeded into the caller env for `AI_AGENT` / `GIT_EDITOR`.
     /// The runner OVERWRITES these for a non-hook (Bash-spawn) command but
@@ -1197,7 +1197,7 @@ mod streaming_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::Notify;
-    use traits::ProcessCommand;
+    use platform_api::ProcessCommand;
 
     #[derive(Default)]
     struct RecordingSink {

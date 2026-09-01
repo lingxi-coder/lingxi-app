@@ -18,7 +18,7 @@
 //!   surface (model, listings, slash, tasks, session control) the connection
 //!   delegates non-turn/non-permission commands to (F2-08).
 //! - [`audio_bridge::AudioBridge`] — the desktop proxies for
-//!   `traits::{SpeechToText, TextToSpeech, VoiceRecorder}`: each trait call
+//!   `platform_api::{SpeechToText, TextToSpeech, VoiceRecorder}`: each trait call
 //!   becomes one [`client_protocol::events::ClientEvent::AudioRequest`] awaiting
 //!   the client's `AudioResponse` (the microphone/speaker live in Electron, not
 //!   in the engine).

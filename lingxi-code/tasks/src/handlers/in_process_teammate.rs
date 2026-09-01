@@ -17,7 +17,7 @@
 //!
 //! * routes typed text into the running agent via
 //!   [`agent::StateMachinePool::send_event`] with an
-//!   [`engine::Event::UserMessage`] (the Rust analogue of
+//!   [`lingxi_core::Event::UserMessage`] (the Rust analogue of
 //!   `injectUserMessageToTeammate`), and
 //! * pumps the agent's outbound [`agent::SubagentEvent`] stream into the task's
 //!   spool file (one line per event), reporting terminal status to a
@@ -25,7 +25,7 @@
 //!
 //! ## Shutdown ordering (cooperative, then hard)
 //!
-//! [`kill`](Task::kill) sends [`engine::Event::UserExit`] first (giving the
+//! [`kill`](Task::kill) sends [`lingxi_core::Event::UserExit`] first (giving the
 //! runner a chance to emit a clean `Killed` the streaming worker spools), then
 //! hard-cancels the slot via [`agent::StateMachinePool::deallocate`]. This
 //! matches the TS `requestTeammateShutdown` (cooperative) → `kill` (hard)
@@ -104,11 +104,11 @@ The user interacts primarily with the team lead. Your work is coordinated throug
 pub(crate) fn pick_next_task(tasks: &[task_store::TodoTask]) -> Option<&task_store::TodoTask> {
     let open: std::collections::HashSet<&str> = tasks
         .iter()
-        .filter(|t| t.status != engine::TodoState::Completed)
+        .filter(|t| t.status != lingxi_core::TodoState::Completed)
         .map(|t| t.id.as_str())
         .collect();
     tasks.iter().find(|t| {
-        if t.status != engine::TodoState::Pending {
+        if t.status != lingxi_core::TodoState::Pending {
             return false;
         }
         if t.owner.as_deref().is_some_and(|o| !o.is_empty()) {
@@ -158,7 +158,7 @@ fn escape_xml_attribute(value: &str) -> String {
 
 /// Neutralize literal teammate-envelope tags inside untrusted message text.
 ///
-/// Same rule as `traits::subagent_output_guard`'s harness-envelope neutralizer
+/// Same rule as `platform_api::subagent_output_guard`'s harness-envelope neutralizer
 /// (whose tag list already contains `teammate-message`): `<` before an optional
 /// `/`, the tag name case-insensitively, then `>` / `/` / whitespace / end-of-
 /// input becomes `<\`. The boundary predicate is IMPORTED from there rather than
@@ -186,7 +186,7 @@ fn escape_teammate_tags(text: &str) -> String {
         if suffix
             .chars()
             .next()
-            .is_none_or(|c| c == '>' || c == '/' || traits::subagent_output_guard::is_js_space(c))
+            .is_none_or(|c| c == '>' || c == '/' || platform_api::subagent_output_guard::is_js_space(c))
         {
             out.push_str(&text[start..=index]);
             out.push('\\');
@@ -332,7 +332,7 @@ pub(crate) async fn check_and_claim_next_task(
     // Oracle: `await WXe(e, n.id, {status:"in_progress"})` as a separate
     // follow-up write after the claim.
     store
-        .update(&next.id, |t| t.status = engine::TodoState::InProgress)
+        .update(&next.id, |t| t.status = lingxi_core::TodoState::InProgress)
         .await;
     tracing::info!(
         target: "lingxi_tasks::in_process_teammate",
@@ -360,10 +360,10 @@ async fn rollback_claimed_task(
     let _ = store
         .update(task_id, |task| {
             if task.owner.as_deref() == Some(agent_name)
-                && task.status == engine::TodoState::InProgress
+                && task.status == lingxi_core::TodoState::InProgress
             {
                 task.owner = None;
-                task.status = engine::TodoState::Pending;
+                task.status = lingxi_core::TodoState::Pending;
             }
         })
         .await;
@@ -458,7 +458,7 @@ pub struct InProcessTeammateHandler {
     api_client: Arc<dyn SubagentApiClient>,
     /// Tool dispatch seam inherited by the teammate. `None` means the teammate
     /// cannot dispatch tools (a `tool_use` then surfaces a runner failure).
-    tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+    tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
     /// Resolves the [`AgentDefinition`] for a spawn.
     definitions: Arc<dyn TeammateDefinitionResolver>,
     /// Parent / main-loop model used to resolve a teammate definition's
@@ -497,7 +497,7 @@ pub struct InProcessTeammateHandler {
     /// Budget enforcer inherited by the teammate so its turns charge the shared
     /// cumulative cost (claude-code teammates share the session budget). `None`
     /// (the default / tests) ⇒ no per-turn budget gate.
-    budget_enforcer: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    budget_enforcer: Option<Arc<dyn platform_api::budget::BudgetEnforcerHandle>>,
     /// Hook executor handed to the teammate's runner so it fires `SubagentStart`
     /// (+ frontmatter hooks) like a normal subagent. SET-ONCE cell (same
     /// cycle-break as [`Self::tool_registry`]); unfilled ⇒ the runner skips the
@@ -507,7 +507,7 @@ pub struct InProcessTeammateHandler {
     strict_plugin_only_hooks: Arc<OnceLock<bool>>,
     /// Skill loader handed to the teammate's runner so it preloads the
     /// definition's frontmatter `skills:`. SET-ONCE; unfilled ⇒ no preloading.
-    skill_loader: Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
+    skill_loader: Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
     /// Session id + cwd stamped on the `HookContext` the runner builds for the
     /// SubagentStart fire (only consulted when [`Self::hook_executor`] is filled).
     hook_session_id: protocol::SessionId,
@@ -594,7 +594,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_budget_enforcer(
         mut self,
-        enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle>,
+        enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
     ) -> Self {
         self.budget_enforcer = Some(enforcer);
         self
@@ -624,7 +624,7 @@ impl InProcessTeammateHandler {
 
     /// Return a clone of the set-once skill-loader cell.
     #[must_use]
-    pub fn skill_loader_handle(&self) -> Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
+    pub fn skill_loader_handle(&self) -> Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -650,7 +650,7 @@ impl InProcessTeammateHandler {
 
     /// Attach the tool dispatch seam inherited by spawned teammates.
     #[must_use]
-    pub fn with_tool_invoker(mut self, invoker: Arc<dyn traits::ToolInvoker>) -> Self {
+    pub fn with_tool_invoker(mut self, invoker: Arc<dyn platform_api::ToolInvoker>) -> Self {
         self.tool_invoker = Some(invoker);
         self
     }
@@ -747,7 +747,7 @@ impl InProcessTeammateHandler {
     /// team it belongs to (empty when spawned standalone). Both ride on the
     /// context as [`SubagentContext::agent_name`] / [`SubagentContext::team_name`]
     /// so the runner threads them into every dispatched tool's
-    /// [`traits::tool_invoker::SubagentInvocationContext`] — the Rust analogue of
+    /// [`platform_api::tool_invoker::SubagentInvocationContext`] — the Rust analogue of
     /// claude-code running the teammate inside `runWithTeammateContext` so
     /// `getAgentName()` / `getTeammateContext()?.teamName` resolve inside its
     /// tool calls.
@@ -1217,7 +1217,7 @@ impl Task for InProcessTeammateHandler {
                             match claim_pool
                                 .send_event(
                                     &claim_agent_id,
-                                    engine::Event::UserMessage {
+                                    lingxi_core::Event::UserMessage {
                                         message_id: protocol::MessageId::new(),
                                         request_id: protocol::RequestId::new(),
                                         content,
@@ -1311,7 +1311,7 @@ impl Task for InProcessTeammateHandler {
                         match claim_pool
                             .send_event(
                                 &claim_agent_id,
-                                engine::Event::UserMessage {
+                                lingxi_core::Event::UserMessage {
                                     message_id: protocol::MessageId::new(),
                                     request_id: protocol::RequestId::new(),
                                     content,
@@ -1474,7 +1474,7 @@ impl Task for InProcessTeammateHandler {
         // replaced by a generic `Killed`.
         let _ = self
             .pool
-            .send_event(&entry.agent_id, engine::Event::UserExit)
+            .send_event(&entry.agent_id, lingxi_core::Event::UserExit)
             .await;
 
         // Stop the streaming worker, then hard-cancel the slot (deallocate

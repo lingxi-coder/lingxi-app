@@ -84,18 +84,18 @@ The 12 traits, their trait files, and the canonical impl locations are:
 
 | Trait | trait file | M1 mock | posix impl | windows impl |
 |---|---|---|---|---|
-| `Clock` | `crates/traits/src/clock.rs` | `mocks::MockClock` | `posix::PosixClock` | `windows::WindowsClock` |
-| `RuntimeSpawner` | `crates/traits/src/runtime.rs` | `mocks::MockRuntimeSpawner` | `posix::PosixRuntimeSpawner` | `windows::WindowsRuntimeSpawner` |
-| `HttpTransport` | `crates/traits/src/http.rs` | `mocks::MockHttpTransport` | `posix::PosixHttp` | `windows::WindowsHttp` |
-| `ProcessRunner` | `crates/traits/src/process.rs` | none in M1 | `posix::PosixProcess` | `windows::WindowsProcess` |
-| `McpTransport` | `crates/traits/src/mcp.rs` | `mocks::MockMcpTransport` | `posix::PosixMcp` | `windows::WindowsMcp` |
-| `LspTransport` | `crates/traits/src/lsp.rs` | none in M1 | `posix::PosixLsp` | `windows::WindowsLsp` |
-| `Sandbox` | `crates/traits/src/sandbox.rs` | none in M1 | `posix::PosixSandbox` | `windows::WindowsSandbox` |
-| `WorktreeManager` | `crates/traits/src/worktree.rs` | none in M1 | `posix::PosixWorktree` | `windows::WindowsWorktree` |
-| `SecureStorage` | `crates/traits/src/secure_storage.rs` | none in M1 | `posix::PlainTextSecureStorage` + `MacOsKeychainStorage` (macOS only) | `windows::PlainTextSecureStorage` |
-| `SwarmBackend` | `crates/traits/src/swarm.rs` | none in M1 | `posix::PosixSwarm` | `windows::WindowsSwarmBackend` |
-| `BridgeTransport` | `crates/traits/src/bridge.rs` | none in M1 | `posix::PosixBridge` | `windows::WindowsBridge` |
-| `EffectHandler` | `crates/traits/src/effect_handler.rs` | none in M1 | `posix-minimal::PosixMinimalHost` (already tested via demo) | n/a |
+| `Clock` | `crates/platform-api/src/clock.rs` | `mocks::MockClock` | `posix::PosixClock` | `windows::WindowsClock` |
+| `RuntimeSpawner` | `crates/platform-api/src/runtime.rs` | `mocks::MockRuntimeSpawner` | `posix::PosixRuntimeSpawner` | `windows::WindowsRuntimeSpawner` |
+| `HttpTransport` | `crates/platform-api/src/http.rs` | `mocks::MockHttpTransport` | `posix::PosixHttp` | `windows::WindowsHttp` |
+| `ProcessRunner` | `crates/platform-api/src/process.rs` | none in M1 | `posix::PosixProcess` | `windows::WindowsProcess` |
+| `McpTransport` | `crates/platform-api/src/mcp.rs` | `mocks::MockMcpTransport` | `posix::PosixMcp` | `windows::WindowsMcp` |
+| `LspTransport` | `crates/platform-api/src/lsp.rs` | none in M1 | `posix::PosixLsp` | `windows::WindowsLsp` |
+| `Sandbox` | `crates/platform-api/src/sandbox.rs` | none in M1 | `posix::PosixSandbox` | `windows::WindowsSandbox` |
+| `WorktreeManager` | `crates/platform-api/src/worktree.rs` | none in M1 | `posix::PosixWorktree` | `windows::WindowsWorktree` |
+| `SecureStorage` | `crates/platform-api/src/secure_storage.rs` | none in M1 | `posix::PlainTextSecureStorage` + `MacOsKeychainStorage` (macOS only) | `windows::PlainTextSecureStorage` |
+| `SwarmBackend` | `crates/platform-api/src/swarm.rs` | none in M1 | `posix::PosixSwarm` | `windows::WindowsSwarmBackend` |
+| `BridgeTransport` | `crates/platform-api/src/bridge.rs` | none in M1 | `posix::PosixBridge` | `windows::WindowsBridge` |
+| `EffectHandler` | `crates/platform-api/src/effect_handler.rs` | none in M1 | `posix-minimal::PosixMinimalHost` (already tested via demo) | n/a |
 
 Where a contract needs subprocess access on CI (e.g. real LSP spawn, real macOS Keychain) the driver gates with `#[cfg(target_os = "...")]` and/or an env var so `cargo test --workspace` on ubuntu-latest stays clean.
 
@@ -105,7 +105,7 @@ Where a contract needs subprocess access on CI (e.g. real LSP spawn, real macOS 
 
 **Files:** `crates/test-harness/src/contracts/clock.rs` (new), `crates/test-harness/tests/contract_clock.rs` (new), `crates/test-harness/src/contracts/mod.rs` (add `pub mod clock;`).
 
-The `Clock` trait surface (per `crates/traits/src/clock.rs`):
+The `Clock` trait surface (per `crates/platform-api/src/clock.rs`):
 - `fn now(&self) -> SystemTime`
 - `fn elapsed_since(&self, earlier: SystemTime) -> Duration` (default impl: `now() - earlier`)
 
@@ -115,7 +115,7 @@ The `Clock` trait surface (per `crates/traits/src/clock.rs`):
 //! [`Clock`] contract test suite — verifies non-decreasing `now()` and that
 //! `elapsed_since(earlier)` returns a sane forward-going duration.
 
-use lingxi_traits::Clock;
+use lingxi_platform_api::Clock;
 use std::time::{Duration, SystemTime};
 
 pub async fn clock_contract_tests<C: Clock>(clock: &C) {
@@ -206,7 +206,7 @@ Expected: 1-2 passing tests on Linux/macOS, 1 on Windows. No `#[ignore]`.
 
 **Files:** `crates/test-harness/src/contracts/runtime.rs` (new), `crates/test-harness/tests/contract_runtime.rs` (new), update `contracts/mod.rs`.
 
-The `RuntimeSpawner` trait surface (per `crates/traits/src/runtime.rs`):
+The `RuntimeSpawner` trait surface (per `crates/platform-api/src/runtime.rs`):
 - `async fn spawn(&self, fut: Pin<Box<dyn Future<Output=()> + Send>>) -> Result<BackgroundTaskHandle, RuntimeError>`
 - `async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError>`
 
@@ -216,7 +216,7 @@ The `RuntimeSpawner` trait surface (per `crates/traits/src/runtime.rs`):
 //! [`RuntimeSpawner`] contract: spawn returns a handle, the task runs, and
 //! `cancel(handle)` is idempotent on already-finished handles.
 
-use lingxi_traits::RuntimeSpawner;
+use lingxi_platform_api::RuntimeSpawner;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -310,7 +310,7 @@ cargo test -p lingxi-test-harness --test contract_runtime
 
 **Files:** `crates/test-harness/src/contracts/http.rs` (new), `crates/test-harness/tests/contract_http.rs` (new), update `contracts/mod.rs`.
 
-The `HttpTransport` trait surface (per `crates/traits/src/http.rs`):
+The `HttpTransport` trait surface (per `crates/platform-api/src/http.rs`):
 - `async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>`
 - `async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError>`
 
@@ -323,7 +323,7 @@ The `HttpTransport` trait surface (per `crates/traits/src/http.rs`):
 //! without external network.
 
 use futures::StreamExt;
-use lingxi_traits::http::{HttpRequest, HttpTransport};
+use lingxi_platform_api::http::{HttpRequest, HttpTransport};
 use std::collections::HashMap;
 
 pub async fn http_transport_contract_tests<H: HttpTransport>(http: &H, base_url: &str) {
@@ -431,7 +431,7 @@ cargo test -p lingxi-test-harness --test contract_http
 
 **Files:** `crates/test-harness/src/contracts/process.rs` (new), `crates/test-harness/tests/contract_process.rs` (new), update `contracts/mod.rs`.
 
-The `ProcessRunner` trait surface (per `crates/traits/src/process.rs`):
+The `ProcessRunner` trait surface (per `crates/platform-api/src/process.rs`):
 - `async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError>`
 - `async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError>`
 - `fn is_available(&self) -> bool`
@@ -443,7 +443,7 @@ The `ProcessRunner` trait surface (per `crates/traits/src/process.rs`):
 //! so the suite constructs commands via [`Sandbox::bypass_with_audit`] under
 //! the canonical "test bypass" reason.
 
-use lingxi_traits::{
+use lingxi_platform_api::{
     ProcessRunner, Sandbox,
     sandbox::ProcessCommand,
 };
@@ -555,7 +555,7 @@ Expected: on macOS/Linux, 1 test asserts echo + non-zero exit. On Windows, is_av
 
 **Files:** `crates/test-harness/src/contracts/mcp.rs` (new), `crates/test-harness/tests/contract_mcp.rs` (new), update `contracts/mod.rs`.
 
-The `McpTransport` trait surface (per `crates/traits/src/mcp.rs`):
+The `McpTransport` trait surface (per `crates/platform-api/src/mcp.rs`):
 - `async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError>`
 - `async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError>`
 - `fn supported_transports(&self) -> Vec<McpTransportKind>`
@@ -568,7 +568,7 @@ The `McpTransport` trait surface (per `crates/traits/src/mcp.rs`):
 //! `supported_transports()` and must return `UnsupportedTransport` (not panic,
 //! not hang, not connect) when handed a kind it doesn't claim to support.
 
-use lingxi_traits::mcp::{
+use lingxi_platform_api::mcp::{
     McpError, McpTransport, McpTransportKind, McpTransportSpec,
 };
 use std::collections::HashMap;
@@ -647,7 +647,7 @@ cargo test -p lingxi-test-harness --test contract_mcp
 
 **Files:** `crates/test-harness/src/contracts/lsp.rs` (new), `crates/test-harness/tests/contract_lsp.rs` (new), update `contracts/mod.rs`.
 
-The `LspTransport` trait surface (per `crates/traits/src/lsp.rs`):
+The `LspTransport` trait surface (per `crates/platform-api/src/lsp.rs`):
 - `async fn start_server(&self, config: &LspServerConfig) -> Result<LspRawConnection, LspError>`
 - `async fn request(&self, conn_id, method, params) -> Result<serde_json::Value, LspError>`
 - `async fn shutdown(&self, conn_id: McpConnectionId) -> Result<(), LspError>`
@@ -660,7 +660,7 @@ The `LspTransport` trait surface (per `crates/traits/src/lsp.rs`):
 //! ubuntu-latest CI without a sidecar install; the contract verifies trait
 //! invariants only.
 
-use lingxi_traits::lsp::{LspError, LspServerConfig, LspTransport};
+use lingxi_platform_api::lsp::{LspError, LspServerConfig, LspTransport};
 use lingxi_protocol::McpConnectionId;
 
 pub async fn lsp_transport_contract_tests<T: LspTransport>(t: &T) {
@@ -735,7 +735,7 @@ cargo test -p lingxi-test-harness --test contract_lsp
 
 **Files:** `crates/test-harness/src/contracts/sandbox.rs` (new), `crates/test-harness/tests/contract_sandbox.rs` (new), update `contracts/mod.rs`.
 
-The `Sandbox` trait surface (per `crates/traits/src/sandbox.rs`):
+The `Sandbox` trait surface (per `crates/platform-api/src/sandbox.rs`):
 - `fn is_available(&self) -> bool`
 - `fn backend(&self) -> SandboxBackend`
 - `fn prepare(&self, cmd: ProcessCommand, policy: &SandboxPolicy) -> Result<SandboxedCommand, SandboxError>`
@@ -748,7 +748,7 @@ The `Sandbox` trait surface (per `crates/traits/src/sandbox.rs`):
 //! [`Sandbox`] contract: prepare/bypass must round-trip the inner
 //! [`ProcessCommand`]; `bypass_with_audit` must record the reason in the tag.
 
-use lingxi_traits::sandbox::{
+use lingxi_platform_api::sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy, SandboxedTag,
 };
 
@@ -866,7 +866,7 @@ cargo test -p lingxi-test-harness --test contract_sandbox
 
 **Files:** `crates/test-harness/src/contracts/worktree.rs` (new), `crates/test-harness/tests/contract_worktree.rs` (new), update `contracts/mod.rs`.
 
-The `WorktreeManager` trait surface (per `crates/traits/src/worktree.rs`):
+The `WorktreeManager` trait surface (per `crates/platform-api/src/worktree.rs`):
 - `async fn create_worktree(&self, repo_root, slug, copy_includes) -> Result<WorktreeHandle, _>`
 - `async fn cleanup_stale(&self, max_age) -> Result<Vec<PathBuf>, _>`
 - `fn is_supported(&self) -> bool`
@@ -878,7 +878,7 @@ The `WorktreeManager` trait surface (per `crates/traits/src/worktree.rs`):
 //! repo; the contract sets one up in a tempdir, exercises the happy path, and
 //! verifies the claude-code-mandated branch prefix.
 
-use lingxi_traits::worktree::{WorktreeError, WorktreeManager};
+use lingxi_platform_api::worktree::{WorktreeError, WorktreeManager};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -989,7 +989,7 @@ Requires `git` on PATH — assumed available on all M2 CI runners.
 
 **Files:** `crates/test-harness/src/contracts/secure_storage.rs` (new), `crates/test-harness/tests/contract_secure_storage.rs` (new), update `contracts/mod.rs`.
 
-The `SecureStorage` trait surface (per `crates/traits/src/secure_storage.rs`):
+The `SecureStorage` trait surface (per `crates/platform-api/src/secure_storage.rs`):
 - `async fn store(&self, service, account, data) -> Result<(), _>`
 - `async fn retrieve(&self, service, account) -> Result<Option<Vec<u8>>, _>`
 - `async fn delete(&self, service, account) -> Result<(), _>`
@@ -1003,7 +1003,7 @@ The `SecureStorage` trait surface (per `crates/traits/src/secure_storage.rs`):
 //! byte-identical payload. `is_encrypted()` is a smoke check — the value
 //! depends on the backend.
 
-use lingxi_traits::SecureStorage;
+use lingxi_platform_api::SecureStorage;
 
 const SERVICE: &str = "lingxi-contract-test";
 const ACCOUNT: &str = "user@example.com";
@@ -1106,7 +1106,7 @@ cargo test -p lingxi-test-harness --test contract_secure_storage
 
 **Files:** `crates/test-harness/src/contracts/swarm.rs` (new), `crates/test-harness/tests/contract_swarm.rs` (new), update `contracts/mod.rs`.
 
-The `SwarmBackend` trait surface (per `crates/traits/src/swarm.rs`):
+The `SwarmBackend` trait surface (per `crates/platform-api/src/swarm.rs`):
 - `async fn destroy_swarm(&self, handle: SwarmHandle) -> Result<(), SwarmError>`
 - `fn is_available(&self) -> bool`
 - plus `start_swarm` / `create_teammate_pane` (kept out of the trait-level contract — real-tmux tests live in `platforms/posix/tests/`)
@@ -1117,7 +1117,7 @@ The `SwarmBackend` trait surface (per `crates/traits/src/swarm.rs`):
 //! [`SwarmBackend`] contract: trait-level invariants only. Real tmux/iTerm
 //! exec tests live in `platforms/posix/tests/` and gate on `TMUX_AVAILABLE`.
 
-use lingxi_traits::swarm::{SwarmBackend, SwarmError, SwarmHandle};
+use lingxi_platform_api::swarm::{SwarmBackend, SwarmError, SwarmHandle};
 
 pub async fn swarm_backend_contract_tests<S: SwarmBackend>(s: &S) {
     test_is_available_returns_bool(s).await;
@@ -1176,7 +1176,7 @@ cargo test -p lingxi-test-harness --test contract_swarm
 
 **Files:** `crates/test-harness/src/contracts/bridge.rs` (new), `crates/test-harness/tests/contract_bridge.rs` (new), update `contracts/mod.rs`.
 
-The `BridgeTransport` trait surface (per `crates/traits/src/bridge.rs`):
+The `BridgeTransport` trait surface (per `crates/platform-api/src/bridge.rs`):
 - `async fn connect(&self, config: &BridgeConfig) -> Result<BridgeConnection, BridgeError>`
 - `async fn disconnect(&self, conn: BridgeConnection) -> Result<(), BridgeError>`
 
@@ -1187,7 +1187,7 @@ The `BridgeTransport` trait surface (per `crates/traits/src/bridge.rs`):
 //! `connect()` must surface either `Unsupported` (Windows or no lockfile
 //! discovery wired) or `LockfileNotFound`; never panic, never hang.
 
-use lingxi_traits::bridge::{BridgeConfig, BridgeError, BridgeTransport};
+use lingxi_platform_api::bridge::{BridgeConfig, BridgeError, BridgeTransport};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -1210,7 +1210,7 @@ async fn test_connect_returns_within_timeout<B: BridgeTransport>(b: &B) {
 }
 
 async fn test_disconnect_unknown_is_ok_or_closed<B: BridgeTransport>(b: &B) {
-    let bogus = lingxi_traits::bridge::BridgeConnection::synthetic_for_test();
+    let bogus = lingxi_platform_api::bridge::BridgeConnection::synthetic_for_test();
     let r = b.disconnect(bogus).await;
     match r {
         Ok(()) | Err(BridgeError::Closed) | Err(BridgeError::Unsupported(_)) => {}
@@ -1219,7 +1219,7 @@ async fn test_disconnect_unknown_is_ok_or_closed<B: BridgeTransport>(b: &B) {
 }
 ```
 
-The `BridgeConnection::synthetic_for_test()` helper is a `pub(crate)`-via-`#[cfg(test)]` constructor that produces a connection handle the transport can recognize as "not mine." Add it to `crates/traits/src/bridge.rs` as part of this task — it's the only way a contract author can construct a `BridgeConnection` without going through `connect()`.
+The `BridgeConnection::synthetic_for_test()` helper is a `pub(crate)`-via-`#[cfg(test)]` constructor that produces a connection handle the transport can recognize as "not mine." Add it to `crates/platform-api/src/bridge.rs` as part of this task — it's the only way a contract author can construct a `BridgeConnection` without going through `connect()`.
 
 `tests/contract_bridge.rs`:
 
@@ -1253,7 +1253,7 @@ cargo test -p lingxi-test-harness --test contract_bridge
 
 **Files:** `crates/test-harness/src/contracts/effect_handler.rs` (new), `crates/test-harness/tests/contract_effect_handler.rs` (new), update `contracts/mod.rs`.
 
-The `EffectHandler` trait surface (per `crates/traits/src/effect_handler.rs`):
+The `EffectHandler` trait surface (per `crates/platform-api/src/effect_handler.rs`):
 - `async fn handle(&self, effect: Effect) -> Result<EffectResult, EffectError>`
 
 `contracts/effect_handler.rs`:
@@ -1264,7 +1264,7 @@ The `EffectHandler` trait surface (per `crates/traits/src/effect_handler.rs`):
 //! specific `EffectError` — never an internal `unreachable!`.
 
 use lingxi_protocol::{Effect, EffectError};
-use lingxi_traits::effect_handler::EffectHandler;
+use lingxi_platform_api::effect_handler::EffectHandler;
 use lingxi_protocol::{MessageId, RequestId, SessionId};
 
 pub async fn effect_handler_contract_tests<H: EffectHandler>(h: &H) {
@@ -1364,7 +1364,7 @@ cd lingxi-core
 cargo test -p lingxi-test-harness --test 'contract_*'
 git add crates/test-harness/src/contracts crates/test-harness/tests/contract_*.rs crates/test-harness/Cargo.toml
 git add platforms/posix-minimal/src/lib.rs  # for_test() helper if needed
-git add crates/traits/src/bridge.rs         # synthetic_for_test() helper
+git add crates/platform-api/src/bridge.rs         # synthetic_for_test() helper
 git commit -m "$(cat <<'EOF'
 test(contracts): 12 trait contract suites
 
@@ -1669,7 +1669,7 @@ cargo test -p lingxi-test-harness --test parity_mcp_initialize
 use lingxi_mcp::registry::{McpRegistry, McpRegistryError};
 use lingxi_mcp::settings::parse_transport_spec;
 use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::mcp::McpError;
+use lingxi_platform_api::mcp::McpError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -1840,7 +1840,7 @@ cargo test -p lingxi-lsp --doc  # exercises the compile_fail block
 
 ```rust
 use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::worktree::{WorktreeError, WorktreeManager};
+use lingxi_platform_api::worktree::{WorktreeError, WorktreeManager};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -2047,7 +2047,7 @@ cargo test -p lingxi-test-harness --test parity_keychain_service_name
 
 ```rust
 use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::swarm::{SwarmBackend, SwarmError, SwarmLayout};
+use lingxi_platform_api::swarm::{SwarmBackend, SwarmError, SwarmLayout};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

@@ -48,8 +48,8 @@ The controller authors these (full v2 narrative). Content requirements:
 
 - [ ] **Step 1 — full gate.** From `lingxi-code/`:
   - `cargo build --workspace` → Finished.
-  - `cargo test -p providers -p orchestrator -p engine -p cost -p test-harness` → all pass (parity byte-locks green).
-  - `cargo clippy -p providers -p orchestrator -p engine --no-deps --all-targets -- -D warnings` → clean.
+  - `cargo test -p providers -p orchestrator -p core -p cost -p test-harness` → all pass (parity byte-locks green).
+  - `cargo clippy -p providers -p orchestrator -p core --no-deps --all-targets -- -D warnings` → clean.
   - `bash scripts/check-deps.sh` → OK.
 - [ ] **Step 2 — final holistic review (opus subagent):** review the whole v2 diff (`llm-v2-p1^..HEAD` i.e. the v2 commits) for cohesion, the bounded deviations, and any cross-phase gap. Verdict READY / NOT READY.
 - [ ] **Step 3 — tag.** `git tag -a v0.12.0 -m "LLM Providers v2: vision, reasoning, Azure/Vertex/Bedrock, router"` and `git tag -a llm-v2-p8 -m "LLM Providers v2 P8: release"`.

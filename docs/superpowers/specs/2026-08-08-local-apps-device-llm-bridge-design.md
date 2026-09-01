@@ -95,10 +95,10 @@ local-apps 目前由 LLM 对话式生成 Next.js 应用，在 iOS 上经 iSH 派
 4. **audio_playback 能力砍掉**：录音以 base64 m4a 返回页面 → Blob URL → `<audio>` 纯页面播放。前置修复：iOS `bridgeSource` 注入的 CSP（LocalAppWebView.swift:527）无 `media-src` → 回落 `default-src 'self'` 拦死 blob——**必须加 `media-src 'self' data: blob:`**（img-src 已有 data: blob: 先例）。Android 未注入 CSP，无需改。
 5. **LOCKED/SOURCE_FILES 在 `local_apps_generation.rs:30/:54`**；sha256 锁定清单由 `source_policy()`(:451) 从 LOCKED_FILES 现算 → lingxi-bridge.js 挪进 LOCKED 后 validator 零改动，且 `prepare_scaffold` 对 LOCKED 全 job 类型强制覆写 → **老应用下次 revise/restore 自动拿到新 helper**。但 `screen_writes`（local_apps_sources.rs:60-113）现放行 `lib/` 任意写 → 须在 screen 层拒 LLM 写 `lib/lingxi-bridge.js`（否则落盘后才死于哈希不符，白烧修复次数）。
 6. `build_ios_engine_with_config` 平铺必填参（ios-framework/lib.rs:2200）→ 新增 `location` 用 `Option<Box<dyn IosLocation>>` + `#[uniffi::export(default(location = None))]` → CronFFIBridge/EngineRoundtripTests 零改动（若 uniffi 0.28.3 默认参在此形态有坑，兜底=3 个 Swift 调用点显式传 nil）。
-7. CameraImpl 回全分辨率 JPEG（12MP≈3-6MB）且 Rust 无 image crate（vendored offline 构建，新增代价高）→ **缩图在 Swift 做**：`traits::CameraControl` 加两个带默认实现的 `*_sized` 方法（default 委托全尺寸版）→ android-aar/Stub 零改动。
+7. CameraImpl 回全分辨率 JPEG（12MP≈3-6MB）且 Rust 无 image crate（vendored offline 构建，新增代价高）→ **缩图在 Swift 做**：`platform_api::CameraControl` 加两个带默认实现的 `*_sized` 方法（default 委托全尺寸版）→ android-aar/Stub 零改动。
 8. Android 桥 op 分发已有 `else`（LocalAppsViewModel.kt:736）不炸；真正会炸的是 `AppCapabilityKindDto` 相关 3 处 Kotlin exhaustive `when` + 1 个 UI enum——补分支即可。
 9. `execute_bridge` 无整体超时（只有 5 分钟 APPROVAL_TIMEOUT）→ 录音必须 start/stop 成对 + 宿主 watchdog，防孤儿录音饿死 FlowMode 的 AVAudioSession lease。
-10. VoiceImpl 已正确走 Coordinator（VoiceImpl.swift:28/49/63）；busy 需给 `traits::VoiceError`/`VoiceFfiError` 加 `Busy` 变体（additive，tools/mobile catch-all 兜住）。
+10. VoiceImpl 已正确走 Coordinator（VoiceImpl.swift:28/49/63）；busy 需给 `platform_api::VoiceError`/`VoiceFfiError` 加 `Busy` 变体（additive，tools/mobile catch-all 兜住）。
 11. **profile 是进程级缓存**（OnceCell registry 按 root 键）→ 设备句柄必须照抄 `SharedLlm(RwLock)+replace` 模式，**不能**裸 OnceLock 存 `Arc<dyn CameraControl>`（引擎重建后句柄指向已废弃 Swift 对象）。
 12. `AppBridgeResponseDto` 加 additive 字段 `error_code: Option<String>`（`capability_not_declared` / `permission_denied` / `audio_session_busy` / `media_too_large` / `timeout` / `cancelled`…），页面可编程处理。
 
@@ -126,7 +126,7 @@ local-apps 目前由 LLM 对话式生成 Next.js 应用，在 iOS 上经 iSH 派
 
 **Step 3 — S7 修复**（`cargo test -p engine-mobile --all-features`）：`reconcile_manifest`(:125) 加 `manifest.capabilities = plan.capabilities;`；`local_apps_host.rs` 新增 `authorize_declared_capability`（**device 与 llm/agent 两轨共用**：先查 manifest 声明 → 未声明 typed 拒且**不发** `AppCapabilityRequested` → 已声明转 `authorize_capability`:493）；错误码通道：内部 `BridgeFailure { code, message }` 类型 + `From<String>` 保旧调用点；`local_apps_bridge.rs` `lower/raise_capability` 各加七臂、`lower_manifest` 填 capabilities；`local_apps_llm.rs:838` plan_schema 能力枚举扩为**九**值。先写：reconcile 后 manifest==plan.capabilities、未声明→`capability_not_declared` 且无事件、AlwaysAllow 持久后不再弹窗。
 
-**Step 4 — traits**（`cargo test -p traits` + workspace `cargo build` 证零破坏）：新建 `traits/src/location.rs`（`LocationFix`/`LocationError{PermissionDenied,Unavailable,Timeout,Other}`/`LocationProvider` async trait）；`platform.rs Platform` 加默认方法 `location() -> Option<Arc<dyn LocationProvider>> { None }`；`camera.rs CameraControl` 加 `capture_photo_sized`/`pick_from_library_sized`（默认实现委托全尺寸）；`voice.rs VoiceError` 加 `Busy`。
+**Step 4 — traits**（`cargo test -p platform-api` + workspace `cargo build` 证零破坏）：新建 `platform-api/src/location.rs`（`LocationFix`/`LocationError{PermissionDenied,Unavailable,Timeout,Other}`/`LocationProvider` async trait）；`platform.rs Platform` 加默认方法 `location() -> Option<Arc<dyn LocationProvider>> { None }`；`camera.rs CameraControl` 加 `capture_photo_sized`/`pick_from_library_sized`（默认实现委托全尺寸）；`voice.rs VoiceError` 加 `Busy`。
 
 **Step 5 — 设备句柄注入**：新建 `engine-mobile/src/local_apps_device.rs`：`DeviceCapabilities{camera,voice,notifications,location: Option<Arc<dyn …>>}` + `SharedDeviceCapabilities(RwLock)`（镜像 SharedLlm）；broker 加 `device: OnceLock<Arc<SharedDeviceCapabilities>>` + `attach_device`；`ProfileApps::load` 构造、`profile_apps` 末尾 `.replace(device)`（对齐 :484 llm.replace）；`host.rs:5887` 调用点从 platform 取句柄传入。
 
@@ -196,7 +196,7 @@ local-apps 目前由 LLM 对话式生成 Next.js 应用，在 iOS 上经 iSH 派
 1. `cargo test -p local-apps`
 2. `cargo test -p client-protocol`（BLESS 重生成快照后，非 BLESS 模式复跑确认绿）
 3. `cargo test -p engine-mobile --all-features`（⚠️ **唯一**能看见 local_apps_* 测试的方式——`--workspace` 编译 0 个 uniffi 门控测试）
-4. `cargo test -p traits` + workspace `cargo build`（确认 traits 默认方法零破坏 desktop）
+4. `cargo test -p platform-api` + workspace `cargo build`（确认 traits 默认方法零破坏 desktop）
 5. `cargo build -p ios-framework --features uniffi`（host 侧编译验证 FFI）
 6. `clients/ios/scripts/build-xcframework.sh`（**Swift 任何编译/测试前必跑**——引擎是预编译 xcframework，xcodebuild 不重编 Rust）
 7. `xcodegen generate` + Xcode 跑 `LocalAppsStoreTests` / `EngineRoundtripTests`

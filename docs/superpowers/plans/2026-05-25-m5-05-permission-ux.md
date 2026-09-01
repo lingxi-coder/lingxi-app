@@ -6,7 +6,7 @@
 
 This plan ships:
 
-- A new public trait `PromptingGate` in `lingxi-traits::prompting_gate` extending `PermissionGate` with `prompt_user(&self, request: &PermissionRequest) -> Result<PromptDecision, PromptError>`. The trait lives in the leaf crate so both `lingxi-permission` (real impl) and `lingxi-orchestrator` (consumer) can name it without a circular dep.
+- A new public trait `PromptingGate` in `lingxi-platform_api::prompting_gate` extending `PermissionGate` with `prompt_user(&self, request: &PermissionRequest) -> Result<PromptDecision, PromptError>`. The trait lives in the leaf crate so both `lingxi-permission` (real impl) and `lingxi-orchestrator` (consumer) can name it without a circular dep.
 - A new module tree under `lingxi-permission`:
   - `gate.rs` — moves the existing `PermissionGate` trait surface up out of `test_support` and re-exports it from the permission crate (the trait was defined locally inside the orchestrator's `test_support.rs` per M5-02; this plan promotes it to its real home).
   - `permission_request.rs` — the `PermissionRequest { tool_name, tool_input, default_decision }` struct + `PromptDefault::AllowByDefault | DenyByDefault` enum.
@@ -31,7 +31,7 @@ This plan ships:
   - §7 OQ-3 (line 493) — each tool's default Y/N. This plan resolves OQ-3 via the Task 0 reverse-engineering documented in the "Tool default Y/N table" below.
 - Predecessor M5-04 (committed at `b49546f`):
   - `ConversationOrchestrator` now has 10 fields: `{ config, api, streaming_api, tools, hooks, perms, output, session, memory, cwd }`.
-  - `perms: Arc<dyn PermissionGate>` field is in place, pointing at the M5-02 local trait in `lingxi-orchestrator::test_support`. **This plan's Task 2 promotes that trait into `lingxi-permission::gate` (or `lingxi-traits::permission_gate`) and rewires `lingxi-orchestrator` to depend on the upstream definition** — strictly additive (the local `pub(crate) trait PermissionGate` becomes a re-export of `lingxi_permission::PermissionGate`; the existing `NoOpPermissionGate` implementing it keeps working unchanged because the trait surface is bit-identical at the method signature level).
+  - `perms: Arc<dyn PermissionGate>` field is in place, pointing at the M5-02 local trait in `lingxi-orchestrator::test_support`. **This plan's Task 2 promotes that trait into `lingxi-permission::gate` (or `lingxi-platform_api::permission_gate`) and rewires `lingxi-orchestrator` to depend on the upstream definition** — strictly additive (the local `pub(crate) trait PermissionGate` becomes a re-export of `lingxi_permission::PermissionGate`; the existing `NoOpPermissionGate` implementing it keeps working unchanged because the trait surface is bit-identical at the method signature level).
   - `OrchestratorConfig` currently holds: `{ model: String, max_turns: u32, cwd: PathBuf }` (3 fields, with `MAX_TURNS_DEFAULT = 30` from M5-02). Task 11 of this plan adds a 4th field: `interactive_permissions: bool` defaulting to `false`.
 - Predecessor M5-02 (committed at `653de44`):
   - `NoOpPermissionGate` is a `unit` struct in `lingxi-orchestrator::test_support` implementing the in-orchestrator local `PermissionGate` trait — its `check(name, _input) -> Result<PermissionDecision, _>` always returns `Allow`. M5-05 preserves this exact behavior for the no-op case.
@@ -143,7 +143,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 ## Design locks
 
-- **PromptingGate trait** lives in `lingxi-traits::prompting_gate` so both `lingxi-permission` (impl) and `lingxi-orchestrator` (consumer) can name it without a circular dep. Signature:
+- **PromptingGate trait** lives in `lingxi-platform_api::prompting_gate` so both `lingxi-permission` (impl) and `lingxi-orchestrator` (consumer) can name it without a circular dep. Signature:
   ```rust
   use async_trait::async_trait;
   use crate::permission_gate::PermissionGate;          // also moved here in Task 2
@@ -156,9 +156,9 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
       ) -> Result<PromptDecision, PromptError>;
   }
   ```
-  `PermissionRequest`, `PromptDecision`, `PromptError`, `PromptDefault` are all defined in `lingxi-traits::prompting_gate` (same file) so consumers don't need to depend on `lingxi-permission` just to name the types.
+  `PermissionRequest`, `PromptDecision`, `PromptError`, `PromptDefault` are all defined in `lingxi-platform_api::prompting_gate` (same file) so consumers don't need to depend on `lingxi-permission` just to name the types.
 
-- **PermissionGate trait** is ALSO moved to `lingxi-traits::permission_gate` in Task 2 — promoting it from the orchestrator's `test_support.rs` (where M5-02 placed it as a local) to the proper traits crate. The orchestrator re-exports it via `pub use lingxi_traits::permission_gate::PermissionGate;` to keep the existing `crate::test_support::PermissionGate` import path working for now. M5-06 (hooks runtime) will retire the re-export.
+- **PermissionGate trait** is ALSO moved to `lingxi-platform_api::permission_gate` in Task 2 — promoting it from the orchestrator's `test_support.rs` (where M5-02 placed it as a local) to the proper traits crate. The orchestrator re-exports it via `pub use lingxi_platform_api::permission_gate::PermissionGate;` to keep the existing `crate::test_support::PermissionGate` import path working for now. M5-06 (hooks runtime) will retire the re-export.
 
 - **Stdin/stderr injection** uses `Arc<tokio::sync::Mutex<dyn AsyncRead + Send + Unpin>>` for stdin and `Arc<tokio::sync::Mutex<dyn AsyncWrite + Send + Unpin>>` for stderr. The mutex is required because `InteractivePromptingGate::prompt_user` takes `&self` (not `&mut self`) per the trait, and `AsyncRead::read_line` needs `&mut self` on the inner. Production wiring (M5-12 CLI binary) wraps `tokio::io::stdin()` and `tokio::io::stderr()` in `Arc::new(Mutex::new(...))`. Tests use `tokio::io::duplex(1024)` returning `(DuplexStream, DuplexStream)` — one side scripted, the other consumed by the gate.
 
@@ -215,11 +215,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 ## Files this plan touches
 
-**Creates (new files — all under `lingxi-code/crates/permission/src/` or `lingxi-code/crates/traits/src/` unless noted):**
+**Creates (new files — all under `lingxi-code/crates/permission/src/` or `lingxi-code/crates/platform-api/src/` unless noted):**
 
-- `lingxi-code/crates/traits/src/permission_gate.rs` — the promoted `PermissionGate` trait + `PermissionDecision` enum + `PermError` enum (all moved out of `lingxi-orchestrator::test_support`).
-- `lingxi-code/crates/traits/src/prompting_gate.rs` — `PromptingGate` sub-trait + `PermissionRequest` + `PromptDecision` + `PromptError` + `PromptDefault`.
-- `lingxi-code/crates/permission/src/gate.rs` — re-export shim: `pub use lingxi_traits::permission_gate::*;` + `pub use lingxi_traits::prompting_gate::*;`. (Keeps the public surface of `lingxi-permission` clean — downstream crates import from `lingxi-permission` not `lingxi-traits` directly.)
+- `lingxi-code/crates/platform-api/src/permission_gate.rs` — the promoted `PermissionGate` trait + `PermissionDecision` enum + `PermError` enum (all moved out of `lingxi-orchestrator::test_support`).
+- `lingxi-code/crates/platform-api/src/prompting_gate.rs` — `PromptingGate` sub-trait + `PermissionRequest` + `PromptDecision` + `PromptError` + `PromptDefault`.
+- `lingxi-code/crates/permission/src/gate.rs` — re-export shim: `pub use lingxi_platform_api::permission_gate::*;` + `pub use lingxi_platform_api::prompting_gate::*;`. (Keeps the public surface of `lingxi-permission` clean — downstream crates import from `lingxi-permission` not `lingxi-traits` directly.)
 - `lingxi-code/crates/permission/src/defaults_per_tool.rs` — the byte-locked `tool_default(name: &str) -> PromptDefault` lookup + the `OnceLock<HashMap>` table populated with all 41 tool names.
 - `lingxi-code/crates/permission/src/prompting_gate.rs` — `InteractivePromptingGate { stdin, stderr }` + `format_prompt` + `parse_user_input` + `prompt_user` impl + `PermissionGate` upcast impl.
 - `lingxi-code/crates/permission/tests/prompting_gate_format_test.rs` — byte-locked prompt-format integration test.
@@ -229,7 +229,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 **Modifies (existing files):**
 
-- `lingxi-code/crates/traits/src/lib.rs` — add `pub mod permission_gate; pub mod prompting_gate;` + re-exports (2 lines).
+- `lingxi-code/crates/platform-api/src/lib.rs` — add `pub mod permission_gate; pub mod prompting_gate;` + re-exports (2 lines).
 - `lingxi-code/crates/permission/src/lib.rs` — add `pub mod gate; pub mod defaults_per_tool; pub mod prompting_gate;` (3 lines) + re-exports (3 more lines).
 - `lingxi-code/crates/permission/Cargo.toml` — verify/add `tokio = { workspace = true, features = ["sync", "io-util", "macros"] }` + `async-trait = { workspace = true }` + `lingxi-traits = { workspace = true }` + `lingxi-tools = { workspace = true }` (the tool-name-constant cross-check).
 - `lingxi-code/crates/orchestrator/src/test_support.rs` — delete the local `pub(crate) trait PermissionGate { ... }` block; replace with `pub use lingxi_permission::gate::PermissionGate;` re-export. `NoOpPermissionGate` impl unchanged (its method signature already matches the promoted trait).
@@ -270,12 +270,12 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 1: Scaffold module files + Cargo wiring
 
 **Files:**
-- Create: `lingxi-code/crates/traits/src/permission_gate.rs`
-- Create: `lingxi-code/crates/traits/src/prompting_gate.rs`
+- Create: `lingxi-code/crates/platform-api/src/permission_gate.rs`
+- Create: `lingxi-code/crates/platform-api/src/prompting_gate.rs`
 - Create: `lingxi-code/crates/permission/src/gate.rs`
 - Create: `lingxi-code/crates/permission/src/defaults_per_tool.rs`
 - Create: `lingxi-code/crates/permission/src/prompting_gate.rs`
-- Modify: `lingxi-code/crates/traits/src/lib.rs`
+- Modify: `lingxi-code/crates/platform-api/src/lib.rs`
 - Modify: `lingxi-code/crates/permission/src/lib.rs`
 - Modify: `lingxi-code/crates/permission/Cargo.toml`
 
@@ -294,7 +294,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 - [ ] Step 2b — Since `lingxi-tools → lingxi-permission` is a real edge (M1.3 lock), do NOT add `lingxi-tools` to `lingxi-permission`'s deps. Instead, inline the 41 tool-name literals as `&'static str` in `defaults_per_tool.rs` (the values are tiny + already byte-locked elsewhere). Add a `#[cfg(test)]` integration test (`permission/tests/tool_name_parity_test.rs`) that depends on `lingxi-tools` as a dev-dep and cross-checks: `assert_eq!(lingxi_permission::defaults_per_tool::tool_default(lingxi_tools::builtin::bash::TOOL_NAME), PromptDefault::DenyByDefault);` for at least 8 representative names. This gives us cross-crate verification WITHOUT a build-time cycle.
 
-- [ ] Step 3 — Create `lingxi-code/crates/traits/src/permission_gate.rs`:
+- [ ] Step 3 — Create `lingxi-code/crates/platform-api/src/permission_gate.rs`:
   ```rust
   //! `PermissionGate` trait — promoted from the M5-02 in-orchestrator local.
   //!
@@ -346,7 +346,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 4 — Create `lingxi-code/crates/traits/src/prompting_gate.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/platform-api/src/prompting_gate.rs`:
   ```rust
   //! `PromptingGate` sub-trait — interactive y/N permission UX.
   //!
@@ -435,23 +435,23 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   pub fn _types_marker(_v: &Value) {}
   ```
 
-- [ ] Step 5 — Append `pub mod permission_gate; pub mod prompting_gate;` to `lingxi-code/crates/traits/src/lib.rs` + `pub use {permission_gate::*, prompting_gate::*};` re-exports.
+- [ ] Step 5 — Append `pub mod permission_gate; pub mod prompting_gate;` to `lingxi-code/crates/platform-api/src/lib.rs` + `pub use {permission_gate::*, prompting_gate::*};` re-exports.
 
 - [ ] Step 6 — Create `lingxi-code/crates/permission/src/gate.rs`:
   ```rust
   //! Re-export shim — workspace-wide single source of truth lives in
-  //! [`lingxi_traits::permission_gate`] and [`lingxi_traits::prompting_gate`].
+  //! [`lingxi_platform_api::permission_gate`] and [`lingxi_platform_api::prompting_gate`].
   //! `lingxi-permission` re-exports so downstream crates only need to depend on
-  //! `lingxi-permission`, not on the traits crate directly.
+  //! `lingxi-permission`, not on the platform-api crate directly.
   #![forbid(unsafe_code)]
 
-  pub use lingxi_traits::permission_gate::{PermErr, PermissionDecision, PermissionGate};
-  pub use lingxi_traits::prompting_gate::{
+  pub use lingxi_platform_api::permission_gate::{PermErr, PermissionDecision, PermissionGate};
+  pub use lingxi_platform_api::prompting_gate::{
       PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
   };
 
-  // Alias for the traits crate's `PermError` (typo-safe import path).
-  pub use lingxi_traits::permission_gate::PermError as PermErr;
+  // Alias for the platform-api crate's `PermError` (typo-safe import path).
+  pub use lingxi_platform_api::permission_gate::PermError as PermErr;
   ```
 
 - [ ] Step 7 — Create placeholder bodies (filled in later tasks):
@@ -499,11 +499,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/test_support.rs`. Locate the existing `pub(crate) trait PermissionGate { ... }` block (added by M5-02 task 8, ~line 38-65). DELETE the trait definition + the `PermissionDecision` enum + the `PermError` enum (all three are now in `lingxi-traits::permission_gate`).
+- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/test_support.rs`. Locate the existing `pub(crate) trait PermissionGate { ... }` block (added by M5-02 task 8, ~line 38-65). DELETE the trait definition + the `PermissionDecision` enum + the `PermError` enum (all three are now in `lingxi-platform_api::permission_gate`).
 
 - [ ] Step 2 — Replace the deleted block with re-exports:
   ```rust
-  // M5-02 local trait promoted to lingxi-traits::permission_gate by M5-05 Task 2.
+  // M5-02 local trait promoted to lingxi-platform_api::permission_gate by M5-05 Task 2.
   // The orchestrator continues to import via the old in-crate path for backward
   // compat — downstream callers don't notice.
   pub use lingxi_permission::gate::{PermErr, PermissionDecision, PermissionGate};
@@ -540,11 +540,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 3: Define `PermissionRequest` + `PromptDefault` (already done in Task 1 step 4 — this task adds the tests)
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/prompting_gate.rs` (add `#[cfg(test)] mod tests`)
+- Modify: `lingxi-code/crates/platform-api/src/prompting_gate.rs` (add `#[cfg(test)] mod tests`)
 
 **Steps:**
 
-- [ ] Step 1 — Append to `lingxi-code/crates/traits/src/prompting_gate.rs`:
+- [ ] Step 1 — Append to `lingxi-code/crates/platform-api/src/prompting_gate.rs`:
   ```rust
   #[cfg(test)]
   mod tests {

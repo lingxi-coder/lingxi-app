@@ -319,7 +319,7 @@ impl ConversationOrchestrator {
     /// / `killed` dream is skipped: nothing was consolidated.
     pub(super) fn enqueue_memory_updates_from(
         &self,
-        notifications: &[traits::task_registry::TaskNotification],
+        notifications: &[platform_api::task_registry::TaskNotification],
     ) {
         let fresh: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = notifications
             .iter()
@@ -523,7 +523,7 @@ impl ConversationOrchestrator {
                 if self.tools.find_by_name("TodoWrite").is_none() {
                     return None;
                 }
-                let items: Vec<(engine::TodoState, String)> = s
+                let items: Vec<(lingxi_core::TodoState, String)> = s
                     .todos
                     .iter()
                     .map(|t| (t.status, t.content.clone()))
@@ -548,7 +548,7 @@ impl ConversationOrchestrator {
                 s.turns_since_last_reminder = 0;
                 drop(s);
                 // Read the V2 task store outside the session lock.
-                let items: Vec<(String, engine::TodoState, String)> =
+                let items: Vec<(String, lingxi_core::TodoState, String)> =
                     match &self.prompt_runtime.todo_reminder_tasks {
                         Some(provider) => provider
                             .task_items(session_id)
@@ -893,11 +893,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///   `showConcurrencyNote = Cc()!=="pro" && DZ()==="default"` (producer
     ///   @296530704) — i.e. NOT a Pro subscription and the subagent steer left at
     ///   `default`. Both signals exist in the port:
-    ///   [`traits::subscription::is_pro_plan`] and
-    ///   [`traits::live_sessions::subagent_steer_is_default`].
+    ///   [`platform_api::subscription::is_pro_plan`] and
+    ///   [`platform_api::live_sessions::subagent_steer_is_default`].
     ///
     /// NOT inert: `LINGXI_AGENT_LIST_IN_MESSAGES` defaults **ON** since 2.1.193
-    /// (`traits::subagent_spawn::should_inject_agent_list_in_messages` returns
+    /// (`platform_api::subagent_spawn::should_inject_agent_list_in_messages` returns
     /// `true` when unset), so a stock session that has the Agent tool now sends
     /// the concurrency note on its FIRST agent listing — which is exactly what
     /// 2.1.238 does for a non-Pro plan on the default steer. The removal branch
@@ -938,7 +938,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // `is_initial` is captured BEFORE inserting (TS `announced.size === 0`).
         let (is_initial, new_entries, removed_types): (
             bool,
-            Vec<traits::subagent_spawn::SubagentListingEntry>,
+            Vec<platform_api::subagent_spawn::SubagentListingEntry>,
             Vec<String>,
         ) = {
             let mut sent = self.prompt_runtime.sent_agent_names.lock().await;
@@ -1009,8 +1009,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         //    (`showConcurrencyNote:Cc()!=="pro"&&DZ()==="default"`, @296530704).
         if !new_entries.is_empty()
             && is_initial
-            && !traits::subscription::is_pro_plan()
-            && traits::live_sessions::subagent_steer_is_default()
+            && !platform_api::subscription::is_pro_plan()
+            && platform_api::live_sessions::subagent_steer_is_default()
         {
             sections.push(
                 "When you launch multiple agents for independent work, send them in a single \
@@ -1566,7 +1566,7 @@ message with multiple tool uses so they run concurrently."
                 .display()
                 .to_string();
             self.output
-                .emit_attachment(traits::AttachmentKind::NestedMemory { display_path })
+                .emit_attachment(platform_api::AttachmentKind::NestedMemory { display_path })
                 .await;
         }
         self.seed_nested_memory_read_state(&surfaced).await;

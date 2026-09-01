@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use traits::ResolvedAddressOverride;
+use platform_api::ResolvedAddressOverride;
 
 /// Outbound URL validator used by the HTTP hook executor.
 ///

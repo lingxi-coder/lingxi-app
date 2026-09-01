@@ -77,7 +77,7 @@ use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
-use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
+use platform_api::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
 struct DesktopWebSearchConfigProvider {
     lingxi_home: std::path::PathBuf,
@@ -85,8 +85,8 @@ struct DesktopWebSearchConfigProvider {
 }
 
 #[async_trait::async_trait]
-impl traits::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
-    async fn load_web_search_config(&self) -> traits::WebSearchRuntimeConfig {
+impl platform_api::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
+    async fn load_web_search_config(&self) -> platform_api::WebSearchRuntimeConfig {
         let settings_path = self.lingxi_home.join("settings.json");
         let parsed = std::fs::read_to_string(&settings_path)
             .ok()
@@ -107,7 +107,7 @@ impl traits::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
             .ok()
             .flatten()
             .map(|s| s.expose_secret().clone());
-        traits::WebSearchRuntimeConfig {
+        platform_api::WebSearchRuntimeConfig {
             provider: Some(parsed.provider.as_str().to_string()),
             searxng_url: parsed.searxng_url,
             tavily_key,
@@ -126,9 +126,9 @@ enum ApiProvider {
 }
 
 /// Port of `isEnvTruthy` (`envUtils.ts:32-37`); value test delegated to
-/// [`traits::env::is_env_truthy`].
+/// [`platform_api::env::is_env_truthy`].
 fn is_env_truthy(key: &str) -> bool {
-    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Session-memory writes persist into the same memdir-backed Session tier that
@@ -506,7 +506,7 @@ async fn load_boot_permission_tiers_with_flag(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     setting_source_scope: (bool, bool),
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
 ) -> BootPermissionTiers {
     let mut rules = Vec::new();
     // With no explicit setting, new sessions start in Auto.  The resolved
@@ -711,7 +711,7 @@ fn managed_model_policy_source(
     use llm_client::model::allowlist::{PolicyModelView, PolicySource};
     let mut view = PolicyModelView::default();
     for raw in managed_tiers {
-        match serde_json::from_str::<engine::settings::schema::SettingsJson>(raw) {
+        match serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(raw) {
             Ok(s) => {
                 if s.available_models.is_some() {
                     view.available_models = s.available_models; // last tier wins
@@ -763,13 +763,13 @@ pub async fn managed_model_allowlist() -> (
 /// Anthropic OAuth login (parity 2.1.207 H-BIN-09). Reads the managed policy
 /// tiers (the SAME `managed_settings_raw_tiers` the permission + model-allowlist
 /// policies read) and folds `forceLoginOrgUUID` via
-/// [`engine::settings::enterprise::fold_force_login_org_pin`] — the
+/// [`lingxi_core::settings::enterprise::fold_force_login_org_pin`] — the
 /// highest-priority tier that sets it wins. `Unset` when no policy pins login
 /// (the common case: login stays unrestricted). Read fresh at each login so a
 /// mid-session managed-settings edit takes effect on the next sign-in.
-pub async fn managed_force_login_org_pin() -> engine::settings::enterprise::ForceLoginOrgPin {
+pub async fn managed_force_login_org_pin() -> lingxi_core::settings::enterprise::ForceLoginOrgPin {
     let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
-    engine::settings::enterprise::fold_force_login_org_pin(&managed_tiers)
+    lingxi_core::settings::enterprise::fold_force_login_org_pin(&managed_tiers)
 }
 
 /// Fold the MANAGED (`policySettings`) raw tiers into telemetry env overrides.
@@ -1025,7 +1025,7 @@ mod managed_otel_env_tests {
 /// disable override was missing. (The remote GB gate itself is not portable —
 /// LingXi has no GrowthBook substrate — but its default-true state is.)
 fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
-    !traits::env::is_env_truthy(disable_cron_env)
+    !platform_api::env::is_env_truthy(disable_cron_env)
 }
 
 /// Expand a raw additional-working-dir entry (settings `additionalDirectories`
@@ -1383,7 +1383,7 @@ pub fn platform_in_enabled_list(
     }
 }
 
-/// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
+/// M10 (T13): a late-bound [`platform_api::tool_invoker::ToolInvoker`] resolving the
 /// composition-root construction cycle.
 ///
 /// The teammate handler is registered into the `TaskRegistry` (which needs
@@ -1401,7 +1401,7 @@ pub fn platform_in_enabled_list(
 /// a tool before `build()` returns, so the cell is always filled before first
 /// use.
 struct DeferredToolInvoker {
-    inner: std::sync::OnceLock<Arc<dyn traits::tool_invoker::ToolInvoker>>,
+    inner: std::sync::OnceLock<Arc<dyn platform_api::tool_invoker::ToolInvoker>>,
 }
 
 impl DeferredToolInvoker {
@@ -1413,22 +1413,22 @@ impl DeferredToolInvoker {
 
     /// Fill the cell with the real invoker. Idempotent-safe: a second call is a
     /// no-op (the first binding wins), matching the build-once semantics.
-    fn set(&self, invoker: Arc<dyn traits::tool_invoker::ToolInvoker>) {
+    fn set(&self, invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker>) {
         let _ = self.inner.set(invoker);
     }
 }
 
 #[async_trait::async_trait]
-impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
+impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke(
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: traits::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -1447,16 +1447,16 @@ impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: traits::tool_invoker::SubagentInvocationContext,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
                     .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -1590,7 +1590,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<traits::task_registry::AgentRunUsage>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
         agent_id: Option<protocol::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
@@ -1620,7 +1620,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
     async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::AgentTerminalOutcome,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
         tasks::handlers::TaskStatusSink::set_agent_outcome(
             self.task_registry.as_ref(),
@@ -1707,14 +1707,14 @@ pub struct CoordinatorWiring {
     pub mode: Arc<coordinator::CoordinatorMode>,
     /// The spawn/kill seam the tools use to start / stop the real backing
     /// `InProcessTeammate` task.
-    pub spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam>,
+    pub spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>,
     /// The orchestrator-facing output stream the `TeamCreate` tool pushes the
     /// live active-worker count through immediately after a spawn is reconciled
     /// — the same `Arc<dyn OutputStream>` `build()` gives the orchestrator and
     /// the `CoordinatorStatusSink`. This makes `active_workers > 0` reach every
     /// client deterministically, independent of the teammate's racy startup
     /// status emit.
-    pub output: Arc<dyn traits::OutputStream>,
+    pub output: Arc<dyn platform_api::OutputStream>,
     /// The (optional) analytics bus the coordinator `TeamCreate` / `TeamDelete`
     /// tools fire their telemetry through (`tengu_team_created` /
     /// `tengu_team_deleted`). `build()` passes the orchestrator bus; the offline
@@ -1727,7 +1727,7 @@ pub struct CoordinatorWiring {
     /// the offline registry-snapshot factory passes `None`). `build()` passes the
     /// session `PosixRuntime` so the pump runs (D17 — never a direct
     /// `tokio::spawn`).
-    pub runtime: Option<Arc<dyn traits::RuntimeSpawner>>,
+    pub runtime: Option<Arc<dyn platform_api::RuntimeSpawner>>,
 }
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -2175,7 +2175,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
 /// holds, plus the shared `current_cwd` cell, and maps both sources through the
 /// orchestrator's pure `build_background_tasks` / `build_session_crons` builders.
 struct RegistryStopHookSnapshot {
-    registry: Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     /// Cron storage is anchored to the session's project root. A Bash `cd`
     /// changes hook payload cwd, but must not silently switch which project's
     /// durable schedules appear in Stop hooks.
@@ -2191,7 +2191,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         // turn.
         let records = self
             .registry
-            .list(traits::task_registry::TaskListFilter::default())
+            .list(platform_api::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         orchestrator::build_background_tasks(&records)
@@ -2456,11 +2456,11 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 #[derive(Clone)]
 pub struct DesktopAudio {
     /// Raw microphone capture — the `voice` tool routes here.
-    pub voice: Arc<dyn traits::voice::VoiceRecorder>,
+    pub voice: Arc<dyn platform_api::voice::VoiceRecorder>,
     /// Speech recognition — the `speech` tool's `transcribe` routes here.
-    pub stt: Arc<dyn traits::stt::SpeechToText>,
+    pub stt: Arc<dyn platform_api::stt::SpeechToText>,
     /// Speech synthesis — the `speech` tool's `speak` routes here.
-    pub tts: Arc<dyn traits::tts::TextToSpeech>,
+    pub tts: Arc<dyn platform_api::tts::TextToSpeech>,
 }
 
 impl DesktopAudio {
@@ -2473,9 +2473,9 @@ impl DesktopAudio {
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
     where
-        T: traits::voice::VoiceRecorder
-            + traits::stt::SpeechToText
-            + traits::tts::TextToSpeech
+        T: platform_api::voice::VoiceRecorder
+            + platform_api::stt::SpeechToText
+            + platform_api::tts::TextToSpeech
             + 'static,
     {
         Self {
@@ -2683,7 +2683,7 @@ pub struct DesktopConfig {
     pub custom_betas: Vec<String>,
     /// Parsed CLI `--settings` / `flagSettings` layer. The CLI host fills this
     /// from an inline JSON object or file; non-CLI hosts leave it absent.
-    pub flag_settings: Option<engine::settings::SettingsJson>,
+    pub flag_settings: Option<lingxi_core::settings::SettingsJson>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -2982,7 +2982,7 @@ pub struct DesktopConfig {
     /// variant fails with a clear `ActionFailed` — INERT boot. The concrete impl
     /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
     /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
-    pub bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
+    pub bg_session_forker: Option<Arc<dyn platform_api::bg_session_forker::BgSessionForker>>,
     /// Optional per-runtime TUI AskUserQuestion bridge sender. Interactive TUI
     /// hosts fill this so questionnaire tools open the mounted bottom-pane
     /// view; non-TUI hosts leave it `None`.
@@ -3403,25 +3403,25 @@ impl DesktopConfig {
 fn resolve_workflow_size_guideline(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
-    managed_layers: &[engine::settings::SettingsJson],
+    managed_layers: &[lingxi_core::settings::SettingsJson],
 ) -> (tool_workflow::WorkflowSizeGuideline, bool, bool) {
-    let defaults = engine::settings::SettingsJson {
+    let defaults = lingxi_core::settings::SettingsJson {
         workflow_size_guideline: Some("medium".to_string()),
         ..Default::default()
     };
     let user_settings_path = cfg.lingxi_home.join("settings.json");
-    let effective = engine::settings::Settings::load_with_layers_from_user_path(
-        engine::settings::LoadInputs {
+    let effective = lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
             env: &std::collections::BTreeMap::new(),
             project_dir: cwd,
             defaults,
         },
-        engine::settings::FileLayerScope {
+        lingxi_core::settings::FileLayerScope {
             include_user: cfg.setting_source_scope.0,
             include_project: cfg.setting_source_scope.1,
             include_local: cfg.setting_source_scope.1,
         },
-        engine::settings::SupplementalLayers {
+        lingxi_core::settings::SupplementalLayers {
             cli_layer: cfg.flag_settings.as_ref(),
             managed_layers,
         },
@@ -3438,33 +3438,33 @@ fn resolve_workflow_size_guideline(
         .and_then(|settings| settings.effective_for("workflowSizeGuideline"))
         .and_then(|provenance| provenance.contributors.last())
         .copied();
-    let managed = source == Some(engine::settings::tracer::Source::Managed);
-    let is_default = source == Some(engine::settings::tracer::Source::Defaults);
+    let managed = source == Some(lingxi_core::settings::tracer::Source::Managed);
+    let is_default = source == Some(lingxi_core::settings::tracer::Source::Defaults);
     (guideline, managed, is_default)
 }
 
 fn resolve_workflow_session_enabled(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
-    managed_layers: &[engine::settings::SettingsJson],
+    managed_layers: &[lingxi_core::settings::SettingsJson],
 ) -> (bool, bool) {
-    let defaults = engine::settings::SettingsJson {
+    let defaults = lingxi_core::settings::SettingsJson {
         enable_workflows: Some(true),
         ..Default::default()
     };
     let user_settings_path = cfg.lingxi_home.join("settings.json");
-    let effective = engine::settings::Settings::load_with_layers_from_user_path(
-        engine::settings::LoadInputs {
+    let effective = lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
             env: &std::collections::BTreeMap::new(),
             project_dir: cwd,
             defaults,
         },
-        engine::settings::FileLayerScope {
+        lingxi_core::settings::FileLayerScope {
             include_user: cfg.setting_source_scope.0,
             include_project: cfg.setting_source_scope.1,
             include_local: cfg.setting_source_scope.1,
         },
-        engine::settings::SupplementalLayers {
+        lingxi_core::settings::SupplementalLayers {
             cli_layer: cfg.flag_settings.as_ref(),
             managed_layers,
         },
@@ -3480,7 +3480,7 @@ fn resolve_workflow_session_enabled(
         .and_then(|settings| settings.effective_for("enableWorkflows"))
         .and_then(|provenance| provenance.contributors.last())
         .copied()
-        == Some(engine::settings::tracer::Source::Managed);
+        == Some(lingxi_core::settings::tracer::Source::Managed);
     (enabled, managed)
 }
 
@@ -3956,7 +3956,7 @@ pub struct DesktopRuntime {
     /// tier/billing/role snapshot once the endpoints respond. UI layers read
     /// it at compose time and treat `None` / a poisoned lock as the
     /// conservative default snapshot.
-    pub subscription: traits::subscription::SharedSubscription,
+    pub subscription: platform_api::subscription::SharedSubscription,
     /// (`/sandbox`) The shared fast-toggle cell for bash-command sandboxing.
     /// The SAME `Arc<AtomicBool>` the bash tool reads via
     /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
@@ -4012,7 +4012,7 @@ pub struct DesktopRuntime {
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
-    pub http: Arc<dyn traits::HttpTransport>,
+    pub http: Arc<dyn platform_api::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
     /// the model's result here; the print path reads it after each turn to
@@ -4030,7 +4030,7 @@ pub struct DesktopRuntime {
     /// enqueues a `/loop` self-wakeup). A fresh stateless `PosixRuntime` — the
     /// same seam every in-`build` spawner uses (D17: never a direct
     /// `tokio::spawn`).
-    pub runtime_spawner: Arc<dyn traits::RuntimeSpawner>,
+    pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
     /// (`!` bash mode) The sandboxed Bash runner for the TUI's `!command` path,
     /// built over the SAME `BuiltinToolContext` (sandbox runner + runtime config)
     /// the model's `Bash` tool uses. The CLI threads it into the TUI `Runtime`
@@ -4201,7 +4201,7 @@ fn sandbox_network_ask_callback(
                 permission_gate
                     .check("Sandbox Network Callback", &input)
                     .await,
-                traits::PermissionDecision::Allow
+                platform_api::PermissionDecision::Allow
             ))
         })
     })
@@ -4291,7 +4291,7 @@ pub enum BuildError {
 /// moved from env/argv to `cfg`, and the output/permission sinks become
 /// connection-scoped parameters:
 ///
-/// - `output` is the [`traits::OutputStream`] the orchestrator pushes turn
+/// - `output` is the [`platform_api::OutputStream`] the orchestrator pushes turn
 ///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
 ///   supplies a `client_adapter::AdapterOutputStream`. The SAME `build` serves
 ///   both.
@@ -4356,12 +4356,12 @@ fn subscription_seed(
     scopes: &[String],
     subscription_type: Option<&String>,
     rate_limit_tier: Option<&String>,
-) -> traits::subscription::SubscriptionSnapshot {
+) -> platform_api::subscription::SubscriptionSnapshot {
     let oauth_effective = matches!(
         source,
         llm_client::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
     );
-    traits::subscription::SubscriptionSnapshot {
+    platform_api::subscription::SubscriptionSnapshot {
         is_subscriber: oauth_subscriber_flag(source, scopes),
         subscription_type: oauth_effective
             .then(|| subscription_type.cloned())
@@ -4381,7 +4381,7 @@ fn subscription_snapshot_from(
     is_subscriber: bool,
     profile: Option<&llm_client::oauth::anthropic::OAuthProfileResponse>,
     roles: Option<&llm_client::oauth::anthropic::UserRolesResponse>,
-) -> traits::subscription::SubscriptionSnapshot {
+) -> platform_api::subscription::SubscriptionSnapshot {
     use llm_client::oauth::anthropic::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
@@ -4393,7 +4393,7 @@ fn subscription_snapshot_from(
             SubscriptionType::Enterprise => Some("enterprise"),
             SubscriptionType::Free | SubscriptionType::Unknown => None,
         });
-    traits::subscription::SubscriptionSnapshot {
+    platform_api::subscription::SubscriptionSnapshot {
         is_subscriber,
         subscription_type: subscription_type.map(str::to_owned),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
@@ -4597,8 +4597,8 @@ struct DefaultModelFallback {
 ///
 /// Preference: (1) the most recent `/model` pick (`settings.recentModels`) on
 /// a connected provider whose model still exists in the catalog; (2) the first
-/// connected provider in [`traits::provider_fallback_order`], on its
-/// [`traits::provider_default_model`]; (3) any remaining connected provider
+/// connected provider in [`platform_api::provider_fallback_order`], on its
+/// [`platform_api::provider_default_model`]; (3) any remaining connected provider
 /// (user-defined — no curated default), on its first listed model. Every
 /// candidate is validated against the live `listings` so the reroute can never
 /// select an id `switch_model`/the wire would reject.
@@ -4615,7 +4615,7 @@ fn connected_provider_fallback(
     anthropic_probe_definitive: bool,
     model_providers: &std::collections::BTreeMap<String, (String, String)>,
     availability: &std::collections::BTreeMap<String, bool>,
-    listings: &[traits::ModelListing],
+    listings: &[platform_api::ModelListing],
     recents: &[RecentModelRef],
 ) -> Option<DefaultModelFallback> {
     // Effective provider of the configured default — the same resolution the
@@ -4652,11 +4652,11 @@ fn connected_provider_fallback(
         }
     }
     // (2) Deterministic provider order, each on its curated boot default.
-    for p in traits::provider_fallback_order() {
+    for p in platform_api::provider_fallback_order() {
         if !connected(p) {
             continue;
         }
-        if let Some(m) = traits::provider_default_model(p) {
+        if let Some(m) = platform_api::provider_default_model(p) {
             if in_listings(p, m) {
                 return Some(route(m.to_string(), p));
             }
@@ -4676,23 +4676,23 @@ fn connected_provider_fallback(
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
-/// helpers (same `engine::settings::Settings::load` seam). Returns `None` on any
+/// helpers (same `lingxi_core::settings::Settings::load` seam). Returns `None` on any
 /// load failure or when the field is unset — the caller then injects no output
 /// style section (OUTSTYLE.2).
 #[derive(Clone)]
 struct MergedSettingsCacheEntry {
     project_dir: PathBuf,
     revision: u64,
-    value: engine::settings::EffectiveSettings,
+    value: lingxi_core::settings::EffectiveSettings,
 }
 
 fn merged_settings_revision(project_dir: &Path, env: &BTreeMap<String, String>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     project_dir.hash(&mut hasher);
     for path in [
-        engine::settings::loader::user_settings_path(),
-        Some(engine::settings::loader::project_settings_path(project_dir)),
-        Some(engine::settings::loader::local_settings_path(project_dir)),
+        lingxi_core::settings::loader::user_settings_path(),
+        Some(lingxi_core::settings::loader::project_settings_path(project_dir)),
+        Some(lingxi_core::settings::loader::local_settings_path(project_dir)),
     ]
     .into_iter()
     .flatten()
@@ -4718,7 +4718,7 @@ fn merged_settings_revision(project_dir: &Path, env: &BTreeMap<String, String>) 
     hasher.finish()
 }
 
-fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::EffectiveSettings> {
+fn load_merged_settings(project_dir: &Path) -> Option<lingxi_core::settings::EffectiveSettings> {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let revision = merged_settings_revision(project_dir, &env);
     let cache = SETTINGS_CACHE.get_or_init(|| Mutex::new(None));
@@ -4730,12 +4730,12 @@ fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::Effectiv
     {
         return Some(entry.value.clone());
     }
-    let inputs = engine::settings::LoadInputs {
+    let inputs = lingxi_core::settings::LoadInputs {
         env: &env,
         project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
+        defaults: lingxi_core::settings::schema::SettingsJson::default(),
     };
-    let value = engine::settings::Settings::load(inputs).ok()?;
+    let value = lingxi_core::settings::Settings::load(inputs).ok()?;
     *cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MergedSettingsCacheEntry {
@@ -4749,9 +4749,9 @@ fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::Effectiv
 fn load_effective_settings_for_config(
     cfg: &DesktopConfig,
     managed_raw_tiers: &[String],
-) -> Option<engine::settings::EffectiveSettings> {
+) -> Option<lingxi_core::settings::EffectiveSettings> {
     let env: BTreeMap<String, String> = std::env::vars().collect();
-    let managed_layers: Vec<engine::settings::SettingsJson> = managed_raw_tiers
+    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_raw_tiers
         .iter()
         .filter_map(|raw| serde_json::from_str(raw).ok())
         .collect();
@@ -4760,18 +4760,18 @@ fn load_effective_settings_for_config(
     } else {
         cfg.setting_source_scope
     };
-    engine::settings::Settings::load_with_layers_from_user_path(
-        engine::settings::LoadInputs {
+    lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
             env: &env,
             project_dir: &cfg.cwd,
-            defaults: engine::settings::schema::SettingsJson::default(),
+            defaults: lingxi_core::settings::schema::SettingsJson::default(),
         },
-        engine::settings::FileLayerScope {
+        lingxi_core::settings::FileLayerScope {
             include_user,
             include_project,
             include_local: include_project,
         },
-        engine::settings::SupplementalLayers {
+        lingxi_core::settings::SupplementalLayers {
             cli_layer: cfg.flag_settings.as_ref(),
             managed_layers: &managed_layers,
         },
@@ -4821,7 +4821,7 @@ fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -
 
 /// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
 /// for the given project dir. Mirrors [`load_merged_output_style`] (same
-/// `engine::settings::Settings::load` seam). When true, the `WebFetch` tool skips
+/// `lingxi_core::settings::Settings::load` seam). When true, the `WebFetch` tool skips
 /// the domain-blocklist preflight (CC 2.1.207 `!Mi().skipWebFetchPreflight` gate,
 /// parity P2-14). Returns `false` on any load failure or when the key is unset —
 /// the frozen default (preflight runs).
@@ -4833,11 +4833,11 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 
 /// Load the merged `settings.disableAgentView` (project + user + env layers) for
 /// the given project dir. Mirrors [`load_merged_skip_web_fetch_preflight`] (same
-/// `engine::settings::Settings::load` seam). When `true`, the agent-view
+/// `lingxi_core::settings::Settings::load` seam). When `true`, the agent-view
 /// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
 /// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
 /// [`command_core::register_core_batch_8`] via
-/// [`traits::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
+/// [`platform_api::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
 fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
@@ -4910,25 +4910,25 @@ pub async fn managed_settings_overlay() -> std::collections::BTreeMap<String, se
 /// `--settings`, and managed policy. Project/local files are intentionally
 /// excluded because an untrusted checkout must not control interaction timing.
 async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
-    let managed_layers: Vec<engine::settings::SettingsJson> =
+    let managed_layers: Vec<lingxi_core::settings::SettingsJson> =
         crate::settings_watch::managed_settings_raw_tiers()
             .await
             .into_iter()
             .filter_map(|raw| serde_json::from_str(&raw).ok())
             .collect();
     let empty_env = std::collections::BTreeMap::new();
-    engine::settings::Settings::load_with_layers_from_user_path(
-        engine::settings::LoadInputs {
+    lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
             env: &empty_env,
             project_dir: &cfg.cwd,
-            defaults: engine::settings::SettingsJson::default(),
+            defaults: lingxi_core::settings::SettingsJson::default(),
         },
-        engine::settings::FileLayerScope {
+        lingxi_core::settings::FileLayerScope {
             include_user: cfg.setting_source_scope.0,
             include_project: false,
             include_local: false,
         },
-        engine::settings::SupplementalLayers {
+        lingxi_core::settings::SupplementalLayers {
             cli_layer: cfg.flag_settings.as_ref(),
             managed_layers: &managed_layers,
         },
@@ -4941,7 +4941,7 @@ async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
 /// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
 /// and `httpHookAllowedEnvVars` — across the project + user + env settings
 /// layers. Both are array-merge (concat-dedup) via the same
-/// `engine::settings::Settings::load` seam. `(None, None)` on any load failure or
+/// `lingxi_core::settings::Settings::load` seam. `(None, None)` on any load failure or
 /// when neither key is set (⇒ no restriction; the HTTP hook executor behaves
 /// exactly as before). Threaded into the executor via
 /// [`hooks::HookExecutorImpl::with_http_hook_policy`], mirroring CC's live
@@ -5171,7 +5171,7 @@ async fn build_agent_mcp_tool_set(
                 }
             }
         };
-        let dtos: Vec<traits::McpToolDto> = {
+        let dtos: Vec<platform_api::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
                 // §11 Stage 2: `connect`/`connect_agent_scoped` above may have
@@ -5254,7 +5254,7 @@ async fn load_enabled_plugins(
     cwd: &std::path::Path,
     additional_project_roots: &[std::path::PathBuf],
     include_ambient: bool,
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     if include_ambient {
@@ -5322,7 +5322,7 @@ async fn load_enabled_plugins(
 async fn load_plugin_configs(
     lingxi_home: &std::path::Path,
     restricted: bool,
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
 ) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
     let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
         std::collections::HashMap::new();
@@ -5394,7 +5394,7 @@ async fn discover_plugin_set(
     cli_plugin_dirs: &[std::path::PathBuf],
     additional_project_roots: &[std::path::PathBuf],
     restricted: bool,
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
 ) -> Vec<(
     protocol::PluginId,
     plugin::PluginManifest,
@@ -5488,11 +5488,11 @@ impl DesktopRepoRootReloader {
 }
 
 #[async_trait::async_trait]
-impl traits::RepoRootReloader for DesktopRepoRootReloader {
+impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
     async fn reload(
         &self,
-        request: traits::RepoRootReloadRequest,
-    ) -> traits::RepoRootReloadOutcome {
+        request: platform_api::RepoRootReloadRequest,
+    ) -> platform_api::RepoRootReloadOutcome {
         {
             let mut roots = self.registered_roots.write().await;
             if !roots.contains(&request.root) {
@@ -5500,7 +5500,7 @@ impl traits::RepoRootReloader for DesktopRepoRootReloader {
             }
         }
 
-        let mut outcome = traits::RepoRootReloadOutcome::default();
+        let mut outcome = platform_api::RepoRootReloadOutcome::default();
         if request.reload_skills {
             let roots = self.registered_roots.read().await.clone();
             let additional_skill_dirs = roots
@@ -5574,7 +5574,7 @@ pub struct PluginRuntime {
     /// Session settings provenance. Restricted refreshes must not re-open
     /// ambient user/project/local plugin configuration.
     restricted: bool,
-    flag_settings: Option<engine::settings::SettingsJson>,
+    flag_settings: Option<lingxi_core::settings::SettingsJson>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -6056,13 +6056,13 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `clock`.
     pub clock: Arc<PosixClock>,
     /// See [`build`] for the resolution rules behind `mcp_oauth_storage`.
-    pub mcp_oauth_storage: Arc<dyn traits::SecureStorage>,
+    pub mcp_oauth_storage: Arc<dyn platform_api::SecureStorage>,
     /// See [`build`] for the resolution rules behind `credentials`.
     pub credentials: Arc<CredentialManager>,
     /// See [`build`] for the resolution rules behind `auth`.
     pub auth: Arc<dyn AuthHandle>,
     /// See [`build`] for the resolution rules behind `subscription`.
-    pub subscription: traits::subscription::SharedSubscription,
+    pub subscription: platform_api::subscription::SharedSubscription,
     /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
     pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
@@ -6076,7 +6076,7 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `model_providers`.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
     /// See [`build`] for the resolution rules behind `default_listings`.
-    pub default_listings: Vec<traits::ModelListing>,
+    pub default_listings: Vec<platform_api::ModelListing>,
     /// See [`build`] for the resolution rules behind `default_model_id`.
     pub default_model_id: String,
     /// See [`build`] for the resolution rules behind `default_model_profile`.
@@ -6127,7 +6127,7 @@ pub struct SharedCredentialStack {
     /// Platform clock used by the credential manager.
     pub clock: Arc<PosixClock>,
     /// Shared storage handle, also reused by MCP OAuth persistence.
-    pub storage: Arc<dyn traits::SecureStorage>,
+    pub storage: Arc<dyn platform_api::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
 }
@@ -6205,8 +6205,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
     // flag, and (for subscribers) a background profile+roles fetch overwrites
     // it with the full snapshot once the endpoints respond.
-    let subscription: traits::subscription::SharedSubscription = std::sync::Arc::new(
-        std::sync::RwLock::new(Some(traits::subscription::SubscriptionSnapshot::default())),
+    let subscription: platform_api::subscription::SharedSubscription = std::sync::Arc::new(
+        std::sync::RwLock::new(Some(platform_api::subscription::SubscriptionSnapshot::default())),
     );
     // `mcp_oauth_storage` and `credentials` originate from the same shared
     // stack, so provider keys and MCP OAuth never split across backends.
@@ -6384,7 +6384,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn traits::HttpTransport> = http.clone();
+                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> = http.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
@@ -6457,8 +6457,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_client::CredentialProvider>> = None;
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
-            let http_dyn: Arc<dyn traits::HttpTransport> =
-                http.clone() as Arc<dyn traits::HttpTransport>;
+            let http_dyn: Arc<dyn platform_api::HttpTransport> =
+                http.clone() as Arc<dyn platform_api::HttpTransport>;
             match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
                 Ok(md) => {
                     openai_chatgpt_delegate =
@@ -6586,14 +6586,14 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // configured default_model so a shared id routes deterministically on the
     // first turn.  Must run while `assembled.client_config.providers` is still
     // owned (before `from_config` moves it).
-    let default_listings: Vec<traits::ModelListing> = assembled
+    let default_listings: Vec<platform_api::ModelListing> = assembled
         .client_config
         .providers
         .iter()
         .flat_map(|p| {
             let profile = p.profile_name.clone();
             let label = provider_profile_label(&p.profile_name);
-            p.models.iter().map(move |m| traits::ModelListing {
+            p.models.iter().map(move |m| platform_api::ModelListing {
                 display_model: m.display_model.clone(),
                 request_model: m.request_model.clone(),
                 provider_id: profile.clone(),
@@ -6607,7 +6607,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         })
         .collect();
     let (mut default_model_id, mut default_model_profile) =
-        traits::parse_model_ref(&cfg.default_model, &default_listings);
+        platform_api::parse_model_ref(&cfg.default_model, &default_listings);
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it
@@ -7075,17 +7075,17 @@ fn aws_auth_refresher(
         load_effective_settings_for_config(cfg, &managed)
     } else {
         let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-        engine::settings::Settings::load(engine::settings::LoadInputs {
+        lingxi_core::settings::Settings::load(lingxi_core::settings::LoadInputs {
             env: &env_vars,
             project_dir: cwd,
-            defaults: engine::settings::schema::SettingsJson::default(),
+            defaults: lingxi_core::settings::schema::SettingsJson::default(),
         })
         .ok()
     }
     .map(|eff| {
         let from_project = |field: &str| {
             eff.effective_for(field).is_some_and(|p| {
-                p.contributors.last() == Some(&engine::settings::tracer::Source::Project)
+                p.contributors.last() == Some(&lingxi_core::settings::tracer::Source::Project)
             })
         };
         llm_client::AwsAuthSettings {
@@ -7456,7 +7456,7 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    traits::session_flags::set_show_thinking_summaries(if cfg.restricted {
+    platform_api::session_flags::set_show_thinking_summaries(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.show_thinking_summaries)
@@ -7464,7 +7464,7 @@ pub async fn build(
     } else {
         load_merged_show_thinking_summaries(&cfg.cwd)
     });
-    traits::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
+    platform_api::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.agent_push_notif_enabled)
@@ -7547,7 +7547,7 @@ pub async fn build(
     //       the legacy stub completion.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(PosixRuntime::new()),
-        traits::subagent_spawn::max_concurrent_subagents(),
+        platform_api::subagent_spawn::max_concurrent_subagents(),
     ));
     // Clone the subagent model seam BEFORE it is moved into the spawner — the
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
@@ -7625,7 +7625,7 @@ pub async fn build(
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.
         .with_transcript_fs(
-            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>
+            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>
         )
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
@@ -7674,7 +7674,7 @@ pub async fn build(
     // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
     // the streaming half to make a backgrounded agent "come to rest" + resume.
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
-    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
     let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
 
@@ -7683,7 +7683,7 @@ pub async fn build(
     //       2.1.217 stops background subagents when that ceiling is reached;
     //       `Halt` makes each child runner's turn-boundary budget check enforce
     //       the same limit. With no CLI ceiling this remains unlimited.
-    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
         Arc::new(cost::BudgetEnforcer::new(
             cost::BudgetConfig {
                 max_session_nano_usd: orch_cfg.max_budget_nano_usd,
@@ -7916,7 +7916,7 @@ pub async fn build(
         Some(w) => (Some(w), None, false),
         None if cfg.session_id_override.is_some() => {
             let snapshot_fs =
-                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>;
+                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>;
             let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
                 &main_transcript_path,
                 snapshot_fs,
@@ -8269,7 +8269,7 @@ pub async fn build(
         // CLI overrides but above settings `defaultMode`. An explicit CLI
         // `default` still suppresses the agent mode, so we must key off the
         // RAW request rather than the resolved `cfg.permission_mode` alone.
-        let env_scrub_active = traits::env::is_env_truthy(
+        let env_scrub_active = platform_api::env::is_env_truthy(
             std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
         );
         if cfg.permission_mode_cli_explicit {
@@ -8436,7 +8436,7 @@ pub async fn build(
     let (async_hook_completion_tx, mut async_hook_completion_rx) =
         tokio::sync::mpsc::channel::<(protocol::HookId, hooks::HookResult)>(64);
     let async_hook_registry = Arc::new(hooks::AsyncHookRegistry::new(
-        hook_runtime.clone() as Arc<dyn traits::RuntimeSpawner>,
+        hook_runtime.clone() as Arc<dyn platform_api::RuntimeSpawner>,
         async_hook_completion_tx,
     ));
     // B5 fold-back (claude-code `getAsyncHookResponseAttachments` +
@@ -8501,7 +8501,7 @@ pub async fn build(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
-            hook_runtime as Arc<dyn traits::RuntimeSpawner>,
+            hook_runtime as Arc<dyn platform_api::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(if cfg.restricted {
             effective_settings
@@ -8513,8 +8513,8 @@ pub async fn build(
         })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
-            Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
-            Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+            Arc::new(PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
         )
         .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
             api_client.clone(),
@@ -8593,8 +8593,8 @@ pub async fn build(
                 mcp_configs.iter().map(|c| (c.name.as_str(), &c.spec)),
             );
             Arc::new(mcp::XaaIdpConfigProvider::new(
-                http.clone() as Arc<dyn traits::HttpTransport>,
-                clock.clone() as Arc<dyn traits::Clock>,
+                http.clone() as Arc<dyn platform_api::HttpTransport>,
+                clock.clone() as Arc<dyn platform_api::Clock>,
                 mcp_oauth_storage.clone(),
                 mcp_on_auth_url.clone(),
                 settings,
@@ -8603,8 +8603,8 @@ pub async fn build(
         })
     };
     let mcp_oauth_deps = mcp::registry::OAuthDeps {
-        http: http.clone() as Arc<dyn traits::HttpTransport>,
-        clock: clock.clone() as Arc<dyn traits::Clock>,
+        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
+        clock: clock.clone() as Arc<dyn platform_api::Clock>,
         storage: mcp_oauth_storage,
         on_authorization_url: mcp_on_auth_url,
         xaa_config,
@@ -8671,7 +8671,7 @@ pub async fn build(
         Arc::new(sidequery::ProviderSideQueryClient::new(
             cfg.api_key.clone(),
             Some(cfg.api_base.clone()),
-            http.clone() as Arc<dyn traits::HttpTransport>,
+            http.clone() as Arc<dyn platform_api::HttpTransport>,
         ));
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
@@ -8787,7 +8787,7 @@ pub async fn build(
         Arc::new(mode)
     };
     let _ = subagent_coordinator_mode_cell
-        .set(coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>);
+        .set(coordinator_mode.clone() as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
 
     // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
     //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
@@ -8873,7 +8873,7 @@ pub async fn build(
         team: coordinator.clone(),
         catalog: agent_catalog.clone(),
     }))
-    .with_tool_invoker(teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>)
+    .with_tool_invoker(teammate_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>)
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
     // the alias to the concrete main-loop wire id (claude `getMainLoopModel()`)
@@ -8939,7 +8939,7 @@ pub async fn build(
     tasks::registry::register_dream_handler(
         &mut task_registry_inner,
         subagent_spawner.clone(),
-        dream_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+        dream_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         dream_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
@@ -8980,7 +8980,7 @@ pub async fn build(
     // worktree + judges it on the SYNC path) and the LocalAgent handler (which
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
-    let worktree_manager: Arc<dyn traits::worktree::WorktreeManager> =
+    let worktree_manager: Arc<dyn platform_api::worktree::WorktreeManager> =
         Arc::new(PosixWorktreeManager::new(cwd.clone()));
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
@@ -8999,7 +8999,7 @@ pub async fn build(
         Arc::new(
             tasks::handlers::LocalAgentHandler::new(
                 subagent_spawner.clone(),
-                local_agent_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+                local_agent_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -9017,14 +9017,14 @@ pub async fn build(
             // be re-established — resuming one unscoped would run it under the
             // parent's (strictly wider) permissions.
             .with_fork_resume_gate(
-                fork_resume_gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>
+                fork_resume_gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>
             )
             // Record each parked agent so a LATER process can rebuild it; the
             // record is erased the moment it terminates.
             .with_parked_agent_store(Arc::new(agent_restore::DesktopParkedAgentStore {
                 subagents_dir: main_subagents_dir.clone(),
             })
-                as Arc<dyn traits::parked_agent_store::ParkedAgentStore>),
+                as Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>),
         ),
     );
 
@@ -9080,7 +9080,7 @@ pub async fn build(
         Arc::new(
             tasks::handlers::LocalWorkflowHandler::new(
                 subagent_spawner.clone(),
-                local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+                local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -9161,7 +9161,7 @@ pub async fn build(
     //        task. `TaskRegistry` impls `TeamSpawnSeam` (T04); the same `Arc` the
     //        tool context holds is reused so the spawned teammate is keyed on the
     //        worker identity threaded through.
-    let spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam> = task_registry.clone();
+    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> = task_registry.clone();
 
     // (5.5) Assemble the desktop tool registry through the composition root.
     //       A coordinator session shares the team's `MailboxRouter` with the
@@ -9175,8 +9175,8 @@ pub async fn build(
     // always resolves a running async agent. Non-async default sessions are
     // unaffected — with no teammates/agents registered a send resolves to
     // `NotFound`, the same effective outcome as the prior `None`.
-    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> =
-        Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+    let coordinator_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>> =
+        Some(coordinator.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
     // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
     // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
     // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
@@ -9353,12 +9353,12 @@ pub async fn build(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
-    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             inner: subagent_spawner,
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
-            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
             // Where a forked skill's scoping sidecars land — beside the
             // background agent's own transcript in this session's
             // `subagents/` directory.
@@ -9430,7 +9430,7 @@ pub async fn build(
     // refinements — not needed to close the ExitWorktree-after-resume no-op.)
     let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
     if cfg.session_id_override.is_some() {
-        let restore_fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
+        let restore_fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
         if let Some(payload) = session::jsonl::loader::read_worktree_state(
             &main_transcript_path,
             restore_fs,
@@ -9577,12 +9577,12 @@ pub async fn build(
         worktree: worktree_manager.clone(),
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
-            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer.clone()),
         coordinator_mode: Some(
-            coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>
+            coordinator_mode.clone() as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>
         ),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
@@ -9675,7 +9675,7 @@ pub async fn build(
             //         `injectUserMessageToTeammate` path. The pump exits on its
             //         own when the teammate is killed (send → Terminated), so it
             //         needs no separate teardown hook.
-            runtime: Some(Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>),
+            runtime: Some(Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>),
         })
     } else {
         // Drop the spawn-seam clone path; it is unused in a default session.
@@ -9750,11 +9750,11 @@ pub async fn build(
             skill_session_id.clone(),
         ));
     // G5: fill the subagent spawner's skill-loader cell with a
-    // `traits::skill_loader::SkillLoader` over the SAME shared command registry,
+    // `platform_api::skill_loader::SkillLoader` over the SAME shared command registry,
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> = Arc::new(
+    let skill_loader_arc: Arc<dyn platform_api::skill_loader::SkillLoader> = Arc::new(
         agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
@@ -9813,7 +9813,7 @@ pub async fn build(
             Some(Arc::new(JsonlWorktreeStatePersister {
                 writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
                     main_transcript_path.clone(),
-                    Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>,
+                    Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
                 )),
                 session_uuid: main_session_uuid.clone(),
             }))
@@ -9882,7 +9882,7 @@ pub async fn build(
         // composition: default → user → project → local → flag → managed.
         // `workflowSizeGuideline` has no environment mapping, so managed is the
         // effective highest source. The default is medium.
-        let managed_workflow_layers: Vec<engine::settings::SettingsJson> =
+        let managed_workflow_layers: Vec<lingxi_core::settings::SettingsJson> =
             crate::settings_watch::managed_settings_raw_tiers()
                 .await
                 .into_iter()
@@ -9890,7 +9890,7 @@ pub async fn build(
                 .collect();
         let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
-        workflow_size_guideline_state = traits::session_flags::WorkflowSizeGuidelineState::new(
+        workflow_size_guideline_state = platform_api::session_flags::WorkflowSizeGuidelineState::new(
             workflow_size_guideline.as_wire(),
             managed_workflow,
             default_workflow,
@@ -9912,7 +9912,7 @@ pub async fn build(
         })
         .unwrap_or(false);
         let workflow_policy_enabled = tool_workflow::workflows_enabled(managed_disable_workflows);
-        dynamic_workflows_gate = traits::session_flags::DynamicWorkflowsGate::new(
+        dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
@@ -10175,7 +10175,7 @@ pub async fn build(
     let parked_agent_restore_inheritance =
         cfg.session_id_override
             .is_some()
-            .then(|| traits::subagent_spawn::SubagentInheritance {
+            .then(|| platform_api::subagent_spawn::SubagentInheritance {
                 tool_invoker: Arc::new(
                     tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
                         .with_gate(perms.clone()),
@@ -10261,7 +10261,7 @@ pub async fn build(
     // under `claude_home`.
     let main_jsonl_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
         main_transcript_path.clone(),
-        Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
+        Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn platform_api::FileSystem>,
     ));
     // (P2-02 cc2.1.207) `main_jsonl_writer` MOVES into the orchestrator builder
     // below (when `session_persistence`); capture a clone so the `--agent` block
@@ -10372,7 +10372,7 @@ pub async fn build(
         // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
         // LSP registry drains publishDiagnostics into).
         .with_new_diagnostics_source(
-            Arc::new(lsp_diagnostics.clone()) as Arc<dyn traits::NewDiagnosticsSource>
+            Arc::new(lsp_diagnostics.clone()) as Arc<dyn platform_api::NewDiagnosticsSource>
         )
         // SKILLLIST.1: enumerate model-invocable skills each turn so the model
         // can discover them. Reads `shared_command_registry` lazily at turn time
@@ -10390,7 +10390,7 @@ pub async fn build(
         // context above; the provider drains the registry's terminal-not-notified
         // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
         .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
         )))
         // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
         // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
@@ -10400,7 +10400,7 @@ pub async fn build(
         // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
         // (claude's tool-use-context `s` gate).
         .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
-            registry: task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            registry: task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
             project_root: watch_cwd.clone(),
         }))
         // Finding #73: supply the V2 task list to the per-turn `task_reminder`
@@ -10430,7 +10430,7 @@ pub async fn build(
         (true, Some(home)) => {
             orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
                 side_query_client.clone(),
-                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
                 &home,
             ))
         }
@@ -10478,7 +10478,7 @@ pub async fn build(
         orch_builder.with_skill_discovery_prefetch(Arc::new(
             skill_api::SkillDiscoveryPrefetch::new(
                 source,
-                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
             ),
         ))
     } else {
@@ -10501,7 +10501,7 @@ pub async fn build(
                 30,
                 30,
                 &home,
-                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
             ))
         }
         _ => orch_builder,
@@ -10701,7 +10701,7 @@ pub async fn build(
     // The TUI intercepts `/workflows` to open its interactive picker. Bind the
     // same registry-backed text projection for headless/bridge dispatch paths.
     reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )));
     reg.register_builtin_handler(worktree_command_handler);
 
@@ -11262,7 +11262,7 @@ pub async fn build(
     //       thread) would be pure overhead in the common no-hook case — gating
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
-    let watch_fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    let watch_fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
@@ -11309,7 +11309,7 @@ pub async fn build(
             if watcher.watch_paths().is_empty() {
                 file_changed_watch::FileChangedWatcherHandle::empty()
             } else {
-                let watch_fs: Arc<dyn traits::FileSystem> =
+                let watch_fs: Arc<dyn platform_api::FileSystem> =
                     Arc::new(PosixFileSystem::new(watch_cwd.clone()));
                 watcher.spawn(watch_fs).await
             }
@@ -11380,10 +11380,10 @@ pub async fn build(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
-        http: http.clone() as Arc<dyn traits::HttpTransport>,
+        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
         structured_output_slot,
         wakeup_scheduler_cell,
-        runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+        runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
         bash_runner,
         shell_expansion: shell_expansion_provider,
         connect_copilot,
@@ -11476,16 +11476,16 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl traits::PermissionGate for RecordingNetworkPermissionGate {
-        async fn check(&self, name: &str, input: &Value) -> traits::PermissionDecision {
+    impl platform_api::PermissionGate for RecordingNetworkPermissionGate {
+        async fn check(&self, name: &str, input: &Value) -> platform_api::PermissionDecision {
             assert_eq!(name, "Sandbox Network Callback");
             assert_eq!(input["host"], "api.example.test");
             assert_eq!(input["port"], 8443);
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.allow {
-                traits::PermissionDecision::Allow
+                platform_api::PermissionDecision::Allow
             } else {
-                traits::PermissionDecision::Deny {
+                platform_api::PermissionDecision::Deny {
                     reason: "blocked".into(),
                 }
             }
@@ -11536,9 +11536,9 @@ mod tests {
             r#"{"workflowSizeGuideline":"medium"}"#,
         )
         .unwrap();
-        let flag: engine::settings::SettingsJson =
+        let flag: lingxi_core::settings::SettingsJson =
             serde_json::from_str(r#"{"workflowSizeGuideline":"large"}"#).unwrap();
-        let managed: engine::settings::SettingsJson =
+        let managed: lingxi_core::settings::SettingsJson =
             serde_json::from_str(r#"{"workflowSizeGuideline":"small"}"#).unwrap();
         let cfg = DesktopConfig {
             cwd: cwd.clone(),
@@ -11600,9 +11600,9 @@ mod tests {
             r#"{"enableWorkflows":true}"#,
         )
         .unwrap();
-        let flag: engine::settings::SettingsJson =
+        let flag: lingxi_core::settings::SettingsJson =
             serde_json::from_str(r#"{"enableWorkflows":false}"#).unwrap();
-        let managed: engine::settings::SettingsJson =
+        let managed: lingxi_core::settings::SettingsJson =
             serde_json::from_str(r#"{"enableWorkflows":true}"#).unwrap();
         let cfg = DesktopConfig {
             cwd: cwd.clone(),
@@ -11695,7 +11695,7 @@ mod tests {
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
-        use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
         // Minimal `AuthHandle` double — no sibling registry test exists in this
         // module, so we construct the lightest object-safe stand-in here.
@@ -11781,7 +11781,7 @@ mod tests {
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
-        use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
         struct MockAuth;
         #[async_trait]
@@ -11894,7 +11894,7 @@ mod tests {
         use command_core::ConnectCredentialWriter;
         use std::collections::HashMap;
         use std::sync::Mutex as StdMutex;
-        use traits::{
+        use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -12303,7 +12303,7 @@ mod tests {
             .expect("flag settings deny rule must parse"),
         );
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -12396,7 +12396,7 @@ mod tests {
         fn existing(name: &str) -> mcp::McpServerConfig {
             mcp::McpServerConfig {
                 name: name.to_string(),
-                spec: traits::McpTransportSpec::Stdio {
+                spec: platform_api::McpTransportSpec::Stdio {
                     command: "prior".into(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
@@ -12463,7 +12463,7 @@ mod tests {
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].name, "docs");
         assert!(
-            matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "npx"),
+            matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "npx"),
             "the agent's config must win over a discovered one"
         );
         assert_eq!(configs[0].scope, mcp::ConfigScope::Agent);
@@ -12499,7 +12499,7 @@ mod tests {
         );
         assert_eq!(configs.len(), 1);
         assert!(
-            matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "prior"),
+            matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "prior"),
             "a --mcp-config server must win on name collision"
         );
         assert_eq!(configs[0].scope, mcp::ConfigScope::Project);
@@ -12605,16 +12605,16 @@ mod tests {
     fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
         let server = mcp::McpServerConfig {
             name: "remote.server".into(),
-            spec: traits::McpTransportSpec::InProcess {
+            spec: platform_api::McpTransportSpec::InProcess {
                 registry_key: "remote.server".into(),
             },
             scope: mcp::ConfigScope::Dynamic,
             disabled: false,
             timeout_ms: None,
             always_load: false,
-            tools: vec![traits::McpConfiguredToolPolicyDto {
+            tools: vec![platform_api::McpConfiguredToolPolicyDto {
                 name: "delete_data".into(),
-                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysDeny),
+                permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysDeny),
                 org_max_permission: None,
             }],
             tool_permissions: std::collections::BTreeMap::new(),
@@ -12655,7 +12655,7 @@ mod tests {
             mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
                 .expect("agent MCP config parses");
         let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
-        let dto = |tool_name: &str, requires_user_interaction: bool| traits::McpToolDto {
+        let dto = |tool_name: &str, requires_user_interaction: bool| platform_api::McpToolDto {
             server_name: "srv".into(),
             tool_name: tool_name.into(),
             description: tool_name.into(),
@@ -12674,7 +12674,7 @@ mod tests {
             mcp::McpConnectionState::Connected {
                 config,
                 connection_id,
-                capabilities: traits::ServerCapabilitiesDto {
+                capabilities: platform_api::ServerCapabilitiesDto {
                     tools: true,
                     resources: false,
                     prompts: false,
@@ -12683,8 +12683,8 @@ mod tests {
                     experimental: std::collections::HashMap::new(),
                     extensions: std::collections::HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![
@@ -13019,7 +13019,7 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
             .await
@@ -13120,11 +13120,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl traits::ProcessRunner for RecordingProcessRunner {
+    impl platform_api::ProcessRunner for RecordingProcessRunner {
         async fn run(
             &self,
-            cmd: &traits::SandboxedCommand,
-        ) -> Result<traits::ProcessOutput, traits::ProcessError> {
+            cmd: &platform_api::SandboxedCommand,
+        ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
             let inner = cmd.inner();
             let exit_code = if inner.args == vec!["-V".to_string()] {
                 self.probe_exit
@@ -13135,7 +13135,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((inner.command.clone(), inner.args.clone()));
-            Ok(traits::ProcessOutput {
+            Ok(platform_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: if exit_code == 0 {
                     String::new()
@@ -13149,12 +13149,12 @@ mod tests {
 
         async fn spawn_background(
             &self,
-            _cmd: &traits::SandboxedCommand,
-        ) -> Result<traits::ProcessHandle, traits::ProcessError> {
-            Err(traits::ProcessError::Unsupported)
+            _cmd: &platform_api::SandboxedCommand,
+        ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
+            Err(platform_api::ProcessError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+        async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
             Ok(())
         }
 
@@ -13179,9 +13179,9 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(0));
-        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
             .await
@@ -13218,9 +13218,9 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(1));
-        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
             .await
@@ -13256,9 +13256,9 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(0));
-        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
             .await
@@ -13319,11 +13319,11 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
         // `tmux -V` probe returns non-zero ⇒ "not installed"; create exit is
         // irrelevant (never reached).
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
-        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
 
         let err =
             super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
@@ -13368,11 +13368,11 @@ mod tests {
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
         // Probe would report "not installed" IF it ran; create fails. Classic
         // must not run the probe, and the create failure must be non-fatal.
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 1));
-        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
 
         super::apply_worktree_launch(
             &Some("feat".to_string()),
@@ -13416,7 +13416,7 @@ mod tests {
         init_git_repo_for_worktree_launch_test(tmp.path()).await;
         cfg.worktree_launch = Some("feat".to_string());
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13451,7 +13451,7 @@ mod tests {
             "test_config's default must be inert"
         );
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13505,7 +13505,7 @@ mod tests {
     #[tokio::test]
     async fn build_constructs_runtime_deterministically() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13538,7 +13538,7 @@ mod tests {
         std::fs::create_dir_all(&extra).expect("mkdir extra");
         cfg.add_dir = vec![extra.clone()];
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13586,7 +13586,7 @@ mod tests {
         cfg.add_dir = vec![std::path::PathBuf::from("data")];
         let expected = cfg.cwd.join("data"); // expand_trusted_dir(relative) = cwd.join
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13619,7 +13619,7 @@ mod tests {
     #[tokio::test]
     async fn build_wires_mcp_oauth_seam() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13644,7 +13644,7 @@ mod tests {
     #[tokio::test]
     async fn build_wires_mcp_discovery_cache_store() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13673,7 +13673,7 @@ mod tests {
         )
         .unwrap();
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13707,7 +13707,7 @@ mod tests {
         )
         .unwrap();
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13742,7 +13742,7 @@ mod tests {
     #[tokio::test]
     async fn build_exposes_dispatcher_shared_command_registry() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13790,7 +13790,7 @@ mod tests {
         )
         .unwrap();
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13815,7 +13815,7 @@ mod tests {
     #[tokio::test]
     async fn build_with_no_plugins_dir_is_a_noop() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13832,7 +13832,7 @@ mod tests {
         // and surfaces its capture slot for the print path.
         let (_tmp, mut cfg) = test_config(true);
         cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13846,7 +13846,7 @@ mod tests {
     #[tokio::test]
     async fn build_without_json_schema_has_no_structured_output_slot() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -13969,7 +13969,7 @@ mod tests {
     #[tokio::test]
     async fn build_surfaces_provider_availability_and_adapter() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14022,7 +14022,7 @@ mod tests {
         });
         // Unique test-only var: guarantees ≥1 connected provider on any host.
         std::env::set_var("LINGXI_TEST_REROUTE_KEY", "k");
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14076,7 +14076,7 @@ mod tests {
             m
         });
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT", "k");
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14113,7 +14113,7 @@ mod tests {
             m
         });
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_ENVPIN", "k");
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14133,7 +14133,7 @@ mod tests {
     #[tokio::test]
     async fn build_surfaces_provider_auth_methods_from_catalog() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14186,7 +14186,7 @@ mod tests {
             }
         }));
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14261,7 +14261,7 @@ mod tests {
     #[tokio::test]
     async fn build_with_noop_gate_uses_noop() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14286,7 +14286,7 @@ mod tests {
         // injected gate must win.
         let (_tmp, mut cfg) = test_config(true);
         cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14308,7 +14308,7 @@ mod tests {
     #[tokio::test]
     async fn build_default_uses_adapter_gate() {
         let (_tmp, cfg) = test_config(false);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let sink = Arc::new(RecordingPermissionSink::default());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = sink.clone();
@@ -14381,7 +14381,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_exposes_coordinator_handles() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14413,7 +14413,7 @@ mod tests {
     /// hook the wired `fire_session_start("startup")` call dispatched against.
     #[tokio::test]
     async fn build_fires_session_start_against_a_registered_hook() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
@@ -14428,7 +14428,7 @@ mod tests {
         )
         .expect("write settings.json");
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14457,7 +14457,7 @@ mod tests {
     /// frontmatter bucket), proving the boot path installed the agent's hook.
     #[tokio::test]
     async fn build_registers_main_thread_agent_frontmatter_hooks() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         // `--agents` flag agent declaring a frontmatter `Stop` hook. `--agent`
@@ -14474,7 +14474,7 @@ mod tests {
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14514,7 +14514,7 @@ mod tests {
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14547,7 +14547,7 @@ mod tests {
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14585,7 +14585,7 @@ mod tests {
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14624,7 +14624,7 @@ mod tests {
         );
         cfg.cli_agent = None;
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14650,7 +14650,7 @@ mod tests {
     /// on-disk `<uuid>.jsonl`.
     #[tokio::test]
     async fn build_persists_and_restores_agent_setting_on_resume() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let agents = r#"{ "tester": {
@@ -14673,7 +14673,7 @@ mod tests {
 
         // First boot: `--agent tester` applies + persists the `agent-setting`.
         cfg.cli_agent = Some("tester".to_string());
-        let output1: Arc<dyn traits::OutputStream> =
+        let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14682,7 +14682,7 @@ mod tests {
             .expect("first boot with --agent must succeed");
 
         // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
-        let output2: Arc<dyn traits::OutputStream> =
+        let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14720,7 +14720,7 @@ mod tests {
         resume_cfg.cli_agent = None;
         cfg.cli_agent = Some("tester".to_string());
 
-        let output1: Arc<dyn traits::OutputStream> =
+        let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14728,7 +14728,7 @@ mod tests {
             .await
             .expect("first boot with --agent must succeed");
 
-        let output2: Arc<dyn traits::OutputStream> =
+        let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14746,7 +14746,7 @@ mod tests {
     /// therefore fall back to the default when the name is unavailable.
     #[tokio::test]
     async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let agents = r#"{ "tester": {
@@ -14767,7 +14767,7 @@ mod tests {
         resume_cfg.cli_agents_json = None;
 
         cfg.cli_agent = Some("tester".to_string());
-        let output1: Arc<dyn traits::OutputStream> =
+        let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14775,7 +14775,7 @@ mod tests {
             .await
             .expect("first boot with --agent must succeed");
 
-        let output2: Arc<dyn traits::OutputStream> =
+        let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14796,7 +14796,7 @@ mod tests {
     /// when that catalog entry is no longer available.
     #[tokio::test]
     async fn build_resume_legacy_missing_agent_falls_back_to_default() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let session_id = "55555555-6666-7777-8888-999999999999";
@@ -14806,14 +14806,14 @@ mod tests {
 
         let transcript_path =
             session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), session_id);
-        let fs: Arc<dyn traits::FileSystem> =
+        let fs: Arc<dyn platform_api::FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(cfg.cwd.clone()));
         session::jsonl::JsonlWriter::new(transcript_path, fs)
             .append_agent_setting(session_id, "tester")
             .await
             .expect("write legacy agent-setting");
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -14908,7 +14908,7 @@ mod tests {
     #[tokio::test]
     async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
         use super::CustomizationGates;
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         for gates in [
             CustomizationGates {
@@ -14932,7 +14932,7 @@ mod tests {
             )
             .expect("write settings.json");
 
-            let output: Arc<dyn traits::OutputStream> =
+            let output: Arc<dyn platform_api::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
             let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
@@ -14954,7 +14954,7 @@ mod tests {
         for (persist, want_writer) in [(true, true), (false, false)] {
             let (_tmp, mut cfg) = test_config(true);
             cfg.session_persistence = persist;
-            let output: Arc<dyn traits::OutputStream> =
+            let output: Arc<dyn platform_api::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
             let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
@@ -14993,7 +14993,7 @@ mod tests {
     /// (never the real filesystem).
     #[tokio::test]
     async fn build_fires_instructions_loaded_against_a_registered_hook() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
@@ -15008,7 +15008,7 @@ mod tests {
         )
         .expect("write settings.json");
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15057,7 +15057,7 @@ mod tests {
     /// runs over the injected file (best-effort) inside `build()`.
     #[tokio::test]
     async fn build_with_injected_memory_reaches_system_prompt() {
-        use traits::OrchestratorHandle as _;
+        use platform_api::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
 
@@ -15092,7 +15092,7 @@ mod tests {
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
         ));
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15156,7 +15156,7 @@ mod tests {
             cfg.memory_provider.is_none(),
             "default config must leave memory_provider None (empty, deterministic)"
         );
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15185,7 +15185,7 @@ mod tests {
         let (_tmp, mut cfg) = test_config(true);
         cfg.session_started_as_coordinator = true;
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15221,7 +15221,7 @@ mod tests {
         let (_tmp, cfg) = test_config(true);
         assert!(!cfg.session_started_as_coordinator);
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15241,17 +15241,17 @@ mod tests {
     struct NoopSeam;
 
     #[async_trait::async_trait]
-    impl traits::team_spawn::TeamSpawnSeam for NoopSeam {
+    impl platform_api::team_spawn::TeamSpawnSeam for NoopSeam {
         async fn spawn_teammate(
             &self,
             _agent_id: protocol::AgentId,
             _name: String,
             _team_name: String,
             _description: String,
-        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+        ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
-        async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+        async fn kill(&self, _task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             Ok(())
         }
     }
@@ -15259,7 +15259,7 @@ mod tests {
     /// A fully-stubbed `BuiltinToolContext` — enough to enumerate registered
     /// names and probe per-tool behavior markers; no tool is ever invoked.
     fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
-        tool_api::test_support::shell_test_ctx(traits::process::ProcessOutput {
+        tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
@@ -15364,7 +15364,7 @@ mod tests {
     async fn build_coordinator_session_enters_mode() {
         let (_tmp, mut cfg) = test_config(true);
         cfg.session_started_as_coordinator = true;
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15390,7 +15390,7 @@ mod tests {
     async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
         let (_tmp, mut cfg) = test_config(true);
         cfg.restricted = true;
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15424,7 +15424,7 @@ mod tests {
         let (_tmp, mut cfg) = test_config(true);
         cfg.restricted = true;
         cfg.restricted_tools = Some(vec!["Bash".into(), "WebFetch".into()]);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -15481,7 +15481,7 @@ mod tests {
         // wiring that splices the coordinator `SendMessage` in.
         let mut ctx = stub_tool_ctx();
         ctx.mailbox_router =
-            Some(team.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+            Some(team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         let wiring = CoordinatorWiring {
             team: team.clone(),
             mode: Arc::new(coordinator::CoordinatorMode::new()),
@@ -16577,7 +16577,7 @@ mod tests {
             "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
         }));
 
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -16653,7 +16653,7 @@ mod tests {
         }));
 
         // Composition-root assertion: build() succeeds with routing-only settings.
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -16884,7 +16884,7 @@ mod tests {
         // Construct the same listing shape the composition root builds from
         // `assembled.client_config.providers`.
         let listings = vec![
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "openai".to_string(),
@@ -16895,7 +16895,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
             },
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "gpt-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "github-copilot".to_string(),
@@ -16906,7 +16906,7 @@ mod tests {
                 reasoning: Default::default(),
                 supports_reasoning: false,
             },
-            traits::ModelListing {
+            platform_api::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
                 request_model: "claude-sonnet-4-6".to_string(),
                 provider_id: "anthropic".to_string(),
@@ -16920,7 +16920,7 @@ mod tests {
         ];
 
         // Qualified: "openai/gpt-4o" → bare id "gpt-4o" + profile "openai"
-        let (id, profile) = traits::parse_model_ref("openai/gpt-4o", &listings);
+        let (id, profile) = platform_api::parse_model_ref("openai/gpt-4o", &listings);
         assert_eq!(id, "gpt-4o", "qualified ref must strip the profile prefix");
         assert_eq!(
             profile.as_deref(),
@@ -16929,12 +16929,12 @@ mod tests {
         );
 
         // Bare: "claude-sonnet-4-6" → same id, no profile (no-op seed path)
-        let (id2, profile2) = traits::parse_model_ref("claude-sonnet-4-6", &listings);
+        let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-6", &listings);
         assert_eq!(id2, "claude-sonnet-4-6", "bare model id must pass through");
         assert!(profile2.is_none(), "bare model must yield None profile");
 
         // Shared id with two providers and explicit profile qualifier
-        let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-4o", &listings);
+        let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-4o", &listings);
         assert_eq!(id3, "gpt-4o");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
@@ -17494,21 +17494,21 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl traits::McpTransport for FailOnceReloadPluginTransport {
+    impl platform_api::McpTransport for FailOnceReloadPluginTransport {
         async fn connect(
             &self,
-            _s: &traits::McpTransportSpec,
-        ) -> Result<traits::McpRawConnection, traits::McpError> {
-            Ok(traits::McpRawConnection {
+            _s: &platform_api::McpTransportSpec,
+        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+            Ok(platform_api::McpRawConnection {
                 connection_id: protocol::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
-            Ok(traits::ServerCapabilitiesDto {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
+            Ok(platform_api::ServerCapabilitiesDto {
                 tools: false,
                 resources: false,
                 prompts: false,
@@ -17521,91 +17521,91 @@ mod tests {
 
         async fn list_tools(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resource_templates(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceTemplateDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _c: &traits::McpRawConnection,
+            _c: &platform_api::McpRawConnection,
             _t: &str,
             _i: serde_json::Value,
-        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
             unreachable!("unused in reload test")
         }
 
         async fn read_resource(
             &self,
-            _c: &traits::McpRawConnection,
+            _c: &platform_api::McpRawConnection,
             _u: &str,
-        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
             unreachable!("unused in reload test")
         }
 
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
             unreachable!("unused in reload test")
         }
 
         async fn handle_elicitation(
             &self,
-            _c: &traits::McpRawConnection,
-            _r: traits::ElicitRequestDto,
-        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+            _r: platform_api::ElicitRequestDto,
+        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
             unreachable!("unused in reload test")
         }
 
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
             if self
                 .disconnect_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                Err(traits::McpError::Internal("disconnect failed".into()))
+                Err(platform_api::McpError::Internal("disconnect failed".into()))
             } else {
                 Ok(())
             }
         }
 
-        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
-            vec![traits::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
+            vec![platform_api::McpTransportKind::Stdio]
         }
     }
 
     #[async_trait::async_trait]
-    impl traits::McpTransport for BlockingReloadPluginTransport {
+    impl platform_api::McpTransport for BlockingReloadPluginTransport {
         async fn connect(
             &self,
-            _s: &traits::McpTransportSpec,
-        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            _s: &platform_api::McpTransportSpec,
+        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
             let call = self
                 .connect_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -17618,16 +17618,16 @@ mod tests {
             {
                 self.connect_release.notified().await;
             }
-            Ok(traits::McpRawConnection {
+            Ok(platform_api::McpRawConnection {
                 connection_id: protocol::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
-            Ok(traits::ServerCapabilitiesDto {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
+            Ok(platform_api::ServerCapabilitiesDto {
                 tools: false,
                 resources: false,
                 prompts: false,
@@ -17640,74 +17640,74 @@ mod tests {
 
         async fn list_tools(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resource_templates(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceTemplateDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _c: &traits::McpRawConnection,
+            _c: &platform_api::McpRawConnection,
             _t: &str,
             _i: serde_json::Value,
-        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
         async fn read_resource(
             &self,
-            _c: &traits::McpRawConnection,
+            _c: &platform_api::McpRawConnection,
             _u: &str,
-        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _c: &traits::McpRawConnection,
-        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
         async fn handle_elicitation(
             &self,
-            _c: &traits::McpRawConnection,
-            _r: traits::ElicitRequestDto,
-        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            _c: &platform_api::McpRawConnection,
+            _r: platform_api::ElicitRequestDto,
+        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
             Ok(())
         }
 
-        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
-            vec![traits::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
+            vec![platform_api::McpTransportKind::Stdio]
         }
     }
 
@@ -18504,8 +18504,8 @@ mod connected_fallback_tests {
     use super::{connected_provider_fallback, RecentModelRef};
     use std::collections::BTreeMap;
 
-    fn listing(provider_id: &str, request_model: &str) -> traits::ModelListing {
-        traits::ModelListing {
+    fn listing(provider_id: &str, request_model: &str) -> platform_api::ModelListing {
+        platform_api::ModelListing {
             display_model: request_model.to_string(),
             request_model: request_model.to_string(),
             provider_id: provider_id.to_string(),
@@ -18519,7 +18519,7 @@ mod connected_fallback_tests {
     }
 
     /// Catalog fixture: anthropic + a few presets + a user-defined "groq".
-    fn listings() -> Vec<traits::ModelListing> {
+    fn listings() -> Vec<platform_api::ModelListing> {
         vec![
             listing("anthropic", "claude-sonnet-5"),
             listing("anthropic", "claude-opus-4-8"),
@@ -18795,7 +18795,7 @@ mod connected_fallback_tests {
     /// serves it.
     #[test]
     fn curated_default_missing_from_catalog_falls_to_first_listing() {
-        let listings: Vec<traits::ModelListing> = vec![
+        let listings: Vec<platform_api::ModelListing> = vec![
             listing("anthropic", "claude-sonnet-5"),
             listing("deepseek", "deepseek-reasoner"), // no deepseek-chat
         ];
@@ -18818,7 +18818,7 @@ mod connected_fallback_tests {
 mod workspace_lease_forwarding_tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     /// Terminal invoker that records the lease token it was dispatched with.
     struct RecordingInvoker {

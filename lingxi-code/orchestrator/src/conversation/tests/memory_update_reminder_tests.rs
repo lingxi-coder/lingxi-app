@@ -11,20 +11,20 @@ use tool_api::registry::ToolRegistry;
 
 struct InlineRuntime;
 #[async_trait]
-impl traits::RuntimeSpawner for InlineRuntime {
+impl platform_api::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
         tokio::spawn(task);
-        Ok(traits::BackgroundTaskHandle {
+        Ok(platform_api::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
     }
     async fn sleep(&self, _d: std::time::Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), traits::RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), platform_api::RuntimeError> {
         Ok(())
     }
 }
@@ -84,8 +84,8 @@ fn reset_scan_floor(orch: &ConversationOrchestrator) {
 fn dream_notification(
     result: Option<&str>,
     status: &str,
-) -> traits::task_registry::TaskNotification {
-    traits::task_registry::TaskNotification {
+) -> platform_api::task_registry::TaskNotification {
+    platform_api::task_registry::TaskNotification {
         task_id: "d12345678".into(),
         task_type: "dream".into(),
         status: status.into(),

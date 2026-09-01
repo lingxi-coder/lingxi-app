@@ -14,7 +14,7 @@ license.workspace = true
 [dependencies]
 branding = { path = "../branding" }
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

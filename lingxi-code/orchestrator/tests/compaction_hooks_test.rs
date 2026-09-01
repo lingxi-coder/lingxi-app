@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
-use traits::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
+use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -49,7 +49,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -60,11 +60,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -493,7 +493,7 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
     .with_compaction(compactor);
     seed_history(&orch, 6).await;
 
-    traits::OrchestratorHandle::force_compact(&orch)
+    platform_api::OrchestratorHandle::force_compact(&orch)
         .await
         .expect("manual compaction");
 

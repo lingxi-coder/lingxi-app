@@ -3,7 +3,7 @@
 //! API-key providers read+store a secret via the [`ConnectCredentialWriter`] seam.
 //! `/connect github-copilot` drives the GitHub device-flow through the
 //! [`CopilotConnectDriver`] seam (begin → display → poll → store). Both seams are
-//! defined HERE (not in the frozen `traits` crate) and implemented by the engine.
+//! defined HERE (not in the frozen `platform-api` crate) and implemented by the engine.
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};

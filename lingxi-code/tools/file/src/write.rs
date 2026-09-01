@@ -76,13 +76,13 @@ fn write_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(traits::rooted_fs::RootedFsError::Fs(
-            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(platform_api::rooted_fs::RootedFsError::Fs(
+            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
 /// Resolve a write target without materializing any missing parent through its
@@ -110,17 +110,17 @@ fn canonicalize_write_target(path: &Path, trusted_dirs: &[PathBuf]) -> Result<Pa
     Ok(canonical)
 }
 
-fn write_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) -> ToolError {
+fn write_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsError) -> ToolError {
     match error {
-        traits::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+        platform_api::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         )),
-        traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+        platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
             ))
         }
-        traits::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+        platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
                 .map(|metadata| metadata.file_type().is_symlink())
                 .unwrap_or(false)
@@ -134,10 +134,10 @@ fn write_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) -
                 ))
             }
         }
-        traits::rooted_fs::RootedFsError::NotRegularFile => {
+        platform_api::rooted_fs::RootedFsError::NotRegularFile => {
             ToolError::Io(format!("File {path} is not a regular file"))
         }
-        traits::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        platform_api::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
     }
 }
 
@@ -379,10 +379,10 @@ impl Tool for FileWriteTool {
         // still requires a prior Read.
         let prior_snapshot = match write_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => None,
-            Err(error @ traits::rooted_fs::RootedFsError::LeafSymlink)
-            | Err(error @ traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged)
-            | Err(error @ traits::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {
+            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => None,
+            Err(error @ platform_api::rooted_fs::RootedFsError::LeafSymlink)
+            | Err(error @ platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged)
+            | Err(error @ platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {
                 self.emit_failed(&invocation_id, "symlink_resolution_changed")
                     .await;
                 return Err(write_resolution_error(file_path, error));
@@ -436,7 +436,7 @@ impl Tool for FileWriteTool {
             self.emit_failed(&invocation_id, "path_blocked").await;
             return Err(ToolError::PathBlocked { path });
         };
-        let write_result = match traits::rooted_fs::write_file_after_permission(
+        let write_result = match platform_api::rooted_fs::write_file_after_permission(
             &root,
             &relative,
             &path,
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn write_resolution_messages_are_byte_exact() {
         assert_eq!(
-            write_resolution_error("/tmp/link.txt", traits::rooted_fs::RootedFsError::LeafSymlink)
+            write_resolution_error("/tmp/link.txt", platform_api::rooted_fs::RootedFsError::LeafSymlink)
                 .to_string()
                 .strip_prefix("invalid input: ")
                 .unwrap_or_default(),
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(
             write_resolution_error(
                 "/tmp/link.txt",
-                traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+                platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
             )
             .to_string(),
             "invalid input: Refusing to write /tmp/link.txt: its parent-directory symlink resolution changed after permission was checked."

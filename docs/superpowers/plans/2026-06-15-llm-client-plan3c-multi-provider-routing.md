@@ -87,7 +87,7 @@ mod provider_key_tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use traits::SecureStorageBackend;
+    use platform_api::SecureStorageBackend;
 
     #[derive(Default)]
     struct MemStorage {
@@ -158,13 +158,13 @@ mod provider_key_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }
@@ -349,7 +349,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 async-trait.workspace = true
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 
 [lints]
 workspace = true
@@ -1419,7 +1419,7 @@ mod tests {
 
 The composite holds `Arc<CredentialManager>`, the per-`credential_id` `CredentialSource` map, the Anthropic API key, and an optional OAuth delegate. It impls `llm_client::CredentialProvider`. `load` dispatches on `scope.credential_id`: `"anthropic-oauth"` → delegate, `"anthropic-api-key"` → configured key, else → keychain[id] → env[recorded var] → `Err(LlmError::Authentication)` (reconciliation #6, matching `EnvCredentialProvider`, credentials.rs:111-121). Copilot's `GITHUB_TOKEN` rides the same non-anthropic branch. `new` arg order: `(manager, sources, anthropic_api_key, oauth_delegate)`.
 
-> The test `NoHttp` double implements BOTH required `traits::HttpTransport` methods (`request` AND `stream_sse`) — the trait has two required methods (http.rs:42-47); the unused one panics.
+> The test `NoHttp` double implements BOTH required `platform_api::HttpTransport` methods (`request` AND `stream_sse`) — the trait has two required methods (http.rs:42-47); the unused one panics.
 
 **Files:**
 - Create: `lingxi-code/provider-config/src/credentials.rs`
@@ -1442,41 +1442,41 @@ mod tests {
         >,
     }
     #[async_trait::async_trait]
-    impl traits::SecureStorage for MemStorage {
+    impl platform_api::SecureStorage for MemStorage {
         async fn store(&self, service: &str, account: &str, data: protocol::SecureStorageData)
-            -> Result<(), traits::SecureStorageError> {
+            -> Result<(), platform_api::SecureStorageError> {
             self.map.lock().unwrap().insert((service.into(), account.into()), data);
             Ok(())
         }
         async fn retrieve(&self, service: &str, account: &str)
-            -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             Ok(self.map.lock().unwrap().get(&(service.into(), account.into())).cloned())
         }
-        async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+        async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
             self.map.lock().unwrap().remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self.map.lock().unwrap().keys().filter(|(s, _)| s == service).map(|(_, a)| a.clone()).collect())
         }
         fn is_encrypted(&self) -> bool { false }
-        fn backend(&self) -> traits::SecureStorageBackend { traits::SecureStorageBackend::PlainText }
+        fn backend(&self) -> platform_api::SecureStorageBackend { platform_api::SecureStorageBackend::PlainText }
     }
     struct FixedClock;
-    impl traits::Clock for FixedClock {
+    impl platform_api::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
         }
     }
     struct NoHttp;
     #[async_trait::async_trait]
-    impl traits::HttpTransport for NoHttp {
+    impl platform_api::HttpTransport for NoHttp {
         async fn request(&self, _req: protocol::HttpRequest)
-            -> Result<protocol::HttpResponse, traits::HttpError> {
+            -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(&self, _req: protocol::HttpRequest)
-            -> Result<traits::http::SseStream, traits::HttpError> {
+            -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }
@@ -1828,41 +1828,41 @@ mod tests {
         >,
     }
     #[async_trait::async_trait]
-    impl traits::SecureStorage for MemStorage {
+    impl platform_api::SecureStorage for MemStorage {
         async fn store(&self, service: &str, account: &str, data: protocol::SecureStorageData)
-            -> Result<(), traits::SecureStorageError> {
+            -> Result<(), platform_api::SecureStorageError> {
             self.map.lock().unwrap().insert((service.into(), account.into()), data);
             Ok(())
         }
         async fn retrieve(&self, service: &str, account: &str)
-            -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             Ok(self.map.lock().unwrap().get(&(service.into(), account.into())).cloned())
         }
-        async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+        async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
             self.map.lock().unwrap().remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self.map.lock().unwrap().keys().filter(|(s, _)| s == service).map(|(_, a)| a.clone()).collect())
         }
         fn is_encrypted(&self) -> bool { false }
-        fn backend(&self) -> traits::SecureStorageBackend { traits::SecureStorageBackend::PlainText }
+        fn backend(&self) -> platform_api::SecureStorageBackend { platform_api::SecureStorageBackend::PlainText }
     }
     struct FixedClock;
-    impl traits::Clock for FixedClock {
+    impl platform_api::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
         }
     }
     struct NoHttp;
     #[async_trait::async_trait]
-    impl traits::HttpTransport for NoHttp {
+    impl platform_api::HttpTransport for NoHttp {
         async fn request(&self, _req: protocol::HttpRequest)
-            -> Result<protocol::HttpResponse, traits::HttpError> {
+            -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("availability tests must not perform HTTP");
         }
         async fn stream_sse(&self, _req: protocol::HttpRequest)
-            -> Result<traits::http::SseStream, traits::HttpError> {
+            -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("availability tests must not perform HTTP");
         }
     }
@@ -2145,7 +2145,7 @@ Threads `ChainConfig` into `ProviderApiAdapter` as a **7th positional `new` arg*
 
   (a) `orchestrator/Cargo.toml`, under `[dependencies]` after `llm-client`: `provider-config = { path = "../provider-config" }`
 
-  (b) `provider_adapter.rs` import (after `use traits::orchestrator::ModelListing;`): `use provider_config::{ChainConfig, ChainEntry, RetryOverride};`
+  (b) `provider_adapter.rs` import (after `use platform_api::orchestrator::ModelListing;`): `use provider_config::{ChainConfig, ChainEntry, RetryOverride};`
 
   (c) struct field (after `version: String,`):
 ```rust
@@ -2837,7 +2837,7 @@ Replaces the single-Anthropic `ClientConfig` (lib.rs:993-1015), the bare `CostTr
     #[tokio::test]
     async fn build_surfaces_provider_availability_and_adapter() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn traits::OutputStream> =
+        let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(orchestrator::test_support::RecordingPermissionSink::default());
@@ -2900,7 +2900,7 @@ fn fixture_cfg(tmp: &std::path::Path) -> DesktopConfig {
 async fn build_with_providers_and_routing_merges_config_chains_availability() {
     std::env::remove_var("GROQ_API_KEY");
     let tmp = tempfile::tempdir().expect("tmp");
-    let output: Arc<dyn traits::OutputStream> =
+    let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(orchestrator::test_support::RecordingPermissionSink::default());
@@ -3059,7 +3059,7 @@ engine-mobile shares the routing core but has no OAuth path (api-key-only). Wire
     async fn build_mobile_merges_user_provider_and_chain() {
         std::env::remove_var("GROQ_API_KEY");
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn traits::Platform> =
+        let platform: Arc<dyn platform_api::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -3166,7 +3166,7 @@ engine-mobile shares the routing core but has no OAuth path (api-key-only). Wire
 //! API-key providers read+store a secret via the [`ConnectCredentialWriter`] seam.
 //! `/connect github-copilot` drives the GitHub device-flow through the
 //! [`CopilotConnectDriver`] seam (begin → display → poll → store). Both seams are
-//! defined HERE (not in the frozen `traits` crate) and implemented by the engine.
+//! defined HERE (not in the frozen `platform-api` crate) and implemented by the engine.
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
@@ -3488,7 +3488,7 @@ mod tests {
     use super::*;
     use platform_posix::{PosixClock, PosixHttp};
     use platform_posix_minimal::PlainTextSecureStorage;
-    use traits::{Clock, HttpTransport, SecureStorage};
+    use platform_api::{Clock, HttpTransport, SecureStorage};
 
     struct CannedPrompt(Option<String>);
     #[async_trait]
@@ -3697,7 +3697,7 @@ use platform_posix::PosixHttp;
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::Value;
 use std::sync::Mutex as StdMutex;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// Credential id under which the GitHub Copilot OAuth token is stored. Matches
 /// the catalog preset's `profile_name`.
@@ -3890,7 +3890,7 @@ pub async fn desktop_command_registry(
 
 ## tui /connect UI + picker Connect badges + select-launches-/connect
 
-All tui-only; frozen crates untouched. Availability rides a sibling `BTreeMap<provider_id, bool>` joined into `ModelRow` at the tui layer (spec §8). Verified fixtures: `ModelRow { display_model, request_model, provider_id, provider_label }` (model.rs:19); `ModelScreenState::new(rows, recent, current)` (model.rs:141); `ModelOutcome::{Stay, Commit{provider_id, request_model}, Cancel}` (model.rs:124); `traits::orchestrator::ModelListing { display_model, request_model, provider_id, provider_label }`; `AppState::new(status: StatusSnapshot)` with `StatusSnapshot: Default` (state.rs:817,447); existing `state.rs` tests build via `AppState::new(fake_status())` where `fake_status()` uses `..StatusSnapshot::default()`; `pump_open_model` calls `build_model_entries(existing, catalog)` at root.rs:1155 and pumps return `bool` (caller bumps `redraw` on `true`).
+All tui-only; frozen crates untouched. Availability rides a sibling `BTreeMap<provider_id, bool>` joined into `ModelRow` at the tui layer (spec §8). Verified fixtures: `ModelRow { display_model, request_model, provider_id, provider_label }` (model.rs:19); `ModelScreenState::new(rows, recent, current)` (model.rs:141); `ModelOutcome::{Stay, Commit{provider_id, request_model}, Cancel}` (model.rs:124); `platform_api::orchestrator::ModelListing { display_model, request_model, provider_id, provider_label }`; `AppState::new(status: StatusSnapshot)` with `StatusSnapshot: Default` (state.rs:817,447); existing `state.rs` tests build via `AppState::new(fake_status())` where `fake_status()` uses `..StatusSnapshot::default()`; `pump_open_model` calls `build_model_entries(existing, catalog)` at root.rs:1155 and pumps return `bool` (caller bumps `redraw` on `true`).
 
 ### Task 19: Thread an `available` flag onto `ModelRow` + `build_model_entries`
 
@@ -3904,7 +3904,7 @@ Per spec §8 availability is a sibling `BTreeMap<provider_id, bool>`; `build_mod
     #[test]
     fn availability_joins_by_provider_id_default_true() {
         use std::collections::BTreeMap;
-        use traits::orchestrator::ModelListing;
+        use platform_api::orchestrator::ModelListing;
         let existing = vec!["claude-opus-4-7".to_string()];
         let catalog = vec![
             ModelListing { display_model: "DeepSeek Chat".to_string(), request_model: "deepseek-chat".to_string(), provider_id: "deepseek".to_string(), provider_label: "DeepSeek".to_string() },
@@ -3922,7 +3922,7 @@ Per spec §8 availability is a sibling `BTreeMap<provider_id, bool>`; `build_mod
     #[test]
     fn empty_availability_map_keeps_all_rows_available() {
         use std::collections::BTreeMap;
-        use traits::orchestrator::ModelListing;
+        use platform_api::orchestrator::ModelListing;
         let rows = build_model_entries(
             vec!["claude-opus-4-7".to_string(), "openai/gpt-4o".to_string()],
             vec![ModelListing { display_model: "DeepSeek Chat".to_string(), request_model: "deepseek-chat".to_string(), provider_id: "deepseek".to_string(), provider_label: "DeepSeek".to_string() }],
@@ -3947,7 +3947,7 @@ Per spec §8 availability is a sibling `BTreeMap<provider_id, bool>`; `build_mod
 #[must_use]
 pub fn build_model_entries(
     existing: Vec<String>,
-    catalog: Vec<traits::orchestrator::ModelListing>,
+    catalog: Vec<platform_api::orchestrator::ModelListing>,
     availability: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<ModelRow> {
     let mut rows = Vec::new();
@@ -4024,11 +4024,11 @@ In `render_model_to_string`, an unavailable row shows `[Connect]` instead of the
 **Files:**
 - Modify: `lingxi-code/tui/src/screens/model.rs`
 
-- [ ] **Step 1: Write the failing test** — append to `mod render_tests` (add `use traits::orchestrator::ModelListing;` if absent):
+- [ ] **Step 1: Write the failing test** — append to `mod render_tests` (add `use platform_api::orchestrator::ModelListing;` if absent):
 ```rust
     fn st_with_unconfigured() -> ModelScreenState {
         use std::collections::BTreeMap;
-        use traits::orchestrator::ModelListing;
+        use platform_api::orchestrator::ModelListing;
         let mut avail = BTreeMap::new();
         avail.insert("github-copilot".to_string(), false);
         let rows = build_model_entries(
@@ -4090,7 +4090,7 @@ In `render_model_to_string`, an unavailable row shows `[Connect]` instead of the
     #[test]
     fn enter_on_unconfigured_row_yields_connect() {
         use std::collections::BTreeMap;
-        use traits::orchestrator::ModelListing;
+        use platform_api::orchestrator::ModelListing;
         let mut avail = BTreeMap::new();
         avail.insert("github-copilot".to_string(), false);
         let rows = build_model_entries(
@@ -4690,7 +4690,7 @@ Every spec §4–§10 component maps to at least one task. The two resolved deci
 - **`AssembleInputs` canonical field names (P0 #4):** `anthropic_api_base`, `anthropic_models`, `anthropic_has_api_key`, `anthropic_has_oauth`, `user_providers`, `routing` (Task 3); engine call sites rewritten (Tasks 14, 15); no `default_model`/`fallback_model` fields. Confirmed `DesktopConfig` real fields at lib.rs:500 and `llm_models = anthropic_models_for(...)` at lib.rs:986.
 - **`CredentialSource.profile_name` (P1 #6):** added (Task 3), set in `assemble` (Task 6: anthropic→"anthropic", presets/users→profile_name); availability fn + engine map key by `profile_name` (Tasks 9, 14).
 - **Async availability call (P1, ordering #1):** `compute_availability` uses `.await` + `matches!(.., Ok(Some(_)))` (Task 9); the engine uses `compute_availability(...).await` (Task 14) — NOT a sync `.is_some()`.
-- **Test doubles impl both `request` + `stream_sse` (P0 #5):** every `NoHttp` in Tasks 1, 8, 9 implements both required `traits::HttpTransport` methods (the unused panics). Verified the trait has 2 required methods (http.rs:42-47).
+- **Test doubles impl both `request` + `stream_sse` (P0 #5):** every `NoHttp` in Tasks 1, 8, 9 implements both required `platform_api::HttpTransport` methods (the unused panics). Verified the trait has 2 required methods (http.rs:42-47).
 - **Dedupe provider-config Cargo.toml (P1 #9 / ordering #3):** Task 2 adds the FULL dep set (llm-client, secret, protocol, cost, serde, serde_json, tracing + dev tokio/async-trait/traits); Tasks 3–9, 13 add modules only.
 - **Availability map → tui App (coverage gap #4 / discrepancy):** Task 23 threads `DesktopRuntime.provider_availability` → cli `Runtime` → `tui::session::Runtime` → `AppState.provider_availability`; Task 20 reads it instead of `BTreeMap::new()`. Verified the hop: session.rs:42/207, init.rs:284.
 - **`parse_routing` 3-tuple (P1 #5):** `(ChainConfig, raw_fallback: BTreeMap, warnings)` (Task 5); `assemble` validates raw fallback into `chains` (Task 6); consistent across consumers.
@@ -4707,7 +4707,7 @@ Every spec §4–§10 component maps to at least one task. The two resolved deci
 - **`ProviderRequest` body shape (P2):** `llm_client::ProviderRequest.body_json: Value` (NOT `body`) — `llm-client/src/protocol.rs:336-346`. Task 10's `transport_models` reads `r.body_json.get("model")`. `ProviderResponse.body_json: Value`, `ProviderResponse::json(status, value)` — protocol.rs:362-386.
 - **engine-mobile feature + MobileConfig (P2):** the host feature is **`uniffi`** (gates `dep:orchestrator`/`dep:secret`/etc.) — `apps/engine-mobile/Cargo.toml:21-41`. `MobileConfig` has `provider_profiles` + `routing` + `api_base` + `default_model` + `api_key` and impls `Default`; **no `fallback_model`** — `apps/engine-mobile/src/host.rs:110-145`. The mobile test harness uses `build_mobile(test_config(..), platform, listener, perm_sink)` — host.rs:1407. Tasks 10, 15 use `--features uniffi` and `anthropic_models(&cfg.default_model)`.
 - **no-op `PermissionRequestSink` (P2):** `orchestrator::test_support::RecordingPermissionSink` exists and impls `client_adapter::PermissionRequestSink` (required method `async fn emit_request(&self, PermissionRequestDto)`) — used by the mobile tests at host.rs:1413. Tasks 14 reuse it; no new engine-desktop `test_support` module is added (reconciliation #9).
-- **tui picker test fixture (P2):** `ModelScreenState::new(rows, recent, current)` (model.rs:141); existing `render_tests::st()` (model.rs:380-391); `ModelRow { display_model, request_model, provider_id, provider_label }` (model.rs:19); `ModelOutcome::{Stay, Commit, Cancel}` (model.rs:124); `traits::orchestrator::ModelListing { display_model, request_model, provider_id, provider_label }`. Tasks 19–22 use these exactly.
+- **tui picker test fixture (P2):** `ModelScreenState::new(rows, recent, current)` (model.rs:141); existing `render_tests::st()` (model.rs:380-391); `ModelRow { display_model, request_model, provider_id, provider_label }` (model.rs:19); `ModelOutcome::{Stay, Commit, Cancel}` (model.rs:124); `platform_api::orchestrator::ModelListing { display_model, request_model, provider_id, provider_label }`. Tasks 19–22 use these exactly.
 - **tui `AppState` fixture (P2):** `AppState::new(status: StatusSnapshot)` (state.rs:817); `StatusSnapshot: Default` (state.rs:447); existing tests build via `AppState::new(fake_status())` where `fake_status()` uses `..StatusSnapshot::default()` (state.rs:1183). Tasks 23/25 use `AppState::new(fake_status())`.
 - **tui redraw var + pump driver (P2):** the loop local is `needs_redraw`; pumps drive as `if pump_x(&state[, handle]).await { needs_redraw = true; }` (root.rs:1989). The `/model` intercept clears `prompt_text`/`prompt_cursor` + raises the flag + `return false` (app.rs:263). Tasks 20, 25 mirror these.
 - **cost wiring path (decision a):** `CostTracker::new(SessionId, Arc<PricingCatalog>, mpsc::Sender)` (cost/src/tracker.rs:86); the engine wraps `cost::PricingCatalog::builtin_reference()` today (lib.rs:1075). Task 14 swaps in `Arc::new(assembled.pricing)`. The `(profile, model) → cost::ProviderId` mapping mirrors `orchestrator::cost_wiring::provider_id_for_profile` (cost_wiring.rs:53).

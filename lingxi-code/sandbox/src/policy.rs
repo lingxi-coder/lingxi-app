@@ -6,7 +6,7 @@
 //!
 //! See spec §24.2 (`SandboxPolicy`).
 
-pub use traits::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+pub use platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
 
 /// Conservative default: no network, project workspace writable,
 /// system paths denied, subprocess allowed, modest resource ceilings.

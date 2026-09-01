@@ -44,8 +44,8 @@ impl PermissionGate for LiveModeGate {
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
-    ) -> traits::PermissionDecision {
-        traits::PermissionDecision::Allow
+    ) -> platform_api::PermissionDecision {
+        platform_api::PermissionDecision::Allow
     }
 
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
@@ -245,7 +245,7 @@ async fn a_real_403_keeps_the_message_the_auth_branches_gate_on() {
 /// the case the panel exists to report.
 #[tokio::test]
 async fn large_memory_warnings_are_recomputed_from_the_live_memory_set() {
-    use traits::OrchestratorHandle as _;
+    use platform_api::OrchestratorHandle as _;
 
     // The default model is `claude-opus-4-8`, a 1M-context model, so the
     // threshold is 200_000 chars — NOT the 40_000 floor. Sizing the fixture
@@ -592,20 +592,20 @@ async fn main_thread_agent_disallowed_tools_subtract() {
 #[tokio::test]
 async fn mobile_runtime_reminder_is_stable_across_agent_tool_filters() {
     let orch = orch_with_tools(&["Read", "Shell"]);
-    let orch = orch.with_mobile_runtime_environment(traits::MobileRuntimeEnvironment::new(
-        traits::MobileHostEnvironment::new(
-            traits::MobileHostOs::Ios,
+    let orch = orch.with_mobile_runtime_environment(platform_api::MobileRuntimeEnvironment::new(
+        platform_api::MobileHostEnvironment::new(
+            platform_api::MobileHostOs::Ios,
             Some("19.0".into()),
-            traits::MobileDeviceClass::Phone,
-            traits::MobileExecutionTarget::PhysicalDevice,
-            traits::MobileLaunchMode::Interactive,
+            platform_api::MobileDeviceClass::Phone,
+            platform_api::MobileExecutionTarget::PhysicalDevice,
+            platform_api::MobileLaunchMode::Interactive,
         ),
-        traits::MobileToolRuntime::MobileLinuxGuest,
+        platform_api::MobileToolRuntime::MobileLinuxGuest,
         Some("/workspace/a".into()),
         Some("/bin/sh".into()),
         Some("Mobile Linux sh".into()),
-        traits::MobileNetworkPolicy::PermissionMediated,
-        traits::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        platform_api::MobileNetworkPolicy::PermissionMediated,
+        platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
     ));
 
     let before = orch

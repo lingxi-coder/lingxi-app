@@ -25,7 +25,7 @@
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
   Commit with `git commit -F <tempfile>`.
-- Frozen crates: do **not** touch `lingxi-code/traits` or `lingxi-code/protocol`. This plan touches only `lingxi-code/llm-client`. (`AuthStrategy` lives in `llm-client/src/config.rs` — adding a variant there is fine; it is NOT a frozen crate.)
+- Frozen crates: do **not** touch `lingxi-code/platform-api` or `lingxi-code/protocol`. This plan touches only `lingxi-code/llm-client`. (`AuthStrategy` lives in `llm-client/src/config.rs` — adding a variant there is fine; it is NOT a frozen crate.)
 - `engine-mobile` + `orchestrator` must keep building (Task 6 verifies — adding an `AuthStrategy` variant can break exhaustive matches in consumers).
 
 ## File structure (Phase 2)

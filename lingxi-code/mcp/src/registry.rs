@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
-use traits::{
+use platform_api::{
     Clock, HttpTransport, McpError, McpRawConnection, McpTransport, McpTransportSpec,
     SecureStorage, ServerCapabilitiesDto,
 };
@@ -468,12 +468,12 @@ struct LiveDiscovery {
     /// Immutable grant identity captured alongside the successful connect
     /// spec; write-through revalidates it before persisting any catalog.
     grant_provenance: Option<GrantProvenance>,
-    negotiated: traits::McpNegotiatedProtocol,
+    negotiated: platform_api::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
-    tools: Vec<traits::McpToolDto>,
-    resources: Vec<traits::McpResourceDto>,
-    resource_templates: Vec<traits::McpResourceTemplateDto>,
-    prompts: Vec<traits::McpPromptDto>,
+    tools: Vec<platform_api::McpToolDto>,
+    resources: Vec<platform_api::McpResourceDto>,
+    resource_templates: Vec<platform_api::McpResourceTemplateDto>,
+    prompts: Vec<platform_api::McpPromptDto>,
     discovery_cache_partition: Option<DiscoveryCachePartition>,
     client: Option<Arc<McpClient>>,
     listener_connection: Option<Arc<jsonrpc::Connection>>,
@@ -667,25 +667,25 @@ pub const UNCONFIGURED_MESSAGE: &str = "No URL configured for this server";
 
 fn negotiated_protocol_from_cache_entry(
     entry: &crate::discovery_cache::DiscoveryCacheEntry,
-) -> traits::McpNegotiatedProtocol {
+) -> platform_api::McpNegotiatedProtocol {
     let era = match entry.negotiated_era.as_deref() {
-        Some("modern") => traits::McpProtocolEra::Modern,
-        _ => traits::McpProtocolEra::Legacy,
+        Some("modern") => platform_api::McpProtocolEra::Modern,
+        _ => platform_api::McpProtocolEra::Legacy,
     };
-    traits::McpNegotiatedProtocol {
+    platform_api::McpNegotiatedProtocol {
         era,
         version: match era {
-            traits::McpProtocolEra::Modern => "2026-07-28",
-            traits::McpProtocolEra::Legacy => "2025-11-25",
+            platform_api::McpProtocolEra::Modern => "2026-07-28",
+            platform_api::McpProtocolEra::Legacy => "2025-11-25",
         }
         .to_string(),
     }
 }
 
-fn negotiated_era_label(era: traits::McpProtocolEra) -> &'static str {
+fn negotiated_era_label(era: platform_api::McpProtocolEra) -> &'static str {
     match era {
-        traits::McpProtocolEra::Modern => "modern",
-        traits::McpProtocolEra::Legacy => "legacy",
+        platform_api::McpProtocolEra::Modern => "modern",
+        platform_api::McpProtocolEra::Legacy => "legacy",
     }
 }
 
@@ -1276,9 +1276,9 @@ impl McpRegistry {
         };
 
         enum Refreshed {
-            Tools(Vec<traits::McpToolDto>),
-            Prompts(Vec<traits::McpPromptDto>),
-            Resources(Vec<traits::McpResourceDto>),
+            Tools(Vec<platform_api::McpToolDto>),
+            Prompts(Vec<platform_api::McpPromptDto>),
+            Resources(Vec<platform_api::McpResourceDto>),
         }
         let refreshed = match change.kind {
             McpCatalogKind::Tools => client
@@ -1772,7 +1772,7 @@ impl McpRegistry {
         input: serde_json::Value,
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
-    ) -> Result<traits::McpToolResultDto, crate::client::McpClientError> {
+    ) -> Result<platform_api::McpToolResultDto, crate::client::McpClientError> {
         let mut lazy_dialed = false;
         let client = if let Some(client) = self.get_client(server).await {
             Some(client)
@@ -2807,7 +2807,7 @@ impl McpRegistry {
                     // unsolicited custom-notification catalog handler. The
                     // legacy protocol retains the established list_changed
                     // listener behavior.
-                    if negotiated.era == traits::McpProtocolEra::Legacy {
+                    if negotiated.era == platform_api::McpProtocolEra::Legacy {
                         listener_connection = Some(connection);
                     }
                 }
@@ -3460,7 +3460,7 @@ impl McpRegistry {
                 }
             }
         };
-        let maybe_push_headers = |candidates: &mut Vec<String>, headers: &traits::McpHeaders| {
+        let maybe_push_headers = |candidates: &mut Vec<String>, headers: &platform_api::McpHeaders| {
             for (name, value) in headers {
                 let lower_name = name.to_ascii_lowercase();
                 let lower_value = value.trim().to_ascii_lowercase();
@@ -3725,13 +3725,13 @@ impl McpRegistry {
         config: &McpServerConfig,
         captured_partition: Option<&DiscoveryCachePartition>,
         caps: &ServerCapabilitiesDto,
-        tools: &[traits::McpToolDto],
-        resources: &[traits::McpResourceDto],
-        resource_templates: &[traits::McpResourceTemplateDto],
-        prompts: &[traits::McpPromptDto],
+        tools: &[platform_api::McpToolDto],
+        resources: &[platform_api::McpResourceDto],
+        resource_templates: &[platform_api::McpResourceTemplateDto],
+        prompts: &[platform_api::McpPromptDto],
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
         grant_provenance: Option<&GrantProvenance>,
-        negotiated: Option<&traits::McpNegotiatedProtocol>,
+        negotiated: Option<&platform_api::McpNegotiatedProtocol>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
             return;
@@ -3871,7 +3871,7 @@ impl McpRegistry {
         (
             McpRawConnection,
             ServerCapabilitiesDto,
-            traits::McpNegotiatedProtocol,
+            platform_api::McpNegotiatedProtocol,
         ),
         McpError,
     > {
@@ -3884,9 +3884,9 @@ impl McpRegistry {
         };
         let expected_era = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
-                traits::McpProtocolEra::Modern
+                platform_api::McpProtocolEra::Modern
             }
-            crate::protocol_negotiation::NegotiationMode::Legacy => traits::McpProtocolEra::Legacy,
+            crate::protocol_negotiation::NegotiationMode::Legacy => platform_api::McpProtocolEra::Legacy,
         };
         let probe_timeout_ms = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
@@ -3899,7 +3899,7 @@ impl McpRegistry {
                 deadline,
                 self.transport.connect_and_initialize(
                     &spec,
-                    traits::McpConnectOptions {
+                    platform_api::McpConnectOptions {
                         expected_era: Some(expected_era),
                         deadline_ms: timeout.as_millis() as u64,
                         probe_timeout_ms,
@@ -4245,7 +4245,7 @@ impl McpRegistry {
         resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
         // Gate on the enable flag (mirror of CLAUDE_CODE_ENABLE_XAA).
-        if !traits::env::is_env_truthy(std::env::var("LINGXI_ENABLE_XAA").ok().as_deref()) {
+        if !platform_api::env::is_env_truthy(std::env::var("LINGXI_ENABLE_XAA").ok().as_deref()) {
             return Err(McpError::OAuth(format!(
                 "XAA is not enabled (set LINGXI_ENABLE_XAA=1). Remove 'xaa' from \
                  server '{}' to use the standard consent flow.",
@@ -4444,7 +4444,7 @@ impl McpRegistry {
     async fn run_interactive_oauth(
         &self,
         config: &McpServerConfig,
-        oauth_cfg: &traits::McpOAuthConfigDto,
+        oauth_cfg: &platform_api::McpOAuthConfigDto,
         key: &str,
         deps: &OAuthDeps,
         scope_override: Option<&str>,
@@ -4968,7 +4968,7 @@ impl McpRegistry {
     /// Returns `Ok(None)` when the config was already in the requested state (a
     /// no-op — claude's `p` filter excludes it). Otherwise `Ok(Some(state))`
     /// carries the server's post-toggle action state (claude's fulfilled
-    /// `u(name).type`): after disable it is [`traits::McpActionState::Disabled`];
+    /// `u(name).type`): after disable it is [`platform_api::McpActionState::Disabled`];
     /// after enable it is the live post-connect state read back from the
     /// registry (`Connected` / `Failed` / `NeedsAuth` / …). Crucially, a failed
     /// enable **connect** is NOT surfaced as `Err` — the server flips on but
@@ -4979,7 +4979,7 @@ impl McpRegistry {
         &self,
         name: &str,
         disabled: bool,
-    ) -> Result<Option<traits::McpActionState>, McpError> {
+    ) -> Result<Option<platform_api::McpActionState>, McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
         self.kick_pending_transport_cleanups().await;
@@ -5028,7 +5028,7 @@ impl McpRegistry {
                 self.emit_retire_event_if_shared(&retired_config, name, connection_id)
                     .await;
             }
-            return Ok(Some(traits::McpActionState::Disabled));
+            return Ok(Some(platform_api::McpActionState::Disabled));
         }
 
         config.disabled = false;
@@ -5052,7 +5052,7 @@ impl McpRegistry {
             let conns = self.connections.read().await;
             conns
                 .get(name)
-                .map_or(traits::McpActionState::Failed, project_action_state)
+                .map_or(platform_api::McpActionState::Failed, project_action_state)
         };
         Ok(Some(resulting))
     }
@@ -5100,16 +5100,16 @@ impl McpRegistry {
     }
 
     /// Project every known connection into the trait-facing
-    /// [`traits::McpServerInfo`] shape. Used by
+    /// [`platform_api::McpServerInfo`] shape. Used by
     /// `OrchestratorHandle::list_mcp_servers` (M6-07) so `/mcp` can list
     /// the registry without exposing the internal state-machine enum.
     ///
     /// Returned list is sorted by `name` for stable display order.
-    pub async fn snapshot(&self) -> Vec<traits::McpServerInfo> {
+    pub async fn snapshot(&self) -> Vec<platform_api::McpServerInfo> {
         let conns = self.connections.read().await;
-        let mut out: Vec<traits::McpServerInfo> = conns
+        let mut out: Vec<platform_api::McpServerInfo> = conns
             .values()
-            .map(|s| traits::McpServerInfo {
+            .map(|s| platform_api::McpServerInfo {
                 name: s.name().to_string(),
                 status: project_status(s),
                 transport: s.transport_kind().to_string(),
@@ -5124,9 +5124,9 @@ impl McpRegistry {
     /// preserves the full state vocabulary (pending / disabled / needs-auth /
     /// failed) the handler needs to pick claude-code's byte-exact state-aware
     /// message. Sorted by name for stable display.
-    pub async fn action_states(&self) -> Vec<(String, traits::McpActionState)> {
+    pub async fn action_states(&self) -> Vec<(String, platform_api::McpActionState)> {
         let conns = self.connections.read().await;
-        let mut out: Vec<(String, traits::McpActionState)> = conns
+        let mut out: Vec<(String, platform_api::McpActionState)> = conns
             .values()
             .map(|s| (s.name().to_string(), project_action_state(s)))
             .collect();
@@ -5137,7 +5137,7 @@ impl McpRegistry {
     /// Failed servers with their sanitized error text, for the `ToolSearch`
     /// empty-result diagnostics note — a port of claude-code's `wZr(u())`
     /// (`failed_mcp_servers`). Every server whose action state projects to
-    /// [`traits::McpActionState::Failed`] ("not connected") is included,
+    /// [`platform_api::McpActionState::Failed`] ("not connected") is included,
     /// carrying its recorded error where one exists, sanitized through
     /// [`sanitize_diagnostic`] (claude's `xLt`). Both the name and the error are
     /// sanitized (claude sanitizes both); the error is the untrusted, model-
@@ -5150,7 +5150,7 @@ impl McpRegistry {
         let conns = self.connections.read().await;
         let mut out: Vec<(String, Option<String>)> = conns
             .values()
-            .filter(|s| project_action_state(s) == traits::McpActionState::Failed)
+            .filter(|s| project_action_state(s) == platform_api::McpActionState::Failed)
             .map(|s| {
                 let error = match s {
                     McpConnectionState::Failed { error, .. } => Some(error.clone()),
@@ -5171,7 +5171,7 @@ impl McpRegistry {
     /// `Connecting` / `AwaitingOAuth` / `Reconnecting` (claude-code's MCP client
     /// `type === "pending"`). These may yet expose tools, so the `AgentTool`
     /// required-MCP gate waits on them before failing. NOTE: the public
-    /// [`traits::McpStatus`] UI projection collapses these into `Disconnected`;
+    /// [`platform_api::McpStatus`] UI projection collapses these into `Disconnected`;
     /// this reads the INTERNAL state map so a connecting server is
     /// distinguishable from a failed/absent one (the gap that blocked the
     /// 30s poll-wait).
@@ -5212,7 +5212,7 @@ impl McpRegistry {
             .read()
             .await
             .values()
-            .any(|s| project_action_state(s) == traits::McpActionState::Pending);
+            .any(|s| project_action_state(s) == platform_api::McpActionState::Pending);
         self.pending_servers
             .store(pending, std::sync::atomic::Ordering::Relaxed);
         pending
@@ -5271,7 +5271,7 @@ impl McpRegistry {
         // shows as available. `cached` (both `Connected` and `Cached`) is
         // reused as the fast-path source for a server that DOES have a
         // client, same as before this change.
-        let (cached, cache_only): (HashMap<String, Vec<traits::McpToolDto>>, Vec<String>) = {
+        let (cached, cache_only): (HashMap<String, Vec<platform_api::McpToolDto>>, Vec<String>) = {
             let conns = self.connections.read().await;
             let mut cached = HashMap::new();
             let mut cache_only = Vec::new();
@@ -5290,7 +5290,7 @@ impl McpRegistry {
             (cached, cache_only)
         };
         let mut out: Vec<String> = Vec::new();
-        let push_tools = |tools: Vec<traits::McpToolDto>, out: &mut Vec<String>| {
+        let push_tools = |tools: Vec<platform_api::McpToolDto>, out: &mut Vec<String>| {
             for tool in tools {
                 // `full_name` is `mcp__<server>__<tool>` (rewrite site in
                 // `connect`); the server segment is index 1.
@@ -5336,7 +5336,7 @@ impl McpRegistry {
     /// command list is deterministic.
     pub async fn connected_prompts(
         &self,
-    ) -> Vec<(String, protocol::McpConnectionId, traits::McpPromptDto)> {
+    ) -> Vec<(String, protocol::McpConnectionId, platform_api::McpPromptDto)> {
         let conns = self.connections.read().await;
         let mut servers: Vec<&String> = conns.keys().collect();
         servers.sort();
@@ -5475,7 +5475,7 @@ impl McpRegistry {
     /// segment, 1:1 with claude-code's `buildMcpToolName`. The MCP server,
     /// however, expects the UNNORMALIZED wire name in its `tools/call` request.
     /// claude-code keeps it as `mcpInfo.toolName` (`client.ts:1774`); here it
-    /// lives on the cached [`traits::McpToolDto::tool_name`], so the dispatch
+    /// lives on the cached [`platform_api::McpToolDto::tool_name`], so the dispatch
     /// path recovers it by matching the dto whose `full_name` equals the
     /// model-supplied name.
     ///
@@ -5712,7 +5712,7 @@ mod backoff_schedule_tests {
 
 /// Borrow the `oauth` config block of an SSE/HTTP spec, if present. Other
 /// transports (stdio, websocket, …) never carry OAuth → `None`.
-fn spec_oauth(spec: &McpTransportSpec) -> Option<&traits::McpOAuthConfigDto> {
+fn spec_oauth(spec: &McpTransportSpec) -> Option<&platform_api::McpOAuthConfigDto> {
     match spec {
         McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => {
             oauth.as_ref()
@@ -5884,7 +5884,7 @@ fn extract_scope_from_www_auth(s: &str) -> Option<String> {
 /// without making the helpers part of the public API.
 #[doc(hidden)]
 pub mod test_support {
-    use traits::McpError;
+    use platform_api::McpError;
 
     /// See [`super::error_is_403_insufficient_scope`].
     #[must_use]
@@ -6063,7 +6063,7 @@ fn discovery_source_emission(decision: &crate::discovery_cache::Decision) -> Opt
 fn tools_listed_payload(
     transport_kind: &str,
     elapsed: std::time::Duration,
-    tools: &[traits::McpToolDto],
+    tools: &[platform_api::McpToolDto],
     server_name: &str,
 ) -> telemetry::tengu::mcp::ToolsListedPayload {
     use telemetry::pii::Verified;
@@ -6172,15 +6172,15 @@ fn state_is_disabled(state: &McpConnectionState) -> bool {
 }
 
 /// Project a [`McpConnectionState`] onto the fine-grained
-/// [`traits::McpActionState`] used by the `/mcp reconnect|enable|disable`
+/// [`platform_api::McpActionState`] used by the `/mcp reconnect|enable|disable`
 /// action handler — a faithful mirror of claude-code's client `type`
 /// discriminant. The `config.disabled` gate takes precedence (a disabled
 /// server reports `"disabled"` regardless of its last live state), then:
 /// `Connected`/`HealthChecking` → connected, `Connecting`/`Reconnecting` →
 /// pending, `AwaitingOAuth` → needs-auth, everything else (`Failed`,
 /// `Disconnected`, `Stopped`) → failed ("not connected").
-fn project_action_state(state: &McpConnectionState) -> traits::McpActionState {
-    use traits::McpActionState;
+fn project_action_state(state: &McpConnectionState) -> platform_api::McpActionState {
+    use platform_api::McpActionState;
     if state_is_disabled(state) {
         return McpActionState::Disabled;
     }
@@ -6202,9 +6202,9 @@ fn project_action_state(state: &McpConnectionState) -> traits::McpActionState {
 }
 
 /// Project a [`McpConnectionState`] variant onto the trait-facing
-/// [`traits::McpStatus`] (M6-07).
-fn project_status(state: &McpConnectionState) -> traits::McpStatus {
-    use traits::McpStatus;
+/// [`platform_api::McpStatus`] (M6-07).
+fn project_status(state: &McpConnectionState) -> platform_api::McpStatus {
+    use platform_api::McpStatus;
     match state {
         // §11 Stage 2 — same rationale as `project_action_state`: a cached
         // server reports `Connected`, never a distinct status.
@@ -6243,7 +6243,7 @@ mod tests {
     use std::sync::Mutex as TestMutex;
     use std::task::{Context, Poll, Wake, Waker};
     use tokio::sync::{mpsc, Notify};
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
         McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -6290,7 +6290,7 @@ mod tests {
         // §26a — canned `resources/templates/list` rows and the capability
         // presence bit that gates whether `connect` fetches them at all
         // (`initialize` reports `resources: true` only when this is set).
-        resource_templates: Vec<traits::McpResourceTemplateDto>,
+        resource_templates: Vec<platform_api::McpResourceTemplateDto>,
         resources_capability: AtomicBool,
         list_resource_templates_fails: AtomicBool,
         drivable_calls: bool,
@@ -6388,7 +6388,7 @@ mod tests {
 
         /// A mock whose server advertises the `resources` capability and
         /// answers `resources/templates/list` with `templates` (§26a).
-        fn with_resource_templates(templates: Vec<traits::McpResourceTemplateDto>) -> Self {
+        fn with_resource_templates(templates: Vec<platform_api::McpResourceTemplateDto>) -> Self {
             let mock = Self::new(&[]);
             mock.resources_capability.store(true, Ordering::SeqCst);
             Self {
@@ -6471,7 +6471,7 @@ mod tests {
         async fn list_resource_templates(
             &self,
             _c: &McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, McpError> {
             self.templates_calls.fetch_add(1, Ordering::SeqCst);
             self.resource_templates_started.notify_one();
             if self.block_resource_templates.load(Ordering::SeqCst) {
@@ -7686,24 +7686,24 @@ mod tests {
 
         assert_eq!(
             registry.set_disabled("mock", true).await.unwrap(),
-            Some(traits::McpActionState::Disabled)
+            Some(platform_api::McpActionState::Disabled)
         );
         assert!(registry.get_client("mock").await.is_none());
         assert_eq!(
             registry.action_states().await,
-            vec![("mock".to_string(), traits::McpActionState::Disabled)]
+            vec![("mock".to_string(), platform_api::McpActionState::Disabled)]
         );
         let retired = changes.recv().await.unwrap();
         assert_eq!(retired.retired_connection_id, Some(connection_id));
 
         assert_eq!(
             registry.set_disabled("mock", false).await.unwrap(),
-            Some(traits::McpActionState::Connected)
+            Some(platform_api::McpActionState::Connected)
         );
         assert!(registry.get_client("mock").await.is_some());
         assert_eq!(
             registry.action_states().await,
-            vec![("mock".to_string(), traits::McpActionState::Connected)]
+            vec![("mock".to_string(), platform_api::McpActionState::Connected)]
         );
     }
 
@@ -7736,7 +7736,7 @@ mod tests {
 
         assert_eq!(
             registry.set_disabled("srv", true).await.unwrap(),
-            Some(traits::McpActionState::Disabled)
+            Some(platform_api::McpActionState::Disabled)
         );
         assert_eq!(
             mock.disconnect_calls.load(Ordering::SeqCst),
@@ -7951,7 +7951,7 @@ mod tests {
 
         assert_eq!(
             registry.set_disabled("srv", true).await.unwrap(),
-            Some(traits::McpActionState::Disabled)
+            Some(platform_api::McpActionState::Disabled)
         );
         assert!(
             registry.lazy_upgrade_slots.read().await.is_empty(),
@@ -7994,7 +7994,7 @@ mod tests {
         // Disabling settles as `Disabled`.
         assert_eq!(
             registry.set_disabled("mock", true).await.unwrap(),
-            Some(traits::McpActionState::Disabled)
+            Some(platform_api::McpActionState::Disabled)
         );
         // The next connect will fail (the catalog fetch errors out).
         mock.list_tools_fails.store(true, Ordering::SeqCst);
@@ -8004,11 +8004,11 @@ mod tests {
         // can render "Enabled …, but it isn't connected yet." instead of erroring.
         assert_eq!(
             registry.set_disabled("mock", false).await.unwrap(),
-            Some(traits::McpActionState::Failed)
+            Some(platform_api::McpActionState::Failed)
         );
         assert_eq!(
             registry.action_states().await,
-            vec![("mock".to_string(), traits::McpActionState::Failed)]
+            vec![("mock".to_string(), platform_api::McpActionState::Failed)]
         );
     }
 
@@ -8087,7 +8087,7 @@ mod tests {
             .await
             .expect("transport teardown must not hold the connection-state lock");
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].status, traits::McpStatus::Connected);
+        assert_eq!(snapshot[0].status, platform_api::McpStatus::Connected);
 
         mock.disconnect_release.notify_one();
         disconnect.await.unwrap().unwrap();
@@ -8209,8 +8209,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: BridgeMock::new(&["old"]).tools,
@@ -8290,8 +8290,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
@@ -8337,8 +8337,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
@@ -8450,8 +8450,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
@@ -8958,7 +8958,7 @@ mod tests {
     #[tokio::test]
     async fn connect_does_not_issue_the_templates_rpc_when_the_cache_is_ineligible() {
         let mock = Arc::new(BridgeMock::with_resource_templates(vec![
-            traits::McpResourceTemplateDto {
+            platform_api::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
                 name: "file-template".into(),
                 description: Some("A file on disk".into()),
@@ -8999,7 +8999,7 @@ mod tests {
         // `BridgeMock::new` reports `resources: false` from `initialize`, so
         // even a mock stocked with templates must yield none on connect.
         let mut mock = BridgeMock::new(&[]);
-        mock.resource_templates = vec![traits::McpResourceTemplateDto {
+        mock.resource_templates = vec![platform_api::McpResourceTemplateDto {
             uri_template: "file:///{path}".into(),
             name: "unreachable".into(),
             description: None,
@@ -9135,7 +9135,7 @@ mod tests {
         let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
             unreachable!()
         };
-        *oauth = Some(traits::McpOAuthConfigDto {
+        *oauth = Some(platform_api::McpOAuthConfigDto {
             client_id: None,
             callback_port: None,
             auth_server_metadata_url: None,
@@ -9144,8 +9144,8 @@ mod tests {
         });
 
         let storage = Arc::new(XaaMemStorage::default());
-        let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
-        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+        let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
         let server_key = oauth::server_key(&cfg.name, &cfg.spec);
         oauth::store_tokens(
             &storage_dyn,
@@ -9169,7 +9169,7 @@ mod tests {
             mock.clone() as Arc<dyn RawConnectionProvider>,
         )
         .with_oauth(OAuthDeps {
-            http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+            http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
             clock,
             storage: storage_dyn,
             on_authorization_url: Arc::new(|_| {}),
@@ -9217,7 +9217,7 @@ mod tests {
             else {
                 unreachable!()
             };
-            *oauth_config = Some(traits::McpOAuthConfigDto {
+            *oauth_config = Some(platform_api::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,
                 auth_server_metadata_url: None,
@@ -9226,8 +9226,8 @@ mod tests {
             });
 
             let storage = Arc::new(XaaMemStorage::default());
-            let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
-            let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+            let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+            let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
             let server_key = oauth::server_key(&cfg.name, &cfg.spec);
             let store_token = |access: &str, refresh: &str| {
                 let storage = storage_dyn.clone();
@@ -9261,7 +9261,7 @@ mod tests {
                 mock.clone() as Arc<dyn RawConnectionProvider>,
             )
             .with_oauth(OAuthDeps {
-                http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+                http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
                 clock: clock.clone(),
                 storage: storage_dyn.clone(),
                 on_authorization_url: Arc::new(|_| {}),
@@ -9287,8 +9287,8 @@ mod tests {
                 tools: true,
                 ..ServerCapabilitiesDto::default()
             };
-            let protocol = traits::McpNegotiatedProtocol {
-                era: traits::McpProtocolEra::Legacy,
+            let protocol = platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             };
             let tool = |name: &str| McpToolDto {
@@ -9383,7 +9383,7 @@ mod tests {
         else {
             unreachable!()
         };
-        *oauth_config = Some(traits::McpOAuthConfigDto {
+        *oauth_config = Some(platform_api::McpOAuthConfigDto {
             client_id: None,
             callback_port: None,
             auth_server_metadata_url: None,
@@ -9391,8 +9391,8 @@ mod tests {
             xaa: None,
         });
         let storage = Arc::new(XaaMemStorage::default());
-        let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
-        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+        let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
         let key = oauth::server_key(&cfg.name, &cfg.spec);
         oauth::store_tokens(
             &storage_dyn,
@@ -9415,7 +9415,7 @@ mod tests {
             mock.clone() as Arc<dyn RawConnectionProvider>,
         )
         .with_oauth(OAuthDeps {
-            http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+            http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
             clock,
             storage: storage_dyn,
             on_authorization_url: Arc::new(|_| {}),
@@ -9951,8 +9951,8 @@ mod tests {
             connection_id: McpConnectionId::new(),
             grant_provenance: Some(GrantProvenance::unbound()),
             negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
-            negotiated: traits::McpNegotiatedProtocol {
-                era: traits::McpProtocolEra::Modern,
+            negotiated: platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Modern,
                 version: "2026-07-28".into(),
             },
             capabilities: ServerCapabilitiesDto::default(),
@@ -10048,8 +10048,8 @@ mod tests {
             negotiation_mode: crate::protocol_negotiation::NegotiationMode::Auto {
                 probe_timeout_ms: 1_000,
             },
-            negotiated: traits::McpNegotiatedProtocol {
-                era: traits::McpProtocolEra::Legacy,
+            negotiated: platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             capabilities: ServerCapabilitiesDto::default(),
@@ -10876,8 +10876,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
@@ -11000,8 +11000,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -11177,8 +11177,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
@@ -11408,8 +11408,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
@@ -11525,8 +11525,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -11649,8 +11649,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -11835,8 +11835,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -11918,8 +11918,8 @@ mod tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -11954,7 +11954,7 @@ mod tests {
         env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let mock = Arc::new(BridgeMock::with_resource_templates(vec![
-            traits::McpResourceTemplateDto {
+            platform_api::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
                 name: "tmpl".into(),
                 description: None,
@@ -12038,7 +12038,7 @@ mod tests {
             .await;
         assert_eq!(
             registry.set_disabled("srv", false).await.unwrap(),
-            Some(traits::McpActionState::Connected)
+            Some(platform_api::McpActionState::Connected)
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             registry.with_headers_helper_cwd(std::path::PathBuf::from("/tmp/other"))
@@ -13559,7 +13559,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     struct FixedClock(std::time::SystemTime);
-    impl traits::Clock for FixedClock {
+    impl platform_api::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             self.0
         }
@@ -13570,13 +13570,13 @@ mod tests {
         map: TestMutex<HashMap<(String, String), protocol::SecureStorageData>>,
     }
     #[async_trait]
-    impl traits::SecureStorage for XaaMemStorage {
+    impl platform_api::SecureStorage for XaaMemStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
             data: protocol::SecureStorageData,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -13587,7 +13587,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -13599,14 +13599,14 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -13619,8 +13619,8 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> traits::SecureStorageBackend {
-            traits::SecureStorageBackend::PlainText
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::PlainText
         }
     }
 
@@ -13660,11 +13660,11 @@ mod tests {
         }
     }
     #[async_trait]
-    impl traits::HttpTransport for GatedXaaHttp {
+    impl platform_api::HttpTransport for GatedXaaHttp {
         async fn request(
             &self,
             req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             let url = req.url.clone();
             if url.contains("oauth-protected-resource") {
                 return Ok(protocol::HttpResponse {
@@ -13713,8 +13713,8 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
@@ -13723,9 +13723,9 @@ mod tests {
             name: name.into(),
             spec: McpTransportSpec::Http {
                 url: "https://mcp.example.com/v1".into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
-                oauth: Some(traits::McpOAuthConfigDto {
+                oauth: Some(platform_api::McpOAuthConfigDto {
                     client_id: Some("as-client".into()),
                     callback_port: None,
                     auth_server_metadata_url: None,
@@ -13758,11 +13758,11 @@ mod tests {
         let http = GatedXaaHttp::new();
         let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(
             OAuthDeps {
-                http: http.clone() as Arc<dyn traits::HttpTransport>,
+                http: http.clone() as Arc<dyn platform_api::HttpTransport>,
                 clock: Arc::new(FixedClock(
                     std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
                 )),
-                storage: Arc::new(XaaMemStorage::default()) as Arc<dyn traits::SecureStorage>,
+                storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
                 on_authorization_url: Arc::new(|_url: &str| {}),
                 xaa_config: Some(Arc::new(FixedXaaProvider)),
             },
@@ -13806,7 +13806,7 @@ mod snapshot_tests {
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
     use std::sync::Arc;
-    use traits::{
+    use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
@@ -13916,7 +13916,7 @@ mod snapshot_tests {
         let mut blank = stdio_cfg("blank");
         blank.spec = McpTransportSpec::Http {
             url: "   ".into(),
-            headers: traits::McpHeaders::default(),
+            headers: platform_api::McpHeaders::default(),
             headers_helper: None,
             oauth: None,
         };
@@ -13932,7 +13932,7 @@ mod snapshot_tests {
         let mut broken = stdio_cfg("broken");
         broken.spec = McpTransportSpec::Http {
             url: "${MISSING:-}".into(),
-            headers: traits::McpHeaders::default(),
+            headers: platform_api::McpHeaders::default(),
             headers_helper: None,
             oauth: None,
         };
@@ -13957,7 +13957,7 @@ mod snapshot_tests {
         let mut malformed = stdio_cfg("malformed");
         malformed.spec = McpTransportSpec::Http {
             url: "api.example.com/mcp".into(),
-            headers: traits::McpHeaders::default(),
+            headers: platform_api::McpHeaders::default(),
             headers_helper: None,
             oauth: None,
         };

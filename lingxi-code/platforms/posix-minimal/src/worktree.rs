@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
-use traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+use platform_api::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// Stub worktree manager.
 #[derive(Default)]

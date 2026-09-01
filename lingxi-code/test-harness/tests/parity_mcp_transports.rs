@@ -26,7 +26,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use test_harness::parity::load_fixture;
-use traits::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -57,19 +57,19 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
         },
         McpTransportKind::Sse => McpTransportSpec::Sse {
             url: "http://127.0.0.1:0/sse".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
         McpTransportKind::Http => McpTransportSpec::Http {
             url: "http://127.0.0.1:0/mcp".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
         McpTransportKind::WebSocket => McpTransportSpec::WebSocket {
             url: "ws://127.0.0.1:0".into(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: None,
         },
         McpTransportKind::InProcess => McpTransportSpec::InProcess {

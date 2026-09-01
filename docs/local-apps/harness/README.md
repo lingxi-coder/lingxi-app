@@ -43,7 +43,7 @@ WebSearch(Tavily) 是**用户确认过的有意分歧**，所以这条红大概�
 
 ### 3. `filesystem::apply_line_window_tests::prefix_read_trims_only_incomplete_trailing_utf8`
 
-`traits/src/filesystem.rs:440` 的 `assert!(got.truncated)`。该文件最后一次改动是
+`platform-api/src/filesystem.rs:440` 的 `assert!(got.truncated)`。该文件最后一次改动是
 `24e91f6ab`（2026-08-25），早于 plugin-LSP 那次提交，所以不是它带进来的。
 
 ## 已实测的「会骗人的判据」
@@ -259,7 +259,7 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 
     cargo test -p engine-mobile -p plugin -p client-protocol -p branding -p tasks \
       -p tool-workflow -p local-apps -p skill-api -p engine-desktop -p permission \
-      -p traits -p mcp -p bridge-server -p test-harness -p cli \
+      -p platform-api -p mcp -p bridge-server -p test-harness -p cli \
       --all-features --no-fail-fast 2>&1 | tee /tmp/stageB.txt
     ./scripts/lap-gate.sh parse --run /tmp/stageB.txt --out /tmp/stageB.json
 

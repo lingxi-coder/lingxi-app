@@ -6,7 +6,7 @@
 
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
-use engine::SessionState;
+use lingxi_core::SessionState;
 use protocol::{AgentId, McpConnectionId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -84,12 +84,12 @@ pub struct ToolUseContext {
     pub depth: u32,
     /// Effective observer inherited from a parent subagent. The Agent tool
     /// copies this to a child only when the child has no direct observer.
-    pub observer: Option<traits::subagent_spawn::ObserverSpec>,
+    pub observer: Option<platform_api::subagent_spawn::ObserverSpec>,
     /// (`/rewind`) Pre-edit file-history backup hook. The `Edit`/`Write`/
     /// `NotebookEdit` tools call `track_edit(path)` through this BEFORE writing,
     /// so `/rewind` can restore the pre-edit content. `None` (tests / no
     /// checkpointing) makes every write untracked (no behavior change).
-    pub file_history: Option<Arc<dyn traits::FileHistorySink>>,
+    pub file_history: Option<Arc<dyn platform_api::FileHistorySink>>,
     // File state cache wired in Plan 10.
 }
 

@@ -13,7 +13,7 @@ use crate::turn_loop::{
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
-use engine::SessionState;
+use lingxi_core::SessionState;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use llm_client::{LlmError, LlmEvent, LlmResponse};
@@ -34,8 +34,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 use tool_api::ToolRegistryView as _;
-use traits::orchestrator::ModelListing;
-use traits::OutputStream;
+use platform_api::orchestrator::ModelListing;
+use platform_api::OutputStream;
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -265,11 +265,11 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// to [`crate::provider_adapter::ProviderApiAdapter::last_rate_limit_info`],
     /// which is populated from every successful 2xx response's headers.
     ///
-    /// Returns a [`traits::RateLimitSnapshot`] carrying all three header-derived
+    /// Returns a [`platform_api::RateLimitSnapshot`] carrying all three header-derived
     /// fields (`rate_limit_type`, `overage_status`, `overage_disabled_reason`).
     /// Using the public snapshot type avoids leaking the orchestrator-internal
     /// `RateLimitInfo` struct through the trait.
-    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+    fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
         None
     }
 
@@ -297,11 +297,11 @@ pub trait OrchestratorApiClient: Send + Sync {
     ///
     /// Task 8 (llm-client future-work batch 3): unlike
     /// [`Self::last_rate_limit_info`] — whose signature is kept untouched and
-    /// projects the three-field public `traits::RateLimitSnapshot` — this
+    /// projects the three-field public `platform_api::RateLimitSnapshot` — this
     /// returns the orchestrator-internal nine-field
     /// [`crate::model::rate_limit::RateLimitInfo`] so the turn drivers can
     /// forward every unified header value to
-    /// `traits::OutputStream::emit_rate_limit`.
+    /// `platform_api::OutputStream::emit_rate_limit`.
     ///
     /// Default returns `None` (mocks / non-Anthropic impls compile
     /// unchanged); `ProviderApiAdapter` overrides it to expose its cached
@@ -1151,10 +1151,10 @@ pub struct ConversationOrchestrator {
     pub(crate) model_runtime: ModelRuntime,
     /// Session-owned dynamic-workflow gate shared with the Workflow tool and
     /// TUI `/config` consumers.
-    pub(crate) dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate,
+    pub(crate) dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size setting shared with the Workflow tool and
     /// TUI `/config` consumers.
-    pub(crate) workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState,
+    pub(crate) workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState,
     /// `queryTracking.chainId` for analytics (claude-code `query.ts:347-358`): a
     /// random uuid grouping a query chain, stamped onto the `queryChainId` field
     /// of `tengu_query_error` / `tengu_auto_compact_*` events. In claude-code a
@@ -1215,7 +1215,7 @@ pub struct ConversationOrchestrator {
     /// rendered per request as a separate second message. Stable host/tool
     /// facts remain frozen in `mobile_runtime_environment_message`.
     pub(crate) mobile_runtime_environment:
-        Option<traits::mobile_runtime_environment::MobileRuntimeEnvironment>,
+        Option<platform_api::mobile_runtime_environment::MobileRuntimeEnvironment>,
     /// Optional mobile host-path to guest-path mapping for live cwd updates.
     pub(crate) mobile_workspace_cwd_resolver:
         Option<Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>>,
@@ -1237,7 +1237,7 @@ pub struct ConversationOrchestrator {
     pub(crate) transcript: TranscriptStore,
     /// Model-input assembly, reminder, and prompt cache state.
     pub(crate) prompt_runtime: PromptRuntime,
-    /// Set by [`traits::OrchestratorHandle::request_exit`] (M5-10).
+    /// Set by [`platform_api::OrchestratorHandle::request_exit`] (M5-10).
     /// The REPL (M5-13) checks this flag at the start of each iteration
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
@@ -1265,11 +1265,11 @@ pub struct ConversationOrchestrator {
     /// `None` (tests / non-desktop roots) ⇒ `fork_conversation` fails with a
     /// clear `ActionFailed` rather than panicking. Mirrors the existing
     /// `with_compaction` / `with_cache_safe_slot` Option-field pattern.
-    pub(crate) fork_spawner: Option<Arc<dyn traits::subagent_spawn::SubagentSpawner>>,
+    pub(crate) fork_spawner: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawner>>,
     /// `/fork` budget enforcer inherited by the spawned background agent
     /// (`SubagentInheritance::budget`). Wired via [`Self::with_fork_budget`].
     /// `None` ⇒ `fork_conversation` fails gracefully.
-    pub(crate) fork_budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    pub(crate) fork_budget: Option<Arc<dyn platform_api::budget::BudgetEnforcerHandle>>,
     /// 2.1.212 `/fork` (`vAd`) background-session forker. When wired (via
     /// [`Self::with_bg_session_forker`], the CLI composition root's
     /// `CliBgSessionForker`), [`OrchestratorHandle::fork_to_background_session`]
@@ -1278,13 +1278,13 @@ pub struct ConversationOrchestrator {
     /// session. `None` (tests / non-desktop roots) ⇒ that handle method fails
     /// with a clear `ActionFailed`. Mirrors the `fork_spawner`/`fork_budget`
     /// optional-seam pattern above.
-    pub(crate) bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
+    pub(crate) bg_session_forker: Option<Arc<dyn platform_api::bg_session_forker::BgSessionForker>>,
     /// Host-owned live catalog reconciler used by `register_repo_root`.
     ///
     /// The orchestrator admits the root into the sandbox and MCP root set
     /// first; the desktop composition root then refreshes the registries it
     /// exclusively owns.
-    pub(crate) repo_root_reloader: Option<Arc<dyn traits::RepoRootReloader>>,
+    pub(crate) repo_root_reloader: Option<Arc<dyn platform_api::RepoRootReloader>>,
     /// `/recap` side-query runner — the SAME single-turn
     /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
     /// from the composition root's `forked_runner` before it moves into the

@@ -32,7 +32,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
-use traits::team_spawn::TeamSpawnSeam;
+use platform_api::team_spawn::TeamSpawnSeam;
 
 use crate::mode::CoordinatorMode;
 use crate::team_file;
@@ -334,7 +334,7 @@ impl Tool for TeamDeleteTool {
             // `clearLeaderTeamName`, `utils/tasks.ts:43`) so the leader's
             // `getTaskListId()` falls back to the session id once the team is
             // gone.
-            traits::team_registry::clear_leader_team_name();
+            platform_api::team_registry::clear_leader_team_name();
             if let Some(name) = &team_name {
                 self.emit_team_deleted(name).await;
             }
@@ -448,14 +448,14 @@ mod tests {
             _name: String,
             _team_name: String,
             _description: String,
-        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+        ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
-        async fn kill(&self, task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+        async fn kill(&self, task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             self.kills.fetch_add(1, Ordering::SeqCst);
             *self.last_killed.lock().unwrap() = Some(task_id.to_string());
             match &self.kill_err {
-                Some(msg) => Err(traits::team_spawn::TeamSpawnError::NotFound(msg.clone())),
+                Some(msg) => Err(platform_api::team_spawn::TeamSpawnError::NotFound(msg.clone())),
                 None => Ok(()),
             }
         }

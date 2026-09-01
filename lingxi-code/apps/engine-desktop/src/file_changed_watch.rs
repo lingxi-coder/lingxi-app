@@ -15,7 +15,7 @@
 //! ## What this does (and does NOT do)
 //! SCOPE is firing the hook only. This watcher resolves the watch paths from the
 //! registered `FileChanged` hooks, watches the PARENT directories of those paths
-//! via the in-tree `fs_watch` primitive ([`traits::FileSystem::watch`]), and —
+//! via the in-tree `fs_watch` primitive ([`platform_api::FileSystem::watch`]), and —
 //! for every changed path that is one of the resolved watch paths — fires
 //! [`FileChangedFirer::fire`] best-effort with the chokidar-style event kind.
 //!
@@ -49,7 +49,7 @@
 //! result as chokidar's per-file watch.
 //!
 //! ## Change-kind mapping (chokidar event names)
-//! The in-tree [`traits::FileEventKind`] maps onto the chokidar event strings
+//! The in-tree [`platform_api::FileEventKind`] maps onto the chokidar event strings
 //! claude-code fires (`fileChangedWatcher.ts:75-77`):
 //! - [`FileEventKind::Created`]  → `"add"`
 //! - [`FileEventKind::Modified`] → `"change"`
@@ -72,7 +72,7 @@ use hooks::file_changed_firer::{FileChangedFire, FileChangedFirer};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use traits::{FileEvent, FileEventKind, FileSystem};
+use platform_api::{FileEvent, FileEventKind, FileSystem};
 
 /// Map an in-tree [`FileEventKind`] onto the chokidar event-name string
 /// claude-code fires (`fileChangedWatcher.ts:75-77`).
@@ -563,10 +563,10 @@ mod tests {
             _p: &str,
             _o: Option<u64>,
             _l: Option<u64>,
-        ) -> Result<traits::FileContent, traits::FsError> {
-            Err(traits::FsError::Io("unused".into()))
+        ) -> Result<platform_api::FileContent, platform_api::FsError> {
+            Err(platform_api::FsError::Io("unused".into()))
         }
-        async fn write_file(&self, _p: &str, _c: &str) -> Result<(), traits::FsError> {
+        async fn write_file(&self, _p: &str, _c: &str) -> Result<(), platform_api::FsError> {
             Ok(())
         }
         fn is_within_workspace(&self, _p: &str) -> bool {
@@ -575,36 +575,36 @@ mod tests {
         async fn watch(
             &self,
             dir: &str,
-        ) -> Result<std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>, traits::FsError>
+        ) -> Result<std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>, platform_api::FsError>
         {
             self.watched.lock().unwrap().push(dir.to_string());
             Ok(Box::pin(tokio_stream::iter(Vec::<FileEvent>::new())))
         }
-        async fn append_file(&self, _p: &str, _c: &str) -> Result<(), traits::FsError> {
+        async fn append_file(&self, _p: &str, _c: &str) -> Result<(), platform_api::FsError> {
             Ok(())
         }
-        async fn truncate(&self, _p: &str, _l: u64) -> Result<(), traits::FsError> {
+        async fn truncate(&self, _p: &str, _l: u64) -> Result<(), platform_api::FsError> {
             Ok(())
         }
-        async fn file_mtime(&self, _p: &str) -> Result<std::time::SystemTime, traits::FsError> {
+        async fn file_mtime(&self, _p: &str) -> Result<std::time::SystemTime, platform_api::FsError> {
             Ok(std::time::SystemTime::UNIX_EPOCH)
         }
-        async fn file_size(&self, _p: &str) -> Result<u64, traits::FsError> {
+        async fn file_size(&self, _p: &str) -> Result<u64, platform_api::FsError> {
             Ok(0)
         }
-        async fn delete_file(&self, _p: &str) -> Result<(), traits::FsError> {
+        async fn delete_file(&self, _p: &str) -> Result<(), platform_api::FsError> {
             Ok(())
         }
-        async fn symlink(&self, _t: &str, _l: &str) -> Result<(), traits::FsError> {
+        async fn symlink(&self, _t: &str, _l: &str) -> Result<(), platform_api::FsError> {
             Ok(())
         }
         async fn flock_exclusive(
             &self,
             _p: &str,
-        ) -> Result<Box<dyn traits::FlockGuard>, traits::FsError> {
-            Err(traits::FsError::Io("unused".into()))
+        ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
+            Err(platform_api::FsError::Io("unused".into()))
         }
-        async fn fsync(&self, _p: &str) -> Result<(), traits::FsError> {
+        async fn fsync(&self, _p: &str) -> Result<(), platform_api::FsError> {
             Ok(())
         }
     }

@@ -18,7 +18,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/resume` handler — renders the resumable-session listing.
 #[derive(Clone)]

@@ -4,9 +4,9 @@
 
 **Goal:** Build the TUI-side multi-agent presentation foundation — `MultiAgentState`, a `MultiAgentEvent` mutation seam, and a swappable `MultiAgentFeed` adapter (fixture + real `TaskRegistryHandle` poller) — fully unit-tested, with zero engine wiring.
 
-**Architecture:** A new `tui/src/multiagent/` module owns a pure presentation model (`MultiAgentState` on `AppState`), a single mutator `apply_multiagent_event` (mirrors the existing `streaming::apply_event`), and a `MultiAgentFeed` trait with two impls: `FixtureFeed` (deterministic, for tests) and `PollerFeed` (over `traits::task_registry::TaskRegistryHandle`, the genuinely-live task path). The `root.rs` pump integration and the desktop `TaskRegistry` construction are intentionally deferred to M9-05 (see "Scope boundary" below).
+**Architecture:** A new `tui/src/multiagent/` module owns a pure presentation model (`MultiAgentState` on `AppState`), a single mutator `apply_multiagent_event` (mirrors the existing `streaming::apply_event`), and a `MultiAgentFeed` trait with two impls: `FixtureFeed` (deterministic, for tests) and `PollerFeed` (over `platform_api::task_registry::TaskRegistryHandle`, the genuinely-live task path). The `root.rs` pump integration and the desktop `TaskRegistry` construction are intentionally deferred to M9-05 (see "Scope boundary" below).
 
-**Tech Stack:** Rust 1.82, `tokio` (mpsc/Notify), `async-trait`, the existing `tui` crate (iocraft), `traits::task_registry`.
+**Tech Stack:** Rust 1.82, `tokio` (mpsc/Notify), `async-trait`, the existing `tui` crate (iocraft), `platform_api::task_registry`.
 
 ---
 
@@ -39,7 +39,7 @@ The "single mutation seam" invariant (design §2.3) is honored: every multi-agen
 - `lingxi-code/tui/src/lib.rs` — add `pub mod multiagent;`.
 - `lingxi-code/tui/src/state.rs` — add `multiagent: MultiAgentState` field to `AppState` + init in `new`.
 
-**No other files change in M9-01.** (`root.rs`, the desktop apps, and `tui/Cargo.toml` are untouched — the poller consumes the `traits::task_registry::TaskRegistryHandle` trait, which `tui` already reaches transitively via its existing `traits` dependency.)
+**No other files change in M9-01.** (`root.rs`, the desktop apps, and `tui/Cargo.toml` are untouched — the poller consumes the `platform_api::task_registry::TaskRegistryHandle` trait, which `tui` already reaches transitively via its existing `traits` dependency.)
 
 ---
 
@@ -63,7 +63,7 @@ Create `lingxi-code/tui/src/multiagent/state.rs`:
 //! are pure functions of this state.
 
 /// One background task as surfaced to the TUI. Mirrors the field shape of
-/// `traits::task_registry::TaskRecord` (the live task path) so the poller
+/// `platform_api::task_registry::TaskRecord` (the live task path) so the poller
 /// maps one-to-one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskRow {
@@ -518,7 +518,7 @@ Create `lingxi-code/tui/src/multiagent/poller.rs`:
 
 ```rust
 //! `PollerFeed` — the live [`MultiAgentFeed`], reading the production task
-//! registry through the narrow `traits::task_registry::TaskRegistryHandle`
+//! registry through the narrow `platform_api::task_registry::TaskRegistryHandle`
 //! trait (no dependency on the concrete `tasks` crate). (M9-01)
 
 use crate::multiagent::adapter::MultiAgentFeed;
@@ -526,7 +526,7 @@ use crate::multiagent::event::MultiAgentEvent;
 use crate::multiagent::state::TaskRow;
 use async_trait::async_trait;
 use std::sync::Arc;
-use traits::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle};
+use platform_api::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle};
 
 /// Maps a `TaskRecord` (the trait's wire shape) onto a `TaskRow` (the TUI's
 /// presentation shape). Total — every `TaskRecord` field has a `TaskRow` home.
@@ -573,7 +573,7 @@ impl MultiAgentFeed for PollerFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::task_registry::{TaskCreateInput, TaskOutputChunk, TaskRegistryError, TaskUpdatePatch};
+    use platform_api::task_registry::{TaskCreateInput, TaskOutputChunk, TaskRegistryError, TaskUpdatePatch};
 
     /// Minimal stand-in `TaskRegistryHandle`: `list` returns a canned set; the
     /// other methods are unused by `PollerFeed::poll` and return trivially.
@@ -682,7 +682,7 @@ Create `lingxi-code/tui/tests/multiagent_contract_test.rs`:
 
 use tui::multiagent::{FixtureFeed, MultiAgentEvent, MultiAgentFeed, TaskRow};
 use tui::multiagent::poller::task_row_from_record;
-use traits::task_registry::TaskRecord;
+use platform_api::task_registry::TaskRecord;
 
 /// The record→row mapping is TOTAL: every `TaskRecord` field lands on the
 /// corresponding `TaskRow` field (no data dropped, no field invented).
@@ -735,7 +735,7 @@ async fn fixture_can_reproduce_a_poller_row() {
 Run: `cd lingxi-code && cargo test -p tui --test multiagent_contract_test`
 Expected: PASS (`record_to_row_mapping_is_total`, `fixture_can_reproduce_a_poller_row`).
 
-Note: this requires `tui::multiagent::poller` to be public (it is — `pub mod poller;` from Task 5) and `traits` to be a dev-dep of `tui`. If `cargo test` reports `unresolved import traits`, add `traits = { path = "../traits" }` under `[dev-dependencies]` in `lingxi-code/tui/Cargo.toml` (it is already a regular dependency, so this is normally unnecessary — regular deps are visible to integration tests).
+Note: this requires `tui::multiagent::poller` to be public (it is — `pub mod poller;` from Task 5) and `traits` to be a dev-dep of `tui`. If `cargo test` reports `unresolved import traits`, add `platform-api = { path = "../platform-api" }` under `[dev-dependencies]` in `lingxi-code/tui/Cargo.toml` (it is already a regular dependency, so this is normally unnecessary — regular deps are visible to integration tests).
 
 - [ ] **Step 3: Commit**
 
@@ -891,7 +891,7 @@ Expected: `m9.1` listed. **Do not push** (design §6.4 — no remote push from C
 - `MultiAgentFeed::poll(&self) -> Vec<MultiAgentEvent>` — same signature in the trait (Task 4) and both impls (Tasks 4, 5). ✓
 - `apply_multiagent_event(&mut AppState, MultiAgentEvent, &Notify)` — mirrors `streaming::apply_event`'s real signature (verified against `tui/src/streaming.rs`). ✓
 - `task_row_from_record(TaskRecord) -> TaskRow` — defined Task 5, used Tasks 5 & 6. ✓
-- `traits::task_registry::TaskRegistryHandle` method set in the Task 5 stub (`create/get/list/update/set_status/kill/output`) matches the real trait (verified against `traits/src/task_registry.rs`). ✓
+- `platform_api::task_registry::TaskRegistryHandle` method set in the Task 5 stub (`create/get/list/update/set_status/kill/output`) matches the real trait (verified against `platform-api/src/task_registry.rs`). ✓
 
 No gaps requiring new tasks. Plan is internally consistent and fully grounded in the current tree.
 

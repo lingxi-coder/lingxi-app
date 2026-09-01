@@ -27,8 +27,8 @@ use crate::tool_team_delete::TeamDeleteTool;
 use std::sync::Arc;
 use telemetry::AnalyticsBus;
 use tool_api::Tool;
-use traits::team_spawn::TeamSpawnSeam;
-use traits::{OutputStream, RuntimeSpawner};
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 
 /// Build the coordinator-only tools carrying net-new behavior.
 ///
@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use protocol::AgentId;
-    use traits::team_spawn::TeamSpawnError;
+    use platform_api::team_spawn::TeamSpawnError;
 
     /// No-op spawn seam — the factory under test never invokes it; it only needs
     /// a concrete `Arc<dyn TeamSpawnSeam>` to construct the tools.
@@ -124,7 +124,7 @@ mod tests {
             _result: &serde_json::Value,
         ) {
         }
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
     }
 
     #[test]

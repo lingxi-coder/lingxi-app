@@ -4,7 +4,7 @@ use crate::{
     reasoning_control_spec, Capabilities, ClientConfig, LlmError, PricingModelRef, ProviderId,
     ReasoningControlSpec, ReasoningTarget,
 };
-use traits::{ModelBillingMode, ModelMetadata, ModelPricing};
+use platform_api::{ModelBillingMode, ModelMetadata, ModelPricing};
 
 /// Model entry exposed to model-picker and listing callers.
 #[derive(Debug, Clone, PartialEq)]

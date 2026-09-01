@@ -55,7 +55,7 @@
           },
           "output_schema": {
             "type": "object",
-            "$comment": "§12.4: agent proposes outputSchema (optional per §13.1's McpToolDefinitionDto.output_schema: Option<Value>, the partially-built wire DTO at lingxi-code/traits/src/mcp.rs:213-232 that this eventually composes into — that struct currently lacks title/output_schema/annotations/execution/icons/meta/effective_max_permission, matching the design table's note that traits/src/mcp.rs 'lacks standard Tool fields')."
+            "$comment": "§12.4: agent proposes outputSchema (optional per §13.1's McpToolDefinitionDto.output_schema: Option<Value>, the partially-built wire DTO at lingxi-code/platform-api/src/mcp.rs:213-232 that this eventually composes into — that struct currently lacks title/output_schema/annotations/execution/icons/meta/effective_max_permission, matching the design table's note that platform-api/src/mcp.rs 'lacks standard Tool fields')."
           },
           "flow_reference": {
             "type": "string",

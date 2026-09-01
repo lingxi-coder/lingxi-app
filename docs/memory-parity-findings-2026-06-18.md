@@ -108,10 +108,10 @@ the shared checkout, when other sessions are active.
    collision keep the Project tag (preserves desktop's "project read last wins").
    Strengthened the regression test `build_mobile_fires_session_start_against_a_registered_hook`
    from `.any()` to `count == 1`. **Verified: `cargo test -p engine-mobile --features uniffi --lib` → 19/19 pass.**
-2. **Dead `open_memory_editor_at` stub** — `traits/src/orchestrator.rs`. The
+2. **Dead `open_memory_editor_at` stub** — `platform-api/src/orchestrator.rs`. The
    failed ux track left an orphan trait method (overridden nowhere, called
    nowhere — grep-confirmed) + a vacuous delegation test + a misleading doc
-   comment. Removed all three. **Verified: `cargo build -p traits` clean.**
+   comment. Removed all three. **Verified: `cargo build -p platform-api` clean.**
 
 Both fixes touched **only** those two files. `cargo test --workspace` was **not**
 run (it would race the concurrent sessions and the tree was actively churning).

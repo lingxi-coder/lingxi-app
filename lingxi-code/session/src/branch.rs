@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-use traits::FileSystem;
+use platform_api::FileSystem;
 use uuid::Uuid;
 
 use crate::jsonl::re_append::iso_now;

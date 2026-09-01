@@ -580,7 +580,7 @@ impl FsReconProducers {
             // `LINGXI_DISABLE_NONESSENTIAL_TRAFFIC` exists to stop. Resolve it
             // from the live setting rather than assuming allowed: a host that
             // opted out must not have the wizard contact GitHub on its behalf.
-            nonessential_traffic_allowed: !traits::traffic_mode::is_essential_traffic_only(),
+            nonessential_traffic_allowed: !platform_api::traffic_mode::is_essential_traffic_only(),
         }
     }
 

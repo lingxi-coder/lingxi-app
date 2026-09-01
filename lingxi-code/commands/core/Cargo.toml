@@ -22,7 +22,7 @@ cron = { path = "../../cron" }
 # the `lingxi-cli auto-mode-setup` subcommand (`permission::auto_mode_argv`),
 # so neither surface can drift from the other's parsing.
 permission = { path = "../../permission" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 telemetry = { path = "../../telemetry" }
 # `/usage` renders the byte-exact claude-code `i6e()` cost-summary block via
 # cost::render::cost_summary; this is non-test code, so `cost` must be a

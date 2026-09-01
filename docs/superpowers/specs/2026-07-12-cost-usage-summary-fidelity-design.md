@@ -84,7 +84,7 @@ No component is blocked; all data foundations exist.
 
 ## Design
 
-### Component 1 — `CostSnapshot` extension (`traits/src/orchestrator.rs`)
+### Component 1 — `CostSnapshot` extension (`platform-api/src/orchestrator.rs`)
 
 Add fields:
 - `api_duration: std::time::Duration`

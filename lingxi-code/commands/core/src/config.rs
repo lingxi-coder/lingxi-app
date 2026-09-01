@@ -10,7 +10,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/config` handler — opens `$EDITOR` on the config file.
 #[derive(Clone)]

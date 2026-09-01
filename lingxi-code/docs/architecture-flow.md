@@ -60,7 +60,7 @@ graph TD
     end
 
     subgraph Layer2["Layer 2: Abstraction"]
-        traits["traits"]
+        platform_api["platform-api"]
         tool_api["tool-api"]
         skill_api["skill-api"]
         command_api["command-api"]
@@ -68,6 +68,7 @@ graph TD
 
     subgraph Layer1["Layer 1: Foundation"]
         proto["protocol"]
+        core_crate["core"]
         branding["branding"]
         features["features"]
     end

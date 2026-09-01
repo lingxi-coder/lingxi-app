@@ -6,7 +6,7 @@
 
 **Architecture:** A pure mode resolver + an injectable-env safety-guard live in the `permission` crate (no new deps); the CLI adds the two flags and a real `BypassEnv` impl (libc geteuid + `/.dockerenv` + a 1s HTTP HEAD probe via the existing `PosixHttp` transport), resolves the mode pre-REPL, runs the guards (exit 1 on refusal), prints the notice, and threads the mode into `DesktopConfig.permission_mode`; engine-desktop feeds that mode into the policy when enforcement is on; the TUI gains a TTY-only blocking bypass-confirm dialog.
 
-**Tech Stack:** Rust 1.82 / edition 2021, clap-derive (argv), `traits::HttpTransport` + `platform-posix-minimal::PosixHttp` (internet probe), `libc` (geteuid), the existing `permission::PermissionPolicy`/`PermissionMode` substrate, telemetry tengu registry.
+**Tech Stack:** Rust 1.82 / edition 2021, clap-derive (argv), `platform_api::HttpTransport` + `platform-posix-minimal::PosixHttp` (internet probe), `libc` (geteuid), the existing `permission::PermissionPolicy`/`PermissionMode` substrate, telemetry tengu registry.
 
 **Spec:** `docs/superpowers/specs/2026-06-10-dangerously-skip-permissions-design.md` (approved). Reference of truth: `claude-code/` TS — `utils/permissions/permissionSetup.ts:689-812`, `setup.ts:395-443`, `interactiveHelpers.tsx:218-223`, `components/BypassPermissionsModeDialog.tsx`, `types/permissions.ts:16-39`, `utils/permissions/PermissionMode.ts:117-121`.
 
@@ -493,7 +493,7 @@ use std::time::Duration;
 
 use permission::bypass_guard::BypassEnv;
 use protocol::transport::{HttpMethod, HttpRequest};
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// Production environment probe for the bypass safety guard.
 pub struct RealBypassEnv {
@@ -649,7 +649,7 @@ impl BypassEnv for RealBypassEnv {
 
 ```rust
 /// Build `CliModeSettings` from the merged user+project settings (the same
-/// `engine::settings::Settings::load` seam the CLI uses elsewhere). On any
+/// `lingxi_core::settings::Settings::load` seam the CLI uses elsewhere). On any
 /// load failure, returns the no-op default (None mode, killswitch off) — a
 /// faithful degrade (TS `getSettings_DEPRECATED() || {}`).
 fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {

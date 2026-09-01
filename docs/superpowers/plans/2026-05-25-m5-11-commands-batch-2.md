@@ -17,7 +17,7 @@
 
 **Goal:** Replace the remaining 12 M5-09 placeholder structs (`CostHandler`, `ConfigHandler`, `ModelHandler`, `PermissionsHandler`, `McpHandler`, `HooksHandler`, `AgentsHandler`, `LoginHandler`, `LogoutHandler`, `VersionHandler`, `StatusHandler`, `DoctorHandler`) with real implementations. After M5-11 lands, the 18 core commands are **all** live; the 84 non-core commands continue to return the M5-09 locked stub literal. Ships **36 new telemetry events** (`tengu_command_<name>_<started|completed|failed>` × 12), growing `tengu::command::NAMES` from 18 → **54** and `ALL_EVENT_NAMES.len()` from 276 → **312**. Grows `OrchestratorHandle` with 7 new methods: `list_mcp_servers`, `list_hooks`, `list_agents`, `run_doctor_checks`, `get_status_snapshot`, `edit_config_file`, `edit_permissions_file`. Introduces a new `AuthHandle` trait in `lingxi-traits` (implemented by `lingxi-anthropic-oauth`) for `/login` and `/logout`. Each batch-2 handler is plain-text-only (no Ink TUI — that's M6); the `/doctor` and `/status` panels are rendered via byte-locked multi-line `format!` templates.
 
-**Architecture:** Twelve new files under `lingxi-commands/src/builtin/` (one per command). One new file `lingxi-commands/src/builtin/list_render.rs` shared by `/mcp`, `/hooks`, `/agents` for the common "header + per-row" rendering pattern. One new file `lingxi-commands/src/builtin/diagnostics.rs` holding the `/doctor` check list. Five new info structs in `lingxi-traits::orchestrator`: `McpServerInfo`, `HookInfo`, `AgentInfo`, `DoctorReport`, `StatusSnapshot`. One new trait `lingxi-traits::auth::AuthHandle` plus a concrete impl `lingxi-anthropic-oauth::handle::OAuthHandle` (wrapping the existing `oauth::client::AnthropicOAuthClient`). The M5-10 `register_core_batch_1(reg, handle)` is **untouched**; M5-11 adds a parallel `register_core_batch_2(reg, handle, auth)` taking the additional `auth: Arc<dyn AuthHandle>` parameter. Both batches' commands compose: M5-12 (CLI binary) calls `register_all_builtin_commands → register_core_batch_1 → register_core_batch_2` in order.
+**Architecture:** Twelve new files under `lingxi-commands/src/builtin/` (one per command). One new file `lingxi-commands/src/builtin/list_render.rs` shared by `/mcp`, `/hooks`, `/agents` for the common "header + per-row" rendering pattern. One new file `lingxi-commands/src/builtin/diagnostics.rs` holding the `/doctor` check list. Five new info structs in `lingxi-platform_api::orchestrator`: `McpServerInfo`, `HookInfo`, `AgentInfo`, `DoctorReport`, `StatusSnapshot`. One new trait `lingxi-platform_api::auth::AuthHandle` plus a concrete impl `lingxi-anthropic-oauth::handle::OAuthHandle` (wrapping the existing `oauth::client::AnthropicOAuthClient`). The M5-10 `register_core_batch_1(reg, handle)` is **untouched**; M5-11 adds a parallel `register_core_batch_2(reg, handle, auth)` taking the additional `auth: Arc<dyn AuthHandle>` parameter. Both batches' commands compose: M5-12 (CLI binary) calls `register_all_builtin_commands → register_core_batch_1 → register_core_batch_2` in order.
 
 **Tech stack:** Rust 2021, `lingxi_anthropic_oauth = { path = "../anthropic-oauth" }` (M2 surface), `lingxi_mcp = { path = "../mcp" }` (M2-02 registry), `lingxi_hooks = { path = "../hooks" }` (M5-06 runtime), `lingxi_agent = { path = "../agent" }` (M4-05 subagents), `dirs = "5"` (config dir), `tokio` (process spawn for editor), `async_trait = "0.1"`, `chrono = "0.4"` (timestamps in `/status` and `/doctor` reports).
 
@@ -409,13 +409,13 @@ git commit -m "feat(M5-11 task 1): tengu::command 18→54 (+36 events) + ALL_EVE
 ## Task 2: Extend `OrchestratorHandle` with 8 new methods + 5 info structs
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/orchestrator.rs`
+- Modify: `lingxi-code/crates/platform-api/src/orchestrator.rs`
 - Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs`
 - Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (mock methods)
 
 - [ ] **Step 1: Write the failing test (object safety + struct field invariants).**
 
-  Append to `lingxi-code/crates/traits/src/orchestrator.rs::m5_10_extension_tests` (rename to `m5_extension_tests`):
+  Append to `lingxi-code/crates/platform-api/src/orchestrator.rs::m5_10_extension_tests` (rename to `m5_extension_tests`):
 
 ```rust
     // Compile-time assertion that the trait remains object-safe after M5-11.
@@ -480,7 +480,7 @@ cargo test -p lingxi-traits --lib m5_extension_tests 2>&1 | head -15
 
 - [ ] **Step 3: Add the 5 info structs + 8 trait methods.**
 
-  Open `lingxi-code/crates/traits/src/orchestrator.rs` and append:
+  Open `lingxi-code/crates/platform-api/src/orchestrator.rs` and append:
 
 ```rust
 // ────────────────────────────────────────────────────────────────────────────
@@ -564,7 +564,7 @@ pub struct StatusSnapshot {
 }
 ```
 
-  Add re-exports to `lingxi-code/crates/traits/src/lib.rs`:
+  Add re-exports to `lingxi-code/crates/platform-api/src/lib.rs`:
 
 ```rust
 pub use orchestrator::{
@@ -794,7 +794,7 @@ async fn spawn_editor_on(&self, target: PathBuf) -> Result<MemoryEditorOutcome, 
 ```rust
 //! `/doctor` check runners. M5-11 ships 6 checks.
 
-use lingxi_traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use lingxi_platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 use std::path::Path;
 
 pub async fn run_all(config_dir: &Path, api_client: &lingxi_api_client::Client) -> DoctorReport {
@@ -933,14 +933,14 @@ git commit -m "feat(M5-11 task 2): OrchestratorHandle +8 methods (list_mcp/hooks
 ## Task 3: `AuthHandle` trait + `OAuthHandle` impl
 
 **Files:**
-- Create: `lingxi-code/crates/traits/src/auth.rs`
-- Modify: `lingxi-code/crates/traits/src/lib.rs`
+- Create: `lingxi-code/crates/platform-api/src/auth.rs`
+- Modify: `lingxi-code/crates/platform-api/src/lib.rs`
 - Create: `lingxi-code/crates/anthropic-oauth/src/handle.rs`
 - Modify: `lingxi-code/crates/anthropic-oauth/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-code/crates/traits/src/auth.rs`:
+  Create `lingxi-code/crates/platform-api/src/auth.rs`:
 
 ```rust
 //! Auth surface used by `/login` and `/logout` slash commands.
@@ -1002,7 +1002,7 @@ mod tests {
 }
 ```
 
-  Add to `lingxi-code/crates/traits/src/lib.rs`: `pub mod auth;` + `pub use auth::{AuthError, AuthHandle, LoginInfo};`.
+  Add to `lingxi-code/crates/platform-api/src/lib.rs`: `pub mod auth;` + `pub use auth::{AuthError, AuthHandle, LoginInfo};`.
 
 - [ ] **Step 2: Run + pass.**
 
@@ -1022,7 +1022,7 @@ cargo test -p lingxi-traits --lib auth::tests 2>&1 | tail -5
 use crate::client::AnthropicOAuthClient;
 use crate::resolver::ResolvedCredential;
 use async_trait::async_trait;
-use lingxi_traits::{AuthError, AuthHandle, LoginInfo};
+use lingxi_platform_api::{AuthError, AuthHandle, LoginInfo};
 use std::sync::Arc;
 
 pub struct OAuthHandle {
@@ -1142,8 +1142,8 @@ pub enum LoginError {
 cargo test -p lingxi-traits -p lingxi-anthropic-oauth 2>&1 | tail -15
 cargo fmt -p lingxi-traits -p lingxi-anthropic-oauth
 cargo clippy -p lingxi-traits -p lingxi-anthropic-oauth --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-code/crates/traits/src/auth.rs \
-        lingxi-code/crates/traits/src/lib.rs \
+git add lingxi-code/crates/platform-api/src/auth.rs \
+        lingxi-code/crates/platform-api/src/lib.rs \
         lingxi-code/crates/anthropic-oauth/
 git commit -m "feat(M5-11 task 3): AuthHandle trait + OAuthHandle impl + run_interactive_login/clear_credentials"
 ```
@@ -1173,7 +1173,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1228,7 +1228,7 @@ fn format_duration(d: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::CostSnapshot;
+    use lingxi_platform_api::CostSnapshot;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand { name: "cost".to_string(), raw_args: String::new(), tokens: vec![] }
@@ -1303,7 +1303,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1382,7 +1382,7 @@ mod tests {
     async fn list_mode_when_no_args() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_available_models(vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into()]);
-        let mut snap = lingxi_traits::StatusSnapshot::default();
+        let mut snap = lingxi_platform_api::StatusSnapshot::default();
         snap.model = "claude-opus-4-7".into();
         mock.set_status_snapshot(snap);
         let h = ModelHandler::new(mock);
@@ -1548,7 +1548,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1698,7 +1698,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{McpServerInfo, McpStatus, OrchestratorHandle};
+use lingxi_platform_api::{McpServerInfo, McpStatus, OrchestratorHandle};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1809,7 +1809,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{HookInfo, OrchestratorHandle};
+use lingxi_platform_api::{HookInfo, OrchestratorHandle};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -1907,7 +1907,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{AgentInfo, OrchestratorHandle};
+use lingxi_platform_api::{AgentInfo, OrchestratorHandle};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -2043,7 +2043,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::AuthHandle;
+use lingxi_platform_api::AuthHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -2083,7 +2083,7 @@ impl BuiltinCommandHandler for LoginHandler {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lingxi_traits::{AuthError, LoginInfo};
+    use lingxi_platform_api::{AuthError, LoginInfo};
 
     struct MockAuth { result: std::sync::Mutex<Result<LoginInfo, AuthError>> }
     impl MockAuth {
@@ -2162,7 +2162,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::AuthHandle;
+use lingxi_platform_api::AuthHandle;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -2226,7 +2226,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{OrchestratorHandle, StatusSnapshot};
+use lingxi_platform_api::{OrchestratorHandle, StatusSnapshot};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -2361,7 +2361,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{CheckStatus, DoctorReport, OrchestratorHandle};
+use lingxi_platform_api::{CheckStatus, DoctorReport, OrchestratorHandle};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -2412,7 +2412,7 @@ pub fn render_doctor(r: &DoctorReport) -> String {
 mod tests {
     use super::*;
     use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::{DoctorCheck, DoctorSummary};
+    use lingxi_platform_api::{DoctorCheck, DoctorSummary};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand { name: "doctor".into(), raw_args: String::new(), tokens: vec![] }
@@ -2500,8 +2500,8 @@ git commit -m "feat(M5-11 task 12): /doctor 6-check report + locked render + 3 t
 /// [`register_core_batch_1`]. Idempotent.
 pub fn register_core_batch_2(
     reg: &mut CommandRegistry,
-    handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
-    auth: std::sync::Arc<dyn lingxi_traits::AuthHandle>,
+    handle: std::sync::Arc<dyn lingxi_platform_api::OrchestratorHandle>,
+    auth: std::sync::Arc<dyn lingxi_platform_api::AuthHandle>,
 ) {
     use crate::builtin::{
         AgentsHandler, ConfigHandler, CostHandler, DoctorHandler, HooksHandler,
@@ -2550,7 +2550,7 @@ mod batch_2_tests {
         register_all_builtin_commands(&mut reg);
         let handle = Arc::new(MockOrchestratorHandle::new());
         let auth = Arc::new(crate::builtin::login::tests::MockAuth::ok(
-            lingxi_traits::LoginInfo { email: "u@x.com".into(), org_id: "x".into() }));
+            lingxi_platform_api::LoginInfo { email: "u@x.com".into(), org_id: "x".into() }));
         register_core_batch_2(&mut reg, handle, auth);
 
         // After overwrite, /version returns the real handler output.
@@ -2615,7 +2615,7 @@ Status:
 
 ```rust
 use lingxi_commands::builtin::status::render_status;
-use lingxi_traits::StatusSnapshot;
+use lingxi_platform_api::StatusSnapshot;
 
 const GOLDEN: &str =
     include_str!("../src/parity/fixtures/parity_status_panel.txt");
@@ -2658,7 +2658,7 @@ Doctor:
 
 ```rust
 use lingxi_commands::builtin::doctor::render_doctor;
-use lingxi_traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use lingxi_platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
 const GOLDEN: &str =
     include_str!("../src/parity/fixtures/parity_doctor_report.txt");
@@ -2709,7 +2709,7 @@ use lingxi_commands::registry::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
 };
 use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{
+use lingxi_platform_api::{
     AgentInfo, AuthError, AuthHandle, CostSnapshot, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };

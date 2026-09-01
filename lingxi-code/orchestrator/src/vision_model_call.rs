@@ -248,13 +248,13 @@ impl ModelCallPreparer for VisionModelCallPreparer {
 }
 
 struct VisionProgressGuard {
-    output: Arc<dyn traits::OutputStream>,
+    output: Arc<dyn platform_api::OutputStream>,
     id: String,
     armed: bool,
 }
 
 impl VisionProgressGuard {
-    fn new(output: Arc<dyn traits::OutputStream>, id: String) -> Self {
+    fn new(output: Arc<dyn platform_api::OutputStream>, id: String) -> Self {
         Self {
             output,
             id,

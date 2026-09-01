@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use platform_posix::mcp::PosixMcpTransport;
-use traits::{McpTransport, McpTransportSpec};
+use platform_api::{McpTransport, McpTransportSpec};
 
 /// Method-aware mock: switch on `body["method"]`, echo the `id`, return the
 /// matching MCP result envelope. `notifications/*` arrive without an `id`
@@ -75,7 +75,7 @@ async fn spawn_mock() -> String {
 fn http_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
-        headers: traits::McpHeaders::new(),
+        headers: platform_api::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }
@@ -149,7 +149,7 @@ async fn full_mcp_surface_roundtrips_over_http() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(traits::McpError::Connection(_))),
+        matches!(after, Err(platform_api::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }

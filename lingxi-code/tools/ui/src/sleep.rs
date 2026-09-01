@@ -163,7 +163,7 @@ impl Tool for SleepTool {
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

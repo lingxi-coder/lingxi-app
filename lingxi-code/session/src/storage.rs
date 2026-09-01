@@ -7,7 +7,7 @@ use crate::transcript::TranscriptEntry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// Owns the on-disk layout for one base directory of sessions.
 pub struct SessionStorage {

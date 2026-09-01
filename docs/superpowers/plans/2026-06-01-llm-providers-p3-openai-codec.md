@@ -6,7 +6,7 @@
 
 **Architecture:** A pure `OpenAiCodec` (in the `providers` crate) implements P1's `WireCodec`: `encode_request` (canonical → OpenAI `/chat/completions` JSON), `decode_response` (OpenAI response → canonical `MessageResponse`), and `new_stream_decoder` (an `OpenAiSseDecoder` that reassembles OpenAI's index-keyed streaming `tool_calls` fragments into canonical `StreamEvent`s). P2's `ProviderRegistry::build` OpenAi arm changes from the "codec unavailable" error to constructing `GenericClient<OpenAiCodec>`. Parity fixtures in `test-harness` lock the wire shapes.
 
-**Tech Stack:** Rust 1.82.0. `serde_json` (wire JSON), `protocol::{ToolUseId, ConversationMessage, ContentBlock}`, `api_client::types::{MessageResponse, StreamEvent, ContentBlockApi, ContentDelta, UsageApi, MessageDeltaPayload}`, `api_client::ApiError`, `traits::HttpError`. Builds on P1 (`WireCodec`/`SseDecoder`/`GenericClient`/`Auth`/`Capabilities`/`CanonicalRequest`) and P2 (`ProviderRegistry`/`ProviderKind`).
+**Tech Stack:** Rust 1.82.0. `serde_json` (wire JSON), `protocol::{ToolUseId, ConversationMessage, ContentBlock}`, `api_client::types::{MessageResponse, StreamEvent, ContentBlockApi, ContentDelta, UsageApi, MessageDeltaPayload}`, `api_client::ApiError`, `platform_api::HttpError`. Builds on P1 (`WireCodec`/`SseDecoder`/`GenericClient`/`Auth`/`Capabilities`/`CanonicalRequest`) and P2 (`ProviderRegistry`/`ProviderKind`).
 
 **Spec:** `docs/superpowers/specs/2026-06-01-llm-providers-design.md` (§4 degradation, §5.1 OpenAI codec, §12 P3).
 
@@ -329,7 +329,7 @@ use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
 use api_client::ApiError;
 use protocol::ToolUseId;
 use serde_json::Value;
-use traits::HttpError;
+use platform_api::HttpError;
 
 /// Map an `OpenAI` `finish_reason` to the canonical stop-reason vocabulary.
 #[must_use]

@@ -4,7 +4,7 @@
 
 **Goal:** Run Claude on AWS Bedrock — the Anthropic Messages body over Bedrock's `InvokeModel` endpoint, authenticated with AWS SigV4.
 
-**Architecture (bounded by the frozen `traits::HttpTransport`):** `HttpTransport` exposes only `request` (full body) and `stream_sse` (SSE) — NOT raw bytes. Bedrock streaming uses AWS binary event-stream framing (not SSE), which we cannot deliver without modifying frozen `traits`. Therefore P6 ships **non-streaming Bedrock** via `POST …/invoke` (a single Anthropic-shaped JSON body, which `MessageResponse` deserializes directly) and a **synthetic single-shot `stream()`** that re-emits the completed response as a valid event sequence. This also removes any need for `aws-smithy-eventstream`.
+**Architecture (bounded by the frozen `platform_api::HttpTransport`):** `HttpTransport` exposes only `request` (full body) and `stream_sse` (SSE) — NOT raw bytes. Bedrock streaming uses AWS binary event-stream framing (not SSE), which we cannot deliver without modifying frozen `traits`. Therefore P6 ships **non-streaming Bedrock** via `POST …/invoke` (a single Anthropic-shaped JSON body, which `MessageResponse` deserializes directly) and a **synthetic single-shot `stream()`** that re-emits the completed response as a valid event sequence. This also removes any need for `aws-smithy-eventstream`.
 
 `BedrockProvider` is a bespoke `LlmProvider` (like `AnthropicLlmProvider`), NOT a `GenericClient`/`WireCodec` (it needs `/invoke` + a synthetic stream + an Anthropic body). Auth is a new `SigV4Authenticator` (the P1 `Authenticator` seam) using `aws-sigv4` + `aws-credential-types` with **environment-variable credentials** (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`).
 
@@ -13,7 +13,7 @@
 **Spec:** `2026-06-01-llm-providers-v2-design.md` §3.5, §8. Branch `llm-providers-v2` (P5 done, tag `llm-v2-p5`).
 
 **Bounded decisions (documented):**
-- **Non-streaming only** + synthetic stream (frozen-`traits` constraint). Real token streaming for Bedrock is deferred (would need a `traits::HttpTransport` raw-byte-stream method).
+- **Non-streaming only** + synthetic stream (frozen-`traits` constraint). Real token streaming for Bedrock is deferred (would need a `platform_api::HttpTransport` raw-byte-stream method).
 - **Env-var credentials** via `aws-credential-types` (no `aws-config` — avoids the heavy SDK runtime + Rust-1.82/edition2024 transitive risk). SSO / IMDS / profile discovery deferred (documented: set the AWS env vars).
 - **Cost:** Bedrock-Claude uses `cost::ProviderId::Anthropic`. Bedrock model ids (e.g. `anthropic.claude-3-5-sonnet-20241022-v2:0`) won't match the Anthropic price keys, so cost may under-report until Bedrock price rows are added (a follow-up). No cost-crate change in P6.
 
@@ -147,7 +147,7 @@ use protocol::{HttpMethod, HttpRequest};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// A Claude-on-Bedrock provider.
 pub struct BedrockProvider {

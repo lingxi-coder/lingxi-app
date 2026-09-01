@@ -2,7 +2,7 @@
 
 日期：2026-08-27
 状态：设计定稿，待实施
-范围：`clients/electron`、`lingxi-code/client-protocol`、`lingxi-code/engine`、`lingxi-code/apps/engine-desktop`、`lingxi-code/permission`、`lingxi-code/migrations`
+范围：`clients/electron`、`lingxi-code/client-protocol`、`lingxi-code/core`、`lingxi-code/apps/engine-desktop`、`lingxi-code/permission`、`lingxi-code/migrations`
 
 本文档含两个可独立交付的部分：
 
@@ -30,9 +30,9 @@ A 不依赖 B。B 依赖 A 的设置页框架。
 
 ### 0.3 引擎侧已有完整的分层设置模型
 
-- `lingxi-code/engine/src/settings/schema.rs`（1678 行，约 80 字段）：`permissions` / `hooks` / `sandbox` / `enabled_tools` / `output_style` / `status_line` / `enabled_plugins` / `plugin_configs` / `providers` / `routing` / `model_overrides` / `telemetry_enabled` 等。
-- 合并优先级（高→低，`engine/src/settings/mod.rs:174`）：**env → managed → cli → local → project → user → defaults**。
-- `engine/src/settings/tracer.rs` 已有 `ProvenanceTrace` / `FieldProvenance`，按层记录来源。**provenance 不需要新算，只需要暴露。**
+- `lingxi-code/core/src/settings/schema.rs`（1678 行，约 80 字段）：`permissions` / `hooks` / `sandbox` / `enabled_tools` / `output_style` / `status_line` / `enabled_plugins` / `plugin_configs` / `providers` / `routing` / `model_overrides` / `telemetry_enabled` 等。
+- 合并优先级（高→低，`core/src/settings/mod.rs:174`）：**env → managed → cli → local → project → user → defaults**。
+- `core/src/settings/tracer.rs` 已有 `ProvenanceTrace` / `FieldProvenance`，按层记录来源。**provenance 不需要新算，只需要暴露。**
 - `apps/engine-desktop/src/settings_watch.rs` 已在 watch 这些文件并触发 `ConfigChange` hook；其模块注释明确写了它**不负责重新加载**设置。
 
 ### 0.4 缺的是桥
@@ -80,10 +80,10 @@ A 不依赖 B。B 依赖 A 的设置页框架。
 
 ### 0.10 桌面没有任何音频能力
 
-- `engine/src/settings/schema.rs` 中 tts / stt / speech / audio / voice **零命中**。
+- `core/src/settings/schema.rs` 中 tts / stt / speech / audio / voice **零命中**。
 - `SpeechToText` / `TextToSpeech` / `VoiceRecorder` 的实现者仅：`platforms/ios`、`platforms/android`、`apps/ios-framework`、`apps/android-aar`（含测试假体）。
 - `tools/mobile/src/speech.rs` 模块注释：「`None` on desktop; mobile composition roots wire a native Swift / Kotlin impl via UniFFI」。
-- `traits/src/platform.rs:62-76` 的 `voice()` / `stt()` / `tts()` 默认返回 `None`；`impl Platform for` 只有 iOS / Android。
+- `platform-api/src/platform.rs:62-76` 的 `voice()` / `stt()` / `tts()` 默认返回 `None`；`impl Platform for` 只有 iOS / Android。
 - `apps/engine-desktop/src/lib.rs:8827-8829`：`voice: None, stt: None, tts: None` —— **这就是注入点**。
 - Electron 客户端里 voice 的全部命中都在死 mock 页内。
 
@@ -377,7 +377,7 @@ clients/electron/src/renderer/components/settings/
 
 注入点：`apps/engine-desktop/src/lib.rs:8827-8829` 的三行 `None`。
 
-trait 形状（`traits/src/{stt,tts,voice}.rs`）：
+trait 形状（`platform-api/src/{stt,tts,voice}.rs`）：
 
 ```rust
 trait SpeechToText { async fn transcribe(&self, opts: SttOpts) -> Result<SttTranscript, SttError>; }

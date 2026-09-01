@@ -1,4 +1,4 @@
-//! Bridge from `traits::HttpTransport` to `llm_client::Transport`.
+//! Bridge from `platform_api::HttpTransport` to `llm_client::Transport`.
 //!
 //! One generic adapter serves every platform HTTP implementation
 //! (`ReqwestHttp` on desktop, native transports on mobile).
@@ -12,13 +12,13 @@ use crate::{
     RawStreamFrame, StreamFraming, StreamingResponse,
 };
 use protocol::{HttpMethod, HttpRequest, HttpResponse};
-use traits::http::{
+use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
     WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 
-/// Adapter exposing a [`traits::HttpTransport`] as an [`llm_client::Transport`].
+/// Adapter exposing a [`platform_api::HttpTransport`] as an [`llm_client::Transport`].
 pub struct LlmTransportBridge<T> {
     inner: T,
 }
@@ -443,9 +443,9 @@ impl FrameStream for BodyFrame {
     }
 }
 
-/// Wrap any host [`traits::HttpTransport`] as an [`crate::Transport`].
+/// Wrap any host [`platform_api::HttpTransport`] as an [`crate::Transport`].
 #[must_use]
-pub fn from_http<T: traits::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport> {
+pub fn from_http<T: platform_api::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport> {
     Arc::new(LlmTransportBridge::new(http))
 }
 

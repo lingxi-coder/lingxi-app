@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::notification::{NotificationError, NotificationRequest};
+use platform_api::notification::{NotificationError, NotificationRequest};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -173,7 +173,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use traits::notification::NotificationService;
+    use platform_api::notification::NotificationService;
 
     /// Fake `NotificationService` that records the last request it received.
     #[derive(Default)]
@@ -193,8 +193,8 @@ mod tests {
         }
     }
 
-    fn empty_output() -> traits::process::ProcessOutput {
-        traits::process::ProcessOutput {
+    fn empty_output() -> platform_api::process::ProcessOutput {
+        platform_api::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

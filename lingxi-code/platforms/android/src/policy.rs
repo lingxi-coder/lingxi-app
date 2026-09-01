@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use traits::{NetworkPolicy, SandboxError, SandboxPolicy};
+use platform_api::{NetworkPolicy, SandboxError, SandboxPolicy};
 
 /// What the runner will ultimately `execve` (spec r3 §`AndroidSandboxPlan`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,7 +279,7 @@ pub fn build_shell_env<S: std::hash::BuildHasher>(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use traits::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
+    use platform_api::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
 
     #[test]
     fn plan_types_construct() {

@@ -217,7 +217,7 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// `McpServers { servers }` round-trips; the row mirrors `McpServerInfo`
-/// (`traits/src/orchestrator.rs:122`).
+/// (`platform-api/src/orchestrator.rs:122`).
 #[test]
 fn mcp_servers_round_trips() {
     let ev = ClientEvent::McpServers {
@@ -273,7 +273,7 @@ fn mcp_status_error_is_struct_variant() {
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
 /// `Hooks { hooks }` round-trips; the row mirrors `HookInfo`
-/// (`traits/src/orchestrator.rs:144`). `matcher` is optional and skipped when
+/// (`platform-api/src/orchestrator.rs:144`). `matcher` is optional and skipped when
 /// absent.
 #[test]
 fn hooks_round_trips() {
@@ -308,7 +308,7 @@ fn hooks_round_trips() {
 // ── Agents (reconciled from spec's `AgentList`) ──────────────────────────────
 
 /// `Agents { agents }` — the WIRE name (reconciled from spec §4.1 `AgentList`,
-/// plan line 149). The row mirrors `AgentInfo` (`traits/src/orchestrator.rs:157`).
+/// plan line 149). The row mirrors `AgentInfo` (`platform-api/src/orchestrator.rs:157`).
 #[test]
 fn agents_round_trips() {
     let ev = ClientEvent::Agents {
@@ -624,7 +624,7 @@ fn settings_snapshot_decodes_a_payload_without_the_added_fields() {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-/// `AuthState` — mirrors `Option<LoginInfo>` (`traits/src/auth.rs:13`) as a
+/// `AuthState` — mirrors `Option<LoginInfo>` (`platform-api/src/auth.rs:13`) as a
 /// tagged enum: signed-out carries no payload; signed-in carries email + org.
 #[test]
 fn auth_state_round_trips() {
@@ -654,7 +654,7 @@ fn auth_state_round_trips() {
 // ── Doctor ───────────────────────────────────────────────────────────────────
 
 /// `DoctorReport { checks, summary }` — mirrors `DoctorReport`
-/// (`traits/src/orchestrator.rs:168`). Each check carries an optional `detail`.
+/// (`platform-api/src/orchestrator.rs:168`). Each check carries an optional `detail`.
 #[test]
 fn doctor_report_round_trips() {
     let ev = ClientEvent::DoctorReport {
@@ -713,7 +713,7 @@ fn check_status_variants_round_trip() {
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
 /// `TaskRow` — one task row. Mirrors `TaskRecord`
-/// (`traits/src/task_registry.rs:36`); the status wire string is lowered to a
+/// (`platform-api/src/task_registry.rs:36`); the status wire string is lowered to a
 /// `TaskStatusDto` enum.
 #[test]
 fn task_row_round_trips() {
@@ -736,7 +736,7 @@ fn task_row_round_trips() {
 }
 
 /// `TaskOutputChunk` — a chunk of a task's spool. Mirrors `TaskOutputChunk`
-/// (`traits/src/task_registry.rs:49`).
+/// (`platform-api/src/task_registry.rs:49`).
 #[test]
 fn task_output_chunk_round_trips() {
     let ev = ClientEvent::TaskOutputChunk {

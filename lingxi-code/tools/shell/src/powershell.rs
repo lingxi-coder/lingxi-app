@@ -233,7 +233,7 @@ impl Tool for PowerShellTool {
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use traits::sandbox::ProcessCommand as SbxCommand;
+        use platform_api::sandbox::ProcessCommand as SbxCommand;
 
         let cmd_str = input
             .get("command")
@@ -441,7 +441,7 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     // PATH is process-global, and several tests install different temporary
     // `pwsh` binaries. Serialize those overrides and restore them on every exit
@@ -726,7 +726,7 @@ mod tests {
     fn sandbox_refusal_literal_byte_locked_at_m204_site() {
         // The literal lives at `SandboxError::Unsupported` in lingxi-traits:
         // `#[error("sandbox not supported on this platform")]`.
-        let err = traits::sandbox::SandboxError::Unsupported;
+        let err = platform_api::sandbox::SandboxError::Unsupported;
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
     }
 

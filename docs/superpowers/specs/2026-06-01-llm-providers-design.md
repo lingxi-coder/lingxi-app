@@ -11,7 +11,7 @@ LingXi today talks to exactly one backend: Anthropic. `api-client::AnthropicProv
 is a concrete struct that builds Anthropic Messages-API requests (`/v1/messages`,
 `x-api-key`, `anthropic-version`, `anthropic-beta`), parses Anthropic SSE, and runs
 the retry / 429 / OAuth-refresh middleware. All network I/O routes through the frozen
-`traits::HttpTransport` port.
+`platform_api::HttpTransport` port.
 
 Three facts make multi-provider support a natural, low-risk extension rather than a
 rewrite:

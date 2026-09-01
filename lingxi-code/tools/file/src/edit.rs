@@ -120,9 +120,9 @@ fn is_perforce_read_only(mode: Option<u32>) -> bool {
 
 /// `cfr()` (binary offset 193219993): `st(process.env.LINGXI_PERFORCE_MODE)`
 /// — env-truthiness (`1`/`true`/`yes`/`on`) of `LINGXI_PERFORCE_MODE`,
-/// mirrored by [`traits::env::is_env_truthy`].
+/// mirrored by [`platform_api::env::is_env_truthy`].
 fn is_perforce_mode_enabled() -> bool {
-    traits::env::is_env_truthy(std::env::var("LINGXI_PERFORCE_MODE").ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var("LINGXI_PERFORCE_MODE").ok().as_deref())
 }
 
 /// Build the byte-locked patch-truncation suffix with `n` substituted.
@@ -232,26 +232,26 @@ fn edit_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(traits::rooted_fs::RootedFsError::Fs(
-            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(platform_api::rooted_fs::RootedFsError::Fs(
+            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
-fn edit_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) -> ToolError {
+fn edit_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsError) -> ToolError {
     match error {
-        traits::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+        platform_api::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         )),
-        traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+        platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
             ))
         }
-        traits::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+        platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
                 .map(|metadata| metadata.file_type().is_symlink())
                 .unwrap_or(false)
@@ -265,10 +265,10 @@ fn edit_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) ->
                 ))
             }
         }
-        traits::rooted_fs::RootedFsError::NotRegularFile => {
+        platform_api::rooted_fs::RootedFsError::NotRegularFile => {
             ToolError::Io(format!("File {path} is not a regular file"))
         }
-        traits::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        platform_api::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
     }
 }
 
@@ -548,7 +548,7 @@ impl Tool for FileEditTool {
         // the edit itself; no later pathname reopen can cross a symlink swap.
         let initial_snapshot = match edit_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => None,
+            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => None,
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_read").await;
                 return Err(edit_resolution_error(file_path, error));
@@ -819,7 +819,7 @@ impl Tool for FileEditTool {
             self.emit_failed(&invocation_id, "path_blocked").await;
             return Err(ToolError::PathBlocked { path });
         };
-        let write_result = match traits::rooted_fs::write_file_after_permission(
+        let write_result = match platform_api::rooted_fs::write_file_after_permission(
             &root, &relative, &path, &canon, &bytes,
         ) {
             Ok(result) => result,

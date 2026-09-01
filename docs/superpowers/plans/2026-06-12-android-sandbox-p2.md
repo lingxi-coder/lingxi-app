@@ -512,7 +512,7 @@ git commit -m "feat(android-minijail): run_jailed — jailed fork/exec, pipe cap
 //! ACTUALLY applied to a jailed run. Attached to the process log / tool meta.
 
 use crate::policy::{AndroidSandboxPlan, ExecTarget, NetProfile};
-use traits::SandboxBackend;
+use platform_api::SandboxBackend;
 
 /// Honest record of one jailed execution.
 #[derive(Debug, Clone, PartialEq, Eq)]

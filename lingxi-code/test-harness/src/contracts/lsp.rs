@@ -16,7 +16,7 @@
 
 use protocol::McpConnectionId;
 use std::collections::HashMap;
-use traits::{LspServerConfig, LspTransport};
+use platform_api::{LspServerConfig, LspTransport};
 
 /// Run the standard [`LspTransport`] contract against an impl.
 ///

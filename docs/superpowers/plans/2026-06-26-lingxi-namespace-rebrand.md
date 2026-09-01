@@ -27,7 +27,7 @@
 ## Task 0: Pick the host crate for the `branding` constants
 
 **Files:**
-- Investigate: `lingxi-code/Cargo.toml` (workspace members), `lingxi-code/traits/Cargo.toml`
+- Investigate: `lingxi-code/Cargo.toml` (workspace members), `lingxi-code/platform-api/Cargo.toml`
 
 **Interfaces:**
 - Produces: the crate path `BRANDING_CRATE` (a `::branding` module) that every other task imports constants from. Default target: a new leaf crate `lingxi-code/branding/`.
@@ -173,10 +173,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Task 2: Route all config-home helpers + scattered path literals through `branding` (Commit A part 2 — pure refactor)
 
 **Files (each adds `branding` as a dep + replaces its literal/helper):**
-- Modify (config-home helpers): `engine/src/settings/loader.rs:57-67`, `migrations/src/global_config.rs:81-105`, `apps/cli/src/run.rs:1446-1450`, `tui/src/root.rs:2157`, `tui/src/screens/doctor.rs:90`, `commands/core/src/skills.rs:127-131`, `memory/src/session_memory.rs:254`, `tools/task/src/todo_store.rs:103-115`, `tools/meta/src/config.rs:116,405`
+- Modify (config-home helpers): `core/src/settings/loader.rs:57-67`, `migrations/src/global_config.rs:81-105`, `apps/cli/src/run.rs:1446-1450`, `tui/src/root.rs:2157`, `tui/src/screens/doctor.rs:90`, `commands/core/src/skills.rs:127-131`, `memory/src/session_memory.rs:254`, `tools/task/src/todo_store.rs:103-115`, `tools/meta/src/config.rs:116,405`
 - Modify (inline copies): `bridge/src/lockfile.rs:108,144,150`, `platforms/posix/src/secure_storage/factory.rs:103-105`, `memory/src/memdir/team_paths.rs:15`
-- Modify (project-level + memory consts): `memory/src/claude_md/hierarchy.rs:6-8,21-34,99,514,681`, `engine/src/settings/loader.rs:67`, `migrations/src/settings_update.rs:30,118`, `skill-api/src/listing.rs:60,117`, `commands/core/src/custom_commands.rs:197,235,366`, `memory/src/memdir/{paths,scan}.rs`, `tools/worktree/src/worktree.rs:43`, `platforms/windows/src/worktree.rs:76,123`, `cron/src/tasks_file.rs:28`, `tools/cron/src/schedule_cron.rs:308`, `outputstyles/src/disk.rs`, `hooks/src/definition.rs`, `agent/src/catalog.rs`, `apps/cli/src/commands/auto_mode.rs:72` (path list in the self-mod guard prompt)
-- Test: `lingxi-code/engine/tests/settings_4layer_test.rs` (existing), plus a new `lingxi-code/test-harness/tests/no_inline_dotclaude_guard.rs`
+- Modify (project-level + memory consts): `memory/src/claude_md/hierarchy.rs:6-8,21-34,99,514,681`, `core/src/settings/loader.rs:67`, `migrations/src/settings_update.rs:30,118`, `skill-api/src/listing.rs:60,117`, `commands/core/src/custom_commands.rs:197,235,366`, `memory/src/memdir/{paths,scan}.rs`, `tools/worktree/src/worktree.rs:43`, `platforms/windows/src/worktree.rs:76,123`, `cron/src/tasks_file.rs:28`, `tools/cron/src/schedule_cron.rs:308`, `outputstyles/src/disk.rs`, `hooks/src/definition.rs`, `agent/src/catalog.rs`, `apps/cli/src/commands/auto_mode.rs:72` (path list in the self-mod guard prompt)
+- Test: `lingxi-code/core/tests/settings_4layer_test.rs` (existing), plus a new `lingxi-code/test-harness/tests/no_inline_dotclaude_guard.rs`
 
 **Interfaces:**
 - Consumes: `branding::{DOT_DIR, GLOBAL_CONFIG_FILE, CONFIG_DIR_ENV, config_home, MEMORY_FILE, MEMORY_LOCAL_FILE}`.
@@ -235,7 +235,7 @@ For each file above: add `branding = { path = "../branding" }` (relative as appr
 
 Run: `cargo test -p test-harness --test no_inline_dotclaude_guard` → PASS.
 Run: `CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --no-run` → builds.
-Run: `cargo test -p engine settings` and `cargo test -p memory` → PASS (behavior unchanged).
+Run: `cargo test -p core settings` and `cargo test -p memory` → PASS (behavior unchanged).
 
 - [ ] **Step 5: Commit (Commit A complete)**
 
@@ -306,7 +306,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Create: `lingxi-code/branding/src/env.rs` (a `rename_env(claude_name) -> &'static str` table is unnecessary; instead each call site uses the literal `LINGXI_*` name — but add a single test asserting the keep-list is untouched).
-- Modify (representative; full list in spec §5.2): `orchestrator/src/conversation.rs`, `tools/agent/src/agent.rs`, `traits/src/subagent_spawn.rs`, `tools/task/src/task.rs`, `tools/workflow/src/lib.rs`, `mcp/src/registry.rs:520`, `compaction/src/{thresholds,orchestrator,threshold_calc}.rs`, `llm-client/src/model/{retry,context_window}.rs`, `commands/core/src/effort.rs`, `tools/shell/src/prompt.rs`, `platforms/posix/src/process/runner.rs` (child-env injection), `hooks/src/{executor,hook_payload}.rs`
+- Modify (representative; full list in spec §5.2): `orchestrator/src/conversation.rs`, `tools/agent/src/agent.rs`, `platform-api/src/subagent_spawn.rs`, `tools/task/src/task.rs`, `tools/workflow/src/lib.rs`, `mcp/src/registry.rs:520`, `compaction/src/{thresholds,orchestrator,threshold_calc}.rs`, `llm-client/src/model/{retry,context_window}.rs`, `commands/core/src/effort.rs`, `tools/shell/src/prompt.rs`, `platforms/posix/src/process/runner.rs` (child-env injection), `hooks/src/{executor,hook_payload}.rs`
 - Test: `lingxi-code/test-harness/tests/env_namespace_test.rs` (new), `platforms/posix/tests/process_spawn_env_test.rs` (update)
 
 **Interfaces:**

@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use traits::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
+use platform_api::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
 
 static GOAL_CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -42,7 +42,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -53,11 +53,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -516,7 +516,7 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
 async fn goal_status_transcript_records_set_progress_and_one_terminal_achievement() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
         dir.path().to_path_buf(),
     ));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));

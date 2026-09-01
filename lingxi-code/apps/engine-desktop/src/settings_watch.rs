@@ -15,7 +15,7 @@
 //! not reload ordinary user/project/local settings or rebuild the full policy;
 //! those remain composition-root concerns. It watches the relevant `.claude`
 //! (and managed) directories via the in-tree `fs_watch` primitive
-//! ([`traits::FileSystem::watch`]), classifies each changed path to a
+//! ([`platform_api::FileSystem::watch`]), classifies each changed path to a
 //! [`ConfigChangeSource`] layer, and fires
 //! [`ConversationOrchestrator::fire_config_change`] best-effort.
 //!
@@ -44,7 +44,7 @@
 //! [`SettingsWatcher::spawn`] starts one background task per watched directory
 //! and returns a [`SettingsWatcherHandle`]. Dropping the handle aborts every
 //! task (RAII) and the underlying `notify` watcher is released when the
-//! [`traits::FileSystem::watch`] stream is dropped — a clean teardown with no
+//! [`platform_api::FileSystem::watch`] stream is dropped — a clean teardown with no
 //! lingering OS handles. The task is started even when no ConfigChange hook is
 //! configured so the managed safety callback cannot be disabled by hook setup.
 
@@ -56,7 +56,7 @@ use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use traits::{FileEvent, FileSystem, PermissionGate};
+use platform_api::{FileEvent, FileSystem, PermissionGate};
 
 /// Narrow fire seam: the watcher fires a `ConfigChange` without depending on
 /// the full orchestrator surface. The composition root injects the live
@@ -410,7 +410,7 @@ pub async fn handle_event_with_permission_gate(
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use traits::FileEventKind;
+    use platform_api::FileEventKind;
 
     /// Recording fake firer — captures every `(source, file_path)` the watcher
     /// fires so tests can assert deterministically without a real orchestrator.

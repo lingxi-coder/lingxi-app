@@ -21,8 +21,8 @@
 - Existing implementation seams:
   - `hooks::HookExecutorImpl::{new, with_async_registry, with_agent_spawner, with_prompt_runner, with_process_runner}`
   - `hooks::PromptExecutor` + `HookPromptRunner`
-  - `hooks::AgentExecutor` + `traits::subagent_spawn::SubagentSpawner`
-  - `hooks::HttpExecutor` + `traits::HttpTransport`
+  - `hooks::AgentExecutor` + `platform_api::subagent_spawn::SubagentSpawner`
+  - `hooks::HttpExecutor` + `platform_api::HttpTransport`
   - `permission::PolicyPermissionGate`
   - `client_adapter::AdapterPermissionGate`
   - `orchestrator::turn_loop` PreToolUse + PermissionRequest/Denied chokepoint
@@ -527,8 +527,8 @@ In `apps/engine-desktop/src/lib.rs`, add a helper that constructs the real execu
 ```rust
 pub fn desktop_hook_executor(
     registry: Arc<RwLock<hooks::HookRegistry>>,
-    http: Arc<dyn traits::HttpTransport>,
-    runtime: Arc<dyn traits::RuntimeSpawner>,
+    http: Arc<dyn platform_api::HttpTransport>,
+    runtime: Arc<dyn platform_api::RuntimeSpawner>,
     prompt_runner: Arc<dyn hooks::HookPromptRunner>,
     async_registry: Arc<hooks::AsyncHookRegistry>,
 ) -> Arc<hooks::HookExecutorImpl> {

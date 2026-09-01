@@ -43,7 +43,7 @@ use command_api::parser::ParsedSlashCommand;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// The `${nyn}` model-family interpolation used by the `xhigh` Usage/description
 /// lines: `getEffortHelpText` (`XVn`) and `getEffortLevelDescription` (`NXu`)
@@ -191,7 +191,7 @@ fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
 /// `<config-home>/settings.json` — `$LINGXI_CONFIG_DIR` when set (claude-code
 /// `tr()` `??`: an empty value is honored verbatim), else `~/.claude`.
 /// Byte-identical to the engine settings loader
-/// (`engine/src/settings/loader.rs` `config_home_dir` + `user_settings_path`)
+/// (`core/src/settings/loader.rs` `config_home_dir` + `user_settings_path`)
 /// so `/effort`'s persisted `effortLevel` lands in the SAME file the loader and
 /// `/config` read. `None` if neither the env override nor `HOME` resolves (TS
 /// `getSettingsFilePathForSource` → `null` → `{ error: null }`).
@@ -222,7 +222,7 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
         return Ok(());
     };
 
-    let selection = level.map(|level| traits::ReasoningSelection::Level {
+    let selection = level.map(|level| platform_api::ReasoningSelection::Level {
         id: level.as_str().to_string(),
     });
     persist_reasoning_default_selection_at(&path, selection.as_ref())
@@ -236,7 +236,7 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
 /// intentionally clear that key so an older engine cannot apply a stale value.
 pub fn persist_reasoning_default_selection_at(
     path: &Path,
-    selection: Option<&traits::ReasoningSelection>,
+    selection: Option<&platform_api::ReasoningSelection>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -257,18 +257,18 @@ pub fn persist_reasoning_default_selection_at(
 
     let mut persisted = None;
     let default_selection = selection.and_then(|selection| match selection {
-        traits::ReasoningSelection::Level { id }
+        platform_api::ReasoningSelection::Level { id }
             if matches!(id.as_str(), "low" | "medium" | "high" | "xhigh") =>
         {
             persisted = Some(json!(id));
             Some(json!({ "type": "level", "id": id }))
         }
-        traits::ReasoningSelection::Disabled => Some(json!({ "type": "disabled" })),
-        traits::ReasoningSelection::Enabled => Some(json!({ "type": "enabled" })),
-        traits::ReasoningSelection::TokenBudget { tokens } => {
+        platform_api::ReasoningSelection::Disabled => Some(json!({ "type": "disabled" })),
+        platform_api::ReasoningSelection::Enabled => Some(json!({ "type": "enabled" })),
+        platform_api::ReasoningSelection::TokenBudget { tokens } => {
             Some(json!({ "type": "token_budget", "tokens": tokens }))
         }
-        traits::ReasoningSelection::Automatic | traits::ReasoningSelection::Level { .. } => None,
+        platform_api::ReasoningSelection::Automatic | platform_api::ReasoningSelection::Level { .. } => None,
     });
 
     if let Some(value) = persisted {
@@ -312,7 +312,7 @@ pub fn persist_reasoning_default_selection_at(
 /// Read the structured reasoning default, with a compatibility fallback for
 /// the legacy root `effortLevel` setting.  Unrepresentable/session-only values
 /// (notably `max`) are ignored so they cannot become a new-session default.
-pub fn load_reasoning_default_selection_at(path: &Path) -> Option<traits::ReasoningSelection> {
+pub fn load_reasoning_default_selection_at(path: &Path) -> Option<platform_api::ReasoningSelection> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&content).ok()?;
     if let Some(default) = value
@@ -320,14 +320,14 @@ pub fn load_reasoning_default_selection_at(path: &Path) -> Option<traits::Reason
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("defaultSelection"))
     {
-        if let Ok(selection) = serde_json::from_value::<traits::ReasoningSelection>(default.clone())
+        if let Ok(selection) = serde_json::from_value::<platform_api::ReasoningSelection>(default.clone())
         {
             return Some(selection);
         }
     }
     match value.get("effortLevel").and_then(Value::as_str) {
         Some(id @ ("low" | "medium" | "high" | "xhigh")) => {
-            Some(traits::ReasoningSelection::Level { id: id.to_string() })
+            Some(platform_api::ReasoningSelection::Level { id: id.to_string() })
         }
         _ => None,
     }
@@ -440,7 +440,7 @@ impl EffortHandler {
             // legacy behavior; production orchestrators always return a spec.
             return true;
         };
-        let selection = traits::ReasoningSelection::Level {
+        let selection = platform_api::ReasoningSelection::Level {
             id: level.as_str().to_string(),
         };
         controls
@@ -667,7 +667,7 @@ mod tests {
     /// per-test temp dir (so persistence never touches the real `~/.claude`),
     /// and clears `LINGXI_EFFORT_LEVEL`. On drop it restores the prior
     /// `HOME` and removes the temp dir. Mirrors the `HOME_LOCK` pattern in
-    /// `engine/src/settings`; uses `std::env::temp_dir()` rather than the
+    /// `core/src/settings`; uses `std::env::temp_dir()` rather than the
     /// `tempfile` crate, matching the `export.rs` test precedent (no new dep).
     struct TestEnv {
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -849,7 +849,7 @@ Effort levels:\n\
         let path = env.settings_path();
         persist_reasoning_default_selection_at(
             &path,
-            Some(&traits::ReasoningSelection::TokenBudget { tokens: 12_345 }),
+            Some(&platform_api::ReasoningSelection::TokenBudget { tokens: 12_345 }),
         )
         .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -860,10 +860,10 @@ Effort levels:\n\
         assert!(value.get("effortLevel").is_none());
         assert_eq!(
             load_reasoning_default_selection_at(&path),
-            Some(traits::ReasoningSelection::TokenBudget { tokens: 12_345 })
+            Some(platform_api::ReasoningSelection::TokenBudget { tokens: 12_345 })
         );
 
-        persist_reasoning_default_selection_at(&path, Some(&traits::ReasoningSelection::Automatic))
+        persist_reasoning_default_selection_at(&path, Some(&platform_api::ReasoningSelection::Automatic))
             .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(value.get("reasoning").is_none());

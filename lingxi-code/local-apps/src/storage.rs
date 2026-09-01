@@ -9,7 +9,7 @@
 //! apps/<app-id>/workspace/.lingxi/app.json — { schemaVersion, app } mirror
 //! ```
 //!
-//! Every write goes through [`traits::rooted_fs::atomic_write`] (same-directory
+//! Every write goes through [`platform_api::rooted_fs::atomic_write`] (same-directory
 //! temp file + rename, no symlink traversal below the root), so a crash can
 //! only ever leave an orphan `*.tmp-<pid>-<seq>` file behind — loaders address
 //! exact file names and therefore ignore orphans naturally. Every document
@@ -74,8 +74,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use traits::rooted_fs::{self, AtomicWriteOptions};
-use traits::FsError;
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 
 /// Upper bound on any single persisted document, enforced in BOTH directions:
 /// loads refuse to slurp a larger file (typed `storage_corrupt` — the file is

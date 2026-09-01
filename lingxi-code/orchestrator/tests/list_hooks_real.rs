@@ -9,7 +9,7 @@ use protocol::HookId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn hk(
     name: &str,

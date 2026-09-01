@@ -137,8 +137,8 @@ mod credential_provider_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(9_999_999),
             Some("acc_XYZ".into()),
             true,
-            http as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -181,8 +181,8 @@ mod credential_provider_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1),
             Some("acc_ABC".into()),
             false,
-            http as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );
@@ -217,8 +217,8 @@ mod credential_provider_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1),
             None,
             false,
-            http as Arc<dyn traits::HttpTransport>,
-            clock as Arc<dyn traits::Clock>,
+            http as Arc<dyn platform_api::HttpTransport>,
+            clock as Arc<dyn platform_api::Clock>,
             None,
             None,
         );

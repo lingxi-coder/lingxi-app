@@ -247,7 +247,7 @@ impl ConversationOrchestrator {
     pub async fn run_orphaned_permission(
         &self,
         tool_use_id: &protocol::ToolUseId,
-        decision: traits::permission_gate::PermissionOutcome,
+        decision: platform_api::permission_gate::PermissionOutcome,
     ) -> Result<bool, OrchestratorError> {
         use protocol::{ContentBlock, ConversationMessage, MessageId};
 
@@ -336,7 +336,7 @@ impl ConversationOrchestrator {
         //    carries the host's possibly-rewritten input; a deny keeps the
         //    original (it will not run anyway).
         let (forced, final_input, permission_updates) = match decision {
-            traits::permission_gate::PermissionOutcome::Allow {
+            platform_api::permission_gate::PermissionOutcome::Allow {
                 updated_input,
                 permission_updates,
                 decision_classification: _,
@@ -345,7 +345,7 @@ impl ConversationOrchestrator {
                 updated_input.unwrap_or(input),
                 permission_updates,
             ),
-            traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+            platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                 if let Err(error) = self.perms.set_permission_mode("auto").await {
                     // The current call was explicitly approved. Keep the one-shot
                     // allow, but never claim the live mode switched when the
@@ -361,7 +361,7 @@ impl ConversationOrchestrator {
                     Vec::new(),
                 )
             }
-            traits::permission_gate::PermissionOutcome::Deny { reason } => (
+            platform_api::permission_gate::PermissionOutcome::Deny { reason } => (
                 crate::test_support::PermissionDecision::Deny { reason },
                 input,
                 Vec::new(),
@@ -608,7 +608,7 @@ impl ConversationOrchestrator {
         // support — never on a present `ToolSearch` tool or deferred candidates —
         // so side queries assembled with an empty toolset take the same
         // normalization branch as the main loop.
-        traits::session_flags::set_tool_search_enabled(
+        platform_api::session_flags::set_tool_search_enabled(
             self.tools.deferral().mode().is_enabled()
                 && tool_search_supported_for_request(&model, model_profile.as_deref()),
         );

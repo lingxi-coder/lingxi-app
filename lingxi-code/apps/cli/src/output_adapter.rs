@@ -1,4 +1,4 @@
-//! Adapter that bridges [`traits::OutputStream`] emissions from
+//! Adapter that bridges [`platform_api::OutputStream`] emissions from
 //! the orchestrator into the CLI's [`crate::output::OutputSink`].
 //!
 //! Wired in M5-12 Task 9: when the orchestrator emits a `Text` content
@@ -9,7 +9,7 @@
 use crate::output::OutputSink;
 use async_trait::async_trait;
 use std::sync::Arc;
-use traits::{CostSnapshot, OutputStream};
+use platform_api::{CostSnapshot, OutputStream};
 
 /// Concrete adapter — owns an `Arc<dyn OutputSink>` and projects every
 /// `OutputStream` method through it.

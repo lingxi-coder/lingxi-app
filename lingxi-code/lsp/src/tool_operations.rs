@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use thiserror::Error;
 use tokio::fs;
-use traits::LspServerConfig;
+use platform_api::LspServerConfig;
 
 /// Upper bound on LSP-eligible file size (10 MB). Matches claude-code's
 /// `MAX_LSP_FILE_SIZE_BYTES = 10_000_000` constant verbatim.
@@ -103,7 +103,7 @@ pub enum LspOperationError {
     NotUtf8(String),
     /// Underlying LSP transport / server error.
     #[error("{0}")]
-    Lsp(#[from] traits::LspError),
+    Lsp(#[from] platform_api::LspError),
 }
 
 /// Convert a 1-based UI position to the 0-based LSP wire position.
@@ -196,7 +196,7 @@ pub(crate) async fn sync_document_text(
         .is_active_connection(client.name(), &connection)
         .await
     {
-        return Err(LspOperationError::Lsp(traits::LspError::Unavailable));
+        return Err(LspOperationError::Lsp(platform_api::LspError::Unavailable));
     }
 
     match tracker.plan_sync(client.name(), uri.clone(), text).await {

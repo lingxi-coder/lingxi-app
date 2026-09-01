@@ -202,7 +202,7 @@ pub(crate) struct PromptRuntime {
     /// LSP diagnostics not yet surfaced and injects them as a transient meta
     /// user message (claude-code's `formatDiagnosticsBlock` flow). `None` when
     /// no LSP servers are configured (the common case) ⇒ no reminder.
-    pub(crate) new_diagnostics_source: Option<Arc<dyn traits::NewDiagnosticsSource>>,
+    pub(crate) new_diagnostics_source: Option<Arc<dyn platform_api::NewDiagnosticsSource>>,
     /// FORK (codex #5 follow-up): the rendered system-prompt bytes the current
     /// turn handed the model, recorded by the turn driver after a successful API
     /// call so a fork-subagent spawn dispatched LATER in the same turn can thread
@@ -721,7 +721,7 @@ pub(crate) struct LifecycleRuntime {
     /// REM-09 goal check-in deferral bookkeeping (`deferredSince` /
     /// `checkinCount` / `lastDeferralPassAt` on the oracle's `activeGoal`).
     /// Session-scoped and deliberately not persisted on
-    /// `engine::session::ActiveGoalState`.
+    /// `lingxi_core::session::ActiveGoalState`.
     pub(crate) goal_checkin: Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
     /// Idle background timer for `/goal` check-ins. Armed only while a goal is
     /// actively deferred by background work and canceled as soon as that
@@ -774,7 +774,7 @@ pub(crate) struct ModelRuntime {
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
     /// Provider-neutral live reasoning selection for subsequent requests.
-    pub(crate) current_reasoning_selection: std::sync::RwLock<traits::ReasoningSelection>,
+    pub(crate) current_reasoning_selection: std::sync::RwLock<platform_api::ReasoningSelection>,
     /// Whether the live effort came from an explicit launch/control choice.
     /// Hot resume may inherit transcript effort only while this is false.
     pub(crate) current_effort_explicit: std::sync::atomic::AtomicBool,
@@ -815,7 +815,7 @@ pub(crate) struct ModelRuntime {
     pub(crate) analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Monotonic timestamp captured at the start of the current session. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
-    /// returned [`traits::CostSnapshot`]. Stored as `std::time::Instant`
+    /// returned [`platform_api::CostSnapshot`]. Stored as `std::time::Instant`
     /// (not `tokio::time::Instant`) so the orchestrator can be constructed
     /// outside a tokio runtime if needed.
     pub(crate) session_started_at: std::sync::Mutex<std::time::Instant>,
@@ -848,7 +848,7 @@ pub(crate) struct ModelRuntime {
     /// same transformed request without mutating `session.history`.
     pub(crate) model_call_preparer: Option<Arc<dyn ModelCallPreparer>>,
     /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
-    /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
+    /// forwarded to [`platform_api::OutputStream::emit_rate_limit`], for the
     /// emit-on-change dedup in [`Self::emit_rate_limit_if_changed`]. Lives on
     /// the orchestrator (not per-turn loop state) so the dedup spans turns —
     /// an identical snapshot across two `run_turn` calls emits exactly once.
@@ -856,7 +856,7 @@ pub(crate) struct ModelRuntime {
     pub(crate) last_emitted_rate_limit: Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
     /// Task 2 (llm-client future-work batch 5): the last RAW per-window
     /// utilization snapshot forwarded to
-    /// [`traits::OutputStream::emit_raw_utilization`], for the
+    /// [`platform_api::OutputStream::emit_raw_utilization`], for the
     /// emit-on-change dedup in [`Self::emit_raw_utilization_if_changed`].
     /// Same lifetime/placement rationale as
     /// [`Self::last_emitted_rate_limit`]: lives on the orchestrator so the
@@ -868,7 +868,7 @@ pub(crate) struct ModelRuntime {
 impl ModelRuntime {
     pub(crate) fn new(
         current_effort: Option<String>,
-        current_reasoning_selection: traits::ReasoningSelection,
+        current_reasoning_selection: platform_api::ReasoningSelection,
         current_effort_explicit: bool,
     ) -> Self {
         Self {
@@ -931,7 +931,7 @@ pub struct SessionMemoryHandle {
     /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the write base).
     pub config_home: std::path::PathBuf,
     /// Runtime used to background-spawn the extraction fork.
-    pub runtime: Arc<dyn traits::RuntimeSpawner>,
+    pub runtime: Arc<dyn platform_api::RuntimeSpawner>,
     /// One extraction at a time per conversation. The flag is claimed before
     /// spawning so scheduler reordering cannot let an older history snapshot
     /// run after a newer extraction and move the watermark backwards.

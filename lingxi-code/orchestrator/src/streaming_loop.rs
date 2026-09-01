@@ -18,7 +18,7 @@ use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use traits::OutputStream;
+use platform_api::OutputStream;
 
 /// One tool dispatch request observed during the stream. Carries the
 /// id/name/input the orchestrator must invoke. The dispatch itself is
@@ -674,7 +674,7 @@ mod tests {
     async fn thinking_and_usage_deltas_emit_to_output() {
         use crate::test_support::MockOutputStream;
         use llm_client::Usage;
-        use traits::OutputEvent;
+        use platform_api::OutputEvent;
 
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();

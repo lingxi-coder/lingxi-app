@@ -20,7 +20,7 @@ use session::jsonl::schema::{JsonlMessage, SESSION_KIND_ENV};
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 

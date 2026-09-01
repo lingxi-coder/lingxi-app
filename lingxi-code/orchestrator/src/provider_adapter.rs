@@ -42,9 +42,9 @@ pub struct ProviderApiAdapter {
 
 /// Whether `model` carries the canonical registry's `fast_mode` capability.
 fn model_supports_fast_mode(model: &str) -> bool {
-    traits::model_capabilities::has_capability(
+    platform_api::model_capabilities::has_capability(
         model,
-        traits::model_capabilities::ModelCapability::FastMode,
+        platform_api::model_capabilities::ModelCapability::FastMode,
     )
 }
 
@@ -325,7 +325,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         })
     }
 
-    fn list_model_listings(&self) -> Vec<traits::orchestrator::ModelListing> {
+    fn list_model_listings(&self) -> Vec<platform_api::orchestrator::ModelListing> {
         self.service
             .model_listings()
             .into_iter()
@@ -337,12 +337,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// Return the most recently observed rate-limit header snapshot.
     ///
     /// Delegates to [`Self::last_rate_limit_info`] and maps the internal
-    /// `RateLimitInfo` struct into the public [`traits::RateLimitSnapshot`]
+    /// `RateLimitInfo` struct into the public [`platform_api::RateLimitSnapshot`]
     /// (all three fields: `rate_limit_type`, `overage_status`, and
     /// `overage_disabled_reason`).
-    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+    fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
         self.last_rate_limit_info()
-            .map(|info| traits::RateLimitSnapshot {
+            .map(|info| platform_api::RateLimitSnapshot {
                 rate_limit_type: info.rate_limit_type,
                 overage_status: info.overage_status,
                 overage_disabled_reason: info.overage_disabled_reason,
@@ -409,56 +409,56 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// Anthropic in the catalog that special case is gone. Anthropic is listed first
 /// to keep the picker's Claude-first ordering for catalog-only (no live config)
 /// callers.
-fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> traits::ReasoningControlSpec {
+fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> platform_api::ReasoningControlSpec {
     let mandatory = raw
         .mandatory_selection
         .as_ref()
         .map(|selection| match selection {
-            llm_client::ReasoningSelection::Automatic => traits::ReasoningSelection::Automatic,
-            llm_client::ReasoningSelection::Disabled => traits::ReasoningSelection::Disabled,
-            llm_client::ReasoningSelection::Enabled => traits::ReasoningSelection::Enabled,
+            llm_client::ReasoningSelection::Automatic => platform_api::ReasoningSelection::Automatic,
+            llm_client::ReasoningSelection::Disabled => platform_api::ReasoningSelection::Disabled,
+            llm_client::ReasoningSelection::Enabled => platform_api::ReasoningSelection::Enabled,
             llm_client::ReasoningSelection::Level(id) => {
-                traits::ReasoningSelection::Level { id: id.clone() }
+                platform_api::ReasoningSelection::Level { id: id.clone() }
             }
             llm_client::ReasoningSelection::TokenBudget(tokens) => {
-                traits::ReasoningSelection::TokenBudget {
+                platform_api::ReasoningSelection::TokenBudget {
                     tokens: u64::from(*tokens),
                 }
             }
         });
-    let mut available = vec![traits::ReasoningSelection::Automatic];
+    let mut available = vec![platform_api::ReasoningSelection::Automatic];
     if let Some(required) = mandatory.as_ref() {
         available = vec![required.clone()];
     } else {
         if raw.can_disable {
-            available.push(traits::ReasoningSelection::Disabled);
+            available.push(platform_api::ReasoningSelection::Disabled);
         }
         if raw.can_enable {
-            available.push(traits::ReasoningSelection::Enabled);
+            available.push(platform_api::ReasoningSelection::Enabled);
         }
         available.extend(
             raw.levels
                 .iter()
                 .cloned()
-                .map(|id| traits::ReasoningSelection::Level { id }),
+                .map(|id| platform_api::ReasoningSelection::Level { id }),
         );
     }
     let auto_only = available.len() == 1
         && matches!(
             available.first(),
-            Some(traits::ReasoningSelection::Automatic)
+            Some(platform_api::ReasoningSelection::Automatic)
         )
         && raw.token_budget.is_none();
-    traits::ReasoningControlSpec {
+    platform_api::ReasoningControlSpec {
         available,
         selections_persistable: mandatory.is_none(),
-        budget_range: raw.token_budget.map(|range| traits::ReasoningBudgetRange {
+        budget_range: raw.token_budget.map(|range| platform_api::ReasoningBudgetRange {
             min_tokens: range.min,
             max_tokens: range.max,
             supports_dynamic: false,
             supports_disabled: raw.can_disable,
         }),
-        provider_default: mandatory.unwrap_or(traits::ReasoningSelection::Automatic),
+        provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
         forced: raw.mandatory_selection.is_some(),
         modifiable: raw.mandatory_selection.is_none() && !auto_only,
         disabled_reason: if raw.mandatory_selection.is_some() {
@@ -473,8 +473,8 @@ fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> traits::Reason
 
 /// Project an llm-client route listing into the provider-neutral picker type.
 #[must_use]
-pub fn lower_model_listing(listing: llm_client::ModelListing) -> traits::ModelListing {
-    let capabilities = traits::ModelCapabilities {
+pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::ModelListing {
+    let capabilities = platform_api::ModelCapabilities {
         streaming: listing.capabilities.streaming,
         tools: listing.capabilities.tools,
         vision: listing.capabilities.vision,
@@ -482,7 +482,7 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> traits::ModelLi
         reasoning: listing.capabilities.reasoning,
         structured_output: listing.capabilities.structured_output,
     };
-    traits::ModelListing {
+    platform_api::ModelListing {
         display_model: listing.display_model,
         request_model: listing.request_model,
         provider_label: provider_label(&listing.profile_name).to_string(),
@@ -495,7 +495,7 @@ pub fn lower_model_listing(listing: llm_client::ModelListing) -> traits::ModelLi
     }
 }
 
-fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
+fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
     // Build one listing, defaulting an absent description to a known per-model
     // parity blurb for the Claude family (models.dev / the Anthropic profiles
     // carry no such string).
@@ -507,24 +507,24 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
                supports_reasoning: bool| {
         let description =
             description.or_else(|| model_description(&request_model).map(str::to_string));
-        traits::orchestrator::ModelListing {
+        platform_api::orchestrator::ModelListing {
             display_model,
             request_model,
             provider_label: label,
             provider_id: provider,
             description,
             supports_reasoning,
-            metadata: traits::ModelMetadata::default(),
-            capabilities: traits::ModelCapabilities {
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: platform_api::ModelCapabilities {
                 reasoning: supports_reasoning,
-                ..traits::ModelCapabilities::default()
+                ..platform_api::ModelCapabilities::default()
             },
-            reasoning: traits::ReasoningControlSpec::default(),
+            reasoning: platform_api::ReasoningControlSpec::default(),
         }
     };
 
     // 1. First-party Anthropic (not in the preset catalog).
-    let mut listings: Vec<traits::orchestrator::ModelListing> =
+    let mut listings: Vec<platform_api::orchestrator::ModelListing> =
         llm_client::anthropic_model_profiles()
             .into_iter()
             .map(|m| {
@@ -1368,7 +1368,7 @@ mod tests {
     // ── Task 5 Part B: OrchestratorApiClient::last_rate_limit_info ──────────────
 
     /// `OrchestratorApiClient::last_rate_limit_info` returns the adapter's stored
-    /// rate-limit info mapped into a `traits::RateLimitSnapshot`.
+    /// rate-limit info mapped into a `platform_api::RateLimitSnapshot`.
     ///
     /// After a 2xx response with unified headers the snapshot must carry all
     /// three fields: `rate_limit_type`, `overage_status`, and

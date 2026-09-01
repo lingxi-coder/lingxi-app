@@ -6,11 +6,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Register every one of the **102** slash commands that `claude-code` exposes at runtime into `lingxi-commands::CommandRegistry` via a single helper `register_all_builtin_commands(reg)`. Each of the **84 not-yet-implemented** commands gets a single shared `UnimplementedCommandHandler` instance that returns the byte-locked literal `"{name}: not implemented in v0.6.0 (M5)"` when dispatched. Each of the **18 core** commands gets its own per-name placeholder struct (`ClearHandler`, `HelpHandler`, ..., `DoctorHandler`) that **also** returns the same literal in M5-09 but exists as a stable type-id so M5-10 (batch 1: 6 commands) and M5-11 (batch 2: 12 commands) can swap real bodies in one struct at a time without touching the registry wiring. Adds a `SlashCommandDispatcher` impl in `lingxi-commands::dispatcher` that takes `Arc<dyn lingxi_traits::OrchestratorHandle>` (M5-02), parses raw input via existing `parse_slash_command`, looks up the registry, and routes to the resolved handler or returns the locked unknown-command literal `"Unknown command: /{name}"`. Zero new telemetry events.
+**Goal:** Register every one of the **102** slash commands that `claude-code` exposes at runtime into `lingxi-commands::CommandRegistry` via a single helper `register_all_builtin_commands(reg)`. Each of the **84 not-yet-implemented** commands gets a single shared `UnimplementedCommandHandler` instance that returns the byte-locked literal `"{name}: not implemented in v0.6.0 (M5)"` when dispatched. Each of the **18 core** commands gets its own per-name placeholder struct (`ClearHandler`, `HelpHandler`, ..., `DoctorHandler`) that **also** returns the same literal in M5-09 but exists as a stable type-id so M5-10 (batch 1: 6 commands) and M5-11 (batch 2: 12 commands) can swap real bodies in one struct at a time without touching the registry wiring. Adds a `SlashCommandDispatcher` impl in `lingxi-commands::dispatcher` that takes `Arc<dyn lingxi_platform_api::OrchestratorHandle>` (M5-02), parses raw input via existing `parse_slash_command`, looks up the registry, and routes to the resolved handler or returns the locked unknown-command literal `"Unknown command: /{name}"`. Zero new telemetry events.
 
 **Architecture:** Three new files under `lingxi-commands/src/`: `builtin/unimplemented.rs` (the shared stub handler), `builtin/core_placeholders.rs` (18 per-command placeholder structs, each delegating to the shared stub body), and `dispatcher.rs` (the `SlashCommandDispatcher` impl). One modified file `builtin/mod.rs` (re-export). One modified file `registry.rs` (add `register_all_builtin_commands` + `is_builtin_name` helpers). One modified file `lib.rs` (re-export dispatcher + helpers). All 102 names are kept in one centralised `BUILTIN_COMMAND_NAMES: &[&str; 102]` constant sorted ASCII-ascending and a parallel `BUILTIN_CORE_NAMES: &[&str; 18]` constant. Parity fixture `parity_slash_commands_102.json` + driver `parity_slash_commands.rs` in `lingxi-test-harness` lock the count and split (84 + 18 = 102). The dispatcher integration into the orchestrator turn loop is **not** done in this plan — only the trait impl is shipped; M5-12 (CLI binary) and M5-02 follow-up wire it. No telemetry deltas; no settings-schema deltas; no event-name count changes (still 258 after M5-08, still 258 after M5-09).
 
-**Tech stack:** Rust 2021, `async_trait = "0.1"` (workspace), `lingxi_protocol::Effect` (already used by `CommandResult::EmitEffects`), `lingxi_traits::OrchestratorHandle` (introduced in M5-02), `lingxi_commands::{model::*, parser::parse_slash_command, registry::CommandRegistry}` (in-crate), `lingxi-test-harness::parity` (M3-06 module).
+**Tech stack:** Rust 2021, `async_trait = "0.1"` (workspace), `lingxi_protocol::Effect` (already used by `CommandResult::EmitEffects`), `lingxi_platform_api::OrchestratorHandle` (introduced in M5-02), `lingxi_commands::{model::*, parser::parse_slash_command, registry::CommandRegistry}` (in-crate), `lingxi-test-harness::parity` (M3-06 module).
 
 ---
 
@@ -1288,13 +1288,13 @@ git commit -m "feat(M5-09 task 4): 18 per-name core placeholder structs (macro-g
 - [ ] **Step 1: Confirm `OrchestratorHandle` trait location.**
 
 ```bash
-rg -n "pub trait OrchestratorHandle" lingxi-code/crates/traits/src/ 2>&1 | head -5
-rg -n "SlashCommandDispatcher" lingxi-code/crates/traits/src/ 2>&1 | head -5
+rg -n "pub trait OrchestratorHandle" lingxi-code/crates/platform-api/src/ 2>&1 | head -5
+rg -n "SlashCommandDispatcher" lingxi-code/crates/platform-api/src/ 2>&1 | head -5
 ```
 
-  Expected: `OrchestratorHandle` lives in `lingxi-code/crates/traits/src/orchestrator.rs` (from M5-02). `SlashCommandDispatcher` either also lives there (defined by M5-02) or it doesn't exist yet and this Task creates it. In either case, the **canonical home** for the trait is `lingxi-traits` so `lingxi-commands` doesn't take a dep on `lingxi-orchestrator`.
+  Expected: `OrchestratorHandle` lives in `lingxi-code/crates/platform-api/src/orchestrator.rs` (from M5-02). `SlashCommandDispatcher` either also lives there (defined by M5-02) or it doesn't exist yet and this Task creates it. In either case, the **canonical home** for the trait is `lingxi-traits` so `lingxi-commands` doesn't take a dep on `lingxi-orchestrator`.
 
-  - **If `SlashCommandDispatcher` does not exist in `lingxi-traits`**, add it there (in `lingxi-code/crates/traits/src/commands.rs`) before continuing this Task. The trait minimum:
+  - **If `SlashCommandDispatcher` does not exist in `lingxi-traits`**, add it there (in `lingxi-code/crates/platform-api/src/commands.rs`) before continuing this Task. The trait minimum:
 
 ```rust
 //! Slash-command dispatch surface — implemented by `lingxi-commands`,
@@ -1323,14 +1323,14 @@ pub enum SlashDispatchResult {
 }
 ```
 
-  Add `pub mod commands;` to `lingxi-code/crates/traits/src/lib.rs` and `pub use commands::{SlashCommandDispatcher, SlashDispatchResult};`. Bump `lingxi-traits` version if its `Cargo.toml` semver is strict; otherwise leave it.
+  Add `pub mod commands;` to `lingxi-code/crates/platform-api/src/lib.rs` and `pub use commands::{SlashCommandDispatcher, SlashDispatchResult};`. Bump `lingxi-traits` version if its `Cargo.toml` semver is strict; otherwise leave it.
 
 - [ ] **Step 2: Write the failing test.**
 
   Create `lingxi-code/crates/commands/src/dispatcher.rs`:
 
 ```rust
-//! Implementation of [`lingxi_traits::SlashCommandDispatcher`] that routes
+//! Implementation of [`lingxi_platform_api::SlashCommandDispatcher`] that routes
 //! `/<name> <args>` into the in-crate [`CommandRegistry`].
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
@@ -1339,7 +1339,7 @@ pub enum SlashDispatchResult {
 mod tests {
     use super::*;
     use crate::registry::{register_all_builtin_commands, CommandRegistry};
-    use lingxi_traits::SlashDispatchResult;
+    use lingxi_platform_api::SlashDispatchResult;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1444,7 +1444,7 @@ cargo test -p lingxi-commands --lib dispatcher::tests 2>&1 | head -25
   Prepend the impl above the `#[cfg(test)]` block:
 
 ```rust
-//! Implementation of [`lingxi_traits::SlashCommandDispatcher`] that routes
+//! Implementation of [`lingxi_platform_api::SlashCommandDispatcher`] that routes
 //! `/<name> <args>` into the in-crate [`CommandRegistry`].
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
@@ -1453,7 +1453,7 @@ use crate::model::CommandResult;
 use crate::parser::parse_slash_command;
 use crate::registry::CommandRegistry;
 use async_trait::async_trait;
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1559,7 +1559,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
 [dependencies]
 async-trait = { workspace = true }
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }    # ← add
+lingxi-platform-api = { path = "../platform-api" }    # ← add
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["sync"] }    # ← ensure "sync" feature is on for RwLock
 ```
@@ -1616,7 +1616,7 @@ cd /Users/luolingfeng/Projects/LingXi-Next
 git add lingxi-code/crates/commands/src/dispatcher.rs \
         lingxi-code/crates/commands/src/lib.rs \
         lingxi-code/crates/commands/Cargo.toml \
-        lingxi-code/crates/traits/src/    # picks up commands.rs + lib.rs change if added
+        lingxi-code/crates/platform-api/src/    # picks up commands.rs + lib.rs change if added
 git commit -m "feat(M5-09 task 5): RegistrySlashDispatcher + SlashCommandDispatcher trait + Unknown command literal lock (7 dispatcher tests)"
 ```
 
@@ -1770,7 +1770,7 @@ git commit -m "feat(M5-09 task 5): RegistrySlashDispatcher + SlashCommandDispatc
 use lingxi_commands::builtin::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
 use lingxi_commands::dispatcher::RegistrySlashDispatcher;
 use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -1981,7 +1981,7 @@ git commit -m "test(M5-09 task 6): parity fixture + 9 drivers — 102 names, 18 
 
 use lingxi_commands::dispatcher::RegistrySlashDispatcher;
 use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -2136,14 +2136,14 @@ git commit -m "test(M5-09 task 7): dispatch_e2e integration tests — 7 end-to-e
 //! # Dispatch
 //!
 //! [`dispatcher::RegistrySlashDispatcher`] implements
-//! [`lingxi_traits::SlashCommandDispatcher`]. It strips a leading `/`,
+//! [`lingxi_platform_api::SlashCommandDispatcher`]. It strips a leading `/`,
 //! parses the remainder via [`parser::parse_slash_command`], looks up the
 //! handler in the [`CommandRegistry`], and returns one of:
 //!
-//! - [`lingxi_traits::SlashDispatchResult::Handled`] for known commands
-//! - [`lingxi_traits::SlashDispatchResult::Unknown`] with the locked literal
+//! - [`lingxi_platform_api::SlashDispatchResult::Handled`] for known commands
+//! - [`lingxi_platform_api::SlashDispatchResult::Unknown`] with the locked literal
 //!   `"Unknown command: /{name}"` for unregistered names
-//! - [`lingxi_traits::SlashDispatchResult::NotASlashCommand`] for inputs that
+//! - [`lingxi_platform_api::SlashDispatchResult::NotASlashCommand`] for inputs that
 //!   don't start with `/`
 //!
 //! # Plan reference
@@ -2294,7 +2294,7 @@ m5.9  M5-09: 102 slash commands registered...
 | Stub literal lock | T0 step 4 L1, T1 step 3, T6 fixture |
 | 102 command-name lock | T0 step 2, T2 (`BUILTIN_COMMAND_NAMES`), T6 fixture |
 | 0 new telemetry events | T9 step 4 confirms `ALL_EVENT_NAMES.len()` unchanged at 258 |
-| Dependency: M5-02 (OrchestratorHandle) | T5 step 1 confirms / creates `lingxi-traits::SlashCommandDispatcher` |
+| Dependency: M5-02 (OrchestratorHandle) | T5 step 1 confirms / creates `lingxi-platform_api::SlashCommandDispatcher` |
 
   All ✅.
 

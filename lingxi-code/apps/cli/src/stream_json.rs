@@ -39,7 +39,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use traits::{CostSnapshot, OutputStream};
+use platform_api::{CostSnapshot, OutputStream};
 
 // ── Wire-format helpers ─────────────────────────────────────────────────────
 
@@ -1842,7 +1842,7 @@ pub fn build_init_params(
         slash_commands,
         terminal_slash_commands,
         api_key_source,
-        claude_code_version: traits::CLAUDE_CODE_VERSION.to_string(),
+        claude_code_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
         output_style: output_style.to_string(),
         agents,
         skills,
@@ -1853,11 +1853,11 @@ pub fn build_init_params(
         // config-privacy check (`zKm()`) and a third-party-gateway check
         // (`o_()`); the former surface isn't ported and the latter is a LingXi
         // accepted divergence (multi-provider), so only the F$e() term is wired.
-        analytics_disabled: traits::traffic_mode::is_telemetry_disabled(),
+        analytics_disabled: platform_api::traffic_mode::is_telemetry_disabled(),
         // `productFeedbackDisabled` follows the essential-traffic privacy gate:
         // with non-essential traffic disabled, the product feedback surface is
         // unavailable and the init frame must advertise that fact.
-        product_feedback_disabled: traits::traffic_mode::is_essential_traffic_only(),
+        product_feedback_disabled: platform_api::traffic_mode::is_essential_traffic_only(),
         memory_paths,
         fast_mode_state: fast_mode_state.to_string(),
         fast_mode_disabled_reason: fast_mode_disabled_reason.map(str::to_string),
@@ -1920,8 +1920,8 @@ mod canonical_model_tests {
     /// legacy aggregate fallback) and sits alongside contextWindow/maxOutputTokens.
     #[test]
     fn usage_block_emits_canonical_model_on_both_branches() {
-        let mut per_model = traits::orchestrator::CostSnapshot::default();
-        per_model.by_model = vec![traits::orchestrator::ModelUsageRow {
+        let mut per_model = platform_api::orchestrator::CostSnapshot::default();
+        per_model.by_model = vec![platform_api::orchestrator::ModelUsageRow {
             model: "us.anthropic.claude-opus-4-7-v1:0".into(),
             provider: Some("bedrock".into()),
             total_nano_usd: 1_000_000_000,
@@ -1950,7 +1950,7 @@ mod canonical_model_tests {
 
         // Legacy aggregate fallback (no per-model rows): provider is unknown
         // there and must be OMITTED (`.optional()`), never null.
-        let mut agg = traits::orchestrator::CostSnapshot::default();
+        let mut agg = platform_api::orchestrator::CostSnapshot::default();
         agg.input_tokens = 5;
         let block2 =
             StreamJsonStream::build_model_usage_block(&agg, "claude-opus-4-7-20251101", &[]);
@@ -3412,7 +3412,7 @@ mod tests {
             input_tokens: 17,
             output_tokens: 5,
             total_usd: 0.000_002,
-            by_model: vec![traits::orchestrator::ModelUsageRow {
+            by_model: vec![platform_api::orchestrator::ModelUsageRow {
                 model: "claude-haiku-4-5".to_string(),
                 provider: Some("firstParty".to_string()),
                 total_nano_usd: 2_000,

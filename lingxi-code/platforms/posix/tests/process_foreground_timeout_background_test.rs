@@ -7,7 +7,7 @@
 use platform_posix::process::{task_output_path, PosixProcess};
 use std::collections::HashMap;
 use std::time::Duration;
-use traits::{
+use platform_api::{
     ForegroundOutcome, ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };

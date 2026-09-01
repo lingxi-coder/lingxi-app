@@ -9,12 +9,12 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/memory` handler — opens the user's memory file in `$EDITOR`.
 ///
 /// Calls
-/// [`OrchestratorHandle::open_memory_editor`](traits::OrchestratorHandle::open_memory_editor)
+/// [`OrchestratorHandle::open_memory_editor`](platform_api::OrchestratorHandle::open_memory_editor)
 /// and renders `"Edited {path} (exit {code})."` on success or the locked
 /// `"Could not edit memory: {error}"` prefix on failure.
 #[derive(Clone)]

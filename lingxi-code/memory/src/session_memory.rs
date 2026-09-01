@@ -457,13 +457,13 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
     let file_name = path
         .file_name()
         .ok_or_else(|| MemoryError::Io("session-memory path has no file name".to_string()))?;
-    let mut options = traits::rooted_fs::AtomicWriteOptions::default();
+    let mut options = platform_api::rooted_fs::AtomicWriteOptions::default();
     #[cfg(unix)]
     if let Ok(metadata) = std::fs::metadata(path) {
         use std::os::unix::fs::PermissionsExt as _;
         options.file_mode = metadata.permissions().mode() & 0o777;
     }
-    traits::rooted_fs::atomic_write(parent, Path::new(file_name), content.as_bytes(), options)
+    platform_api::rooted_fs::atomic_write(parent, Path::new(file_name), content.as_bytes(), options)
         .map_err(|error| MemoryError::Io(error.to_string()))
 }
 

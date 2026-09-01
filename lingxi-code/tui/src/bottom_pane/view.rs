@@ -170,7 +170,7 @@ pub enum PermissionAction {
 
 /// An app-level `/tasks` effect a view can request via
 /// [`ViewOutcome::RunTaskAction`]. The owner aborts the task OFF-LOOP via
-/// [`traits::task_registry::TaskRegistryHandle::kill`] on the live runtime and
+/// [`platform_api::task_registry::TaskRegistryHandle::kill`] on the live runtime and
 /// reports the result back through `TurnEvent::SystemNotice`. The 9-char task
 /// id is not secret, so the derived `Debug` is fine.
 #[derive(Debug, Clone, PartialEq, Eq)]

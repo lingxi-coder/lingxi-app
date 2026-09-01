@@ -6,7 +6,7 @@
 //! background process and treat "process not found" as success.
 
 use tokio::process::Command;
-use traits::ProcessError;
+use platform_api::ProcessError;
 
 /// Terminate the process tree rooted at `pid` via `taskkill /T /F /PID`.
 ///

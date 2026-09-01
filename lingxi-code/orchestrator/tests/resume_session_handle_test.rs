@@ -12,7 +12,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::{ConversationMessage, MessageId, SessionId};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(vec![]));
@@ -71,11 +71,11 @@ async fn resume_session_adopts_history_named_id_and_runtime_model() {
             history.clone(),
             Some("11111111-1111-4111-8111-111111111111".to_string()),
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 model: "claude-opus-4-1".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 effort: Some("high".to_string()),
-                ..traits::ResumeRuntimeSnapshot::default()
+                ..platform_api::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -125,7 +125,7 @@ async fn resume_session_default_runtime_keeps_live_model_for_legacy_callers() {
             )],
             None,
             None,
-            traits::ResumeRuntimeSnapshot::default(),
+            platform_api::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("legacy resume_session call must still succeed");

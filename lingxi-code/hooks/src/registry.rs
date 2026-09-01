@@ -8,7 +8,7 @@ use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use telemetry::otel::SerializedTraceContext;
-use traits::SubagentInheritance;
+use platform_api::SubagentInheritance;
 
 /// Per-call context handed to hooks alongside the event payload.
 ///

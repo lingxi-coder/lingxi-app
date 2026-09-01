@@ -5,7 +5,7 @@
 //! `UnsupportedTransport`.
 
 use platform_windows::WindowsMcpTransport;
-use traits::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_api::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[tokio::test]
 async fn connect_sse_does_not_return_unsupported_transport() {

@@ -42,7 +42,7 @@ use protocol::{HttpMethod, HttpRequest};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use traits::http::HttpTransport;
+use platform_api::http::HttpTransport;
 
 /// Timeout for the domain blocklist preflight check (10 seconds).
 /// Mirrors `utils.ts:119` `DOMAIN_CHECK_TIMEOUT_MS`.
@@ -311,7 +311,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-    use traits::http::HttpError;
+    use platform_api::http::HttpError;
 
     fn sync_resp(status: u16, body: &str) -> ScriptedResponse {
         ScriptedResponse::Sync(protocol::HttpResponse {

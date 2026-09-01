@@ -11,14 +11,14 @@ use tool_api::context::ToolUseOptions;
 struct TokioRuntime;
 
 #[async_trait]
-impl traits::RuntimeSpawner for TokioRuntime {
+impl platform_api::RuntimeSpawner for TokioRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
         tokio::spawn(task);
-        Ok(traits::BackgroundTaskHandle {
+        Ok(platform_api::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -30,8 +30,8 @@ impl traits::RuntimeSpawner for TokioRuntime {
 
     async fn cancel(
         &self,
-        _handle: &traits::BackgroundTaskHandle,
-    ) -> Result<(), traits::RuntimeError> {
+        _handle: &platform_api::BackgroundTaskHandle,
+    ) -> Result<(), platform_api::RuntimeError> {
         Ok(())
     }
 }
@@ -130,7 +130,7 @@ async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
 
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        traits::OrchestratorHandle::clear_session(&orch),
+        platform_api::OrchestratorHandle::clear_session(&orch),
     )
     .await
     .expect("clear must not wait for the side query")

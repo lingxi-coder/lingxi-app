@@ -197,7 +197,7 @@ This is the largest task. Do it in the four sub-steps below, building green betw
   - `async fn stream(&self, …) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>`
   - `async fn stream_forced(&self, …) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>`
   - (exact signatures: copy the bodies of the 3 trait impls' methods at provider_adapter.rs:1808/2079/2132 as inherent `ApiService` methods, replacing `self.<field>` access with the moved struct's fields.)
-- Consumes: `crate::model::*`, `crate::convert::*`, `crate::Transport`, `protocol::*`, `traits::subscription::SharedSubscription`, `telemetry::AnalyticsBus`.
+- Consumes: `crate::model::*`, `crate::convert::*`, `crate::Transport`, `protocol::*`, `platform_api::subscription::SharedSubscription`, `telemetry::AnalyticsBus`.
 
 - [ ] **Step 3a: Create `ApiService` with the struct state + constructors (no drive methods yet)**
 

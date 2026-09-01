@@ -148,8 +148,8 @@ pub fn connected_model_rows_restricted(
                 || current_provider.as_deref() == Some(profile);
             eligible
                 && !m.is_deprecated()
-                && (traits::is_curated_model(profile, &m.request_model)
-                    || !traits::provider_has_curated_list(profile))
+                && (platform_api::is_curated_model(profile, &m.request_model)
+                    || !platform_api::provider_has_curated_list(profile))
                 // Managed allowlist gate: a barred model is not selectable.
                 && llm_client::model::allowlist::is_model_allowed(
                     &m.request_model,

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use traits::{
+use platform_api::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessRunner, ProcessStreamSink,
     RuntimeSpawner, Sandbox,
 };
@@ -253,7 +253,7 @@ impl MonitorHandler {
         self
     }
 
-    fn classify(result: &Result<traits::ProcessOutput, ProcessError>) -> TaskStatus {
+    fn classify(result: &Result<platform_api::ProcessOutput, ProcessError>) -> TaskStatus {
         match result {
             Ok(output) if output.exit_code == 0 => TaskStatus::Completed,
             Ok(_) => TaskStatus::Failed,
@@ -269,7 +269,7 @@ impl MonitorHandler {
     /// classified from the process result.
     fn terminal_status(
         cancelled: bool,
-        result: &Result<traits::ProcessOutput, ProcessError>,
+        result: &Result<platform_api::ProcessOutput, ProcessError>,
     ) -> TaskStatus {
         if cancelled {
             TaskStatus::Killed
@@ -476,9 +476,9 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{
         ProcessCommand, ProcessHandle, ProcessOutput, SandboxError, SandboxPolicy, SandboxedCommand,
     };
 
@@ -710,7 +710,7 @@ mod tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: traits::SandboxFeatures::default(),
+                features: platform_api::SandboxFeatures::default(),
             }
         }
     }

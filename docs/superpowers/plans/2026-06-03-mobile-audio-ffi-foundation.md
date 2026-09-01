@@ -26,18 +26,18 @@ Pattern to mirror for foreign capabilities: `ios-framework`'s `IosEventListener`
 Pattern to mirror for the tool: `tools/voice` (`VoiceTool` → `ctx.voice`).
 
 ## Layer 1 — Rust seam (engine side) — self-contained, verifiable now
-- [x] T1.1 `traits/src/stt.rs`: `#[async_trait] SpeechToText` + `SttOpts{language}`,
+- [x] T1.1 `platform-api/src/stt.rs`: `#[async_trait] SpeechToText` + `SttOpts{language}`,
       `SttTranscript{text,language,confidence}`, `SttError`. Mirror `voice.rs`.
-- [x] T1.2 `traits/src/tts.rs`: `#[async_trait] TextToSpeech` + `TtsOpts{text,voice}`,
+- [x] T1.2 `platform-api/src/tts.rs`: `#[async_trait] TextToSpeech` + `TtsOpts{text,voice}`,
       `TtsAudio{pcm:Vec<u8>,sample_rate_hz}`, `TtsError`.
-- [x] T1.3 `traits/src/lib.rs` pub use; `platform.rs` add `stt()`/`tts()` default `None`.
+- [x] T1.3 `platform-api/src/lib.rs` pub use; `platform.rs` add `stt()`/`tts()` default `None`.
 - [x] T1.4 `tool-api` `BuiltinToolContext`: add `stt`/`tts: Option<Arc<dyn …>>`.
       Fix 3 construction sites (`test_support.rs`, `engine-mobile/host.rs`,
       `engine-desktop/lib.rs`) → `None` (desktop) / `platform.stt()` (mobile).
 - [x] T1.5 New `tools/speech` crate: `SpeechTool` (actions `transcribe`/`speak`) →
       `ctx.stt`/`ctx.tts`. Mirror `tool-voice`. Unit tests with fake impls.
 - [x] T1.6 Register `tool-speech` in the mobile tool set; wire `ctx.stt/tts` from
-      `platform` in `engine-mobile`. `cargo test -p traits -p tool-api -p tool-speech -p engine-mobile`.
+      `platform` in `engine-mobile`. `cargo test -p platform-api -p tool-api -p tool-speech -p engine-mobile`.
 
 ## Layer 2 — FFI foundation (UniFFI export + Android bindings)
 - [x] T2.1 `android-aar` + `ios-framework`: crate-local `#[uniffi::export(callback_interface)]`

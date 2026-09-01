@@ -78,7 +78,7 @@ genuinely can differ, and that is the transform it needs.
 
 All three layers landed. `session::agent_rows` holds the parked row
 (`agent-<id>.task.json`, absence-means-terminal),
-`traits::parked_agent_store::ParkedAgentStore` is the seam,
+`platform_api::parked_agent_store::ParkedAgentStore` is the seam,
 `engine_desktop::agent_restore::restore_parked_agents` rebuilds through the same
 `spawn_async` a fresh launch uses, and `SubagentContext::resumed_history`
 REPLACES the seed (prompt + fork context + preload) rather than prefixing it.

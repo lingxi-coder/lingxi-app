@@ -34,9 +34,9 @@
 ## Survey facts (verified — do NOT re-derive)
 
 - `SubscriberState { is_subscriber, is_enterprise }` is copied at adapter construction: `orchestrator/src/provider_adapter.rs:33-37`, consumed at `:280`/`:298` (`apply_beta_header_with_auth` is_subscriber) and `:497-498` (`RetryState { is_subscriber, is_enterprise }`). Built at `apps/engine-desktop/src/lib.rs:1182` (`is_enterprise: false` hard-coded) and `apps/engine-mobile/src/host.rs:362` (both false).
-- `DesktopRuntime.subscription: traits::subscription::SharedSubscription` exists (batch 4); slot seeded synchronously, background fetch fills tier/billing/role. Readers: `.read().ok()` → clone → `unwrap_or_default()`.
+- `DesktopRuntime.subscription: platform_api::subscription::SharedSubscription` exists (batch 4); slot seeded synchronously, background fetch fills tier/billing/role. Readers: `.read().ok()` → clone → `unwrap_or_default()`.
 - `OrchestratorConfig.is_subscriber/is_enterprise` (`config.rs:127/:140`) feed the adapter via the composition root; the `config.rs:134` PARITY-GAP comment says the profile fetch isn't performed — now it IS (batch 4); the comment is stale either way.
-- Batch-3 precedent for additive events: `traits::OutputEvent::RateLimit` (9-field variant appended) + `OutputStream::emit_rate_limit` default no-op; orchestrator emit-on-change via `tokio::sync::Mutex<Option<RateLimitInfo>>` dedupe at two seams (`conversation.rs` streaming ~:2129 helper `emit_rate_limit_if_changed` at ~:639, `turn_loop.rs` batched funnel ~:375); TUI bridge `tui/src/events/orchestrator_bridge.rs:206` maps variant → `TurnEvent::RateLimit`; `tui/src/streaming.rs:115-156` apply_event arm composes + dedupes via `state.last_rate_limit_text`.
+- Batch-3 precedent for additive events: `platform_api::OutputEvent::RateLimit` (9-field variant appended) + `OutputStream::emit_rate_limit` default no-op; orchestrator emit-on-change via `tokio::sync::Mutex<Option<RateLimitInfo>>` dedupe at two seams (`conversation.rs` streaming ~:2129 helper `emit_rate_limit_if_changed` at ~:639, `turn_loop.rs` batched funnel ~:375); TUI bridge `tui/src/events/orchestrator_bridge.rs:206` maps variant → `TurnEvent::RateLimit`; `tui/src/streaming.rs:115-156` apply_event arm composes + dedupes via `state.last_rate_limit_text`.
 - `RateLimitInfo::from_headers_at` (orchestrator/src/model/rate_limit.rs) parses per-claim headers already; tolerant helpers `parse_epoch_secs`/`parse_fraction` are module fns.
 - TUI statusline command: `tui/src/components/status_line_command.rs:115-147` `build_status_line_input(8 args) -> Value` builds the stdin JSON (NO rate_limits today); config/text plumbed via `AppState.status_line_config` (state.rs:820) + `status_line_text`; invocation site — grep `build_status_line_input(` in `tui/src` (repl.rs/app.rs region).
 - TUI has NO TS-style notification system; rate-limit notices render as `RenderedMessage::RateLimit { text, upsell }` pushed from the streaming arm. The overage notice rides the same channel.
@@ -51,14 +51,14 @@
 
 ---
 
-### Task 1: traits additive — `OutputEvent::RawUtilization` + `emit_raw_utilization` + `traits::env::is_env_truthy` (FROZEN-ADDITIVE)
+### Task 1: traits additive — `OutputEvent::RawUtilization` + `emit_raw_utilization` + `platform_api::env::is_env_truthy` (FROZEN-ADDITIVE)
 
 **Files:**
-- Modify: `lingxi-code/traits/src/orchestrator.rs` (append variant + default method — find the batch-3 `RateLimit` variant and `emit_rate_limit` and mirror their style/doc conventions EXACTLY)
-- Create: `lingxi-code/traits/src/env.rs`
-- Modify: `lingxi-code/traits/src/lib.rs` (+1 `pub mod env;` line)
+- Modify: `lingxi-code/platform-api/src/orchestrator.rs` (append variant + default method — find the batch-3 `RateLimit` variant and `emit_rate_limit` and mirror their style/doc conventions EXACTLY)
+- Create: `lingxi-code/platform-api/src/env.rs`
+- Modify: `lingxi-code/platform-api/src/lib.rs` (+1 `pub mod env;` line)
 
-- [ ] **Step 1: Read** `traits/src/orchestrator.rs` — the `OutputEvent::RateLimit` variant block and `emit_rate_limit` default no-op + their tests (batch 3). Confirm appending a variant + a default-bodied method is additive (no existing lines change).
+- [ ] **Step 1: Read** `platform-api/src/orchestrator.rs` — the `OutputEvent::RateLimit` variant block and `emit_rate_limit` default no-op + their tests (batch 3). Confirm appending a variant + a default-bodied method is additive (no existing lines change).
 
 - [ ] **Step 2: Failing tests** (RED): in orchestrator.rs's test mod, mirror the existing RateLimit-variant tests:
 
@@ -152,8 +152,8 @@ async fn emit_raw_utilization(
 ```
 (If `emit_rate_limit` instead takes the variant or a struct — MATCH whatever it does.)
 
-- [ ] **Step 4: GREEN + clippy + frozen check** (`cargo test -p traits`, clippy, `git diff main -- lingxi-code/traits | grep -c '^-[^-]'` → 0). NOTE: appending a variant may break exhaustive `match`es in OTHER crates (tui bridge, client-adapter). `cargo check --workspace` and fix those matches with explicit no-op arms IN THE CONSUMING CRATES (not traits) — those crates are not frozen. Keep the fixes minimal (`OutputEvent::RawUtilization { .. } => {}` style with a one-line comment).
-- [ ] **Step 5: Commit** — `git add lingxi-code/traits/src/env.rs lingxi-code/traits/src/lib.rs lingxi-code/traits/src/orchestrator.rs` + any consuming-crate match fixes by name; message `feat(traits): additive RawUtilization event + emit hook + shared is_env_truthy`.
+- [ ] **Step 4: GREEN + clippy + frozen check** (`cargo test -p platform-api`, clippy, `git diff main -- lingxi-code/traits | grep -c '^-[^-]'` → 0). NOTE: appending a variant may break exhaustive `match`es in OTHER crates (tui bridge, client-adapter). `cargo check --workspace` and fix those matches with explicit no-op arms IN THE CONSUMING CRATES (not traits) — those crates are not frozen. Keep the fixes minimal (`OutputEvent::RawUtilization { .. } => {}` style with a one-line comment).
+- [ ] **Step 5: Commit** — `git add lingxi-code/platform-api/src/env.rs lingxi-code/platform-api/src/lib.rs lingxi-code/platform-api/src/orchestrator.rs` + any consuming-crate match fixes by name; message `feat(traits): additive RawUtilization event + emit hook + shared is_env_truthy`.
 
 ---
 
@@ -240,7 +240,7 @@ impl RawUtilization {
 - Modify: `lingxi-code/apps/engine-desktop/src/lib.rs` (pass the slot)
 - Modify: `lingxi-code/apps/engine-mobile/src/host.rs` (pass None)
 
-- [ ] **Step 1: Read** provider_adapter.rs :33-37 (SubscriberState), :130-230 (constructors), :280/:298/:497 (read sites). Plan: add `subscription: Option<traits::subscription::SharedSubscription>` field + builder method `with_subscription(mut self, slot) -> Self` (do NOT change existing constructor signatures — additive builder keeps every existing call site compiling). Add a private resolver:
+- [ ] **Step 1: Read** provider_adapter.rs :33-37 (SubscriberState), :130-230 (constructors), :280/:298/:497 (read sites). Plan: add `subscription: Option<platform_api::subscription::SharedSubscription>` field + builder method `with_subscription(mut self, slot) -> Self` (do NOT change existing constructor signatures — additive builder keeps every existing call site compiling). Add a private resolver:
 
 ```rust
 /// Effective subscriber state: the live shared snapshot when provided and
@@ -396,11 +396,11 @@ TS behavior (errors.ts:480-536): when a turn DIES on a 429 (retries exhausted), 
 ### Task 7: isEnvTruthy consolidation (TS-faithful copies only)
 
 **Files:**
-- Modify: `lingxi-code/tui/src/rate_limit_messages.rs:94-101` — replace the local fn with `traits::env::is_env_truthy` (tui already deps traits).
+- Modify: `lingxi-code/tui/src/rate_limit_messages.rs:94-101` — replace the local fn with `platform_api::env::is_env_truthy` (tui already deps traits).
 - Examine each of: `migrations/src/context.rs:14`, `tools/skill/src/model_override.rs:183`, `tools/shell/src/prompt.rs:100`, `tools/meta/src/repl_gate.rs:67`, `tools/task/src/task.rs:148`, `compaction/src/thresholds.rs:254`. For EACH: read the fn + its tests; switch to the traits helper ONLY IF (a) semantics are byte-identical to the TS port (unset/empty false; lowercase-trim ∈ {1,true,yes,on}) AND (b) the crate already depends on `traits` (check Cargo.toml; do NOT add new dep edges). Keep local wrappers where the copy reads the env itself (e.g. `prompt.rs` takes a name) — the wrapper calls the traits fn for the value test. Anything semantically divergent (e.g. the documented-divergent `orchestrator/src/conversation.rs:2758`) stays local with its existing documentation.
 - [ ] **Step 1:** Per-file examination table in your report (file → identical? → traits dep? → switched/kept + why).
 - [ ] **Step 2:** Switch the qualifying ones; their existing tests stay and must pass unchanged (they pin behavior, not implementation).
-- [ ] **Step 3: GREEN + clippy** on every touched crate. **Step 4: Commit** — `refactor: consolidate TS-faithful is_env_truthy copies onto traits::env`.
+- [ ] **Step 3: GREEN + clippy** on every touched crate. **Step 4: Commit** — `refactor: consolidate TS-faithful is_env_truthy copies onto platform_api::env`.
 
 ---
 

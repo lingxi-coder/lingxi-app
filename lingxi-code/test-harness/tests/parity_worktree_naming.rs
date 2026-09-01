@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 use test_harness::parity::load_fixture;
-use traits::worktree::{WorktreeError, WorktreeManager};
+use platform_api::worktree::{WorktreeError, WorktreeManager};
 
 #[derive(Deserialize)]
 struct Case {

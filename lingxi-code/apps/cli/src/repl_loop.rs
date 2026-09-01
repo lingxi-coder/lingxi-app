@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use traits::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Outcome returned by [`step`] — tells the outer loop what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,7 +289,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{duplex, AsyncBufRead, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;
-    use traits::{SlashCommandDispatcher, SlashDispatchResult};
+    use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
     /// Wrap a duplex client end in the shared `Arc<Mutex<BufReader<_>>>` the
     /// refactored `step` expects (upcast to the `dyn AsyncBufRead` trait object).

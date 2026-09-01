@@ -127,8 +127,8 @@ struct Buckets {
 
 /// Bucket the current action states of the requested servers, plus the
 /// requested names that no configured server matches (oracle `_`, "unknown").
-fn bucket(states: &[(String, traits::McpActionState)], requested: &[String]) -> Buckets {
-    use traits::McpActionState as S;
+fn bucket(states: &[(String, platform_api::McpActionState)], requested: &[String]) -> Buckets {
+    use platform_api::McpActionState as S;
     let mut b = Buckets::default();
     for (name, state) in states {
         match state {
@@ -161,9 +161,9 @@ fn bucket(states: &[(String, traits::McpActionState)], requested: &[String]) -> 
 /// on the raw name OR its normalized form (oracle
 /// `i=()=>Zpr(t).filter((v)=>n.includes(v.name)||o.has(au(v.name)))`).
 fn select(
-    states: Vec<(String, traits::McpActionState)>,
+    states: Vec<(String, platform_api::McpActionState)>,
     requested: &[String],
-) -> Vec<(String, traits::McpActionState)> {
+) -> Vec<(String, platform_api::McpActionState)> {
     let normalized: BTreeSet<String> = requested
         .iter()
         .map(|s| mcp::normalization::normalize_name_for_mcp(s))
@@ -326,7 +326,7 @@ impl Tool for WaitForMcpServersTool {
                 .action_states()
                 .await
                 .into_iter()
-                .filter(|(_, s)| *s == traits::McpActionState::Pending)
+                .filter(|(_, s)| *s == platform_api::McpActionState::Pending)
                 .map(|(n, _)| n)
                 .collect()
         } else {
@@ -341,7 +341,7 @@ impl Tool for WaitForMcpServersTool {
             let now = select(registry.action_states().await, &requested);
             let any_pending = now
                 .iter()
-                .any(|(_, s)| *s == traits::McpActionState::Pending);
+                .any(|(_, s)| *s == platform_api::McpActionState::Pending);
             if !any_pending || std::time::Instant::now() >= deadline {
                 break;
             }
@@ -433,7 +433,7 @@ mod tests {
     /// on the NORMALIZED name (oracle `au`).
     #[test]
     fn unknown_bucket_compares_normalized_names() {
-        let states = vec![("my.server".to_string(), traits::McpActionState::Connected)];
+        let states = vec![("my.server".to_string(), platform_api::McpActionState::Connected)];
         let b = bucket(&states, &["my_server".into(), "nope".into()]);
         assert_eq!(b.connected, vec!["my.server".to_string()]);
         assert_eq!(
@@ -446,7 +446,7 @@ mod tests {
     /// Readiness ignores `connected` but is blocked by every other bucket.
     #[test]
     fn ready_requires_every_blocking_bucket_empty() {
-        let states = vec![("s".to_string(), traits::McpActionState::Pending)];
+        let states = vec![("s".to_string(), platform_api::McpActionState::Pending)];
         let b = bucket(&states, &["s".into()]);
         assert_eq!(b.still_pending, vec!["s".to_string()]);
         assert!(b.unknown.is_empty());

@@ -15,7 +15,7 @@ crates/bridge/
 ├── Cargo.toml
 └── src/{lib, transport, message, pairing, jwt, codes, rate_limiter, state}.rs
 
-crates/traits/src/bridge.rs ← NEW: BridgeTransport trait
+crates/platform-api/src/bridge.rs ← NEW: BridgeTransport trait
 ```
 
 ---
@@ -23,7 +23,7 @@ crates/traits/src/bridge.rs ← NEW: BridgeTransport trait
 ## Task 1: BridgeTransport trait
 
 ```rust
-// crates/traits/src/bridge.rs
+// crates/platform-api/src/bridge.rs
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use lingxi_protocol::Secret;
@@ -81,7 +81,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true
@@ -316,7 +316,7 @@ mod tests {
 use crate::codes::generate_pairing_code;
 use crate::rate_limiter::RateLimiter;
 use lingxi_protocol::Secret;
-use lingxi_traits::SecureStorage;
+use lingxi_platform_api::SecureStorage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -399,7 +399,7 @@ pub use transport::IdeBridge;
 
 ```rust
 // transport.rs (small wrapper around BridgeTransport)
-use lingxi_traits::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
+use lingxi_platform_api::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

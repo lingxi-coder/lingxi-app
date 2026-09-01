@@ -17,7 +17,7 @@ use protocol::{HttpMethod, HttpRequest};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
-use traits::HttpTransport;
+use platform_api::HttpTransport;
 
 /// Run the standard [`HttpTransport`] contract against an impl and a base
 /// URL for an echo server that exposes `GET /ok` and `GET /sse`.

@@ -35,7 +35,7 @@
 
 | 方案断言 | 核实结果 |
 | --- | --- |
-| `McpToolDto` 缺 title / outputSchema / annotations / execution / icons / 完整 `_meta` | ✅ `traits/src/mcp.rs:215-238`，仅 7 个字段 |
+| `McpToolDto` 缺 title / outputSchema / annotations / execution / icons / 完整 `_meta` | ✅ `platform-api/src/mcp.rs:215-238`，仅 7 个字段 |
 | `mcp/src/client.rs` 已解析 searchHint / alwaysLoad / structuredContent | ✅ `mcp/src/client.rs:542, 1562, 1566, 1573` |
 | `mcp/src/registry.rs` 已处理 `notifications/tools/list_changed` | ✅ `mcp/src/registry.rs:422` |
 | `LocalAppsMcpScope` 只有 `ConversationAgent` / `App(String)` | ✅ `apps/engine-mobile/src/local_apps_mcp.rs:254-257` |

@@ -2,7 +2,7 @@
 //! against `workflow_tools.json`. Every byte-locked literal from spec §7
 //! lines 482-489 is asserted here AND in the tool's own unit tests.
 
-use engine::TodoState;
+use lingxi_core::TodoState;
 use serde_json::Value;
 use telemetry::tengu::tool::{
     ENTER_PLAN_MODE_COMPLETED, ENTER_PLAN_MODE_FAILED, ENTER_PLAN_MODE_STARTED,

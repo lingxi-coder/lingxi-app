@@ -311,7 +311,7 @@ async fn parity_cost_after_one_turn() {
     use cost::CostTracker;
     use protocol::SessionId;
     use tokio::sync::mpsc;
-    use traits::OrchestratorHandle;
+    use platform_api::OrchestratorHandle;
 
     let response = llm_client::LlmResponse {
         id: "msg_mock".into(),
@@ -380,7 +380,7 @@ async fn parity_cost_after_one_turn() {
 async fn parity_force_compact_50_messages() {
     use compaction::CompactionOrchestrator;
     use protocol::{ConversationMessage, MessageId};
-    use traits::OrchestratorHandle;
+    use platform_api::OrchestratorHandle;
 
     // Drive the assertion from the fixture so the scenario fields are
     // load-bearing (matches the cost_after_one_turn convention).

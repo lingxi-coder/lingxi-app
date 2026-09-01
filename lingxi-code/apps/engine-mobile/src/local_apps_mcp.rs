@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -1453,7 +1453,7 @@ impl LocalAppsMcpTransport {
         let mut tools = Vec::with_capacity(entries.len());
         for entry in entries {
             let definition_value = entry.get("definition").unwrap_or(entry);
-            let definition: traits::McpToolDefinitionDto =
+            let definition: platform_api::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
                     McpError::Internal(format!(
                         "active Local App tool definition is invalid: {error}"
@@ -1464,14 +1464,14 @@ impl LocalAppsMcpTransport {
             let Some(ceiling) = entry
                 .get("ceiling")
                 .and_then(Value::as_str)
-                .and_then(traits::McpPermissionCeiling::from_policy_str)
+                .and_then(platform_api::McpPermissionCeiling::from_policy_str)
             else {
                 return Err(McpError::Internal(format!(
                     "active Local App tool {} has no valid permission ceiling",
                     definition.name
                 )));
             };
-            if ceiling == traits::McpPermissionCeiling::Deny {
+            if ceiling == platform_api::McpPermissionCeiling::Deny {
                 return Err(McpError::Internal(format!(
                     "active Local App tool {} has a denied permission ceiling",
                     definition.name
@@ -1485,7 +1485,7 @@ impl LocalAppsMcpTransport {
                 full_name,
                 search_hint: Some("local app".into()),
                 always_load: None,
-                requires_user_interaction: ceiling == traits::McpPermissionCeiling::Ask,
+                requires_user_interaction: ceiling == platform_api::McpPermissionCeiling::Ask,
             };
             tools.push(tool);
         }
@@ -1517,7 +1517,7 @@ impl LocalAppsMcpTransport {
             })?;
         for entry in entries {
             let definition_value = entry.get("definition").unwrap_or(entry);
-            let definition: traits::McpToolDefinitionDto =
+            let definition: platform_api::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
                     McpError::Internal(format!(
                         "active Local App tool definition is invalid: {error}"
@@ -1624,7 +1624,7 @@ impl LocalAppsMcpTransport {
     }
 
     fn validate_export_input(
-        definition: &traits::McpToolDefinitionDto,
+        definition: &platform_api::McpToolDefinitionDto,
         input: &Value,
     ) -> Result<(), McpToolResultDto> {
         let object = input
@@ -1708,7 +1708,7 @@ impl LocalAppsMcpTransport {
             return Err(McpError::ToolNotFound(tool.into()));
         };
         let definition_value = entry.get("definition").unwrap_or(&entry);
-        let definition: traits::McpToolDefinitionDto =
+        let definition: platform_api::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone()).map_err(|error| {
                 McpError::Internal(format!(
                     "active Local App tool definition is invalid: {error}"
@@ -2526,13 +2526,13 @@ impl LocalAppsMcpTransport {
                     .join(format!("{log}.log"));
                 let root = self.root.clone();
                 let body = match tokio::task::spawn_blocking(move || {
-                    traits::rooted_fs::read_to_string_limited(&root, &relative, 16 * 1024 * 1024)
+                    platform_api::rooted_fs::read_to_string_limited(&root, &relative, 16 * 1024 * 1024)
                 })
                 .await
                 .map_err(|error| McpError::Internal(format!("log reader failed: {error}")))?
                 {
                     Ok(body) => body,
-                    Err(traits::FsError::NotFound(_)) => String::new(),
+                    Err(platform_api::FsError::NotFound(_)) => String::new(),
                     Err(error) => {
                         return Ok(Self::tool_error(format!("failed to read app log: {error}")))
                     }

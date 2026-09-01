@@ -347,7 +347,7 @@ an unresolved `Ask` delegates to the inner transport — exactly the §3.1 short
 This makes the OUTER policy gate the "local pre-gate" and the inner stdio decider the
 "SDK request"; the structure already matches the TS by construction.
 
-The trait surface to implement (`traits/src/permission_gate.rs:116`):
+The trait surface to implement (`platform-api/src/permission_gate.rs:116`):
 `check` / `check_with_worker` (threads `PromptWorker` → maps to `agent_id`) /
 `resolve_detailed` / `check_in_plan_mode` / `check_after_hook_allow`. The turn loop
 already calls `resolve_detailed` (turn_loop.rs:2329) and `check` (2427).

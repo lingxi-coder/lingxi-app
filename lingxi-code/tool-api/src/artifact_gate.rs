@@ -37,10 +37,10 @@
 //! OAuth-account + auth-route detection (`$o()`/`xn()`), the subscription-tier
 //! read (`Us()`), and the `settings.disableArtifact`/`enableArtifact` runtime
 //! consumption (`R9i()` settings half + `P7t()`). The settings KEYS round-trip
-//! via `engine::settings::SettingsJson`; wiring their live values into this gate
+//! via `lingxi_core::settings::SettingsJson`; wiring their live values into this gate
 //! lands with the Stage-2 publish/list pipeline.
 
-use traits::env::{is_env_defined_falsy, is_env_truthy};
+use platform_api::env::{is_env_defined_falsy, is_env_truthy};
 
 /// Binary `dw` — the Artifact tool's wire name.
 pub const ARTIFACT_TOOL_NAME: &str = "Artifact";

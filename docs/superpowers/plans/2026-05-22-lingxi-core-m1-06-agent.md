@@ -17,14 +17,14 @@ crates/agent/
 ├── Cargo.toml
 └── src/{lib, definition, context, pool, runner, multi_dispatch, tool_resolver, permission_mode, color_manager, display, fork, transcript, worktree_policy}.rs
 
-crates/traits/src/worktree.rs ← NEW: WorktreeManager trait
+crates/platform-api/src/worktree.rs ← NEW: WorktreeManager trait
 ```
 
 ---
 
 ## Task 1: WorktreeManager trait
 
-**Files:** `crates/traits/src/worktree.rs`
+**Files:** `crates/platform-api/src/worktree.rs`
 
 - [ ] **Step 1: Impl**
 
@@ -75,7 +75,7 @@ pub enum WorktreeError {
 
 - [ ] **Step 2: Re-export + commit**
 
-`crates/traits/src/lib.rs`: `pub mod worktree; pub use worktree::*;`
+`crates/platform-api/src/lib.rs`: `pub mod worktree; pub use worktree::*;`
 
 ```bash
 cargo check -p lingxi-traits
@@ -100,7 +100,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-tools = { path = "../tools" }
 lingxi-mcp = { path = "../mcp" }
@@ -186,7 +186,7 @@ use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
 use lingxi_memory::AgentMemorySnapshot;
 use lingxi_protocol::{AgentId, McpConnectionId, ConversationMessage};
-use lingxi_traits::WorktreeHandle;
+use lingxi_platform_api::WorktreeHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -370,7 +370,7 @@ impl AgentToolResolver {
 ```rust
 // transcript.rs
 use lingxi_protocol::{AgentId, ConversationMessage};
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -394,7 +394,7 @@ impl AgentTranscriptWriter {
         Self { transcript_path, agent_id, fs }
     }
 
-    pub async fn record(&self, message: &ConversationMessage) -> Result<(), lingxi_traits::FsError> {
+    pub async fn record(&self, message: &ConversationMessage) -> Result<(), lingxi_platform_api::FsError> {
         let entry = TranscriptEntry { agent_id: self.agent_id, timestamp: SystemTime::now(), message: message.clone() };
         let line = format!("{}\n", serde_json::to_string(&entry).unwrap());
         // FileSystem.append_file added in Plan 10. For now use write+read concat:
@@ -408,7 +408,7 @@ impl AgentTranscriptWriter {
 ```rust
 // worktree_policy.rs
 use crate::definition::WorktreeRequirement;
-use lingxi_traits::{WorktreeError, WorktreeHandle, WorktreeManager};
+use lingxi_platform_api::{WorktreeError, WorktreeHandle, WorktreeManager};
 
 pub async fn create_worktree_or_degrade(
     manager: &dyn WorktreeManager,
@@ -452,7 +452,7 @@ git commit -m "feat(agent): AgentDefinition, SubagentContext, ColorManager, Tool
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};

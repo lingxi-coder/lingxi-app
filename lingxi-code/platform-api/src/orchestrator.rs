@@ -3,7 +3,7 @@
 //!
 //! The concrete `ConversationOrchestrator` lives in `lingxi-orchestrator`;
 //! these traits live here so consumers can depend on them without pulling
-//! in the orchestrator (preserves the leaf position of `lingxi-traits`).
+//! in the orchestrator (preserves the leaf position of `platform-api`).
 //!
 //! See spec §2.3 (key traits) for the matched design.
 
@@ -37,7 +37,7 @@ pub struct RateLimitSnapshot {
 ///
 /// Lightweight echo of `cost::SessionCostSummary` — see that type for
 /// the canonical session-scope rollup. We keep a leaf-friendly mirror here
-/// so `lingxi-traits` does not need to depend on `lingxi-cost`.
+/// so `platform-api` does not need to depend on `lingxi-cost`.
 ///
 /// M5-11 added the `total_usd`, `input_tokens`, `output_tokens`, `api_calls`,
 /// and `session_duration` fields used by the `/cost` slash command's
@@ -532,7 +532,7 @@ pub enum HandleError {
 /// [`OrchestratorHandle::run_turn_streaming_with_cancel`]. (M6-03)
 ///
 /// Mirrors `orchestrator::TurnOutcome` so the trait surface in
-/// `lingxi-traits` does not depend on the orchestrator crate. Map between
+/// `platform-api` does not depend on the orchestrator crate. Map between
 /// the two in `orchestrator::handle_impl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
@@ -2134,7 +2134,7 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `anthropic-ratelimit-unified-*` headers; `None` until then.
     ///
     /// The returned [`RateLimitSnapshot`] avoids leaking the
-    /// orchestrator-internal `RateLimitInfo` struct through the `traits` crate
+    /// orchestrator-internal `RateLimitInfo` struct through the `platform-api` crate
     /// (which must not depend on `orchestrator`).  It carries all three
     /// header-derived fields including `overage_disabled_reason`.
     ///
@@ -2851,8 +2851,8 @@ pub trait OutputStream: Send + Sync {
     /// Added by the §0.7 "light up thinking/usage" follow-up. Called from
     /// `event_router` when a `MessageDelta`/`MessageStart` SSE event carries
     /// a `usage` payload. Counts are passed as bare `u64`s (rather than a
-    /// `cost::TokenUsage`) to keep `lingxi-traits` a leaf crate: `lingxi-cost`
-    /// already depends on `lingxi-traits`, so a `cost` dependency here would
+    /// `cost::TokenUsage`) to keep `platform-api` a leaf crate: `lingxi-cost`
+    /// already depends on `platform-api`, so a `cost` dependency here would
     /// form a cycle. The four arguments map field-for-field onto both
     /// `cost::TokenUsage` (caller side, in the orchestrator) and
     /// `ClientEvent::UsageUpdate` (adapter side).

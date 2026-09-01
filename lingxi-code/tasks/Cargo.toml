@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 branding.workspace = true
 mcp = { path = "../mcp" }
-engine = { path = "../engine" }
+core = { path = "../core" }
 agent = { path = "../agent" }
 hooks = { path = "../hooks" }
 workflow = { path = "../workflow" }

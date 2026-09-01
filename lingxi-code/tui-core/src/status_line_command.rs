@@ -404,7 +404,7 @@ pub struct StatusLineInputs<'a> {
     /// Cumulative output tokens across successful requests.
     pub total_output_tokens: u64,
     /// Most recent successful model-response usage.
-    pub current_usage: Option<&'a traits::CurrentUsageSnapshot>,
+    pub current_usage: Option<&'a platform_api::CurrentUsageSnapshot>,
     /// Raw context token estimate (the auto-compact gate's input estimate) —
     /// `context_window.total_input_tokens` + the `exceeds_200k_tokens`
     /// derivation. `0` = no usage yet (percentages go `null`, binary `o2n`).
@@ -721,7 +721,7 @@ mod tests {
 
     #[test]
     fn build_status_line_input_shape() {
-        let current_usage = traits::CurrentUsageSnapshot {
+        let current_usage = platform_api::CurrentUsageSnapshot {
             input_tokens: 1_000,
             output_tokens: 200,
             cache_read_input_tokens: 300,

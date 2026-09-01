@@ -18,12 +18,12 @@ use futures_util::stream::StreamExt;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
-use traits::http::{
+use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
     WebSocketConnection, WebSocketConnectionWithMeta, WebSocketMessageStream,
     WebSocketMessageStreamWithMeta,
 };
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 use url::Url;
 
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -955,7 +955,7 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use std::fmt;
-    use traits::http::SseStreamWithMeta;
+    use platform_api::http::SseStreamWithMeta;
 
     #[derive(Debug)]
     struct TestError {
@@ -1146,7 +1146,7 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::Arc;
         use tokio::net::TcpListener;
-        use traits::ResolvedAddressOverride;
+        use platform_api::ResolvedAddressOverride;
 
         async fn handler(
             State(host_seen): State<Arc<Mutex<Option<String>>>>,

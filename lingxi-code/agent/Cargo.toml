@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
-engine = { path = "../engine" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 llm-client = { path = "../llm-client" }
 tool-api = { path = "../tool-api" }
 base64 = "0.22"

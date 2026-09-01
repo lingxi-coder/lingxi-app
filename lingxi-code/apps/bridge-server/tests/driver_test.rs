@@ -47,7 +47,7 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
     // orchestrator's `AdapterOutputStream` lowers every callback into a
     // `ClientEvent` and forwards it here.
     let sink = MockSink::arc();
-    let output: Arc<dyn traits::OutputStream> = Arc::new(AdapterOutputStream::new(
+    let output: Arc<dyn platform_api::OutputStream> = Arc::new(AdapterOutputStream::new(
         sink.clone() as Arc<dyn client_adapter::ClientEventSink>
     ));
 

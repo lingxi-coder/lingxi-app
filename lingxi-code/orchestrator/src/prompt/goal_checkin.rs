@@ -195,7 +195,7 @@ pub fn next_checkin_interval_ms(base_interval_ms: i64, checkin_count: u32) -> i6
 /// (`deferredSince` / `checkinCount` / `lastDeferralPassAt`).
 ///
 /// Held session-scoped by the orchestrator rather than on
-/// `engine::session::ActiveGoalState`: it is pure turn-local timing state, it
+/// `lingxi_core::session::ActiveGoalState`: it is pure turn-local timing state, it
 /// must never reach the persisted goal shape (the oracle explicitly STRIPS the
 /// three fields before yielding the goal when nothing is deferring —
 /// `let{deferredSince:Z,checkinCount:W,lastDeferralPassAt:te,...ee}=L;

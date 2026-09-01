@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use engine_desktop::desktop_tool_registry;
-use traits::process::ProcessOutput;
+use platform_api::process::ProcessOutput;
 
 #[test]
 fn desktop_tool_list_snapshot() {

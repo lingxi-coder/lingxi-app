@@ -10,7 +10,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::AuthHandle;
+use platform_api::AuthHandle;
 
 /// Injected managed-policy enforcement for the interactive `/login` flow
 /// (parity 2.1.207 H-BIN-09). The engine host supplies an implementation that
@@ -115,7 +115,7 @@ impl BuiltinCommandHandler for LoginHandler {
 pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
-    use traits::{AuthError, LoginInfo};
+    use platform_api::{AuthError, LoginInfo};
 
     /// Test double for [`AuthHandle`]. Exposes the same `Ok` / `Err`
     /// constructors as the test helpers in M5-11 T9.

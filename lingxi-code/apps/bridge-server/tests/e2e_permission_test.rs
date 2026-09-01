@@ -162,7 +162,7 @@ fn build_connection() -> BridgeConnection {
     // sink; we wire them into the orchestrator so the SAME outbound channel feeds
     // streamed events AND permission requests.
     let connection = BridgeConnection::new();
-    let output: Arc<dyn traits::OutputStream> =
+    let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(AdapterOutputStream::new(connection.event_sink()));
     let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
 

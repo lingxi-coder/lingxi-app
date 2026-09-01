@@ -50,16 +50,16 @@ use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixH
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
-use traits::auth::{AuthError, AuthHandle, LoginInfo};
-use traits::orchestrator::{
+use platform_api::auth::{AuthError, AuthHandle, LoginInfo};
+use platform_api::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
     McpStatus, MemoryEditorOutcome, SkillInfo, StatusSnapshot,
 };
-use traits::task_registry::{
+use platform_api::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 // ── Test sink ───────────────────────────────────────────────────────────────
 
@@ -77,13 +77,13 @@ struct SelectiveFailureStorage {
 }
 
 #[async_trait]
-impl traits::SecureStorage for SelectiveFailureStorage {
+impl platform_api::SecureStorage for SelectiveFailureStorage {
     async fn store(
         &self,
         service: &str,
         account: &str,
         data: protocol::SecureStorageData,
-    ) -> Result<(), traits::SecureStorageError> {
+    ) -> Result<(), platform_api::SecureStorageError> {
         self.values
             .lock()
             .unwrap()
@@ -95,9 +95,9 @@ impl traits::SecureStorage for SelectiveFailureStorage {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
         if account == "provider-key-openrouter" {
-            return Err(traits::SecureStorageError::PermissionDenied(
+            return Err(platform_api::SecureStorageError::PermissionDenied(
                 "test keychain denial".to_string(),
             ));
         }
@@ -109,7 +109,7 @@ impl traits::SecureStorage for SelectiveFailureStorage {
             .cloned())
     }
 
-    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
         self.values
             .lock()
             .unwrap()
@@ -117,7 +117,7 @@ impl traits::SecureStorage for SelectiveFailureStorage {
         Ok(())
     }
 
-    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
         Ok(self
             .values
             .lock()
@@ -132,8 +132,8 @@ impl traits::SecureStorage for SelectiveFailureStorage {
         true
     }
 
-    fn backend(&self) -> traits::SecureStorageBackend {
-        traits::SecureStorageBackend::MacOsKeychain
+    fn backend(&self) -> platform_api::SecureStorageBackend {
+        platform_api::SecureStorageBackend::MacOsKeychain
     }
 }
 
@@ -191,8 +191,8 @@ struct ResumingHandle {
             protocol::SessionId,
             Vec<protocol::ConversationMessage>,
             Option<String>,
-            Option<traits::ActiveGoalSnapshot>,
-            traits::ResumeRuntimeSnapshot,
+            Option<platform_api::ActiveGoalSnapshot>,
+            platform_api::ResumeRuntimeSnapshot,
         )>,
     >,
     resume_context: Mutex<Option<(Option<String>, bool)>>,
@@ -253,7 +253,7 @@ impl ResumingHandle {
 }
 
 #[async_trait]
-impl traits::OrchestratorHandle for ResumingHandle {
+impl platform_api::OrchestratorHandle for ResumingHandle {
     async fn current_session_id(&self) -> protocol::SessionId {
         self.session_id
     }
@@ -344,8 +344,8 @@ impl traits::OrchestratorHandle for ResumingHandle {
         session_id: protocol::SessionId,
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
-        active_goal: Option<traits::ActiveGoalSnapshot>,
-        runtime: traits::ResumeRuntimeSnapshot,
+        active_goal: Option<platform_api::ActiveGoalSnapshot>,
+        runtime: platform_api::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         self.operation_log
             .lock()
@@ -416,7 +416,7 @@ fn router_with(
     tasks: Arc<MockTaskRegistry>,
 ) -> EngineCommandRouter {
     EngineCommandRouter::new(
-        handle as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks as Arc<dyn TaskRegistryHandle>,
         None,
@@ -454,7 +454,7 @@ fn router_with_store(
 ) -> EngineCommandRouter {
     let cwd = root.to_string_lossy().into_owned();
     EngineCommandRouter::new(
-        handle as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -853,7 +853,7 @@ async fn set_fast_mode_routes_and_acknowledges_authoritative_state() {
 #[tokio::test]
 async fn set_model_keeps_provider_in_acknowledgement() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    handle.set_model_listings(vec![traits::ModelListing {
+    handle.set_model_listings(vec![platform_api::ModelListing {
         display_model: "GPT-5.5".into(),
         request_model: "gpt-5.5".into(),
         provider_id: "github-copilot".into(),
@@ -996,7 +996,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     handle.set_available_models(vec!["gpt-5.6-sol".into(), "gpt-4o".into()]);
     handle.set_model_listings(vec![
-        traits::ModelListing {
+        platform_api::ModelListing {
             display_model: "GPT-5.6 Sol".into(),
             request_model: "gpt-5.6-sol".into(),
             provider_id: "openai".into(),
@@ -1007,7 +1007,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
             reasoning: Default::default(),
             supports_reasoning: true,
         },
-        traits::ModelListing {
+        platform_api::ModelListing {
             display_model: "GPT-4o".into(),
             request_model: "gpt-4o".into(),
             provider_id: "openai".into(),
@@ -1018,7 +1018,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
             reasoning: Default::default(),
             supports_reasoning: false,
         },
-        traits::ModelListing {
+        platform_api::ModelListing {
             display_model: "GPT-5.6 Sol".into(),
             request_model: "gpt-5.6-sol".into(),
             provider_id: "github-copilot".into(),
@@ -1150,7 +1150,7 @@ async fn slash_command_routes_to_registry() {
 
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = EngineCommandRouter::new(
-        handle as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1205,7 +1205,7 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     let dispatcher = Arc::new(RegistrySlashDispatcher::new(shared.clone()));
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+            as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1297,7 +1297,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     let shared = Arc::new(RwLock::new(reg));
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+            as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(Arc::new(MutatingDispatcher {
@@ -1604,7 +1604,7 @@ async fn list_sessions_preserves_readable_rows_when_one_transcript_is_corrupt() 
 #[tokio::test]
 async fn new_session_clears_applies_model_and_emits_started() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    let expected_id = traits::OrchestratorHandle::current_session_id(&*handle)
+    let expected_id = platform_api::OrchestratorHandle::current_session_id(&*handle)
         .await
         .to_string();
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
@@ -1683,7 +1683,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     let handle = Arc::new(ResumingHandle::new());
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -1774,7 +1774,7 @@ async fn resume_session_sets_plan_state_before_replay() {
     handle.set_current_permission_mode("acceptEdits").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -1832,7 +1832,7 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
     handle.set_plan_mode_error("plan latch failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -1885,7 +1885,7 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
     handle.set_permission_mode_error("plan gate failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -1935,7 +1935,7 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
     handle.set_resume_error("resume replay failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,

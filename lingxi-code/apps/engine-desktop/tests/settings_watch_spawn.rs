@@ -15,7 +15,7 @@ use hooks::events::ConfigChangeSource;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use traits::filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
+use platform_api::filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 
 /// Fake `FileSystem` whose `watch` hands back a synthetic stream seeded at
 /// construction. Every other method is unused by the watcher.

@@ -147,7 +147,7 @@ mod tests {
 ## Task 2: lock.rs — cross-process file lock with PID-liveness (A9)
 
 ```rust
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -222,7 +222,7 @@ mod tests {
 use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
 use lingxi_tasks::{TaskRegistry, TaskSpawnInput, TaskType};
-use lingxi_traits::{Clock, FileSystem, RuntimeSpawner};
+use lingxi_platform_api::{Clock, FileSystem, RuntimeSpawner};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -246,7 +246,7 @@ pub struct CronScheduler {
     runtime: Arc<dyn RuntimeSpawner>,
     lock_dir: PathBuf,
     pub jitter_seconds: u32,
-    tick_handle: Mutex<Option<lingxi_traits::BackgroundTaskHandle>>,
+    tick_handle: Mutex<Option<lingxi_platform_api::BackgroundTaskHandle>>,
 }
 
 impl CronScheduler {
@@ -274,7 +274,7 @@ impl CronScheduler {
         Ok(())
     }
 
-    pub async fn start(self: Arc<Self>) -> Result<(), lingxi_traits::RuntimeError> {
+    pub async fn start(self: Arc<Self>) -> Result<(), lingxi_platform_api::RuntimeError> {
         let me = self.clone();
         let handle = self.runtime.spawn("cron-tick", Box::pin(async move {
             loop {
@@ -339,7 +339,7 @@ impl CronScheduler {
         }
     }
 
-    pub async fn stop(&self) -> Result<(), lingxi_traits::RuntimeError> {
+    pub async fn stop(&self) -> Result<(), lingxi_platform_api::RuntimeError> {
         if let Some(h) = self.tick_handle.lock().await.take() {
             self.runtime.cancel(&h).await?;
         }
@@ -393,7 +393,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-tasks = { path = "../tasks" }
 serde.workspace = true
 serde_json.workspace = true

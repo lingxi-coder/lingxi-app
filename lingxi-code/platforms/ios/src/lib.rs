@@ -1,6 +1,6 @@
 //! `platform-ios` (M8-P10) — the iOS platform skeleton.
 //!
-//! [`IosPlatform`] implements the [`traits::Platform`] aggregate. The core OS
+//! [`IosPlatform`] implements the [`platform_api::Platform`] aggregate. The core OS
 //! handles (filesystem/clock/process/sandbox/worktree) are currently reused
 //! from `platform-posix-minimal` — those impls are portable Rust (`std::fs`
 //! over the App-Sandbox root, `std::time`, and `Unsupported` stubs) and valid
@@ -21,7 +21,7 @@
 use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{
+use platform_api::{
     CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider, DeepLinkOpener,
     DeviceStatusProvider, FileSystem, HapticService, HttpTransport, LocationProvider,
     MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService,
@@ -196,7 +196,7 @@ fn build_mobile_linux_mounts(
         .map(|host_path| {
             vec![MountSpec {
                 host_path,
-                guest_path: traits::mobile_linux::guest_paths::workspace(&guest_workspace_id),
+                guest_path: platform_api::mobile_linux::guest_paths::workspace(&guest_workspace_id),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             }]
@@ -276,7 +276,7 @@ impl Platform for IosPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use traits::{
+    use platform_api::{
         CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
         ShareResult, UnavailableMobileLinuxRuntime, VoiceError, VoiceRecording, VoiceRecordingOpts,
     };

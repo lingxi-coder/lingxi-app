@@ -8,13 +8,13 @@
 //! * **Real multi-turn loop** (`api_client = Some`): an imperative loop that
 //!   mirrors the orchestrator's `execute_one_turn` — call the model, append
 //!   the assistant turn, dispatch any `tool_use` blocks through the inherited
-//!   [`traits::ToolInvoker`], feed the results back as a user message, and
+//!   [`platform_api::ToolInvoker`], feed the results back as a user message, and
 //!   repeat until the model stops (`end_turn` / no tool use) or `max_turns`
 //!   is hit. A `UserExit` / `UserInterrupt` arriving on `event_rx` aborts the
 //!   loop and surfaces [`SubagentEvent::Killed`]. When
 //!   [`crate::context::SubagentContext::persistent`] is set, the loop does not
 //!   return on a terminal stop: it parks awaiting the next inbound
-//!   [`engine::Event::UserMessage`], appends it to history, and runs the next
+//!   [`lingxi_core::Event::UserMessage`], appends it to history, and runs the next
 //!   turn-set — modelling a long-lived, message-driven teammate.
 //! * **Legacy stub** (`api_client = None`): the M1.11 reducer-driven stub that
 //!   completes after the first inbound event. Retained for back-compat with
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use traits::WorkflowQueryWatchdog;
+use platform_api::WorkflowQueryWatchdog;
 
 /// Events emitted by [`run_subagent`] back to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ pub enum SubagentEvent {
         /// Final result payload (free-form JSON).
         result: serde_json::Value,
         /// Wire usage from the FINAL model response (the spawner translates this
-        /// into `traits::SubagentUsage` + the result-level token total). The
+        /// into `platform_api::SubagentUsage` + the result-level token total). The
         /// legacy stub path has no real round-trips and emits `Usage::default()`.
         usage: llm_client::Usage,
         /// Number of tool-use blocks executed across the run (claude
@@ -200,13 +200,13 @@ fn with_workflow_stream_watchdog(
 /// [`SubagentEvent`]s on `out_tx`.
 pub async fn run_subagent(
     ctx: SubagentContext,
-    event_rx: mpsc::Receiver<engine::Event>,
+    event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
     let non_interactive = ctx
         .session_interactive
         .map_or(ctx.is_async, |interactive| !interactive || ctx.is_async);
-    traits::session_flags::scope_non_interactive_session(
+    platform_api::session_flags::scope_non_interactive_session(
         non_interactive,
         run_subagent_inner(ctx, event_rx, out_tx),
     )
@@ -215,7 +215,7 @@ pub async fn run_subagent(
 
 async fn run_subagent_inner(
     ctx: SubagentContext,
-    event_rx: mpsc::Receiver<engine::Event>,
+    event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
     // G4 (frontmatter hooks): register the agent definition's frontmatter hooks
@@ -985,7 +985,7 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
 ///
 /// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
 /// model, append the assistant turn, dispatch `tool_use` blocks through the
-/// inherited [`traits::ToolInvoker`], feed results back as a user message,
+/// inherited [`platform_api::ToolInvoker`], feed results back as a user message,
 /// and repeat. Each model round-trip goes over the streaming seam
 /// ([`crate::api::SubagentApiClient::messages_create_stream`] drained through
 /// `crate::accumulator::accumulate_stream`) and races a `UserExit` /
@@ -997,7 +997,7 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
 )]
 async fn run_subagent_loop(
     ctx: SubagentContext,
-    mut event_rx: mpsc::Receiver<engine::Event>,
+    mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
     use protocol::{ContentBlock, ConversationMessage, MessageId};
@@ -1208,7 +1208,7 @@ async fn run_subagent_loop(
             // the same current/maximum bytes as Claude Code 2.1.217's background
             // task budget halt when the configured ceiling is available.
             if let Some(b) = &budget {
-                if let Err(traits::budget::BudgetError::Exceeded { current_nano_usd }) =
+                if let Err(platform_api::budget::BudgetError::Exceeded { current_nano_usd }) =
                     b.check_and_charge(0).await
                 {
                     // Stop with the 2.1.217 background-agent budget string.
@@ -1372,7 +1372,7 @@ async fn run_subagent_loop(
                         biased;
                         ev = event_rx.recv() => {
                             match ev {
-                                Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                                Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                     emit_killed(
                                         &out_tx,
                                         transcript.as_ref(),
@@ -1390,7 +1390,7 @@ async fn run_subagent_loop(
                                 // into the catch-all below and silently DISCARDED the
                                 // text. Persistent (teammate) runners only; one-shot
                                 // subagents keep the legacy drop-and-retry semantics.
-                                Some(engine::Event::UserMessage { content, .. })
+                                Some(lingxi_core::Event::UserMessage { content, .. })
                                     if ctx.persistent =>
                                 {
                                     wake_message = Some(content);
@@ -1668,7 +1668,7 @@ async fn run_subagent_loop(
                         });
                         continue;
                     }
-                    let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
+                    let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
                         parent_agent_id: ctx.parent_agent_id,
                         // Swarm identity (claude-code `getAgentName()` /
                         // `getTeammateContext()?.teamName`): a teammate's dispatched
@@ -1681,7 +1681,7 @@ async fn run_subagent_loop(
                         // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
                         is_async: ctx.is_async,
                         is_non_interactive_session: ctx.is_async
-                            || traits::session_flags::effective_non_interactive_session(),
+                            || platform_api::session_flags::effective_non_interactive_session(),
                         // Whether this worker may surface a permission prompt to the
                         // user — drives the worker attribution on the prompt dialog
                         // (claude-code's worker permission badge).
@@ -1766,7 +1766,7 @@ async fn run_subagent_loop(
                                 content_blocks,
                             });
                         }
-                        Err(traits::tool_invoker::ToolInvokerError::Abort(error)) => {
+                        Err(platform_api::tool_invoker::ToolInvokerError::Abort(error)) => {
                             emit_failed(
                                 &out_tx,
                                 transcript.as_ref(),
@@ -1978,7 +1978,7 @@ async fn run_subagent_loop(
         }
         loop {
             match event_rx.recv().await {
-                Some(engine::Event::UserMessage { content, .. }) => {
+                Some(lingxi_core::Event::UserMessage { content, .. }) => {
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("running", None).await;
                     }
@@ -1989,7 +1989,7 @@ async fn run_subagent_loop(
                     history.push(ConversationMessage::user(MessageId::new(), content));
                     break;
                 }
-                Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                     emit_killed(
                         &out_tx,
                         transcript.as_ref(),
@@ -2017,16 +2017,16 @@ async fn run_subagent_loop(
 
 /// Legacy reducer-driven stub.
 ///
-/// Drives [`engine::reduce`] over `event_rx` and emits [`SubagentEvent`]s on
+/// Drives [`lingxi_core::reduce`] over `event_rx` and emits [`SubagentEvent`]s on
 /// `out_tx`. M1.11 stubs completion after the first event so the pool can be
 /// wired end-to-end before the real agentic loop arrives. Selected when
 /// [`SubagentContext::api_client`] is `None`.
 async fn run_subagent_stub(
     ctx: SubagentContext,
-    mut event_rx: mpsc::Receiver<engine::Event>,
+    mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
-    use engine::{reduce, ConversationState, SessionState};
+    use lingxi_core::{reduce, ConversationState, SessionState};
     use protocol::SessionId;
 
     let agent_id = ctx.agent_id;
@@ -2057,7 +2057,7 @@ async fn run_subagent_stub(
         // without this fast path it would never produce Killed.
         if matches!(
             &event,
-            engine::Event::UserExit | engine::Event::UserInterrupt
+            lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt
         ) {
             // Drive the reducer anyway for state consistency, but ignore
             // the resulting reason.
@@ -2073,7 +2073,7 @@ async fn run_subagent_stub(
         // BEFORE the reducer consumes it — we need to peek at the
         // final_message for the Message emit.
         let api_end_msg = match &event {
-            engine::Event::ApiStreamEnd { final_message, .. } => Some(final_message.clone()),
+            lingxi_core::Event::ApiStreamEnd { final_message, .. } => Some(final_message.clone()),
             _ => None,
         };
 

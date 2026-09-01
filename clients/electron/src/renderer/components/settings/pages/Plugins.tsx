@@ -17,7 +17,7 @@ import { ghostButtonStyle, inputStyle } from './ghostButton';
  *
  * `extraKnownMarketplaces` / `strictKnownMarketplaces` / `blockedMarketplaces`
  * are deliberately NOT on this page: their own doc comments in
- * `engine/src/settings/schema.rs` describe them as the MANAGED counterparts
+ * `core/src/settings/schema.rs` describe them as the MANAGED counterparts
  * of `additionalMarketplaces` (an admin allow/deny list), not something a
  * desktop user adds to directly — out of scope, noted in the Task 18 report
  * rather than silently added or silently dropped.

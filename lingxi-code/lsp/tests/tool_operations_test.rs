@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-use traits::LspServerConfig;
+use platform_api::LspServerConfig;
 
 const FRAME_BUFFER: usize = 64 * 1024;
 
@@ -470,7 +470,7 @@ async fn hover_rejects_a_stale_client_after_server_clear() {
         .expect_err("stale client must not recreate tracker state after clear");
     assert!(matches!(
         error,
-        LspOperationError::Lsp(traits::LspError::Unavailable)
+        LspOperationError::Lsp(platform_api::LspError::Unavailable)
     ));
     assert!(!tracker.is_open("rust-analyzer", &uri).await);
 }

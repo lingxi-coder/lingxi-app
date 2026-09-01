@@ -184,7 +184,7 @@ Claude Code 2.1.219 新增 `sandbox.network.strictAllowlist`：sandboxed command
 LingXi 当前 network restriction 只有 `allowed_domains`、`denied_domains`、`allow_managed_domains_only`、socket/local-binding 等旧字段：
 
 - `sandbox/src/runtime_config.rs:82-120`
-- `engine/src/settings/schema.rs:144-150`
+- `core/src/settings/schema.rs:144-150`
 
 没有 `strictAllowlist` 的 settings schema、merge、managed precedence 和 macOS/Linux/Windows runtime enforcement。
 
@@ -209,8 +209,8 @@ Claude Code 2.1.219 把默认嵌套深度从 1 提升到 3；设置 `CLAUDE_CODE
 
 LingXi 仍写死：
 
-- `traits/src/subagent_spawn.rs:470-482`
-- `traits/src/subagent_spawn.rs:495-502`
+- `platform-api/src/subagent_spawn.rs:470-482`
+- `platform-api/src/subagent_spawn.rs:495-502`
 - `agent/src/tool_resolver.rs:21-22`
 
 这会让已经实现的 depth-2+ stream-json forwarding 在默认配置下无法真正发生。
@@ -337,7 +337,7 @@ LingXi `agent/src/catalog.rs:163-174` 只检查非空；另一方面 `apps/engin
 
 **结论：Confirmed / Medium**
 
-`traits/src/lib.rs:15-21` 的 `CLAUDE_CODE_VERSION` 仍为 `2.1.217`，并进入 `AI_AGENT` 和 WebFetch `User-Agent` 等外部可见标识。
+`platform-api/src/lib.rs:15-21` 的 `CLAUDE_CODE_VERSION` 仍为 `2.1.217`，并进入 `AI_AGENT` 和 WebFetch `User-Agent` 等外部可见标识。
 
 在 2.1.218–2.1.220 行为尚未修完前，不应仅机械改字符串并宣称 parity；但当前状态同样不能表示为已对齐 2.1.220。
 

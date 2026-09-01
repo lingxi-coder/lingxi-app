@@ -10,7 +10,7 @@ use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNotificationStream, McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
@@ -467,7 +467,7 @@ mod tests {
     }
 
     fn remote_spec(kind: &str, url: String) -> McpTransportSpec {
-        let headers = traits::McpHeaders::new();
+        let headers = platform_api::McpHeaders::new();
         match kind {
             "sse" => McpTransportSpec::Sse {
                 url,
@@ -498,7 +498,7 @@ mod tests {
             .connect_and_initialize(
                 &remote_spec(kind, url),
                 McpConnectOptions {
-                    expected_era: Some(traits::McpProtocolEra::Legacy),
+                    expected_era: Some(platform_api::McpProtocolEra::Legacy),
                     deadline_ms: 10_000,
                     probe_timeout_ms: None,
                 },
@@ -607,7 +607,7 @@ mod tests {
         let unsupported = transport
             .connect(&McpTransportSpec::WebSocket {
                 url: "ws://127.0.0.1:1".into(),
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
             })
             .await;
@@ -627,7 +627,7 @@ mod tests {
         let connection = transport
             .connect(&McpTransportSpec::Http {
                 url,
-                headers: traits::McpHeaders::new(),
+                headers: platform_api::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             })
@@ -676,12 +676,12 @@ mod tests {
             .connect_and_initialize(
                 &McpTransportSpec::Http {
                     url,
-                    headers: traits::McpHeaders::new(),
+                    headers: platform_api::McpHeaders::new(),
                     headers_helper: None,
                     oauth: None,
                 },
                 McpConnectOptions {
-                    expected_era: Some(traits::McpProtocolEra::Legacy),
+                    expected_era: Some(platform_api::McpProtocolEra::Legacy),
                     deadline_ms: 5_000,
                     probe_timeout_ms: None,
                 },

@@ -1308,7 +1308,7 @@ impl Tool for LSPTool {
             .await
         {
             Ok(triple) => triple,
-            Err(traits::LspError::Unavailable) => {
+            Err(platform_api::LspError::Unavailable) => {
                 let extension = path
                     .extension()
                     .and_then(|extension| extension.to_str())

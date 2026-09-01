@@ -12,7 +12,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn build_orch(cwd: std::path::PathBuf) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
@@ -135,7 +135,7 @@ async fn list_skills_does_not_report_a_skill_from_a_trusted_but_unregistered_dir
 
 /// Fix round 1 (review "Important"): a skill living under the managed
 /// (org-policy) directory must appear in the listing too. Overrides
-/// `LINGXI_MANAGED_DIR` (the same env var `traits::live_sessions::
+/// `LINGXI_MANAGED_DIR` (the same env var `platform_api::live_sessions::
 /// managed_settings_dir` and the composition root's `managed_settings_dir`
 /// both honor) for the duration of the test, guarded by `ENV_LOCK` since the
 /// override is process-global and `cargo test` runs functions in this file

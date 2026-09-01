@@ -11,7 +11,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::{OrchestratorHandle, StatusSnapshot};
+use platform_api::{OrchestratorHandle, StatusSnapshot};
 
 /// `/status` handler — renders the locked 11-line panel.
 #[derive(Clone)]

@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use traits::{FileEvent, FileEventKind, FsError};
+use platform_api::{FileEvent, FileEventKind, FsError};
 
 /// Default stability threshold (chokidar 4 parity).
 pub const DEFAULT_STABILITY_THRESHOLD_MS: u64 = 500;

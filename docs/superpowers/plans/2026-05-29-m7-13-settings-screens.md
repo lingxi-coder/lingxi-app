@@ -6,7 +6,7 @@
 
 **Architecture:** The screen is a **route state**, not a z-index overlay (iocraft 0.8.3 has no portable overlay primitive — same posture as M6-05 permission dialogs and M7-11 Doctor). `AppState.active_screen: Option<Screen>` carries a new `Screen::Settings(SettingsState)` variant; when `Some`, `render_screen` returns the settings element INSTEAD OF the REPL 3-zone layout, and `handle_live_key` routes keys to the screen at priority 2 (after permission, before input). `SettingsState { tab: SettingsTab, ... }` is a small UI-state struct owned by `AppState`; tab navigation is a pure `(SettingsState, KeyAction) -> SettingsState` reducer (snapshot/behavior testable). Each sub-screen is a pure `render_*_to_string(&SettingsData) -> String` + a `#[component]` iocraft wrapper, matching the M6-04 / M7-04 two-function renderer pattern. **Settings data is read once when the screen opens** into a `SettingsData` snapshot (the merged `SettingsJson` + a `StatusSnapshot` + a `CostSnapshot`) so the render path stays synchronous and pure — no `.await` inside iocraft's render callback. Editing is **handoff, not inline mutation**: pressing the edit key on the Config tab calls `OrchestratorHandle::edit_config_file()` (the only settings write the engine exposes), which opens `$EDITOR` on `config.json`; on return the screen re-reads the snapshot. There is intentionally NO field-by-field setter — see "§4 R7 guard" below.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`; `Text`), `insta = "1.40"` (yaml) snapshots, `tokio` (async handle calls happen in the bridge/open path, NOT in render). `lingxi_core::settings::{Settings, LoadInputs, EffectiveSettings, SettingsJson}` (the M3 settings store — read-only loader). `lingxi_traits::{OrchestratorHandle, StatusSnapshot, CostSnapshot}`. No new workspace deps.
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`; `Text`), `insta = "1.40"` (yaml) snapshots, `tokio` (async handle calls happen in the bridge/open path, NOT in render). `lingxi_core::settings::{Settings, LoadInputs, EffectiveSettings, SettingsJson}` (the M3 settings store — read-only loader). `lingxi_platform_api::{OrchestratorHandle, StatusSnapshot, CostSnapshot}`. No new workspace deps.
 
 **References:**
 
@@ -22,9 +22,9 @@
   - `crates/tui/src/screens/mod.rs` — currently `pub mod repl;` only. Add `pub mod settings;`.
   - `crates/tui/src/root.rs` — `handle_live_key(st, k, viewport)` (THE single live-key dispatcher; §2.5 priority order). The permission focus-trap is priority 1 (`st.pending_permission.is_some()`). M7-11 adds the priority-2 `active_screen.is_some()` branch. M7-13 extends that branch's reducer for the `Settings` variant.
   - `crates/tui/src/app.rs:267` — `render_screen(state, viewport)`; the permission branch (lines 275-308) returns the dialog element instead of `ReplScreen`. M7-11 adds the `active_screen` branch just like it. `dispatch(action, st)` consumes `KeyAction` and mutates `AppState`.
-  - `crates/tui/src/state.rs` — `AppState` struct + `StatusSnapshot` (TUI-local: model, cwd, cost String, context_pct, permission_mode). NOTE there are **two** `StatusSnapshot` types: the TUI-local one in `state.rs` (status-line) and `lingxi_traits::StatusSnapshot` (the rich `/status` panel). The Status tab uses the **traits** one (richer).
+  - `crates/tui/src/state.rs` — `AppState` struct + `StatusSnapshot` (TUI-local: model, cwd, cost String, context_pct, permission_mode). NOTE there are **two** `StatusSnapshot` types: the TUI-local one in `state.rs` (status-line) and `lingxi_platform_api::StatusSnapshot` (the rich `/status` panel). The Status tab uses the **traits** one (richer).
   - `crates/core/src/settings/mod.rs` — `Settings::load(LoadInputs{env, project_dir, defaults}) -> Result<EffectiveSettings, SettingsError>`; `EffectiveSettings { settings: SettingsJson, trace: ProvenanceTrace }`. **This is the ENTIRE M3 read API — there is no `save`/`set`/`write` method.** `SettingsJson` is `crates/core/src/settings/schema.rs` (camelCase JSON keys, all `Option<T>`).
-  - `crates/traits/src/orchestrator.rs:208-239` — `StatusSnapshot { session_id, model, n_messages, total_cost_usd, input_tokens, output_tokens, n_mcp_connected, n_mcp_total, n_hooks, n_agents, started_at, cwd }`. `:27-49` — `CostSnapshot { total_usd, input_tokens, output_tokens, api_calls, session_duration, … }` (NO per-model field). Trait methods `get_status_snapshot()`, `snapshot_cost()`.
+  - `crates/platform-api/src/orchestrator.rs:208-239` — `StatusSnapshot { session_id, model, n_messages, total_cost_usd, input_tokens, output_tokens, n_mcp_connected, n_mcp_total, n_hooks, n_agents, started_at, cwd }`. `:27-49` — `CostSnapshot { total_usd, input_tokens, output_tokens, api_calls, session_duration, … }` (NO per-model field). Trait methods `get_status_snapshot()`, `snapshot_cost()`.
   - `crates/orchestrator/src/test_support.rs` — `MockOrchestratorHandle` (used by command tests; reuse for behavior tests that need a handle).
   - `crates/commands/src/builtin/config.rs`, `crates/commands/src/builtin/status.rs` — the existing `/config` and `/status` handlers (M5-11). `/config` calls `handle.edit_config_file()` and prints `Edited {path} (exit {code}).`. M7-13 leaves these handlers intact (they remain the `--no-tui` path) and optionally adds a TUI open-screen hook — see "Command wiring decision".
   - `crates/tui/src/theme.rs` — `TuiTheme::{ASSISTANT, USER, ERROR, DIM}` iocraft `Color` constants. M7-15 adds the full theme; until then use these + literal iocraft colors with a `// TODO(M7-15)` note where a semantic color is missing.
@@ -67,7 +67,7 @@ Run:
 ```bash
 cd lingxi-core
 grep -rn "pub fn load\|pub struct EffectiveSettings\|pub struct SettingsJson\|pub use schema" crates/core/src/settings/mod.rs
-grep -rn "fn get_status_snapshot\|fn snapshot_cost\|fn edit_config_file" crates/traits/src/orchestrator.rs
+grep -rn "fn get_status_snapshot\|fn snapshot_cost\|fn edit_config_file" crates/platform-api/src/orchestrator.rs
 grep -rn "fn save\|fn set_\|fn store\|fn persist" crates/core/src/settings/ || echo "NO SETTINGS WRITE API — confirms §4 R7 read-only posture"
 ```
 Expected: `Settings::load`, `EffectiveSettings`, `SettingsJson` present; the three handle methods present; **no settings write API** (the last grep prints the confirmation line). This grep result is the justification for the read-only Config/Settings tabs.
@@ -83,7 +83,7 @@ Expected: `Settings::load`, `EffectiveSettings`, `SettingsJson` present; the thr
 | `crates/tui/src/screens/settings/mod.rs` | The `Settings` container: `SettingsTab` enum (`Config`/`Settings`/`Status`/`Usage`), `SettingsState { tab }`, the pure tab-nav reducer `apply_settings_key`, the `SettingsData` read-snapshot struct + its async `snapshot(handle, eff)` constructor, the tab-strip renderer, and the `#[component] SettingsScreen`. Re-exports the four sub-modules. | Create (Tasks 1, 2, 7) |
 | `crates/tui/src/screens/settings/config.rs` | `render_config_to_string(&SettingsData) -> String` + `#[component] ConfigTab`. Read-only effective-settings table + `$EDITOR` handoff hint. | Create (Task 3) |
 | `crates/tui/src/screens/settings/settings.rs` | `render_settings_to_string(&SettingsData) -> String` + `#[component] SettingsTabView`. Read-only effective settings + per-field provenance (from `EffectiveSettings::trace`). | Create (Task 4) |
-| `crates/tui/src/screens/settings/status.rs` | `render_status_to_string(&SettingsData) -> String` + `#[component] StatusTab`. Renders `lingxi_traits::StatusSnapshot` rows (claude-code Status.tsx order/labels). | Create (Task 5) |
+| `crates/tui/src/screens/settings/status.rs` | `render_status_to_string(&SettingsData) -> String` + `#[component] StatusTab`. Renders `lingxi_platform_api::StatusSnapshot` rows (claude-code Status.tsx order/labels). | Create (Task 5) |
 | `crates/tui/src/screens/settings/usage.rs` | `render_usage_to_string(&SettingsData) -> String` + `#[component] UsageTab`. Flat cost from `CostSnapshot` + the M8-gap line. | Create (Task 6) |
 | `crates/tui/src/screens/mod.rs` | Add `pub mod settings;`. | Modify (Task 1) |
 | `crates/tui/src/state.rs` | Add `Screen::Settings(SettingsState)` variant (extend the M7-11 `Screen` enum); helper `AppState::open_settings(tab)` / reuse M7-11's open/close. | Modify (Task 7) |
@@ -128,7 +128,7 @@ Create `crates/tui/src/screens/settings/mod.rs` with the test module first:
 //! cost (per-model breakdown is M8).
 
 use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-use lingxi_traits::{CostSnapshot, StatusSnapshot};
+use lingxi_platform_api::{CostSnapshot, StatusSnapshot};
 
 /// Which sub-screen is selected. Tab order is Config → Settings → Status →
 /// Usage (LingXi order; see plan "Tab-order decision").
@@ -297,7 +297,7 @@ Add to `mod.rs` (top-level, outside `tests`):
 
 ```rust
 use std::sync::Arc;
-use lingxi_traits::OrchestratorHandle;
+use lingxi_platform_api::OrchestratorHandle;
 
 use crate::events::keymap::KeyAction;
 
@@ -431,7 +431,7 @@ mod tests {
     use super::*;
     use crate::screens::settings::{SettingsData, SettingsTab};
     use lingxi_core::settings::SettingsJson;
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use lingxi_platform_api::{CostSnapshot, StatusSnapshot};
 
     fn fixture() -> SettingsData {
         SettingsData {
@@ -592,7 +592,7 @@ mod tests {
     use crate::screens::settings::SettingsData;
     use lingxi_core::settings::{EffectiveSettings, SettingsJson};
     use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use lingxi_platform_api::{CostSnapshot, StatusSnapshot};
 
     #[test]
     fn settings_renders_provenance_table() {
@@ -634,7 +634,7 @@ EOF
 
 ---
 
-## Task 5: Status tab — `lingxi_traits::StatusSnapshot` rows
+## Task 5: Status tab — `lingxi_platform_api::StatusSnapshot` rows
 
 **Files:**
 - Create: `crates/tui/src/screens/settings/status.rs`
@@ -647,7 +647,7 @@ Rows follow claude-code `Status.tsx` order/labels: `Version`, `Session ID`, `cwd
 Create `crates/tui/src/screens/settings/status.rs`:
 
 ```rust
-//! Status tab — renders `lingxi_traits::StatusSnapshot` rows (M7-13),
+//! Status tab — renders `lingxi_platform_api::StatusSnapshot` rows (M7-13),
 //! matching claude-code Status.tsx row order/labels where the data exists.
 //! Account/IDE/session-name rows are omitted (no engine surface yet).
 
@@ -676,7 +676,7 @@ mod tests {
     use crate::screens::settings::SettingsData;
     use lingxi_core::settings::{EffectiveSettings, SettingsJson};
     use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use lingxi_platform_api::{CostSnapshot, StatusSnapshot};
     use std::path::PathBuf;
 
     fn fixture() -> SettingsData {
@@ -713,7 +713,7 @@ mod tests {
 }
 ```
 
-> Verify `StatusSnapshot` field names against `crates/traits/src/orchestrator.rs:214-239` — they match the fixture above (confirmed at plan time). `StatusSnapshot` derives `Default`.
+> Verify `StatusSnapshot` field names against `crates/platform-api/src/orchestrator.rs:214-239` — they match the fixture above (confirmed at plan time). `StatusSnapshot` derives `Default`.
 
 - [ ] **Step 2: Add `pub mod status;`, run, accept snapshot**
 
@@ -780,7 +780,7 @@ mod tests {
     use crate::screens::settings::SettingsData;
     use lingxi_core::settings::{EffectiveSettings, SettingsJson};
     use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use lingxi_platform_api::{CostSnapshot, StatusSnapshot};
     use std::time::Duration;
 
     fn fixture() -> SettingsData {
@@ -819,7 +819,7 @@ mod tests {
 }
 ```
 
-> Verify `CostSnapshot` field names against `crates/traits/src/orchestrator.rs:27-49`: `total_usd: f64`, `input_tokens: u64`, `output_tokens: u64`, `api_calls: u32`, `session_duration: Duration` (confirmed at plan time). `..Default::default()` covers the legacy `total_nano_usd`/`total_tokens`/`session_id` fields.
+> Verify `CostSnapshot` field names against `crates/platform-api/src/orchestrator.rs:27-49`: `total_usd: f64`, `input_tokens: u64`, `output_tokens: u64`, `api_calls: u32`, `session_duration: Duration` (confirmed at plan time). `..Default::default()` covers the legacy `total_nano_usd`/`total_tokens`/`session_id` fields.
 
 - [ ] **Step 2: Add `pub mod usage;`, run, accept snapshot**
 
@@ -1254,7 +1254,7 @@ Expected: `m7.13` listed; HEAD is the Task 11 (or last) commit.
 
 **Placeholder scan:** the `source_label` placeholder in T4 is explicitly flagged "do NOT ship the placeholder" with a grep to find real `Source` variants; the `SettingsJson` field names in T3 carry a verify-before-writing grep. No TBD/TODO-without-content. ✔
 
-**Type consistency:** `SettingsTab`, `SettingsState`, `SettingsData` (carrying `EffectiveSettings` after T4's extension — note the T1→T4 migration of `effective` from `SettingsJson` to `EffectiveSettings` is called out in T4 Step 1), `apply_settings_key`, `KeyAction::{TabNext,TabPrev,CloseScreen,OpenSettings}`, `Screen::Settings`, `SettingsScreen`, `ConfigTab`/`SettingsTabView`/`StatusTab`/`UsageTab` used consistently across T1-T10. The `StatusSnapshot`/`CostSnapshot` field names match `crates/traits/src/orchestrator.rs` (verified). ✔
+**Type consistency:** `SettingsTab`, `SettingsState`, `SettingsData` (carrying `EffectiveSettings` after T4's extension — note the T1→T4 migration of `effective` from `SettingsJson` to `EffectiveSettings` is called out in T4 Step 1), `apply_settings_key`, `KeyAction::{TabNext,TabPrev,CloseScreen,OpenSettings}`, `Screen::Settings`, `SettingsScreen`, `ConfigTab`/`SettingsTabView`/`StatusTab`/`UsageTab` used consistently across T1-T10. The `StatusSnapshot`/`CostSnapshot` field names match `crates/platform-api/src/orchestrator.rs` (verified). ✔
 
 ---
 

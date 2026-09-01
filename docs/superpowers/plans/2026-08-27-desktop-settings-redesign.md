@@ -71,7 +71,7 @@
 ## 文件结构
 
 **Rust 新建**
-- `lingxi-code/apps/bridge-server/src/settings_bridge.rs` —— 设置快照构建 + 带标记的原子通用写入器。落在 bridge-server 是因为 `engine` crate 依赖极简（无 `traits` / `permission`），而 bridge-server 已依赖 client-protocol / permission / migrations / traits / engine。
+- `lingxi-code/apps/bridge-server/src/settings_bridge.rs` —— 设置快照构建 + 带标记的原子通用写入器。落在 bridge-server 是因为 `core` crate 依赖极简（无 `traits` / `permission`），而 bridge-server 已依赖 client-protocol / permission / migrations / traits / engine。
 
 **Rust 修改**
 - `lingxi-code/client-protocol/src/commands.rs` —— 新增命令变体
@@ -254,7 +254,7 @@ Expected: 编译失败，`cannot find function \`build_snapshot\``
 ```rust
 //! 设置快照构建与带标记的原子写入器。
 //!
-//! 落在 bridge-server 而非 `engine::settings`，因为 `engine` crate 的依赖极简
+//! 落在 bridge-server 而非 `lingxi_core::settings`，因为 `core` crate 的依赖极简
 //! （无 `traits` / `permission`），而带标记的原子写需要两者。
 
 use std::collections::BTreeMap;
@@ -334,7 +334,7 @@ pub fn writable_path(
 }
 ```
 
-> `locked` 在本任务留空 `Vec`；managed 层的锁定在 Task 3 接入真实的 `engine::settings` 加载后填充。
+> `locked` 在本任务留空 `Vec`；managed 层的锁定在 Task 3 接入真实的 `lingxi_core::settings` 加载后填充。
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -414,7 +414,7 @@ F1-09 guard：新增变体与**新增可选字段**是 additive。故：
   —— 语义正是「运行中的会话启动时实际加载的值」。
   ⚠️ `OrchestratorHandle` 上**没有** `active_settings()`，别去找。
 - `locked` 由组合根填：`apps/engine-desktop/src/lib.rs:4540` 已在构建
-  `managed_layers: Vec<engine::settings::SettingsJson>`，取其键集即可。
+  `managed_layers: Vec<lingxi_core::settings::SettingsJson>`，取其键集即可。
   bridge-server 不实现 managed 层加载。
 - `settings` 为 `None` 时（轻量测试 / 嵌入式客户端），该 listing 分支保持现有的
   debug 日志行为并额外发一个 `ClientEvent::Error`，消息点名缺少设置上下文。

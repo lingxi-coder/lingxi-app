@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
-use traits::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
 
 struct MockAuth {
     result: StdMutex<Result<LoginInfo, AuthError>>,

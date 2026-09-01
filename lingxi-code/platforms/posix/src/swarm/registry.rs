@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use traits::SwarmBackend;
+use platform_api::SwarmBackend;
 
 use super::detection::{detect_terminal_env, pick_backend, BackendChoice, TerminalEnv};
 use super::inprocess::InProcessSwarmBackend;

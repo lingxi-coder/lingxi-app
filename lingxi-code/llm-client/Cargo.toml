@@ -17,7 +17,7 @@ sha2 = "0.10"
 # "process" — `aws_auth::ShellAwsAuthProcess` runs the awsAuthRefresh /
 # awsCredentialExport scripts (2.1.198 ZBd/gIn/t2d port).
 tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread", "process"] }
-traits = { path = "../traits" }
+platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 futures = { workspace = true }

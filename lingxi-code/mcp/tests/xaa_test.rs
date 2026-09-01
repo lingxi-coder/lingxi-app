@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use mcp::xaa::{self, XaaConfig};
 use protocol::{HttpRequest, HttpResponse};
 use std::sync::{Arc, Mutex};
-use traits::http::SseStream;
-use traits::{HttpError, HttpTransport};
+use platform_api::http::SseStream;
+use platform_api::{HttpError, HttpTransport};
 
 // ---------------------------------------------------------------------------
 // Mock transport answering PRM / AS-metadata / IdP-exchange / AS-jwt-bearer.

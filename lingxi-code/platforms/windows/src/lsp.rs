@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::warn;
-use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

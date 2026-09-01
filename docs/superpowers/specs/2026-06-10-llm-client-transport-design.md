@@ -8,7 +8,7 @@ Status: approved (user), implementation in `llm-client`
 Give `llm-client` an execution path from `LlmRequest` to `LlmResponse` /
 `LlmEvent` stream over real HTTP, without coupling the crate to any HTTP
 library. Production HTTP stays on the existing platform stack
-(`traits::HttpTransport` / `platforms/common::ReqwestHttp`, design rule D17:
+(`platform_api::HttpTransport` / `platforms/common::ReqwestHttp`, design rule D17:
 engine code never imports a concrete HTTP client); `llm-client` ships the
 contract and the orchestration, the host ships a thin adapter.
 
@@ -16,7 +16,7 @@ contract and the orchestration, the host ships a thin adapter.
 
 - A concrete HTTP implementation inside `llm-client` (no reqwest/tokio
   runtime dependencies; tokio returns as dev-dependency only).
-- The `traits::HttpTransport -> llm_client::Transport` adapter (written when
+- The `platform_api::HttpTransport -> llm_client::Transport` adapter (written when
   the engine adopts `llm-client`).
 - Retry driving (RetryPolicy classification exists; the host owns the loop).
 - Bedrock binary event-stream framing.
@@ -121,7 +121,7 @@ impl DefaultLlmClient {
 ## Integration path (follow-up, not this change)
 
 A ~50-line adapter in the engine/platform layer implements
-`llm_client::Transport` over `traits::HttpTransport`: `execute` maps
+`llm_client::Transport` over `platform_api::HttpTransport`: `execute` maps
 `ProviderRequest` → `protocol::HttpRequest`; `open_stream` uses `stream_sse`
 (mapping each `SseEvent.data` to one `RawStreamFrame`) or `stream_raw_bytes` +
 `SseFrameSplitter`.

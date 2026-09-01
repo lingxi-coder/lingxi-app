@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use traits::{
+use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
@@ -439,7 +439,7 @@ impl McpTransport for RemoteMcpTransport {
                 arguments: prompt
                     .arguments
                     .into_iter()
-                    .map(|argument| traits::McpPromptArgumentDto {
+                    .map(|argument| platform_api::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,

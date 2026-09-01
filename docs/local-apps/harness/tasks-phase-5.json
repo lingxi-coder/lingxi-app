@@ -7,18 +7,18 @@
       "gate": "§13.1 / §13.5 / §18 Phase 5: tools/list serializes only the standard MCP tool definition while Host-only server_name/full_name/search_hint/always_load/effective_max_permission stay out of the wire shape; initialize negotiates with LATEST_PROTOCOL_VERSION and CallToolResult preserves content/structuredContent/isError/_meta",
       "owns": [
         "docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md",
-        "lingxi-code/traits/src/mcp.rs",
+        "lingxi-code/platform-api/src/mcp.rs",
         "lingxi-code/mcp/src/client.rs",
         "lingxi-code/mcp/src/initialize_params.rs",
         "lingxi-code/tools/mcp/src/mcp_tool.rs",
         "lingxi-code/mcp/tests/mock_mcp.rs"
       ],
       "crates": [
-        "traits",
+        "platform-api",
         "mcp"
       ],
       "testPackages": [
-        "traits",
+        "platform-api",
         "mcp"
       ],
       "exclusive": false,

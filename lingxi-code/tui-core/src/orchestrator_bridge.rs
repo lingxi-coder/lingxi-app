@@ -1,6 +1,6 @@
 //! Orchestrator → TUI event bridge. (M6-03)
 //!
-//! The `BridgeOutputStream` is an [`traits::OutputStream`] impl that
+//! The `BridgeOutputStream` is an [`platform_api::OutputStream`] impl that
 //! forwards every orchestrator callback as a [`TurnEvent`] on an mpsc
 //! channel. The TUI render loop drains the receiver and feeds events into
 //! `crate::streaming::apply_event`, which mutates `AppState` and pokes a
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
-use traits::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
+use platform_api::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 
 /// One live heartbeat value retained by the bridge. Heartbeats are transient
 /// render state and therefore may be replaced by a newer value for the same
@@ -134,7 +134,7 @@ pub enum TurnEvent {
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The
     /// orchestrator's `emit_thinking` fires once per COMPLETED block (not
-    /// per-delta — see `traits::OutputStream::emit_thinking`), so one event
+    /// per-delta — see `platform_api::OutputStream::emit_thinking`), so one event
     /// carries the whole reasoning text.
     ThinkingDelta(String),
     /// A tool invocation is about to dispatch.
@@ -253,7 +253,7 @@ pub enum TurnEvent {
         summary: String,
     },
     /// Unified rate-limit header snapshot (llm-client future-work batch 3,
-    /// Task 9). Mirrors `traits::OutputEvent::RateLimit`'s nine fields —
+    /// Task 9). Mirrors `platform_api::OutputEvent::RateLimit`'s nine fields —
     /// see that variant's per-field docs for the
     /// `anthropic-ratelimit-unified-*` header each value comes from. The
     /// orchestrator emits on-change only; `apply_event` additionally dedupes
@@ -281,11 +281,11 @@ pub enum TurnEvent {
         /// a list; `None` when the header is absent or empty.
         upgrade_paths: Option<Vec<String>>,
         /// 2.1.206 `credits_required` derivation — see
-        /// `traits::OutputEvent::RateLimit::credits_required`.
+        /// `platform_api::OutputEvent::RateLimit::credits_required`.
         credits_required: bool,
     },
     /// Raw per-window utilization snapshot (llm-client future-work batch 5,
-    /// Task 4). Mirrors `traits::OutputEvent::RawUtilization`'s four fields —
+    /// Task 4). Mirrors `platform_api::OutputEvent::RawUtilization`'s four fields —
     /// tracked on every API response (unlike the warning-gated
     /// [`Self::RateLimit`]) and stored on `AppState.raw_utilization` for the
     /// statusline command input's `rate_limits` field (`StatusLine.tsx:50-65`).
@@ -451,9 +451,9 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    async fn emit_attachment(&self, attachment: traits::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
         let attachment = match attachment {
-            traits::AttachmentKind::NestedMemory { display_path } => {
+            platform_api::AttachmentKind::NestedMemory { display_path } => {
                 crate::message::Attachment::NestedMemory { display_path }
             }
             // Unmodelled kind: drop rather than guess a variant. Dropping draws
@@ -624,7 +624,7 @@ impl OutputStream for BridgeOutputStream {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the trait method's eleven header-derived fields (see traits::OutputStream::emit_rate_limit)"
+        reason = "mirrors the trait method's eleven header-derived fields (see platform_api::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -706,7 +706,7 @@ mod tests {
         // conversation…` progress UI never appears.
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        traits::OutputStream::emit_compaction_started(&bridge).await;
+        platform_api::OutputStream::emit_compaction_started(&bridge).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::CompactStarted));
     }
@@ -828,7 +828,7 @@ mod tests {
     async fn emit_end_turn_endturn_reason_translates_to_endturn() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = traits::CostSnapshot::default();
+        let cost = platform_api::CostSnapshot::default();
         bridge.emit_end_turn("end_turn", &cost).await;
         // M6-06: emit_end_turn now precedes TurnEnded with a CostUpdated event.
         assert!(matches!(
@@ -849,7 +849,7 @@ mod tests {
     async fn emit_end_turn_max_tokens_translates_to_maxturns() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = traits::CostSnapshot::default();
+        let cost = platform_api::CostSnapshot::default();
         bridge.emit_end_turn("max_tokens", &cost).await;
         assert!(matches!(
             rx.recv().await.unwrap(),
@@ -869,9 +869,9 @@ mod tests {
     async fn emit_end_turn_formats_real_cost_4dp() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = traits::CostSnapshot {
+        let cost = platform_api::CostSnapshot {
             total_usd: 0.0234,
-            ..traits::CostSnapshot::default()
+            ..platform_api::CostSnapshot::default()
         };
         bridge.emit_end_turn("end_turn", &cost).await;
         match rx.recv().await.unwrap() {
@@ -950,10 +950,10 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         bridge
             .emit_context_pressure(
-                Some(traits::ContextPressureBanner {
+                Some(platform_api::ContextPressureBanner {
                     text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
                         .into(),
-                    level: traits::ContextPressureLevel::Error,
+                    level: platform_api::ContextPressureLevel::Error,
                 }),
                 0.92,
                 184_000,
@@ -971,7 +971,7 @@ mod tests {
                     b.text,
                     "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
                 );
-                assert_eq!(b.level, traits::ContextPressureLevel::Error);
+                assert_eq!(b.level, platform_api::ContextPressureLevel::Error);
                 assert!((used_fraction - 0.92).abs() < 1e-6);
                 assert_eq!(used_tokens, 184_000);
                 assert_eq!(context_window_tokens, 200_000);

@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use traits::Clock;
+use platform_api::Clock;
 
 /// A [`Clock`] pinned to a settable epoch-milliseconds value.
 #[derive(Debug)]

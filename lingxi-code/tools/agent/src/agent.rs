@@ -32,8 +32,8 @@ use telemetry::tengu::agent::{
 };
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
-use traits::budget::BudgetError;
-use traits::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
+use platform_api::budget::BudgetError;
+use platform_api::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -54,7 +54,7 @@ pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 /// `claude-code/src/tools/AgentTool/built-in/*.ts`.
 ///
 /// ADVISORY ONLY. `AgentTool` no longer rejects a `subagent_type` outside this
-/// list: the catalog-aware [`traits::subagent_spawn::SubagentSpawner`] resolves
+/// list: the catalog-aware [`platform_api::subagent_spawn::SubagentSpawner`] resolves
 /// any type (user/project catalog overrides built-ins; an unknown type →
 /// `general-purpose`, matching claude-code's `effectiveType ?? GENERAL_PURPOSE`).
 /// `tool-agent` cannot depend on the `agent` crate (cycle — see the module
@@ -122,7 +122,7 @@ const EXAMPLE_MIGRATION_REVIEW_PROMPT: &str = "Review migration 0042_user_schema
 ///
 /// `t` (`allowedAgentTypes`, the `att()` wildcard-rule allowlist) has no port
 /// seam, so `o(...)` is the JS `?? !0` default — always true.
-fn general_purpose_is_available(agents: &[traits::subagent_spawn::SubagentListingEntry]) -> bool {
+fn general_purpose_is_available(agents: &[platform_api::subagent_spawn::SubagentListingEntry]) -> bool {
     let target = normalize_agent_type(GENERAL_PURPOSE_AGENT_TYPE);
     let matches = agents
         .iter()
@@ -252,7 +252,7 @@ fn agent_type_tools_denied_error(agent_type: &str) -> String {
 /// mode (it is a per-session `CoordinatorModeHandle`, not a process global), so
 /// the arm is enforced here.
 fn drop_coordinator_hidden_builtins(
-    agents: &mut Vec<traits::subagent_spawn::SubagentListingEntry>,
+    agents: &mut Vec<platform_api::subagent_spawn::SubagentListingEntry>,
     is_coordinator: bool,
 ) {
     if is_coordinator {
@@ -262,13 +262,13 @@ fn drop_coordinator_hidden_builtins(
 
 /// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
 /// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
-/// object carrying [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
+/// object carrying [`platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
 /// (the pool spawner's sentinel wrapper); `None` for a plain nested-activity
 /// line, which never parses as such an object.
 fn decode_forward_subagent_message(line: &str) -> Option<Value> {
     let parsed: Value = serde_json::from_str(line).ok()?;
     parsed
-        .get(traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
+        .get(platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
         .cloned()
 }
 
@@ -651,9 +651,9 @@ impl AgentTool {
     ///   (`i = o && r`), not in `z1e()` itself, and this schema builder has no
     ///   session context at all. The port's stand-in for the missing GrowthBook
     ///   flag is `LINGXI_FORK_SUBAGENT` (see
-    ///   [`traits::fork_subagent::is_fork_subagent_enabled`]), read raw here.
+    ///   [`platform_api::fork_subagent::is_fork_subagent_enabled`]), read raw here.
     ///
-    /// The pre-2.1.238 port gated on `traits::subscription::is_pro_plan()`
+    /// The pre-2.1.238 port gated on `platform_api::subscription::is_pro_plan()`
     /// instead of the fork flag. That was wrong in both directions: on a Pro plan
     /// it hid `run_in_background` and forced synchronous dispatch, and with fork
     /// enabled it kept advertising a field the binary omits. All four
@@ -663,13 +663,13 @@ impl AgentTool {
     /// background agents.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        let background_tasks_disabled = traits::env::is_env_truthy(
+        let background_tasks_disabled = platform_api::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
         );
         let fork_feature_enabled =
-            traits::env::is_env_truthy(std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref());
+            platform_api::env::is_env_truthy(std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref());
         let advertise_run_in_background = !background_tasks_disabled && !fork_feature_enabled;
         Self {
             ctx,
@@ -688,8 +688,8 @@ impl AgentTool {
     /// `agent_listing_delta` attachment path (orchestrator) render identical
     /// lines. The `toolsDescription` is pre-rendered by the spawner (TS
     /// `getToolsDescription`).
-    fn format_agent_line(agent: &traits::subagent_spawn::SubagentListingEntry) -> String {
-        traits::subagent_spawn::format_agent_line(agent)
+    fn format_agent_line(agent: &platform_api::subagent_spawn::SubagentListingEntry) -> String {
+        platform_api::subagent_spawn::format_agent_line(agent)
     }
 
     /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
@@ -700,7 +700,7 @@ impl AgentTool {
     /// static pointer line "Available agent types are listed in <system-reminder>
     /// messages in the conversation." — there is NO inline-catalog variant in the
     /// description. The `should_inject_agent_list_in_messages()` gate (now default
-    /// ON, see [`traits::subagent_spawn`]) reflects that: ON ⇒ pointer (the
+    /// ON, see [`platform_api::subagent_spawn`]) reflects that: ON ⇒ pointer (the
     /// 2.1.193 default); an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
     /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
     ///
@@ -716,18 +716,18 @@ impl AgentTool {
     /// coordinator system prompt already covers usage / examples).
     ///
     /// The `d` pro-plan gate (`vi()==="pro"`) IS modeled: a `pro` subscription
-    /// (read from the process-global [`traits::subscription::is_pro_plan`]) injects
+    /// (read from the process-global [`platform_api::subscription::is_pro_plan`]) injects
     /// the "Do not spawn agents unless the user asks" block after the catalog
     /// pointer line and suppresses `## When to use`. It is inert until a
     /// composition root resolves the plan via
-    /// [`traits::subscription::set_current_subscription`] (subscription resolution
+    /// [`platform_api::subscription::set_current_subscription`] (subscription resolution
     /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
     /// default).
     ///
     /// The `o` fork-subagent gate (`isForkSubagentEnabled` / 2.1.232 `SPe`) IS
     /// modeled: when fork is enabled (`is_fork_subagent_enabled(is_coordinator,
     /// is_non_interactive)`, reading the process-global
-    /// [`traits::session_flags::is_non_interactive_session`]), the subagent_type
+    /// [`platform_api::session_flags::is_non_interactive_session`]), the subagent_type
     /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
     /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
     /// qualifier. Default ON for interactive non-coordinator sessions; set
@@ -747,7 +747,7 @@ impl AgentTool {
     /// PRE-deny-filter listing exactly as the binary's `prompt({agents,…})`
     /// wrapper does (@292885292).
     fn build_prompt(
-        agents: &[traits::subagent_spawn::SubagentListingEntry],
+        agents: &[platform_api::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
         model: Option<&str>,
@@ -762,7 +762,7 @@ impl AgentTool {
         //     (CLI/TUI/desktop are always out-of-process), so it is modeled as
         //     a constant `false` — matching the binary's CLI/TUI default.
         // ⇒ `l` is TRUE unless the kill-switch env is set.
-        let async_agents_available = !traits::env::is_env_truthy(
+        let async_agents_available = !platform_api::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -780,7 +780,7 @@ impl AgentTool {
     /// `build_prompt` with the binary's `l` gate supplied explicitly, so tests
     /// can exercise both arms without touching the process-global env.
     fn build_prompt_with_async_agents(
-        agents: &[traits::subagent_spawn::SubagentListingEntry],
+        agents: &[platform_api::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
@@ -792,7 +792,7 @@ impl AgentTool {
         // description carries only the static pointer line. A LEGACY inline body is
         // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
         // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
-        let agent_list_section = if traits::subagent_spawn::should_inject_agent_list_in_messages() {
+        let agent_list_section = if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
             "Available agent types are listed in <system-reminder> messages in the conversation."
                 .to_string()
         } else {
@@ -811,7 +811,7 @@ impl AgentTool {
         // binary's unknown-plan default). The block is injected right after the
         // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
         // section — both per the binary's `${d}` / `${d?"":…}` placements.
-        let pro_block = if traits::subscription::is_pro_plan() {
+        let pro_block = if platform_api::subscription::is_pro_plan() {
             // Binary `d=Pi()==="pro"?`\n\n**Do not spawn…`:""` — DOUBLE leading `\n`
             // (injected as `…conversation.${d}\n\n${subagent}`; od -c verified on
             // 2.1.195 @211615145).
@@ -829,9 +829,9 @@ impl AgentTool {
         // non-coordinator sessions. The non-interactive flag is read from the
         // process-global session flag (the port's `getIsNonInteractiveSession()`
         // analog, set by `ConversationOrchestrator::new`).
-        let is_fork = traits::fork_subagent::is_fork_subagent_enabled(
+        let is_fork = platform_api::fork_subagent::is_fork_subagent_enabled(
             is_coordinator,
-            traits::session_flags::effective_non_interactive_session(),
+            platform_api::session_flags::effective_non_interactive_session(),
         );
 
         // Subagent_type sentence — fork variant (binary `${o?…:…}`).
@@ -888,10 +888,10 @@ impl AgentTool {
 
         // Steer gate `g = DZ()==="default"` (binary @292441984 / the `${g?…:…}`
         // arms). Already ported as
-        // `traits::live_sessions::subagent_steer_is_default` and consumed by the
+        // `platform_api::live_sessions::subagent_steer_is_default` and consumed by the
         // system-prompt bullet at `orchestrator/src/prompt/body_sections.rs`;
         // the Agent tool prompt consults the SAME gate.
-        let steer_is_default = traits::live_sessions::subagent_steer_is_default();
+        let steer_is_default = platform_api::live_sessions::subagent_steer_is_default();
 
         // LEAN/LONG split (binary `m = qk(e)`, the shared `Dh(model)` gate the
         // port already implements as `tool_api::dh_simple_system_prompt`):
@@ -1395,7 +1395,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
     async fn emit_subagent_output_flagged(
         bus: &Arc<AnalyticsBus>,
         agent_id: &str,
-        result: &traits::subagent_output_guard::SanitizeResult,
+        result: &platform_api::subagent_output_guard::SanitizeResult,
     ) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -1475,7 +1475,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
     ///
     /// claude returns the `async_launched` payload immediately and drives the
     /// lifecycle detached (AgentTool.tsx:686-764). This calls the
-    /// [`traits::subagent_spawn::SubagentSpawner::spawn_async`] seam, which
+    /// [`platform_api::subagent_spawn::SubagentSpawner::spawn_async`] seam, which
     /// DEFAULTS to a clear error when unwired — so an unwired async branch
     /// surfaces an explicit message rather than silently running synchronously
     /// (the task forbids a silent wrong path). When the production spawner
@@ -1495,24 +1495,24 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         bus: &Arc<AnalyticsBus>,
         invocation_id: &str,
         started: Instant,
-        spawner: &dyn traits::subagent_spawn::SubagentSpawner,
+        spawner: &dyn platform_api::subagent_spawn::SubagentSpawner,
         parsed: &AgentToolInput,
         effective_type: &str,
-        selected: &traits::subagent_spawn::SelectedAgentMeta,
+        selected: &platform_api::subagent_spawn::SelectedAgentMeta,
         is_fork: bool,
         ctx: &ToolUseContext,
-        budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
+        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
         parent_registry: Arc<tool_api::ToolRegistry>,
         effective_isolation: Option<String>,
         resolved_cwd: Option<String>,
-        agent_worktree: Option<traits::worktree::WorktreeHandle>,
+        agent_worktree: Option<platform_api::worktree::WorktreeHandle>,
     ) -> Result<ToolCallResult, ToolError> {
         let mut invoker_impl =
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget,
@@ -1650,7 +1650,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     mcp_meta: None,
                 })
             }
-            Err(traits::subagent_spawn::SubagentSpawnError::PoolFull) => {
+            Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     bus,
@@ -1660,7 +1660,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 )
                 .await;
                 Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    traits::subagent_spawn::max_concurrent_subagents(),
+                    platform_api::subagent_spawn::max_concurrent_subagents(),
                 )))
             }
             Err(e) => {
@@ -1901,7 +1901,7 @@ impl Tool for AgentTool {
         // Claude Code 2.1.217 defaults the nesting cap to 1: the main thread
         // (depth 0) may spawn a child, while that child may not spawn another
         // unless CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
-        let depth_limit = traits::subagent_spawn::max_subagent_spawn_depth();
+        let depth_limit = platform_api::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
             Self::emit_failed(
                 &bus,
@@ -1956,7 +1956,7 @@ impl Tool for AgentTool {
             .as_deref()
             .is_some_and(|t| normalize_agent_type(t) == "fork");
         let is_fork = wants_fork
-            && traits::fork_subagent::is_fork_subagent_enabled(
+            && platform_api::fork_subagent::is_fork_subagent_enabled(
                 is_coordinator,
                 ctx.options.is_non_interactive_session,
             );
@@ -1969,7 +1969,7 @@ impl Tool for AgentTool {
         // sole guard. It relies on the `<fork-boilerplate>` tag being present in
         // the child's inherited transcript, which `build_child_message`
         // guarantees. (FLAG: faithful but narrower than claude's dual check.)
-        if is_fork && traits::fork_subagent::is_in_fork_child(&ctx.messages) {
+        if is_fork && platform_api::fork_subagent::is_in_fork_child(&ctx.messages) {
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -2006,7 +2006,7 @@ impl Tool for AgentTool {
         // change.
         let tools_denied: Vec<String> = spawner.tools_denied_agent_types().await;
         let effective_type: String = if is_fork {
-            traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
+            platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
         } else {
             let candidate = parsed
                 .subagent_type
@@ -2221,7 +2221,7 @@ impl Tool for AgentTool {
         // runtime already has the configured number of active subagents. Keep
         // this before the session-total counter so a rejected concurrent spawn
         // does not consume one of the 200 lifetime slots.
-        let concurrent_cap = traits::subagent_spawn::max_concurrent_subagents();
+        let concurrent_cap = platform_api::subagent_spawn::max_concurrent_subagents();
         if spawner.concurrent_subagent_count().await >= concurrent_cap {
             Self::emit_failed(
                 &bus,
@@ -2409,7 +2409,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // `!dqt`; the remote path is separate and out of scope here.) The same
         // `run_in_background` value drives BOTH the telemetry `is_async` flag and
         // the async-dispatch branch below.
-        let background_tasks_disabled = traits::env::is_env_truthy(
+        let background_tasks_disabled = platform_api::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -2483,7 +2483,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             other => other,
         };
-        let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
+        let mut agent_worktree: Option<platform_api::worktree::WorktreeHandle> = None;
         let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
         if effective_isolation.as_deref() == Some("worktree") {
             let slug = format!("agent-{invocation_id}");
@@ -2550,7 +2550,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget: budget.clone(),
@@ -2571,9 +2571,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .rev()
                 .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }));
             let fork_msgs = match assistant {
-                Some(a) => traits::fork_subagent::build_forked_messages(&parsed.prompt, a),
+                Some(a) => platform_api::fork_subagent::build_forked_messages(&parsed.prompt, a),
                 // No assistant turn yet → fallback directive-only user message.
-                None => traits::fork_subagent::build_forked_messages(
+                None => platform_api::fork_subagent::build_forked_messages(
                     &parsed.prompt,
                     &protocol::ConversationMessage::Assistant {
                         id: protocol::MessageId::new(),
@@ -2732,12 +2732,12 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // Worktree lifecycle (claude `fe()` / `getWorktreeResult`): once the
         // agent finished, KEEP the worktree (return its path + branch) if it
         // left changes, else REMOVE it (auto-clean). The judgment itself lives
-        // in `traits::worktree::agent_worktree_result` (shared with the ASYNC
+        // in `platform_api::worktree::agent_worktree_result` (shared with the ASYNC
         // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match &agent_worktree {
             Some(handle) => {
-                traits::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle).await
+                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle).await
             }
             None => None,
         };
@@ -2792,7 +2792,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // reportable matched) prepend a warning block. The sanitized
                 // blocks feed BOTH the result `content` array and the model-facing
                 // string, and a `tengu_subagent_output_flagged` event is emitted.
-                let sanitized = traits::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                let sanitized = platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
                     Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
                 }
@@ -2888,7 +2888,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
-            Err(traits::subagent_spawn::SubagentSpawnError::PoolFull) => {
+            Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     &bus,
@@ -2898,7 +2898,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 )
                 .await;
                 Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    traits::subagent_spawn::max_concurrent_subagents(),
+                    platform_api::subagent_spawn::max_concurrent_subagents(),
                 )))
             }
             Err(e) => {
@@ -2960,8 +2960,8 @@ mod f_description_l_gate_tests {
         out
     }
 
-    fn agents() -> Vec<traits::subagent_spawn::SubagentListingEntry> {
-        vec![traits::subagent_spawn::SubagentListingEntry {
+    fn agents() -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+        vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),

@@ -27,7 +27,7 @@
 //! `compaction::thresholds::effective_context_window_size`, whose only override
 //! knob is the `LINGXI_AUTO_COMPACT_WINDOW` env var (a positive integer). There
 //! is **no** `userSettings.autoCompactWindow` store and **no**
-//! `OrchestratorHandle` getter/setter for it (checked `traits/src/orchestrator.rs`).
+//! `OrchestratorHandle` getter/setter for it (checked `platform-api/src/orchestrator.rs`).
 //! So this handler is a faithful **read-only status/echo**: it reports the
 //! current resolution and, when an argument is supplied while the env override
 //! is active, surfaces the byte-exact env-precedence note explaining why the

@@ -14,7 +14,7 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 branding.workspace = true
 workflow = { path = "../../workflow" }
 async-trait.workspace = true

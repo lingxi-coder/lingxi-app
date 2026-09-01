@@ -45,7 +45,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-use traits::{
+use platform_api::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
     RuntimeSpawner, Sandbox,
 };
@@ -143,7 +143,7 @@ pub trait TaskStatusSink: Send + Sync {
         &self,
         _task_id: &str,
         _result: Option<String>,
-        _usage: Option<traits::task_registry::AgentRunUsage>,
+        _usage: Option<platform_api::task_registry::AgentRunUsage>,
         _agent_id: Option<protocol::AgentId>,
         _agent_name: Option<String>,
         _team_name: Option<String>,
@@ -169,7 +169,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_agent_outcome(
         &self,
         _task_id: &str,
-        _outcome: traits::task_registry::AgentTerminalOutcome,
+        _outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
     }
 
@@ -179,7 +179,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_workflow_outcome(
         &self,
         _task_id: &str,
-        _outcome: traits::task_registry::WorkflowTerminalOutcome,
+        _outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
     }
 
@@ -191,7 +191,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         self.set_workflow_outcome(task_id, outcome).await;
@@ -243,7 +243,7 @@ impl TaskStatusSink for NoopStatusSink {
 pub struct LocalBashHandler {
     /// Runs the sandboxed bash command.
     process: Arc<dyn ProcessRunner>,
-    /// Mints the [`traits::SandboxedCommand`] the runner accepts (D2 / A1).
+    /// Mints the [`platform_api::SandboxedCommand`] the runner accepts (D2 / A1).
     sandbox: Arc<dyn Sandbox>,
     /// Owns the spool directory + path allocation for stdout/stderr.
     output_manager: Arc<TaskOutputManager>,
@@ -540,9 +540,9 @@ mod tests {
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand};
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand};
 
     // ---- In-memory FileSystem (mirrors handle.rs InMemoryFs) ---------------
 
@@ -784,7 +784,7 @@ mod tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: traits::SandboxFeatures::default(),
+                features: platform_api::SandboxFeatures::default(),
             }
         }
     }

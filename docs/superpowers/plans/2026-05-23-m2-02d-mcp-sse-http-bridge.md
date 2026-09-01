@@ -189,7 +189,7 @@ Create `lingxi-code/platforms/common/src/mcp_sse.rs`:
 ```rust
 //! MCP SSE transport — implemented in Task 3.
 use lingxi_jsonrpc::Connection;
-use lingxi_traits::McpError;
+use lingxi_platform_api::McpError;
 use thiserror::Error;
 
 /// Errors specific to opening an MCP SSE connection.
@@ -223,7 +223,7 @@ Create `lingxi-code/platforms/common/src/mcp_http.rs`:
 ```rust
 //! MCP Streamable HTTP transport — implemented in Task 5.
 use lingxi_jsonrpc::Connection;
-use lingxi_traits::McpError;
+use lingxi_platform_api::McpError;
 use thiserror::Error;
 
 /// Errors specific to opening an MCP Streamable HTTP connection.
@@ -490,7 +490,7 @@ Replace the body of `lingxi-code/platforms/common/src/mcp_sse.rs`:
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use lingxi_jsonrpc::{Connection, Mode};
-use lingxi_traits::McpError;
+use lingxi_platform_api::McpError;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -820,7 +820,7 @@ Replace the body of `lingxi-code/platforms/common/src/mcp_http.rs`:
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use lingxi_jsonrpc::{Connection, Mode};
-use lingxi_traits::McpError;
+use lingxi_platform_api::McpError;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -1004,7 +1004,7 @@ Create `lingxi-code/platforms/posix/tests/mcp_dispatch_test.rs`:
 //! to the shared connectors rather than returning UnsupportedTransport.
 
 use lingxi_platform_posix::PosixMcpTransport;
-use lingxi_traits::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_platform_api::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -1088,7 +1088,7 @@ use async_trait::async_trait;
 use lingxi_jsonrpc::Connection as JsonRpcConnection;
 use lingxi_platform_common::{connect_http, connect_sse};
 use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
+use lingxi_platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -1339,7 +1339,7 @@ Create `lingxi-code/platforms/windows/tests/mcp_dispatch_test.rs`:
 ```rust
 //! Mirrors posix mcp_dispatch_test.rs against WindowsMcpTransport.
 use lingxi_platform_windows::WindowsMcpTransport;
-use lingxi_traits::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_platform_api::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use std::collections::HashMap;
 
 #[tokio::test]

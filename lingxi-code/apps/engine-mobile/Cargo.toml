@@ -141,7 +141,7 @@ uniffi = [
 # values — pure indirection, byte-identical behavior).
 branding.workspace = true
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 skill-api = { path = "../../skill-api" }
 command-api = { path = "../../command-api" }
 

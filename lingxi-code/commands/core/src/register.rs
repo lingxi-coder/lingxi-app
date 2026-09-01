@@ -95,7 +95,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
 /// `Arc<dyn OrchestratorHandle>`.
 pub fn register_core_batch_1(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn traits::OrchestratorHandle>,
+    handle: Arc<dyn platform_api::OrchestratorHandle>,
 ) {
     use crate::{
         ClearHandler, CompactHandler, ExitHandler, HelpHandler, InitHandler, MemoryHandler,
@@ -134,8 +134,8 @@ pub fn register_core_batch_1(
 /// `Arc<dyn AuthHandle>` instances.
 pub fn register_core_batch_2(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn traits::OrchestratorHandle>,
-    auth: Arc<dyn traits::AuthHandle>,
+    handle: Arc<dyn platform_api::OrchestratorHandle>,
+    auth: Arc<dyn platform_api::AuthHandle>,
 ) {
     use crate::{
         AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, LoginHandler, LogoutHandler,
@@ -187,7 +187,7 @@ pub fn register_core_batch_2(
 /// `Arc<dyn OrchestratorHandle>`.
 pub fn register_core_batch_4(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn traits::OrchestratorHandle>,
+    handle: Arc<dyn platform_api::OrchestratorHandle>,
 ) {
     use crate::{ContextHandler, ExportHandler, FilesHandler, ResumeHandler};
 
@@ -257,7 +257,7 @@ pub fn register_core_batch_3(reg: &mut CommandRegistry) {
 /// `Arc<dyn OrchestratorHandle>`.
 pub fn register_core_batch_5(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn traits::OrchestratorHandle>,
+    handle: Arc<dyn platform_api::OrchestratorHandle>,
 ) {
     use crate::{EffortHandler, UsageHandler};
 
@@ -344,14 +344,14 @@ pub fn register_core_batch_7(reg: &mut CommandRegistry) {
 ///   (`settings.disableAgentView === true`), read by the composition root from
 ///   the merged engine settings. `true` disables the agent-view fork/subtask
 ///   surface exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`; the two halves are
-///   OR-combined via [`traits::agent_view::is_enabled_with_setting`] (binary
+///   OR-combined via [`platform_api::agent_view::is_enabled_with_setting`] (binary
 ///   `I2i()`/`vO()`).
 ///
 /// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
 /// this alongside the other core batch registrars.
 pub fn register_core_batch_8(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn traits::OrchestratorHandle>,
+    handle: Arc<dyn platform_api::OrchestratorHandle>,
     shared_registry: Arc<tokio::sync::RwLock<CommandRegistry>>,
     cwd: std::path::PathBuf,
     lingxi_home: std::path::PathBuf,
@@ -373,7 +373,7 @@ pub fn register_core_batch_8(
     //
     //   ...vO() && !IS_DEMO ? [vAd, RAd] : [SAd]
     //
-    // where `vO()` = agent view enabled (the default; `traits::agent_view`).
+    // where `vO()` = agent view enabled (the default; `platform_api::agent_view`).
     //
     //   * enabled  → `vAd` (the new background-session-copy `/fork`,
     //                `ForkBackgroundHandler`) + `RAd` (`/subtask`, the renamed
@@ -386,7 +386,7 @@ pub fn register_core_batch_8(
     // the `disableAgentView` settings half passed by the composition root from
     // the merged engine settings (`settings.disableAgentView === true`). Either
     // one disables the agent-view surface.
-    if traits::agent_view::is_enabled_with_setting(disable_agent_view) {
+    if platform_api::agent_view::is_enabled_with_setting(disable_agent_view) {
         reg.register_builtin_handler(Arc::new(ForkBackgroundHandler::new(handle.clone())));
         reg.register_builtin_handler(Arc::new(SubtaskHandler::new(handle.clone())));
     } else {
@@ -1106,7 +1106,7 @@ mod batch_8_tests {
 
     fn batch_8(
         reg: &mut CommandRegistry,
-        handle: Arc<dyn traits::OrchestratorHandle>,
+        handle: Arc<dyn platform_api::OrchestratorHandle>,
         disable_agent_view: bool,
     ) {
         register_core_batch_8(

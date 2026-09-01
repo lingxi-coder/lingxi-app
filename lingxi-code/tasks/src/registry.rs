@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
-use traits::{
+use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, ProcessRunner, RuntimeSpawner, Sandbox,
     SubagentSpawner, ToolInvoker,
 };
@@ -74,7 +74,7 @@ pub struct TaskRegistry {
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
     /// Bounded live `monitor_ws` stdout events waiting for the next turn.
     pending_monitor_events: Arc<
-        tokio::sync::Mutex<std::collections::VecDeque<traits::task_registry::TaskNotification>>,
+        tokio::sync::Mutex<std::collections::VecDeque<platform_api::task_registry::TaskNotification>>,
     >,
     /// Per-session running total of subagents spawned through the `Agent` tool
     /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
@@ -101,7 +101,7 @@ struct RestPayload {
     /// The agent's final-text response → the `<result>` section.
     result: Option<String>,
     /// Run usage → the `<usage>` section.
-    usage: Option<traits::task_registry::AgentRunUsage>,
+    usage: Option<platform_api::task_registry::AgentRunUsage>,
     /// Persistent id of the resting agent. Used only for unnamed-owner
     /// fallback; never surfaced as a display name.
     agent_id: Option<protocol::AgentId>,
@@ -1217,7 +1217,7 @@ impl TaskRegistry {
             if monitor.base.status.is_terminal() {
                 return Ok(());
             }
-            traits::task_registry::TaskNotification {
+            platform_api::task_registry::TaskNotification {
                 task_id: monitor.base.id.clone(),
                 task_type: "monitor_ws".to_string(),
                 status: "running".to_string(),
@@ -1377,7 +1377,7 @@ impl TaskRegistry {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<traits::task_registry::AgentRunUsage>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
         agent_id: Option<protocol::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
@@ -1455,11 +1455,11 @@ impl TaskRegistry {
     /// failed background agent reported `Unknown error`.
     ///
     /// Callers must invoke this BEFORE the terminal `set_status`; see
-    /// [`traits::task_registry::TaskRegistryHandle::set_agent_outcome`].
+    /// [`platform_api::task_registry::TaskRegistryHandle::set_agent_outcome`].
     pub async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::AgentTerminalOutcome,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -1476,7 +1476,7 @@ impl TaskRegistry {
     pub async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -1493,7 +1493,7 @@ impl TaskRegistry {
     pub async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) -> Result<TaskState, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
@@ -1539,7 +1539,7 @@ impl TaskRegistry {
 
     pub async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<traits::task_registry::TaskNotification> {
+    ) -> Vec<platform_api::task_registry::TaskNotification> {
         use crate::handle::{status_to_wire, task_type_to_wire};
         let mut out: Vec<_> = self.pending_monitor_events.lock().await.drain(..).collect();
         let mut map = self.tasks.write().await;
@@ -1598,7 +1598,7 @@ impl TaskRegistry {
                 _ => None,
             };
             let agent_outcome = agent_outcome.unwrap_or_default();
-            out.push(traits::task_registry::TaskNotification {
+            out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 status: status_to_wire(b.status).to_string(),
@@ -1708,7 +1708,7 @@ impl TaskRegistry {
                 deferred_rest.push((id, payload));
                 continue;
             }
-            out.push(traits::task_registry::TaskNotification {
+            out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 // DISPLAY status "completed" — the notification renderer
@@ -1877,7 +1877,7 @@ impl TaskRegistry {
 /// `InProcessTeammate` task WITHOUT a `coordinator` → `lingxi-tasks` dependency
 /// cycle (the abstract trait lives in `traits`; this concrete impl lives here).
 ///
-/// Unlike [`TaskRegistryHandle::create`](traits::task_registry::TaskRegistryHandle::create)
+/// Unlike [`TaskRegistryHandle::create`](platform_api::task_registry::TaskRegistryHandle::create)
 /// — which builds a nil-`AgentId` / empty-name placeholder — `spawn_teammate`
 /// threads the worker `agent_id` + `name` straight through
 /// [`TaskRegistry::spawn`], so the started teammate is keyed on the real worker
@@ -2406,7 +2406,7 @@ pub fn register_dream_handler(
 #[cfg(test)]
 mod adopted_workflow_scope_test {
     use super::*;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
     // ---- Minimal in-memory FileSystem, just enough for `output_manager` ----
     struct InMemoryFs {

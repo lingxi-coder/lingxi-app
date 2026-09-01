@@ -35,8 +35,8 @@ Deletes:
 In-place modifications:
 - `lingxi-code/platforms/posix/src/worktree.rs` — branch prefix `worktree-`, path under `.claude/worktrees/`, slug validation, flatten helper, copy_includes wiring, cleanup_stale stdout parsing.
 - `lingxi-code/platforms/windows/src/worktree.rs` — same set of changes mirrored.
-- `lingxi-code/crates/traits/src/sandbox.rs` — add `SandboxError::Unsupported` variant.
-- `lingxi-code/crates/traits/src/worktree.rs` — add `WorktreeError::InvalidSlug(String)` variant.
+- `lingxi-code/crates/platform-api/src/sandbox.rs` — add `SandboxError::Unsupported` variant.
+- `lingxi-code/crates/platform-api/src/worktree.rs` — add `WorktreeError::InvalidSlug(String)` variant.
 - `lingxi-code/crates/secret/src/keychain_prefetch.rs` — module-doc update only (pointer to M2-06).
 
 Total: 8 rewrites, 4 deletes, 5 modifications.
@@ -65,13 +65,13 @@ These are non-negotiable strings/identifiers from claude-code that MUST appear i
 ## Task 1: Add `SandboxError::Unsupported` variant
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/sandbox.rs`
+- Modify: `lingxi-code/crates/platform-api/src/sandbox.rs`
 
 The rewritten Windows sandbox (Task 3) needs `SandboxError::Unsupported`. The current enum has `Unavailable(String)` but no parameterless `Unsupported` — claude-code's TS surface treats unsupported-platform as a distinct categorical error so we match. `SwarmError::Unsupported` already exists; this is the symmetric addition.
 
 - [ ] **Step 1: Write failing test**
 
-Append a new `#[cfg(test)] mod m2_01_tests` block at the bottom of `crates/traits/src/sandbox.rs`:
+Append a new `#[cfg(test)] mod m2_01_tests` block at the bottom of `crates/platform-api/src/sandbox.rs`:
 
 ```rust
 #[cfg(test)]
@@ -104,7 +104,7 @@ Expected: FAIL with `no variant or associated item named 'Unsupported' found for
 
 - [ ] **Step 3: Add the variant**
 
-Edit `crates/traits/src/sandbox.rs`. Locate `pub enum SandboxError` (around line 135) and add as the second variant, immediately after the existing `Unavailable(String)`:
+Edit `crates/platform-api/src/sandbox.rs`. Locate `pub enum SandboxError` (around line 135) and add as the second variant, immediately after the existing `Unavailable(String)`:
 
 ```rust
     /// Backend cannot wrap commands on this platform at all (e.g. Windows).
@@ -140,13 +140,13 @@ Expected: clean. No existing consumer exhaustively matches all variants without 
 ## Task 2: Add `WorktreeError::InvalidSlug` variant
 
 **Files:**
-- Modify: `lingxi-code/crates/traits/src/worktree.rs`
+- Modify: `lingxi-code/crates/platform-api/src/worktree.rs`
 
 `validate_worktree_slug` (Task 8) needs a categorical error for bad input. Today `WorktreeError` has only `Unsupported`, `Git(String)`, `Io(String)`; using `Git("invalid slug …")` would lie about provenance. Add an explicit variant.
 
 - [ ] **Step 1: Write failing test**
 
-Append to `crates/traits/src/worktree.rs`:
+Append to `crates/platform-api/src/worktree.rs`:
 
 ```rust
 #[cfg(test)]
@@ -173,7 +173,7 @@ Expected: FAIL — `no variant 'InvalidSlug'`.
 
 - [ ] **Step 3: Add the variant**
 
-Edit `crates/traits/src/worktree.rs` `pub enum WorktreeError`. Add as the second variant (after `Unsupported`, before `Git`):
+Edit `crates/platform-api/src/worktree.rs` `pub enum WorktreeError`. Add as the second variant (after `Unsupported`, before `Git`):
 
 ```rust
     /// Caller-supplied slug failed validation (bad char, too long, empty
@@ -210,13 +210,13 @@ claude-code refuses sandbox on Windows at the source (`@anthropic-ai/sandbox-run
 
 - [ ] **Step 1: Write failing tests**
 
-Before editing, read `crates/traits/src/sandbox.rs` to confirm the exact field set of `ProcessCommand` (it may or may not have a `stdin` field in v0.2.0 — adjust the `empty_cmd()` helper accordingly). Then append to the bottom of `platforms/windows/src/sandbox.rs`:
+Before editing, read `crates/platform-api/src/sandbox.rs` to confirm the exact field set of `ProcessCommand` (it may or may not have a `stdin` field in v0.2.0 — adjust the `empty_cmd()` helper accordingly). Then append to the bottom of `platforms/windows/src/sandbox.rs`:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_traits::{ProcessCommand, Sandbox, SandboxBackend, SandboxPolicy};
+    use lingxi_platform_api::{ProcessCommand, Sandbox, SandboxBackend, SandboxPolicy};
     use std::collections::HashMap;
 
     fn empty_cmd() -> ProcessCommand {
@@ -244,7 +244,7 @@ mod tests {
         let err = WindowsSandbox::new()
             .prepare(empty_cmd(), &SandboxPolicy::default())
             .unwrap_err();
-        assert!(matches!(err, lingxi_traits::SandboxError::Unsupported));
+        assert!(matches!(err, lingxi_platform_api::SandboxError::Unsupported));
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         // on unsupported platforms an explicit audit grant must still produce
         // a usable command.
         let wrapped = WindowsSandbox::new().bypass_with_audit(empty_cmd(), "explicit override");
-        let _: lingxi_traits::SandboxedCommand = wrapped;
+        let _: lingxi_platform_api::SandboxedCommand = wrapped;
     }
 
     #[tokio::test]
@@ -291,7 +291,7 @@ Replace everything in `platforms/windows/src/sandbox.rs` **above** the `#[cfg(te
 //! AppContainer / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
-use lingxi_traits::{
+use lingxi_platform_api::{
     ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -357,14 +357,14 @@ Current file returns `Unsupported` for two methods, but `destroy_swarm` returns 
 
 - [ ] **Step 1: Write failing tests**
 
-Read `crates/traits/src/swarm.rs` first to confirm the exact shape of `SwarmHandle` / `PanePosition`. Then append:
+Read `crates/platform-api/src/swarm.rs` first to confirm the exact shape of `SwarmHandle` / `PanePosition`. Then append:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
     use lingxi_protocol::AgentId;
-    use lingxi_traits::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+    use lingxi_platform_api::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
     #[test]
     fn is_available_returns_false() {
@@ -419,7 +419,7 @@ Expected: `destroy_swarm_returns_unsupported` fails (current file returns `Ok(()
 
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 /// Windows-side [`SwarmBackend`] — always reports unsupported.
 #[derive(Default)]
@@ -660,11 +660,11 @@ The current `IdeBridge` references the now-deleted `BridgeMessage` and a `Bridge
 //! The auth header is exactly `X-Claude-Code-Ide-Authorization` — NOT
 //! `Authorization: Bearer …`. Locked here so M2-02 can't drift.
 //!
-//! Until then every method returns [`lingxi_traits::BridgeError::Unsupported`].
+//! Until then every method returns [`lingxi_platform_api::BridgeError::Unsupported`].
 
 use crate::message::BridgeMessagePlaceholder;
 use crate::state::BridgeState;
-use lingxi_traits::BridgeError;
+use lingxi_platform_api::BridgeError;
 use tokio::sync::RwLock;
 
 pub struct IdeBridge {
@@ -908,7 +908,7 @@ Append to `platforms/posix/src/worktree.rs`:
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use lingxi_traits::WorktreeManager;
+    use lingxi_platform_api::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
 
@@ -1421,7 +1421,7 @@ git status
 git diff --stat
 ```
 
-Expected: changes in `lingxi-code/platforms/{posix,windows}/src/{sandbox,swarm,worktree}.rs`, `lingxi-code/crates/bridge/{Cargo.toml,src/{lib,message,state,transport}.rs}`, `lingxi-code/crates/secret/src/keychain_prefetch.rs`, `lingxi-code/crates/traits/src/{sandbox,worktree}.rs`. Four files deleted (`codes`, `jwt`, `pairing`, `rate_limiter` under `bridge/src/`).
+Expected: changes in `lingxi-code/platforms/{posix,windows}/src/{sandbox,swarm,worktree}.rs`, `lingxi-code/crates/bridge/{Cargo.toml,src/{lib,message,state,transport}.rs}`, `lingxi-code/crates/secret/src/keychain_prefetch.rs`, `lingxi-code/crates/platform-api/src/{sandbox,worktree}.rs`. Four files deleted (`codes`, `jwt`, `pairing`, `rate_limiter` under `bridge/src/`).
 
 - [ ] **Step 2: Stage the changes**
 
@@ -1429,8 +1429,8 @@ Expected: changes in `lingxi-code/platforms/{posix,windows}/src/{sandbox,swarm,w
 git add lingxi-code/platforms \
         lingxi-code/crates/bridge \
         lingxi-code/crates/secret/src/keychain_prefetch.rs \
-        lingxi-code/crates/traits/src/sandbox.rs \
-        lingxi-code/crates/traits/src/worktree.rs
+        lingxi-code/crates/platform-api/src/sandbox.rs \
+        lingxi-code/crates/platform-api/src/worktree.rs
 ```
 
 If `Cargo.lock` updated (it almost certainly did after Task 5), also stage:

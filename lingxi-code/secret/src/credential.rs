@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
-use traits::{Clock, HttpTransport, SecureStorage, SecureStorageError};
+use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 
 use crate::kinds::SecretKind;
 
@@ -806,7 +806,7 @@ mod oauth_tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use traits::SecureStorageBackend;
+    use platform_api::SecureStorageBackend;
 
     /// In-memory `(service, account) -> data` store for credential tests.
     #[derive(Default)]
@@ -879,13 +879,13 @@ mod oauth_tests {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }

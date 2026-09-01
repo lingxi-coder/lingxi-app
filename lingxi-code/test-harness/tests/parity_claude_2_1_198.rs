@@ -308,7 +308,7 @@ const CHECKLIST: &[Entry] = &[
     // the two channels — permission approval reaches a pending prompt only
     // through the permission gate below the `ToolInvoker` seam (keyed
     // `can_use_tool`/dialog), while a launcher/lead message arrives as
-    // `engine::Event::UserMessage` on the runner's event channel, where the
+    // `lingxi_core::Event::UserMessage` on the runner's event channel, where the
     // M9 wake arm appends it to history as a plain user message (task
     // direction). A message delivered while a permission prompt is pending
     // cannot resolve the prompt or re-run the tool. Locked by

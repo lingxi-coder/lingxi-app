@@ -13,7 +13,7 @@
 **Bounded decisions:**
 - Cost: Vertex-Gemini uses `cost::ProviderId::GoogleGemini` (it IS Gemini; reuses the Gemini price table) — no cost-crate change.
 - Testability: the live token fetch needs real GCP credentials, so it is NOT unit-tested. P5's tests cover URL building, profile parsing, registry resolution, and authenticator construction. The token path is exercised only against a live GCP environment (documented).
-- The model request still flows through `traits::HttpTransport`; `gcp_auth` is used ONLY to mint the token (its own credential-discovery I/O is an accepted side channel).
+- The model request still flows through `platform_api::HttpTransport`; `gcp_auth` is used ONLY to mint the token (its own credential-discovery I/O is an accepted side channel).
 
 **Parity gate:** the existing Gemini API path is untouched (`new` unchanged; `UrlStyle::GeminiApi` reproduces today's URL). Existing tests + `test-harness` parity stay green. Do NOT modify `traits/`.
 

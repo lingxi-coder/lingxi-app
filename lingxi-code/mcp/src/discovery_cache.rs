@@ -101,7 +101,7 @@
 //!
 //! **Serving from cache.** `mcp::connection::McpConnectionState` gained a
 //! `Cached` variant carrying the entry's full catalog plus a freshly
-//! allocated [`traits::McpTransportSpec`]-agnostic connection id with NO live
+//! allocated [`platform_api::McpTransportSpec`]-agnostic connection id with NO live
 //! transport behind it. `McpRegistry::connect_locked_inner` consults
 //! [`decide`] BEFORE dialing (unless the call is itself the lazy-dial
 //! upgrade of an already-`Cached` entry — see below): on `Fresh`/`Stale` it
@@ -154,7 +154,7 @@
 //! leaves the optional store unwired.
 
 use sha2::{Digest, Sha256};
-use traits::{
+use platform_api::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
@@ -184,7 +184,7 @@ pub(crate) fn partition_key_for_era(
 ) -> String {
     let material = format!(
         "{logical_cache_key}\0{fingerprint}\0era:{era}\0{}",
-        traits::CLAUDE_CODE_VERSION
+        platform_api::CLAUDE_CODE_VERSION
     );
     sha256_hex(material.as_bytes())[..32].to_string()
 }
@@ -216,7 +216,7 @@ fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value
     }
 }
 
-fn oauth_logical_key_config(oauth: &traits::McpOAuthConfigDto) -> serde_json::Value {
+fn oauth_logical_key_config(oauth: &platform_api::McpOAuthConfigDto) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(client_id) = &oauth.client_id {
         map.insert("clientId".into(), client_id.clone().into());
@@ -419,7 +419,7 @@ pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The feature opt-in env var (oracle `MCP_DISCOVERY_CACHE`, read through a
 /// boolean-coerced env schema — `a.MCP_DISCOVERY_CACHE===true`/`===false`).
-/// Reused here via [`traits::env::is_env_truthy`]/[`traits::env::is_env_defined_falsy`],
+/// Reused here via [`platform_api::env::is_env_truthy`]/[`platform_api::env::is_env_defined_falsy`],
 /// this port's established idiom for a coerced-boolean env var.
 pub const ENV_ENABLED: &str = "MCP_DISCOVERY_CACHE";
 
@@ -573,7 +573,7 @@ const DEFAULT_STRIKES: u32 = 1;
 /// disable reason at [`cache_gate`], matching `cot`'s own collapse.
 #[must_use]
 pub fn feature_enabled() -> bool {
-    traits::env::is_env_truthy(std::env::var(ENV_ENABLED).ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var(ENV_ENABLED).ok().as_deref())
 }
 
 /// Whether the MCP skills capability gate is enabled. This reads the
@@ -872,7 +872,7 @@ pub fn now_ms() -> u64 {
 /// `serverInfo` sub-object — spread onto the served "cached" client only
 /// when present: `...v.serverInfo && {serverInfo:{name:...,version:...}}`).
 ///
-/// This port's [`traits::McpTransport::initialize`] returns only
+/// This port's [`platform_api::McpTransport::initialize`] returns only
 /// [`ServerCapabilitiesDto`] — the wire `serverInfo` block is discarded
 /// before it reaches `mcp::registry`, so nothing populates this field today.
 /// Kept as a real (rather than omitted) field so schema v2 is
@@ -1538,7 +1538,7 @@ mod tests {
     fn http_spec(url: &str, headers_helper: Option<&str>) -> McpTransportSpec {
         McpTransportSpec::Http {
             url: url.to_string(),
-            headers: traits::McpHeaders::new(),
+            headers: platform_api::McpHeaders::new(),
             headers_helper: headers_helper.map(str::to_string),
             oauth: None,
         }
@@ -2243,18 +2243,18 @@ mod tests {
             42,
             caps_tools(true),
             sample_tools(5),
-            vec![traits::McpResourceDto {
+            vec![platform_api::McpResourceDto {
                 uri: "file:///a".into(),
                 name: "a".into(),
                 mime_type: None,
             }],
-            vec![traits::McpResourceTemplateDto {
+            vec![platform_api::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
                 name: "tmpl".into(),
                 description: None,
                 mime_type: None,
             }],
-            vec![traits::McpPromptDto {
+            vec![platform_api::McpPromptDto {
                 name: "p".into(),
                 description: None,
                 arguments: vec![],
@@ -2707,7 +2707,7 @@ mod tests {
         let McpTransportSpec::Http { oauth, .. } = &mut empty_oauth.spec else {
             unreachable!()
         };
-        *oauth = Some(traits::McpOAuthConfigDto {
+        *oauth = Some(platform_api::McpOAuthConfigDto {
             client_id: None,
             callback_port: None,
             auth_server_metadata_url: None,

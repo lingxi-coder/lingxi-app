@@ -155,7 +155,7 @@ pub enum QueuedCommandContent {
         /// (`{behavior:"allow"|"deny", updatedInput?, message?, …}`). The consumer
         /// maps it to a `PermissionOutcome` to force the tool's decision —
         /// twin of `orphanedPermission.permissionResult`. Stored as raw JSON
-        /// because `msgqueue` sits below the `permission`/`traits` crates and
+        /// because `msgqueue` sits below the `permission`/`platform-api` crates and
         /// cannot name `PermissionOutcome`.
         #[serde(default)]
         permission_decision_json: serde_json::Value,

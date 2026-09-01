@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
-use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// One slot in the [`StateMachinePool`].
 ///
@@ -26,7 +26,7 @@ pub struct StateMachineSlot {
     /// Handle to the background task running the subagent.
     pub task: BackgroundTaskHandle,
     /// Sender used by the host to deliver `Event`s into the slot.
-    pub event_tx: mpsc::Sender<engine::Event>,
+    pub event_tx: mpsc::Sender<lingxi_core::Event>,
     /// Capacity permit held for the entire lifetime of this slot.
     _capacity_permit: OwnedSemaphorePermit,
 }
@@ -103,7 +103,7 @@ impl StateMachinePool {
 
     /// Allocate a slot. Returns `(agent_id, event_rx)` where `event_rx` is the
     /// channel emitting [`SubagentEvent`]s for the new spawn. The
-    /// `event_tx` for inbound `engine::Event`s is owned by the slot
+    /// `event_tx` for inbound `lingxi_core::Event`s is owned by the slot
     /// table and reachable via [`Self::send_event`] in later milestones.
     pub async fn allocate(
         &self,
@@ -118,7 +118,7 @@ impl StateMachinePool {
             .try_acquire_owned()
             .map_err(|_| PoolError::TooManyAgents)?;
         let agent_id = ctx.agent_id;
-        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(100);
+        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(100);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(100);
 
         let task = self
@@ -148,11 +148,11 @@ impl StateMachinePool {
         Ok((agent_id, out_rx))
     }
 
-    /// Deliver an inbound [`engine::Event`] into the slot owned by `agent_id`.
+    /// Deliver an inbound [`lingxi_core::Event`] into the slot owned by `agent_id`.
     ///
     /// Used by message-driven handlers (e.g. the in-process teammate) to push
-    /// a [`engine::Event::UserMessage`] to a parked subagent, and to deliver
-    /// [`engine::Event::UserExit`] / [`engine::Event::UserInterrupt`] for
+    /// a [`lingxi_core::Event::UserMessage`] to a parked subagent, and to deliver
+    /// [`lingxi_core::Event::UserExit`] / [`lingxi_core::Event::UserInterrupt`] for
     /// cooperative termination.
     ///
     /// A `read()` lock suffices: we only read the `event_tx` sender, and the
@@ -160,7 +160,7 @@ impl StateMachinePool {
     pub async fn send_event(
         &self,
         agent_id: &AgentId,
-        event: engine::Event,
+        event: lingxi_core::Event,
     ) -> Result<(), PoolError> {
         let slots = self.slots.read().await;
         let slot = slots.get(agent_id).ok_or(PoolError::NoSuchAgent)?;
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(pool.slot_count().await, 0);
     }
 
-    /// `send_event` routes an inbound `engine::Event` into the slot's runner.
+    /// `send_event` routes an inbound `lingxi_core::Event` into the slot's runner.
     /// We drive the stub runner (api_client = None): a `UserExit` delivered via
     /// `send_event` makes it emit `SubagentEvent::Killed`, proving the event
     /// reached the slot's `event_tx`.
@@ -318,7 +318,7 @@ mod tests {
         let aid = ctx.agent_id;
         let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
 
-        pool.send_event(&aid, engine::Event::UserExit)
+        pool.send_event(&aid, lingxi_core::Event::UserExit)
             .await
             .expect("send_event delivers to the live slot");
 
@@ -336,7 +336,7 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = StateMachinePool::new(runtime, 5);
         let err = pool
-            .send_event(&AgentId::new(), engine::Event::UserInterrupt)
+            .send_event(&AgentId::new(), lingxi_core::Event::UserInterrupt)
             .await
             .unwrap_err();
         assert!(matches!(err, PoolError::NoSuchAgent), "got {err:?}");
@@ -388,7 +388,7 @@ mod tests {
             // Drive the stub runner to termination: UserExit makes it emit
             // Killed and return, dropping its `event_rx`. We never deallocate,
             // so the slot stays in the map with a now-closed inbound channel.
-            pool.send_event(&id, engine::Event::UserExit).await.unwrap();
+            pool.send_event(&id, lingxi_core::Event::UserExit).await.unwrap();
             // Wait for the runner to actually surface Killed and return so its
             // receiver is dropped before we probe the closed channel.
             let ev = out_rx.recv().await.expect("Killed event");
@@ -403,7 +403,7 @@ mod tests {
         let err = pool
             .send_event(
                 &aid,
-                engine::Event::UserMessage {
+                lingxi_core::Event::UserMessage {
                     message_id: protocol::MessageId::new(),
                     request_id: protocol::RequestId::new(),
                     content: "hello".into(),

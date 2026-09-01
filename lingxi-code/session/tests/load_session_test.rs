@@ -18,7 +18,7 @@ use serde_json::json;
 use session::jsonl::{load_session, project_dir_name, LoaderError};
 use std::sync::Arc;
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 use uuid::Uuid;
 
 async fn setup_cwd() -> (

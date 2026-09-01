@@ -614,7 +614,7 @@ git commit -m "feat(M9-05): ticker drives pump_once(PollerFeed) into the channel
 
 > Confirm the exact `TaskOutputManager::new` signature + module path by reading `tasks/src/output_manager.rs`; adjust the args. Confirm `PosixProcess` implements `RuntimeSpawner` (the grounding indicates it does). Add `tasks` to `apps/cli/Cargo.toml` if not already a dep (the check-deps gate permits apps depending on `tasks`).
 
-Then set the tool-context field: `task_registry: Some(task_registry.clone() as std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>),` (replacing `task_registry: None`).
+Then set the tool-context field: `task_registry: Some(task_registry.clone() as std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>),` (replacing `task_registry: None`).
 
 - [ ] **Step 2: Build the feed + channel + pass to TUI** — where the TUI is mounted (the `TuiRootProps` construction in the cli `run`/`init` path):
 
@@ -622,7 +622,7 @@ Then set the tool-context field: `task_registry: Some(task_registry.clone() as s
     let (ma_tx, ma_rx) = tokio::sync::mpsc::unbounded_channel::<tui::multiagent::MultiAgentEvent>();
     let feed: std::sync::Arc<dyn tui::multiagent::MultiAgentFeed> =
         std::sync::Arc::new(tui::multiagent::PollerFeed::new(
-            task_registry.clone() as std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            task_registry.clone() as std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
         ));
     // ...in TuiRootProps:
     //   multiagent_rx: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(ma_rx)))),

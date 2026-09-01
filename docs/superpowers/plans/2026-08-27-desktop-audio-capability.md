@@ -163,7 +163,7 @@ git commit -m "Let the engine ask the client to record, transcribe and speak"
 - Test: `lingxi-code/apps/bridge-server/src/audio_bridge.rs`
 
 **Interfaces:**
-- Consumes: Task 1 的 `AudioOpDto` / `AudioResultDto`；`traits::{stt::SpeechToText, tts::TextToSpeech, voice::VoiceRecorder}`
+- Consumes: Task 1 的 `AudioOpDto` / `AudioResultDto`；`platform_api::{stt::SpeechToText, tts::TextToSpeech, voice::VoiceRecorder}`
 - Produces:
   - `pub struct AudioBridge`（持有请求分发与应答等待表）
   - `pub fn new_audio_bridge(sink: Arc<dyn EventSink>) -> (Arc<AudioBridge>, AudioResponder)`
@@ -176,7 +176,7 @@ git commit -m "Let the engine ask the client to record, transcribe and speak"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::stt::SttOpts;
+    use platform_api::stt::SttOpts;
 
     #[tokio::test]
     async fn transcribe_emits_a_request_and_resolves_on_the_client_response() {
@@ -249,9 +249,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use client_protocol::{AudioOpDto, AudioResultDto, ClientEvent};
 use tokio::sync::oneshot;
-use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-use traits::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-use traits::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
+use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 
 /// 等待中的音频请求表。
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<AudioResultDto>>>>;
@@ -363,7 +363,7 @@ impl VoiceRecorder for AudioBridge {
 }
 ```
 
-> 错误变体名已核实（`traits/src/{stt,tts,voice}.rs`）：
+> 错误变体名已核实（`platform-api/src/{stt,tts,voice}.rs`）：
 > `SttError::{PermissionDenied, NoSpeech, Unavailable, Busy, Retriable(String), Other(String)}`；
 > `TtsError::{Unavailable, SynthesisFailed(String), Other(String)}`；
 > `VoiceError::{PermissionDenied, NotRecording, Busy, Other(String)}`。

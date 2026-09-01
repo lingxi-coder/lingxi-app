@@ -14,7 +14,7 @@
 //!   never panics).
 
 use protocol::McpConnectionId;
-use traits::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 
 /// Run the standard [`McpTransport`] contract against an impl.
 ///

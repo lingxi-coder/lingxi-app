@@ -123,7 +123,7 @@ pub enum ChatOutcome {
     /// `TurnEvent::BashOutput`.
     RunBash(String),
     /// `/compact` asked for a forced compaction pass. The caller drives
-    /// [`traits::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// [`platform_api::OrchestratorHandle::force_compact`] — a real multi-second LLM
     /// summarization round-trip — asynchronously on the LIVE engine runtime
     /// (correct reactor; never on the render thread's throwaway `block_on`,
     /// which would freeze input, drive the reqwest/websocket sockets on the
@@ -401,7 +401,7 @@ pub struct ChatWidget {
     /// copy; absent/unfilled degrades to the unknown-subscription default
     /// (TS-conservative), exactly like the old backend's
     /// `AppState::subscription_snapshot`.
-    subscription: Option<traits::subscription::SharedSubscription>,
+    subscription: Option<platform_api::subscription::SharedSubscription>,
     /// Composition-root-shared custom-statusline slot (`None` unless the
     /// embedder wires one via [`Self::set_status_line`]). The widget writes the
     /// live pump inputs (cost / rate-limit utilization) + marks it dirty on
@@ -484,7 +484,7 @@ pub struct ChatWidget {
     /// [`ChatOutcome::Compact`] instead.
     /// `None` (every test widget) makes each of those a graceful
     /// "unavailable" system line rather than a panic.
-    orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    orchestrator: Option<std::sync::Arc<dyn platform_api::OrchestratorHandle>>,
     /// Composition-root-shared sandbox-enabled cell (also held by the bash
     /// tool's `BuiltinToolContext::sandbox_enabled_override`). `/sandbox` flips
     /// it for the live session so the next bash command sandboxes (or not)
@@ -516,7 +516,7 @@ pub struct ChatWidget {
     /// to seed the `/tasks` picker; the picker's stop action goes off-loop via
     /// [`ChatOutcome::TaskAction`]. `None` (every test widget) makes `/tasks` a
     /// graceful "unavailable" line.
-    task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
+    task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
     goal_handler: Option<command_core::goal::GoalHandler>,
     /// Most recent history-inert `/btw` exchange. Claude Code keeps this
     /// panel-local state so a bare `/btw` reopens the exchange without issuing
@@ -622,7 +622,7 @@ impl ChatWidget {
     /// lose it — see the `goal_handler` field). Wired from the CLI `run_app`
     /// off the engine runtime; `None` (every test widget) keeps those commands
     /// as graceful no-ops.
-    pub fn set_orchestrator(&mut self, handle: std::sync::Arc<dyn traits::OrchestratorHandle>) {
+    pub fn set_orchestrator(&mut self, handle: std::sync::Arc<dyn platform_api::OrchestratorHandle>) {
         self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
         self.orchestrator = Some(handle);
     }
@@ -902,7 +902,7 @@ impl ChatWidget {
         {
             return;
         }
-        if let Some(held) = traits::uds_inbox::next_unannounced_held() {
+        if let Some(held) = platform_api::uds_inbox::next_unannounced_held() {
             self.bottom_pane.show_held_peer(held);
         }
     }
@@ -1258,7 +1258,7 @@ impl ChatWidget {
                     });
             }
             TurnEvent::TurnEnded(outcome) => {
-                let was_cancelled = matches!(outcome, traits::TurnOutcome::Cancelled)
+                let was_cancelled = matches!(outcome, platform_api::TurnOutcome::Cancelled)
                     || self
                         .current_turn
                         .as_ref()
@@ -1727,7 +1727,7 @@ impl ChatWidget {
     /// and the seed/background fetch has filled it. A poisoned lock degrades
     /// to `None` (conservative copy, never a panic in the event-fold path) —
     /// the documented `SharedSubscription` reader stance.
-    fn subscription_snapshot(&self) -> Option<traits::subscription::SubscriptionSnapshot> {
+    fn subscription_snapshot(&self) -> Option<platform_api::subscription::SubscriptionSnapshot> {
         self.subscription
             .as_ref()
             .and_then(|s| s.read().ok())
@@ -1737,7 +1737,7 @@ impl ChatWidget {
     /// Wire the composition root's shared subscription slot so the rate-limit
     /// composer reads the live snapshot at compose time (the old backend's
     /// `Runtime::with_subscription`).
-    pub fn set_subscription(&mut self, slot: traits::subscription::SharedSubscription) {
+    pub fn set_subscription(&mut self, slot: platform_api::subscription::SharedSubscription) {
         self.subscription = Some(slot);
     }
 
@@ -1813,7 +1813,7 @@ impl ChatWidget {
     /// (tests) keeps `/tasks` a graceful "unavailable" no-op.
     pub fn set_task_registry(
         &mut self,
-        handle: std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        handle: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     ) {
         self.task_registry = Some(handle);
     }
@@ -2361,13 +2361,13 @@ impl ChatWidget {
         let (message, is_error) = runtime.block_on(async {
             // Live configured servers, excluding the `ide` pseudo-server
             // (claude's `clients.filter(b => b.name !== "ide")`).
-            let states: Vec<(String, traits::McpActionState)> = handle
+            let states: Vec<(String, platform_api::McpActionState)> = handle
                 .mcp_server_states()
                 .await
                 .into_iter()
                 .filter(|(name, _)| name != "ide")
                 .collect();
-            let l: Vec<(String, traits::McpActionState)> = if is_all {
+            let l: Vec<(String, platform_api::McpActionState)> = if is_all {
                 states.clone()
             } else {
                 states
@@ -2399,12 +2399,12 @@ impl ChatWidget {
     /// branch: single-target block pre-check, `all` failed/needs-auth subset,
     /// live reconnect of that subset, then a re-query for the outcome message.
     async fn mcp_do_reconnect(
-        handle: &dyn traits::OrchestratorHandle,
+        handle: &dyn platform_api::OrchestratorHandle,
         target: &str,
         is_all: bool,
-        l: &[(String, traits::McpActionState)],
+        l: &[(String, platform_api::McpActionState)],
     ) -> (String, bool) {
-        use traits::McpActionState::{Failed, NeedsAuth};
+        use platform_api::McpActionState::{Failed, NeedsAuth};
         if !is_all {
             if let Some(msg) = mcp_reconnect_block_msg(l[0].1, target) {
                 return (msg, false);
@@ -2423,7 +2423,7 @@ impl ChatWidget {
         if w.is_empty() {
             let disabled = l
                 .iter()
-                .filter(|(_, s)| matches!(s, traits::McpActionState::Disabled))
+                .filter(|(_, s)| matches!(s, platform_api::McpActionState::Disabled))
                 .count();
             return (mcp_reconnect_nothing_msg(disabled), false);
         }
@@ -2431,14 +2431,14 @@ impl ChatWidget {
             let _ = handle.reconnect_mcp_servers(Some(name)).await;
         }
         // Re-query the live state to read each server's post-reconnect `type`.
-        let post: std::collections::HashMap<String, traits::McpActionState> =
+        let post: std::collections::HashMap<String, platform_api::McpActionState> =
             handle.mcp_server_states().await.into_iter().collect();
         if !is_all {
             mcp_reconnect_single_msg(post.get(target).copied(), target)
         } else {
             let connected = w
                 .iter()
-                .filter(|n| post.get(*n) == Some(&traits::McpActionState::Connected))
+                .filter(|n| post.get(*n) == Some(&platform_api::McpActionState::Connected))
                 .count();
             (mcp_reconnect_all_msg(connected, w.len()), false)
         }
@@ -2450,17 +2450,17 @@ impl ChatWidget {
     /// claude's byte-exact "already enabled/disabled" message; a real change
     /// reports the existing state without reconnecting.
     async fn mcp_do_enable_disable(
-        handle: &dyn traits::OrchestratorHandle,
+        handle: &dyn platform_api::OrchestratorHandle,
         target: &str,
         is_all: bool,
         enable: bool,
-        l: &[(String, traits::McpActionState)],
+        l: &[(String, platform_api::McpActionState)],
     ) -> (String, bool) {
         // Approval pre-check (claude's `needs-approval` guard). Inert: no
         // LingXi connection state maps to `NeedsApproval`.
         if !is_all
             && l.iter()
-                .any(|(_, s)| matches!(s, traits::McpActionState::NeedsApproval))
+                .any(|(_, s)| matches!(s, platform_api::McpActionState::NeedsApproval))
         {
             return (
                 format!(
@@ -2607,9 +2607,9 @@ impl ChatWidget {
 
     fn workflow_size_guideline_state(
         &self,
-    ) -> Result<traits::session_flags::WorkflowSizeGuidelineSnapshot, String> {
+    ) -> Result<platform_api::session_flags::WorkflowSizeGuidelineSnapshot, String> {
         let Some(handle) = self.orchestrator.clone() else {
-            return Ok(traits::session_flags::workflow_size_guideline_snapshot());
+            return Ok(platform_api::session_flags::workflow_size_guideline_snapshot());
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2637,10 +2637,10 @@ impl ChatWidget {
 
     fn set_workflow_size_guideline_state(&self, value: &str) -> Result<(), String> {
         let Some(handle) = self.orchestrator.clone() else {
-            if traits::session_flags::workflow_size_guideline_is_managed() {
+            if platform_api::session_flags::workflow_size_guideline_is_managed() {
                 return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
             }
-            let _ = traits::session_flags::set_workflow_size_guideline(value, false);
+            let _ = platform_api::session_flags::set_workflow_size_guideline(value, false);
             return Ok(());
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2689,7 +2689,7 @@ impl ChatWidget {
                 // Agents-view rows (2.1.220): shown only while agent view is
                 // enabled, mirroring the oracle's `...$H()?[row]:[]` /
                 // `...H7e()?[row]:[]` spreads.
-                traits::agent_view::is_enabled(),
+                platform_api::agent_view::is_enabled(),
                 self.bottom_pane.left_arrow_opens_agents(),
                 tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false),
                 &self.session.doctor.lingxi_home,
@@ -2818,7 +2818,7 @@ impl ChatWidget {
             // for). With agent view disabled the ids simply do not exist, so the
             // key must fall through to `icy`'s unknown-key answer.
             "leftArrowOpensAgents"
-                if traits::agent_view::is_enabled()
+                if platform_api::agent_view::is_enabled()
                     && !telemetry::flag_bool("tengu_maple_sundial", false) =>
             {
                 let want = parse_bool("leftArrowOpensAgents")?;
@@ -2827,7 +2827,7 @@ impl ChatWidget {
                 Ok(format!("Set leftArrowOpensAgents to {want}."))
             }
             "defaultToAgentsView"
-                if traits::agent_view::is_enabled()
+                if platform_api::agent_view::is_enabled()
                     && !telemetry::flag_bool("tengu_maple_sundial", false) =>
             {
                 let want = parse_bool("defaultToAgentsView")?;
@@ -2835,25 +2835,25 @@ impl ChatWidget {
                 Ok(format!("Set defaultToAgentsView to {want}."))
             }
             "dialogExpiry" => {
-                if !traits::live_sessions::DIALOG_EXPIRY_OPTIONS.contains(&value) {
+                if !platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS.contains(&value) {
                     return Err(format!(
                         "dialogExpiry takes one of: {}",
-                        traits::live_sessions::DIALOG_EXPIRY_OPTIONS.join(", ")
+                        platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS.join(", ")
                     ));
                 }
                 tui_core::theme_persist::save_dialog_expiry(value);
                 Ok(format!("Set dialogExpiry to {value}."))
             }
             "crossSessionInbound" => {
-                if !traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.contains(&value) {
+                if !platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.contains(&value) {
                     return Err(format!(
                         "crossSessionInbound takes one of: {}",
-                        traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.join(", ")
+                        platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.join(", ")
                     ));
                 }
                 tui_core::theme_persist::save_cross_session_inbound(value);
                 if value == "accept" {
-                    let n = traits::uds_inbox::release_all_held();
+                    let n = platform_api::uds_inbox::release_all_held();
                     if n > 0 {
                         return Ok(format!(
                             "Set crossSessionInbound to {value}. Released {n} held cross-session message(s) to Claude's queue (policy-accepts)."
@@ -3093,7 +3093,7 @@ impl ChatWidget {
             .build()
             .map_err(|err| format!("/tasks failed: {err}"))?;
         Ok(runtime
-            .block_on(registry.list(traits::task_registry::TaskListFilter::default()))
+            .block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
             .unwrap_or_default()
             .into_iter()
             .map(tui_core::multiagent::task_row_from_record)
@@ -3118,7 +3118,7 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    fn backgrounding_snapshot(&self) -> traits::BackgroundingSnapshot {
+    fn backgrounding_snapshot(&self) -> platform_api::BackgroundingSnapshot {
         let queued_commands = self
             .queued_compact
             .as_ref()
@@ -3133,7 +3133,7 @@ impl ChatWidget {
             .collect();
         let draft = self.bottom_pane.composer().text().to_string();
         if self.current_turn.is_none() {
-            return traits::BackgroundingSnapshot::Idle {
+            return platform_api::BackgroundingSnapshot::Idle {
                 queued_commands,
                 draft,
                 boundary_id: self.background_boundary_id,
@@ -3149,7 +3149,7 @@ impl ChatWidget {
             .filter(|kind| is_agent_tool(kind))
             .count();
         if in_flight_kinds.is_empty() {
-            traits::BackgroundingSnapshot::Streaming {
+            platform_api::BackgroundingSnapshot::Streaming {
                 queued_commands,
                 draft,
                 in_flight_kinds,
@@ -3158,7 +3158,7 @@ impl ChatWidget {
                 restartable_count,
             }
         } else {
-            traits::BackgroundingSnapshot::BetweenTools {
+            platform_api::BackgroundingSnapshot::BetweenTools {
                 queued_commands,
                 draft,
                 in_flight_kinds,
@@ -3172,7 +3172,7 @@ impl ChatWidget {
     /// Restore the composer and queued command state captured in a durable
     /// background handoff. The current producer only queues `/compact`; keep
     /// the serialized vector so future queue kinds remain forward-compatible.
-    pub fn restore_background_handoff(&mut self, snapshot: &traits::BackgroundingSnapshot) {
+    pub fn restore_background_handoff(&mut self, snapshot: &platform_api::BackgroundingSnapshot) {
         self.bottom_pane.restore_composer_text(snapshot.draft());
         let queued = snapshot.queued_commands().to_vec();
         if self.queued_compact.is_none() {
@@ -3189,7 +3189,7 @@ impl ChatWidget {
 
     fn perform_backgrounding(
         &mut self,
-        snapshot: traits::BackgroundingSnapshot,
+        snapshot: platform_api::BackgroundingSnapshot,
         abort_foreground: bool,
     ) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
@@ -3238,19 +3238,19 @@ impl ChatWidget {
         let elapsed_ms = self.pending_backgrounding.as_ref().map_or(0, |pending| {
             u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
-        match traits::classify_backgrounding(&snapshot, elapsed_ms) {
-            traits::BackgroundingDecision::IdleFork => self.perform_backgrounding(snapshot, false),
-            traits::BackgroundingDecision::DeferThenFork { .. } => {
+        match platform_api::classify_backgrounding(&snapshot, elapsed_ms) {
+            platform_api::BackgroundingDecision::IdleFork => self.perform_backgrounding(snapshot, false),
+            platform_api::BackgroundingDecision::DeferThenFork { .. } => {
                 if self.pending_backgrounding.is_some() {
                     // A confirmed second ← is the oracle's “skip ahead” path.
-                    match traits::classify_backgrounding(
+                    match platform_api::classify_backgrounding(
                         &snapshot,
-                        traits::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                        platform_api::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
                     ) {
-                        traits::BackgroundingDecision::AbortThenFork => {
+                        platform_api::BackgroundingDecision::AbortThenFork => {
                             self.perform_backgrounding(snapshot, true)
                         }
-                        traits::BackgroundingDecision::Refuse { reason } => {
+                        platform_api::BackgroundingDecision::Refuse { reason } => {
                             self.pending_backgrounding = None;
                             self.show_system_text(reason, true)
                         }
@@ -3263,10 +3263,10 @@ impl ChatWidget {
                     self.show_system_text("Backgrounding after the current tool finishes…", false)
                 }
             }
-            traits::BackgroundingDecision::AbortThenFork => {
+            platform_api::BackgroundingDecision::AbortThenFork => {
                 self.perform_backgrounding(snapshot, true)
             }
-            traits::BackgroundingDecision::Refuse { reason } => {
+            platform_api::BackgroundingDecision::Refuse { reason } => {
                 self.pending_backgrounding = None;
                 self.show_system_text(reason, true)
             }
@@ -3281,18 +3281,18 @@ impl ChatWidget {
         let elapsed_ms =
             u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let snapshot = self.backgrounding_snapshot();
-        match traits::classify_backgrounding(&snapshot, elapsed_ms) {
-            traits::BackgroundingDecision::IdleFork => {
+        match platform_api::classify_backgrounding(&snapshot, elapsed_ms) {
+            platform_api::BackgroundingDecision::IdleFork => {
                 let _ = self.perform_backgrounding(snapshot, false);
             }
-            traits::BackgroundingDecision::AbortThenFork => {
+            platform_api::BackgroundingDecision::AbortThenFork => {
                 let _ = self.perform_backgrounding(snapshot, true);
             }
-            traits::BackgroundingDecision::Refuse { reason } => {
+            platform_api::BackgroundingDecision::Refuse { reason } => {
                 self.pending_backgrounding = None;
                 let _ = self.show_system_text(reason, true);
             }
-            traits::BackgroundingDecision::DeferThenFork { .. } => {}
+            platform_api::BackgroundingDecision::DeferThenFork { .. } => {}
         }
     }
 
@@ -3304,7 +3304,7 @@ impl ChatWidget {
 
     /// `/workflows`: seed the interactive "Dynamic workflows" picker with all
     /// `local_workflow` runs (running AND completed), reading the richer
-    /// [`traits::task_registry::TaskRegistryHandle::list_workflows`] projection
+    /// [`platform_api::task_registry::TaskRegistryHandle::list_workflows`] projection
     /// and enriching each row with the agent-count + phase/agent tree parsed
     /// from its output spool. Subsequent lifecycle changes arrive through
     /// pushed `MultiAgentEvent`s. Opens the dialog even when empty (its own
@@ -4190,7 +4190,7 @@ impl ChatWidget {
 
     /// `/compact`: run a forced compaction pass. Returns
     /// [`ChatOutcome::Compact`] so the CLI drives
-    /// [`traits::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// [`platform_api::OrchestratorHandle::force_compact`] — a real multi-second LLM
     /// round-trip — on the LIVE runtime handle, reporting the summary via
     /// `TurnEvent::SystemNotice`. It must NOT go through `run_core_command`'s
     /// throwaway `block_on`: that would freeze the render/input thread for the
@@ -4636,7 +4636,7 @@ fn line_count(lines: &[ratatui::text::Line<'static>]) -> u16 {
 /// Maps `TurnEvent::RateLimit`'s fields onto the composer's own
 /// [`crate::rate_limit_messages::RateLimitInfo`] shape — the two share the
 /// same field set (the `TurnEvent` variant is the bridge-crate twin of
-/// `traits::OutputEvent::RateLimit`), so this is a straight field-for-field
+/// `platform_api::OutputEvent::RateLimit`), so this is a straight field-for-field
 /// carry, including the 206 `upgrade_paths` / `credits_required` overage
 /// fields threaded alongside the original nine.
 #[allow(
@@ -4812,8 +4812,8 @@ fn mcp_not_configured_msg(is_all: bool, target: &str) -> String {
 /// Single-target `reconnect` pre-check (claude's `R3s(b)` blocking states):
 /// disabled / pending / needs-approval short-circuit before any reconnect.
 /// `None` means the state is reconnectable (connected / failed / needs-auth).
-fn mcp_reconnect_block_msg(state: traits::McpActionState, target: &str) -> Option<String> {
-    use traits::McpActionState::{Disabled, NeedsApproval, Pending};
+fn mcp_reconnect_block_msg(state: platform_api::McpActionState, target: &str) -> Option<String> {
+    use platform_api::McpActionState::{Disabled, NeedsApproval, Pending};
     match state {
         Disabled => Some(format!(
             "\"{target}\" is disabled. Run `/mcp enable {target}` to bring it back."
@@ -4842,8 +4842,8 @@ fn mcp_reconnect_nothing_msg(disabled_count: usize) -> String {
 /// Single-target `reconnect` outcome, keyed on the post-reconnect state `k`
 /// (claude's `k` = `x[0].value.client.type`, or `void 0` when the attempt
 /// hard-failed). Returns `(message, is_error)`.
-fn mcp_reconnect_single_msg(k: Option<traits::McpActionState>, target: &str) -> (String, bool) {
-    use traits::McpActionState::{Connected, NeedsAuth};
+fn mcp_reconnect_single_msg(k: Option<platform_api::McpActionState>, target: &str) -> (String, bool) {
+    use platform_api::McpActionState::{Connected, NeedsAuth};
     match k {
         Some(Connected) => (format!("Reconnected \"{target}\"."), false),
         Some(other) => {
@@ -4909,9 +4909,9 @@ fn mcp_toggle_success_message(
     enable: bool,
     is_all: bool,
     target: &str,
-    out: &[traits::McpToggleOutcome],
+    out: &[platform_api::McpToggleOutcome],
 ) -> String {
-    use traits::McpActionState;
+    use platform_api::McpActionState;
     let verb = if enable { "Enabled" } else { "Disabled" };
     // claude `m` = settled (fulfilled) count.
     let settled = out.iter().filter(|o| o.state.is_some()).count();
@@ -5023,7 +5023,7 @@ mod tests {
 
     #[test]
     fn mcp_reconnect_block_messages_are_byte_exact() {
-        use traits::McpActionState::*;
+        use platform_api::McpActionState::*;
         assert_eq!(
             mcp_reconnect_block_msg(Disabled, "sentry").unwrap(),
             "\"sentry\" is disabled. Run `/mcp enable sentry` to bring it back."
@@ -5056,7 +5056,7 @@ mod tests {
 
     #[test]
     fn mcp_reconnect_single_messages_are_byte_exact() {
-        use traits::McpActionState::*;
+        use platform_api::McpActionState::*;
         assert_eq!(
             mcp_reconnect_single_msg(Some(Connected), "sentry"),
             ("Reconnected \"sentry\".".to_string(), false)
@@ -5121,7 +5121,7 @@ mod tests {
             "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
         );
         // pGd state labels.
-        use traits::McpActionState::*;
+        use platform_api::McpActionState::*;
         assert_eq!(Connected.label(), "connected");
         assert_eq!(Pending.label(), "connecting");
         assert_eq!(Disabled.label(), "disabled");
@@ -5130,8 +5130,8 @@ mod tests {
         assert_eq!(NeedsApproval.label(), "pending approval");
     }
 
-    fn toggle(name: &str, state: Option<traits::McpActionState>) -> traits::McpToggleOutcome {
-        traits::McpToggleOutcome {
+    fn toggle(name: &str, state: Option<platform_api::McpActionState>) -> platform_api::McpToggleOutcome {
+        platform_api::McpToggleOutcome {
             name: name.to_string(),
             state,
         }
@@ -5139,7 +5139,7 @@ mod tests {
 
     #[test]
     fn mcp_toggle_success_message_single_forms_are_byte_exact() {
-        use traits::McpActionState::{Connected, Disabled, Failed, NeedsAuth, Pending};
+        use platform_api::McpActionState::{Connected, Disabled, Failed, NeedsAuth, Pending};
 
         // ── single enable ──
         // Connected → plain quoted name.
@@ -5206,7 +5206,7 @@ mod tests {
 
     #[test]
     fn mcp_toggle_success_message_aggregate_forms_are_byte_exact() {
-        use traits::McpActionState::{Connected, Disabled, Failed};
+        use platform_api::McpActionState::{Connected, Disabled, Failed};
 
         // enable-all, every server connected.
         assert_eq!(
@@ -5413,10 +5413,10 @@ mod tests {
     /// or a value the key's type rejects.
     #[test]
     fn cmd_config_shorthand_sets_and_reports_errors() {
-        let prior_workflow = traits::session_flags::workflow_size_guideline();
-        let prior_workflow_managed = traits::session_flags::workflow_size_guideline_is_managed();
-        let prior_workflow_default = traits::session_flags::workflow_size_guideline_is_default();
-        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
+        let prior_workflow = platform_api::session_flags::workflow_size_guideline();
+        let prior_workflow_managed = platform_api::session_flags::workflow_size_guideline_is_managed();
+        let prior_workflow_default = platform_api::session_flags::workflow_size_guideline_is_default();
+        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
 
         // vim=true applies live and confirms.
         let mut w = widget();
@@ -5473,7 +5473,7 @@ mod tests {
         );
         assert!(sys.is_error());
 
-        let _ = traits::session_flags::set_workflow_size_guideline_with_source(
+        let _ = platform_api::session_flags::set_workflow_size_guideline_with_source(
             prior_workflow,
             prior_workflow_managed,
             prior_workflow_default,
@@ -5551,7 +5551,7 @@ mod tests {
             .build()
             .expect("runtime");
         assert_eq!(
-            runtime.block_on(traits::OrchestratorHandle::workflow_size_guideline(
+            runtime.block_on(platform_api::OrchestratorHandle::workflow_size_guideline(
                 mock.as_ref()
             )),
             "large"
@@ -5573,14 +5573,14 @@ mod tests {
             .build()
             .expect("runtime");
         assert_eq!(
-            runtime.block_on(traits::OrchestratorHandle::workflow_size_guideline(
+            runtime.block_on(platform_api::OrchestratorHandle::workflow_size_guideline(
                 mock.as_ref()
             )),
             "small"
         );
         assert!(
             !runtime.block_on(
-                traits::OrchestratorHandle::workflow_size_guideline_is_default(mock.as_ref())
+                platform_api::OrchestratorHandle::workflow_size_guideline_is_default(mock.as_ref())
             ),
             "live /config changes are explicit, not built-in defaults"
         );
@@ -5616,7 +5616,7 @@ mod tests {
         let _env = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let var = traits::agent_view::DISABLE_AGENT_VIEW_ENV;
+        let var = platform_api::agent_view::DISABLE_AGENT_VIEW_ENV;
         std::env::remove_var(var);
 
         // Enabled (the default): the arms match, so a bad bool reports the
@@ -5721,7 +5721,7 @@ mod tests {
 
         assert!(matches!(
             widget.backgrounding_snapshot(),
-            traits::BackgroundingSnapshot::Streaming {
+            platform_api::BackgroundingSnapshot::Streaming {
                 ref partial_text,
                 ref in_flight_kinds,
                 ..
@@ -5741,7 +5741,7 @@ mod tests {
     #[test]
     fn background_handoff_restores_draft_and_queued_compact() {
         let mut widget = widget();
-        let snapshot = traits::BackgroundingSnapshot::Streaming {
+        let snapshot = platform_api::BackgroundingSnapshot::Streaming {
             queued_commands: vec!["/compact focus on tests".into()],
             draft: "继续检查 Unicode 🦀".into(),
             in_flight_kinds: Vec::new(),
@@ -5781,7 +5781,7 @@ mod tests {
         assert!(!token.is_cancelled(), "first confirm waits for the tool");
         assert!(matches!(
             widget.backgrounding_snapshot(),
-            traits::BackgroundingSnapshot::BetweenTools {
+            platform_api::BackgroundingSnapshot::BetweenTools {
                 ref partial_text,
                 restartable_count: 1,
                 ..
@@ -5812,7 +5812,7 @@ mod tests {
         widget.pending_backgrounding = Some(PendingBackgrounding {
             requested_at: Instant::now()
                 - std::time::Duration::from_millis(
-                    traits::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                    platform_api::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
                 ),
         });
         widget.pump_backgrounding();
@@ -6320,7 +6320,7 @@ mod tests {
                 ChatOutcome::Continue
             ));
         }
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert_eq!(widget.bottom_pane().composer().text(), "draft");
 
         let Some((args, token)) = widget.take_ready_compact() else {
@@ -6416,7 +6416,7 @@ mod tests {
         w2.apply_turn_event(TurnEvent::TurnStarted);
         w2.apply_turn_event(TurnEvent::CompactStarted);
         assert!(w2.pane_status().compact_percent.is_some());
-        w2.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        w2.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(
             w2.pane_status().compact_percent.is_none(),
             "turn boundary is the failed-auto-compact backstop"
@@ -6431,7 +6431,7 @@ mod tests {
         assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
         widget.apply_turn_event(TurnEvent::CompactStarted);
         assert!(widget.pane_status().compact_percent.is_some());
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(
             widget.pane_status().compact_percent.is_some(),
             "manual compaction bar is cleared by CompactEnded, not TurnEnded"
@@ -6864,7 +6864,7 @@ mod tests {
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
@@ -6903,7 +6903,7 @@ mod tests {
                 result: serde_json::json!("ok"),
             });
         }
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         assert!(cells(&widget)[1]
@@ -6967,7 +6967,7 @@ mod tests {
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         assert!(cells(&widget)[1]
@@ -7005,7 +7005,7 @@ mod tests {
             tool: "ToolSearch".to_string(),
             result: serde_json::json!("ok"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         let cell = cells(&widget)[1]
@@ -7058,7 +7058,7 @@ mod tests {
             tool: "mcp__github__create_issue".to_string(),
             input: serde_json::json!({"title": "bug"}),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
 
         let committed = cells(&widget);
         assert!(committed.iter().any(|cell| {
@@ -7112,7 +7112,7 @@ mod tests {
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
 
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         let first = cells(&widget)[1]
@@ -7207,7 +7207,7 @@ mod tests {
             input: serde_json::json!({ "content": "big payload" }),
         });
         assert_eq!(widget.tool_inputs.len(), 1);
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(
             widget.tool_inputs.is_empty(),
             "un-paired tool input cleared on TurnEnded"
@@ -7270,7 +7270,7 @@ mod tests {
         assert!(widget.activity.is_none());
 
         // TurnEnded finalizes the reply and clears every per-turn field.
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert!(!widget.turn_running());
         assert!(widget.turn_started_at.is_none());
         assert!(widget.transcript.active_cell().is_none(), "cell flushed");
@@ -7299,7 +7299,7 @@ mod tests {
         assert_eq!(widget.transcript().committed_to_terminal(), 1);
 
         // TurnEnded finalizes: the reply commits as a whole, the tail empties.
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         widget.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(widget.transcript().committed_to_terminal(), 2);
         assert!(widget.transcript().visible_live_tail(80, &theme).is_empty());
@@ -7333,7 +7333,7 @@ mod tests {
         });
         assert_eq!(widget.active_tool_elapsed_ms, Some(17_000));
 
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
         assert!(!widget.turn_running());
         assert!(widget.activity.is_none());
         assert!(widget.turn_started_at.is_none());
@@ -7399,7 +7399,7 @@ mod tests {
         assert!(cells(&widget).is_empty());
 
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         let before = cells(&widget).len();
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
@@ -8585,7 +8585,7 @@ mod tests {
             tool: "Bash".to_string(),
             result: serde_json::json!({}),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         widget.apply_turn_event(TurnEvent::TurnStarted);
         assert!(widget.spinner_text().contains("Compiling the project…"));
 
@@ -8662,7 +8662,7 @@ mod tests {
         assert_eq!(tasks[1].state, PlanTaskState::InProgress);
         assert_eq!(tasks[2].state, PlanTaskState::Pending);
 
-        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
         assert_eq!(
             widget.bottom_pane().planned_tasks().len(),
             3,
@@ -8966,9 +8966,9 @@ mod tests {
         let width = 80;
         let idle_height = widget.desired_height(width);
         widget.apply_turn_event(TurnEvent::ContextPressure {
-            banner: Some(traits::ContextPressureBanner {
+            banner: Some(platform_api::ContextPressureBanner {
                 text: "Context low (12% remaining)".to_string(),
-                level: traits::ContextPressureLevel::Warning,
+                level: platform_api::ContextPressureLevel::Warning,
             }),
             used_fraction: 0.88,
             used_tokens: 0,
@@ -8976,7 +8976,7 @@ mod tests {
         });
         assert_eq!(
             widget.bottom_pane().context_pressure().map(|b| b.level),
-            Some(traits::ContextPressureLevel::Warning)
+            Some(platform_api::ContextPressureLevel::Warning)
         );
         // The banner adds exactly one pane row. Idle has no leading status
         // row now, so the banner renders FIRST, above the composer.
@@ -9213,10 +9213,10 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnStarted);
         // A live composition-root slot, filled AFTER wiring (the background
         // fetch landing) — the composer reads it at compose time.
-        let slot: traits::subscription::SharedSubscription =
+        let slot: platform_api::subscription::SharedSubscription =
             std::sync::Arc::new(std::sync::RwLock::new(None));
         widget.set_subscription(std::sync::Arc::clone(&slot));
-        *slot.write().unwrap() = Some(traits::subscription::SubscriptionSnapshot {
+        *slot.write().unwrap() = Some(platform_api::subscription::SubscriptionSnapshot {
             is_subscriber: true,
             subscription_type: Some("pro".to_string()),
             billing_type: Some("stripe_subscription".to_string()),

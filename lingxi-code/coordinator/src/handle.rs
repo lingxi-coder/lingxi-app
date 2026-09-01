@@ -13,8 +13,8 @@ use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
 use protocol::AgentId;
 use std::time::SystemTime;
-use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-use traits::team_registry::{TeamRegistryHandle, WorkerInfo};
+use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use platform_api::team_registry::{TeamRegistryHandle, WorkerInfo};
 use uuid::Uuid;
 
 /// Byte-locked teammate claim window (spec §7 line 498).

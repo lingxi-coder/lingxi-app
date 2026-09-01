@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use traits::{
+use platform_api::{
     McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpPermissionCeiling, McpPromptDto,
     McpProtocolEra, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransportKind, ServerCapabilitiesDto,
@@ -769,9 +769,9 @@ impl McpClient {
             // an org ceiling is present for the same raw tool name.
             if let Some(policy) = tool.permission_policy {
                 let policy_ceiling = match policy {
-                    traits::McpToolPermissionPolicy::AlwaysAllow => McpPermissionCeiling::Allow,
-                    traits::McpToolPermissionPolicy::AlwaysAsk => McpPermissionCeiling::Ask,
-                    traits::McpToolPermissionPolicy::AlwaysDeny => McpPermissionCeiling::Deny,
+                    platform_api::McpToolPermissionPolicy::AlwaysAllow => McpPermissionCeiling::Allow,
+                    platform_api::McpToolPermissionPolicy::AlwaysAsk => McpPermissionCeiling::Ask,
+                    platform_api::McpToolPermissionPolicy::AlwaysDeny => McpPermissionCeiling::Deny,
                 };
                 org_ceilings
                     .entry(tool.name.as_str())
@@ -1130,7 +1130,7 @@ impl McpClient {
                 arguments: p
                     .arguments
                     .into_iter()
-                    .map(|argument| traits::McpPromptArgumentDto {
+                    .map(|argument| platform_api::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,
@@ -1227,7 +1227,7 @@ impl McpClient {
         &self,
         uri: &str,
         output_dir: &std::path::Path,
-    ) -> Result<Vec<traits::McpResourceContentsRich>, McpClientError> {
+    ) -> Result<Vec<platform_api::McpResourceContentsRich>, McpClientError> {
         let mut raw_value: serde_json::Value = self
             .connection
             .call(
@@ -1893,7 +1893,7 @@ pub struct ToolMeta {
     /// ["anthropic/requiresUserInteraction"]===!0` (client.ts factory,
     /// binary-confirmed @182519150); read back as `requiresUserInteraction()`
     /// (@182520425) and folded into `suppressesAlwaysAllowRule` (@182520462).
-    /// Forwarded onto `traits::McpToolDto::requires_user_interaction` and from
+    /// Forwarded onto `platform_api::McpToolDto::requires_user_interaction` and from
     /// there onto `tool-mcp`'s `MCPTool::requires_user_interaction` override,
     /// so a persistent "always allow" grant is never offered/written for such
     /// a tool (see `tui/src/permission_gate.rs` and
@@ -2706,7 +2706,7 @@ mod timeout_tests {
         DEFAULT_CALL_TOOL_TIMEOUT,
     };
     use std::time::Duration;
-    use traits::McpTransportKind;
+    use platform_api::McpTransportKind;
 
     #[test]
     fn default_value_is_byte_locked_to_claude_code() {

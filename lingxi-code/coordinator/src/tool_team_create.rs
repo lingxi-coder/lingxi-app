@@ -27,8 +27,8 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
-use traits::team_spawn::TeamSpawnSeam;
-use traits::{OutputStream, RuntimeSpawner};
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 
 use crate::mode::CoordinatorMode;
 use crate::team_file::{self, TeamFile, TeamMember};
@@ -487,7 +487,7 @@ impl Tool for TeamCreateTool {
         //        4) so the leader's V2 tasks land under the team name — the same
         //        on-disk directory its in-process teammates resolve to — instead
         //        of under the session id.
-        traits::team_registry::set_leader_team_name(&team_name);
+        platform_api::team_registry::set_leader_team_name(&team_name);
 
         // 5b. Write the on-disk team file `~/.lingxi/teams/{name}/config.json`
         //     mirroring the TS `TeamFile` shape (TeamCreateTool.ts:157-177 →
@@ -695,21 +695,21 @@ mod tests {
             name: String,
             team_name: String,
             description: String,
-        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+        ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
             self.spawns.fetch_add(1, Ordering::SeqCst);
             *self.last_args.lock().unwrap() = Some((agent_id, name, team_name, description));
             Ok(self.task_id.clone())
         }
-        async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+        async fn kill(&self, _task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             Ok(())
         }
         async fn send_message(
             &self,
             _task_id: &str,
             message: String,
-        ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+        ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             if self.terminate_on_send.load(Ordering::SeqCst) {
-                return Err(traits::team_spawn::TeamSpawnError::Terminated);
+                return Err(platform_api::team_spawn::TeamSpawnError::Terminated);
             }
             self.injected.lock().unwrap().push(message);
             Ok(())
@@ -731,15 +731,15 @@ mod tests {
         }
     }
     #[async_trait]
-    impl traits::RuntimeSpawner for TestSpawner {
+    impl platform_api::RuntimeSpawner for TestSpawner {
         async fn spawn(
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
             let h = tokio::spawn(task);
             self.handles.lock().unwrap().push(h);
-            Ok(traits::BackgroundTaskHandle {
+            Ok(platform_api::BackgroundTaskHandle {
                 task_name: name.into(),
                 task_id: 1,
             })
@@ -749,8 +749,8 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -789,7 +789,7 @@ mod tests {
             _result: &serde_json::Value,
         ) {
         }
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
         async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
             self.statuses
                 .lock()
@@ -1279,7 +1279,7 @@ mod tests {
         let seam = Arc::new(RecordingSeam::new("handler-task-pump"));
         let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
         let spawner = TestSpawner::new();
-        let tool = tool.with_runtime(spawner as Arc<dyn traits::RuntimeSpawner>);
+        let tool = tool.with_runtime(spawner as Arc<dyn platform_api::RuntimeSpawner>);
 
         // Create the team → spawns the worker (registers its mailbox), starts
         // the real teammate (recording seam), and launches the pump.
@@ -1344,7 +1344,7 @@ mod tests {
         seam.terminate_on_send();
         let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam);
         let spawner = TestSpawner::new();
-        let tool = tool.with_runtime(spawner as Arc<dyn traits::RuntimeSpawner>);
+        let tool = tool.with_runtime(spawner as Arc<dyn platform_api::RuntimeSpawner>);
 
         tool.call(
             json!({ "team_name": "alpha", "agent_type": "researcher" }),

@@ -32,7 +32,7 @@ const SCOPES: { id: McpScopeDto; label: string }[] = [
  * left it untouched) reports a MERGED, currently-running view — name,
  * connection status, transport — with NO scope field
  * (`client-protocol/src/listings.rs`'s `McpServerDto` carries exactly those
- * three fields; `traits::orchestrator::McpServerInfo` it's lowered from
+ * three fields; `platform_api::orchestrator::McpServerInfo` it's lowered from
  * carries no more). There is also no read command for "what does scope X's
  * OWN file currently contain" — `mcp_bridge.rs` is write-only
  * (`upsert_server`/`remove_server`), by design (its own module doc: the

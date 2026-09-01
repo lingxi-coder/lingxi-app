@@ -1000,7 +1000,7 @@ async fn run_evaluation(
         return Ok((
             AggregateResult {
                 schema_version: RESULT_SCHEMA_VERSION,
-                claude_version: traits::CLAUDE_CODE_VERSION.to_string(),
+                claude_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
                 started_at,
                 duration_seconds: 0.0,
                 cost_usd: 0.0,
@@ -1199,7 +1199,7 @@ async fn run_evaluation(
     Ok((
         AggregateResult {
             schema_version: RESULT_SCHEMA_VERSION,
-            claude_version: traits::CLAUDE_CODE_VERSION.to_string(),
+            claude_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
             started_at,
             duration_seconds: started.elapsed().as_secs_f64(),
             cost_usd: total_cost,

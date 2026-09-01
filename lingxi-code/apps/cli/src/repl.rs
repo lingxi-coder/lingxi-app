@@ -21,7 +21,7 @@ use tokio::io::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use traits::{OrchestratorHandle, OutputStream};
+use platform_api::{OrchestratorHandle, OutputStream};
 
 /// Pure decision: should the REPL surface an interactive permission prompt?
 ///

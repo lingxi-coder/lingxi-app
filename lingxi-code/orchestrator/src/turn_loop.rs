@@ -17,7 +17,7 @@ use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::ContextModifier;
 
 async fn forward_tool_progress(
-    output: &dyn traits::OutputStream,
+    output: &dyn platform_api::OutputStream,
     parent_tool_use_id: &str,
     progress: tool_api::progress::ToolProgress,
 ) {
@@ -1290,12 +1290,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
         compaction::is_compact_warning_suppressed(),
         None,
     )
-    .map(|b| traits::ContextPressureBanner {
+    .map(|b| platform_api::ContextPressureBanner {
         text: b.text,
         level: match b.color {
-            compaction::TokenWarningColor::Dim => traits::ContextPressureLevel::Dim,
-            compaction::TokenWarningColor::Warning => traits::ContextPressureLevel::Warning,
-            compaction::TokenWarningColor::Error => traits::ContextPressureLevel::Error,
+            compaction::TokenWarningColor::Dim => platform_api::ContextPressureLevel::Dim,
+            compaction::TokenWarningColor::Warning => platform_api::ContextPressureLevel::Warning,
+            compaction::TokenWarningColor::Error => platform_api::ContextPressureLevel::Error,
         },
     });
     // Context usage as a 0-1 fraction of the model's effective context window
@@ -2011,7 +2011,7 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // are inseparable here.
     //
     // DIVERGENCE (recorded): the oracle stamps the goal-status attachment with
-    // `context_limit` / `api_error`; `traits::GoalStatusKind` has only
+    // `context_limit` / `api_error`; `platform_api::GoalStatusKind` has only
     // `Set|Cleared|Achieved`, and widening it would change a serialized
     // transcript enum, so the teardown records `Cleared`.
     let Some(goal) = orch.clear_active_goal_state_and_hook().await else {
@@ -3497,7 +3497,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             file_history: orch
                 .file_history
                 .clone()
-                .map(|fh| fh as std::sync::Arc<dyn traits::FileHistorySink>),
+                .map(|fh| fh as std::sync::Arc<dyn platform_api::FileHistorySink>),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
@@ -4044,7 +4044,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         } else if hook_allowed && !plan_mode {
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
-            let ctx = traits::permission_gate::PermissionCheckContext {
+            let ctx = platform_api::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -4057,7 +4057,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .await;
             let mut hook_decision_classification = None;
             let hook_decision = match hook_outcome {
-                traits::permission_gate::PermissionOutcome::Allow {
+                platform_api::permission_gate::PermissionOutcome::Allow {
                     updated_input,
                     decision_classification,
                     permission_updates: _,
@@ -4068,7 +4068,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     }
                     PermissionDecision::Allow
                 }
-                traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                     if let Some(updated) = updated_input {
                         effective_input = updated;
                     }
@@ -4081,7 +4081,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     }
                     PermissionDecision::Allow
                 }
-                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
                     PermissionDecision::Deny { reason }
                 }
             };
@@ -4095,7 +4095,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             decision_otel_source = if matches!(hook_decision, PermissionDecision::Allow) {
                 hook_decision_classification.map_or(
                     "hook",
-                    traits::permission_gate::ToolDecisionClassification::as_str,
+                    platform_api::permission_gate::ToolDecisionClassification::as_str,
                 )
             } else {
                 "config"
@@ -4105,7 +4105,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
-            let resolution_ctx = traits::permission_gate::PermissionCheckContext {
+            let resolution_ctx = platform_api::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -4290,7 +4290,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     // `decide_outcome_with_context` emission (subagent dispatch) is
                     // never reached here — emit through the outer gate, which
                     // forwards to the stdio transport. No-op on non-stdio transports.
-                    let sysmsg_ctx = traits::permission_gate::PermissionCheckContext {
+                    let sysmsg_ctx = platform_api::permission_gate::PermissionCheckContext {
                         tool_use_id: Some(tool_use_id.to_string()),
                         ..Default::default()
                     };
@@ -4413,7 +4413,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 // REAL tool_use_id (so a stdio `can_use_tool` request is
                                 // byte-faithful) and applying the host's `updatedInput`
                                 // rewrite to the input the tool actually runs with.
-                                let ctx = traits::permission_gate::PermissionCheckContext {
+                                let ctx = platform_api::permission_gate::PermissionCheckContext {
                                     tool_use_id: Some(tool_use_id.to_string()),
                                     requires_user_interaction,
                                     suppress_always_allow_rule,
@@ -4447,7 +4447,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                         .await
                                 };
                                 match outcome {
-                                    traits::permission_gate::PermissionOutcome::Allow {
+                                    platform_api::permission_gate::PermissionOutcome::Allow {
                                         updated_input,
                                         // `permission_updates` (the host's
                                         // `updatedPermissions`) are applied + persisted
@@ -4462,14 +4462,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                         // temporary-allow fallback.
                                         decision_otel_source = decision_classification.map_or(
                                         "user_temporary",
-                                        traits::permission_gate::ToolDecisionClassification::as_str,
+                                        platform_api::permission_gate::ToolDecisionClassification::as_str,
                                     );
                                         if let Some(u) = updated_input {
                                             effective_input = u;
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    traits::permission_gate::PermissionOutcome::AllowAuto {
+                                    platform_api::permission_gate::PermissionOutcome::AllowAuto {
                                         updated_input,
                                     } => {
                                         if let Some(u) = updated_input {
@@ -4487,7 +4487,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                                    platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
                                         // An ABORTED prompt is a distinct label: claude-code
                                         // denies with `decisionReason: iYt` ("tool permission
                                         // request aborted") when `signal.aborted`, and `eQ_`
@@ -4567,7 +4567,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     } else {
                         let (decision_reason_type, decision_reason) =
                             tool_ask_reason_context(reason);
-                        let ask_ctx = traits::permission_gate::PermissionCheckContext {
+                        let ask_ctx = platform_api::permission_gate::PermissionCheckContext {
                             tool_use_id: Some(tool_use_id.to_string()),
                             requires_user_interaction,
                             suppress_always_allow_rule: requires_user_interaction
@@ -4582,7 +4582,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             .ask_via_transport(name, &effective_input, &ask_ctx)
                             .await
                         {
-                            traits::permission_gate::PermissionOutcome::Allow {
+                            platform_api::permission_gate::PermissionOutcome::Allow {
                                 updated_input,
                                 ..
                             } => {
@@ -4591,7 +4591,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 }
                                 PermissionDecision::Allow
                             }
-                            traits::permission_gate::PermissionOutcome::AllowAuto {
+                            platform_api::permission_gate::PermissionOutcome::AllowAuto {
                                 updated_input,
                             } => {
                                 if let Some(updated) = updated_input {
@@ -4599,7 +4599,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 }
                                 PermissionDecision::Allow
                             }
-                            traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                            platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
                                 PermissionDecision::Deny { reason }
                             }
                         }
@@ -6208,7 +6208,7 @@ mod denial_kind_wiring_tests {
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
     };
-    use traits::permission_gate::{
+    use platform_api::permission_gate::{
         PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
     };
 
@@ -6740,36 +6740,36 @@ mod hook_context_attachment_tests {
 
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
+    impl platform_api::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -7276,7 +7276,7 @@ mod hook_context_attachment_tests {
         use protocol::MessageId;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
             dir.path().to_path_buf(),
         ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
@@ -7401,7 +7401,7 @@ mod hook_context_attachment_tests {
             None => orch,
             Some(path) => {
                 let root = path.parent().expect("parent").to_path_buf();
-                let fs: Arc<dyn traits::FileSystem> =
+                let fs: Arc<dyn platform_api::FileSystem> =
                     Arc::new(platform_posix::fs::PosixFileSystem::new(root));
                 orch.with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
                     path.to_path_buf(),
@@ -8026,8 +8026,8 @@ mod tool_hook_wiring_tests {
         CoercedInput, DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError,
         ToolStaticContext, ValidationError,
     };
-    use traits::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+    use platform_api::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 
     /// A gate that RESOLVES to a plain allow (the `rule_source` under test) but
     /// whose prompt transport always denies — so "the ask reached the prompt" is
@@ -8081,40 +8081,40 @@ mod tool_hook_wiring_tests {
     struct UnusedHookHttp;
 
     #[async_trait]
-    impl traits::HttpTransport for UnusedHookHttp {
+    impl platform_api::HttpTransport for UnusedHookHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
 
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
     struct UnusedHookRuntime;
 
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedHookRuntime {
+    impl platform_api::RuntimeSpawner for UnusedHookRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
 
         async fn sleep(&self, _duration: std::time::Duration) {}
 
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -8166,7 +8166,7 @@ mod tool_hook_wiring_tests {
         async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
             PermissionResolution::Deny {
                 reason: "prompted-and-declined".into(),
-                source: traits::permission_gate::PermissionDecisionSource::Rule,
+                source: platform_api::permission_gate::PermissionDecisionSource::Rule,
                 rule_source: Some("userSettings".into()),
                 decision_reason_type: Some("rule".into()),
                 decision_reason: None,
@@ -8595,7 +8595,7 @@ mod tool_hook_wiring_tests {
             .await
             .expect_err("nested Read denial must stop subagent Workflow");
         assert!(
-            matches!(error, traits::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
+            matches!(error, platform_api::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
         );
     }
 }

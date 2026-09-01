@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
-use traits::coordinator_mode::CoordinatorModeHandle;
-use traits::subagent_spawn::{
+use platform_api::coordinator_mode::CoordinatorModeHandle;
+use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
@@ -37,7 +37,7 @@ use traits::subagent_spawn::{
 tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
     static WORKFLOW_QUERY_WATCHDOG_OVERRIDE:
-        std::cell::RefCell<Option<traits::WorkflowQueryWatchdog>>;
+        std::cell::RefCell<Option<platform_api::WorkflowQueryWatchdog>>;
 }
 
 /// Runs a future with a workflow-scoped child transcript directory override.
@@ -208,11 +208,11 @@ pub struct PoolSubagentSpawner {
     /// Skill loader handed to every child runner via
     /// [`SubagentContext::skill_loader`] so the runner can preload the agent
     /// definition's frontmatter `skills:` (claude runAgent.ts:577-646). A leaf
-    /// trait ([`traits::skill_loader::SkillLoader`]) so the agent crate avoids a
+    /// trait ([`platform_api::skill_loader::SkillLoader`]) so the agent crate avoids a
     /// cycle into the command/skill registry; the concrete impl is built at the
     /// composition root. SET-ONCE cell (same cycle-break as the others). Unfilled
     /// ⇒ no skill preloading (byte-identical legacy).
-    skill_loader: Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
+    skill_loader: Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
     /// Session id stamped on the `HookContext` the child runner builds for the
     /// SubagentStart fire (claude `createBaseHookInput`). Set at boot via
     /// [`Self::with_hook_context`]; defaults to a nil session (only consulted when
@@ -242,7 +242,7 @@ pub struct PoolSubagentSpawner {
     /// boot: naming the path without wiring a writer is what left the
     /// `SubagentStop` hook reporting a transcript that did not exist. `None`
     /// ⇒ nothing is persisted (byte-identical legacy).
-    transcript_fs: Option<std::sync::Arc<dyn traits::FileSystem>>,
+    transcript_fs: Option<std::sync::Arc<dyn platform_api::FileSystem>>,
     /// G14: name → child agent-id registry for `SendMessage` routing of spawned
     /// ASYNC subagents (claude `AppState.agentNameRegistry`, AgentTool.tsx:704-711).
     /// `AgentTool` calls [`SubagentSpawner::register_name`] after a successful
@@ -296,7 +296,7 @@ pub struct PoolSubagentSpawner {
     /// provider/model environment renderer because inference routing is not a
     /// device capability and may change independently.
     mobile_runtime_environment:
-        Option<traits::mobile_runtime_environment::MobileRuntimeEnvironment>,
+        Option<platform_api::mobile_runtime_environment::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
     spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
@@ -378,7 +378,7 @@ pub const APPEND_SUBAGENT_PROMPT_VALUE_ENV: &str = "LINGXI_APPEND_SUBAGENT_SYSTE
 /// version is strictly wider — recorded rather than guessed at.
 #[must_use]
 pub fn append_subagent_system_prompt_suffix() -> Option<String> {
-    if !traits::env::is_env_truthy(
+    if !platform_api::env::is_env_truthy(
         std::env::var(APPEND_SUBAGENT_PROMPT_GATE_ENV)
             .ok()
             .as_deref(),
@@ -449,7 +449,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_mobile_runtime_environment(
         mut self,
-        environment: traits::mobile_runtime_environment::MobileRuntimeEnvironment,
+        environment: platform_api::mobile_runtime_environment::MobileRuntimeEnvironment,
     ) -> Self {
         self.mobile_runtime_environment = Some(environment);
         self
@@ -871,7 +871,7 @@ impl PoolSubagentSpawner {
     /// [`Self::skill_loader_handle`] to fill it later. Threaded onto every child
     /// via [`SubagentContext::skill_loader`].
     #[must_use]
-    pub fn with_skill_loader(self, loader: Arc<dyn traits::skill_loader::SkillLoader>) -> Self {
+    pub fn with_skill_loader(self, loader: Arc<dyn platform_api::skill_loader::SkillLoader>) -> Self {
         let _ = self.skill_loader.set(loader);
         self
     }
@@ -882,7 +882,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn skill_loader_handle(
         &self,
-    ) -> Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
+    ) -> Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -934,7 +934,7 @@ impl PoolSubagentSpawner {
     /// Pairs with [`Self::with_hook_context`]'s `subagents_dir` — a dir without
     /// a writer names a file nothing creates.
     #[must_use]
-    pub fn with_transcript_fs(mut self, fs: std::sync::Arc<dyn traits::FileSystem>) -> Self {
+    pub fn with_transcript_fs(mut self, fs: std::sync::Arc<dyn platform_api::FileSystem>) -> Self {
         self.transcript_fs = Some(fs);
         self
     }
@@ -1054,7 +1054,7 @@ impl PoolSubagentSpawner {
         // it (claude uses the synthetic FORK_AGENT on the fork path, never the
         // catalog — forkSubagent.ts:60-71 / AgentTool.tsx:335). It is NOT in the
         // 6-element built-in vec (claude does not register it in builtInAgents).
-        if subagent_type == traits::fork_subagent::FORK_SUBAGENT_TYPE {
+        if subagent_type == platform_api::fork_subagent::FORK_SUBAGENT_TYPE {
             return crate::builtins::fork_agent_definition();
         }
         // 1. File catalog (user/project) wins on collision.
@@ -1664,7 +1664,7 @@ impl PoolSubagentSpawner {
 /// The persistent / resumable subagent seam (claude-code `run_in_background` +
 /// "comes to rest" + `resumeAgentBackground`).
 ///
-/// Distinct from the cross-crate [`traits::SubagentSpawner`] (whose return type
+/// Distinct from the cross-crate [`platform_api::SubagentSpawner`] (whose return type
 /// is the traits-level [`SubagentResult`] — it cannot reference the `agent`-crate
 /// [`SubagentEvent`] stream). The task-layer LocalAgent handler — which already
 /// depends on `agent` — drives a persistent (background/resumable) local_agent
@@ -1747,7 +1747,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         self.pool
             .send_event(
                 agent_id,
-                engine::Event::UserMessage {
+                lingxi_core::Event::UserMessage {
                     message_id: protocol::MessageId::new(),
                     request_id: protocol::RequestId::new(),
                     content: message,
@@ -1764,7 +1764,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         // `deallocate`, which is itself idempotent (missing slot ⇒ Ok).
         let _ = self
             .pool
-            .send_event(agent_id, engine::Event::UserExit)
+            .send_event(agent_id, lingxi_core::Event::UserExit)
             .await;
         // §24b: settle any agent-scoped MCP teardown this persistent spawn
         // parked. Runs BEFORE `deallocate` so a teardown failure cannot leave
@@ -2264,7 +2264,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             (observer_spec, &mut result)
         {
             let valid_target = spec.schema_version
-                == traits::subagent_spawn::OBSERVER_SCHEMA_VERSION
+                == platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION
                 && spec.agent != observed_agent_type
                 && self
                     .listing_entries()
@@ -2359,7 +2359,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
         observer: Option<Arc<dyn SubagentSpawnObserver>>,
-        watchdog: traits::WorkflowQueryWatchdog,
+        watchdog: platform_api::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         WORKFLOW_QUERY_WATCHDOG_OVERRIDE
             .scope(
@@ -2418,7 +2418,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         &self,
         subagent_type: &str,
         model: Option<&str>,
-    ) -> traits::subagent_spawn::SelectedAgentMeta {
+    ) -> platform_api::subagent_spawn::SelectedAgentMeta {
         let def = self.lookup_definition(subagent_type).await;
         let observer = if crate::observer::observer_agents_enabled() && def.observer.is_some() {
             let mut definitions = vec![def.clone()];
@@ -2483,7 +2483,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             }
             None => String::new(),
         };
-        traits::subagent_spawn::SelectedAgentMeta {
+        platform_api::subagent_spawn::SelectedAgentMeta {
             agent_type: def.agent_type.clone(),
             observer,
             resolved_model,
@@ -2533,7 +2533,7 @@ fn subagent_tool_call_lines(message: &serde_json::Value) -> Vec<String> {
 ///
 /// Returns `None` for non-assistant messages (user/tool_result rides the
 /// always-on activity path). The Agent tool decodes the returned line via
-/// [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`] and forwards
+/// [`platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`] and forwards
 /// the inner message to the stream-json sink, which re-emits its text/thinking
 /// blocks with `parent_tool_use_id` set. The final text/thinking gate lives at
 /// the sink, so this stays cheap and unconditional for assistant turns.
@@ -2542,7 +2542,7 @@ fn forward_subagent_message_line(message: &serde_json::Value) -> Option<String> 
         return None;
     }
     serde_json::to_string(&serde_json::json!({
-        traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
+        platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
     }))
     .ok()
 }
@@ -2619,9 +2619,9 @@ mod tests {
     use tokio::task::JoinHandle;
     use tool_api::tool_trait::PromptOptions;
     use tool_api::Tool;
-    use traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
     struct DummyInvoker;
 
@@ -2725,7 +2725,7 @@ mod tests {
         let request = SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
             prompt: "do work".into(),
-            observer: Some(traits::subagent_spawn::ObserverSpec::new("Explore")),
+            observer: Some(platform_api::subagent_spawn::ObserverSpec::new("Explore")),
             context_paths: Vec::new(),
             description: None,
             model: None,
@@ -3124,7 +3124,7 @@ mod tests {
         // The production wiring uses Arc<StateMachinePool>; this test
         // confirms the adapter accepts and stores the Arc cleanly. Driving
         // the runner end-to-end requires the M1.11 stub to receive an
-        // inbound `engine::Event`, which lands when the agentic loop
+        // inbound `lingxi_core::Event`, which lands when the agentic loop
         // arrives in Plan 09+.
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -5965,7 +5965,7 @@ mod tests {
         // Sentinel-wrapped JSON object carrying the inner message verbatim.
         let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
-            parsed[traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL],
+            parsed[platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL],
             message
         );
     }
@@ -6036,13 +6036,13 @@ mod tests {
             use_exact_tools: false,
         });
         worker.agent_type = "worker".into();
-        worker.observer = Some(traits::subagent_spawn::ObserverSpec::new("reviewer"));
+        worker.observer = Some(platform_api::subagent_spawn::ObserverSpec::new("reviewer"));
 
         let mut invalid = agent_def(AgentToolPolicy::All {
             use_exact_tools: false,
         });
         invalid.agent_type = "invalid".into();
-        invalid.observer = Some(traits::subagent_spawn::ObserverSpec::new("missing"));
+        invalid.observer = Some(platform_api::subagent_spawn::ObserverSpec::new("missing"));
 
         let catalog = Arc::new(RwLock::new(vec![reviewer, worker, invalid]));
         let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
@@ -6081,7 +6081,7 @@ mod tests {
             use_exact_tools: false,
         });
         worker.agent_type = "worker".into();
-        worker.observer = Some(traits::subagent_spawn::ObserverSpec::new("reviewer"));
+        worker.observer = Some(platform_api::subagent_spawn::ObserverSpec::new("reviewer"));
 
         let catalog = Arc::new(RwLock::new(vec![reviewer, worker]));
         let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);

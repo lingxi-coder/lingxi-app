@@ -81,7 +81,7 @@ Port files: `tui/src/screen_reader.rs`, `tui/src/composer.rs`, `apps/cli/src/ax_
 
 > Oracle: agent definition zod schema has observer (string, 217+), observerMessage (217+), and observeSubagents (boolean, 0 hits in 2.1.217 → 12 in 218+). Runtime: '[agentObserver] Agent X declares observer Y…', pairing carries fanoutToSubagents:e.observeSubagents!==!1 and fanoutDepth with a depth cap, and spawned subagents inherit the observer unless observeSubagents:false ('not fanning out to observer agent (no chaining)'). Port: rg observer/observerMessage/observeSubagents across all .rs = 0 hits; agent/src/catalog.rs frontmatter parser has zero 'observ' matches, so the fields are silently dropped and no observer agent is ever armed. Schedule after H7 (depth 3) since fan-out interacts with spawn depth.
 
-Port files: `agent/src/catalog.rs`, `traits/src/subagent_spawn.rs`.
+Port files: `agent/src/catalog.rs`, `platform-api/src/subagent_spawn.rs`.
 
 ### N-protocol-7 (Low, est S) — Lean-model (Opus 5) Bash/Agent tool description content not ported
 
@@ -108,7 +108,7 @@ Port files: `memory/src/lib.rs`.
 ## 5. Out of scope for Session B (sibling session)
 
 - **M10** (对外 parity 版本仍标记为 2.1.217 — `CLAUDE_CODE_VERSION` bump) and **H1** (lean main system prompt consumer) remain with the sibling session's prompt/model wave (H1/H2/M1/M2/M10). This gate deliberately did NOT bump `CLAUDE_CODE_VERSION`.
-- Sibling-owned files were never touched by this wave: `orchestrator/src/prompt/*`, `tool-api/src/model_prompt_gate.rs`, `traits/src/model_capabilities.rs`.
+- Sibling-owned files were never touched by this wave: `orchestrator/src/prompt/*`, `tool-api/src/model_prompt_gate.rs`, `platform-api/src/model_capabilities.rs`.
 - ⚠️ **Duplicate implementations to reconcile at the integration→main merge**: the sibling session's `d0ddcfb32` on main re-implemented **H5 runtime enforcement + M11** (Session B items per the split) from the same oracle sites (`wSu`/`srt` @229871903, `MQ` @226607421). Same four files on both sides: `sandbox-runtime/src/{config,matcher}.rs`, `sandbox-runtime-runner/src/convert.rs`, `tools/shell/src/bash.rs`. Whoever merges second keeps ONE implementation and the UNION of tests (this wave: `45b6f00eb` incl. the http_proxy CONNECT-403 enforcement-layer test + runner structural-key tests, `fc09d6f8b`; main: the cross-separator Windows-basename fix).
 
 ## 6. Deferred slivers carried out of this wave
@@ -246,7 +246,7 @@ wrong about the oracle, and belong on the same backlog: **MCPCLI-5** (empty
   the `fix220/auth` merge: **exit 0 both times**, so no compile-level repair was
   needed (contrast the two `--tests`-only cross-lane breakages earlier in this
   wave). The `--tests` flag still matters: `fix220/soc` turns
-  `traits::PermissionResolution::Allow` from a unit into a struct variant
+  `platform_api::PermissionResolution::Allow` from a unit into a struct variant
   (`rule_source`), which only test-side constructors would have exposed.
 - **One real repair — `dac087a04`.** Gate run 1 at `6c73779e6` built clean but
   `-p llm-client --lib` failed ~50% of the time on

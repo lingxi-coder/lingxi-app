@@ -567,12 +567,12 @@ async fn populate_stop_hook_snapshot_noop_without_provider() {
 /// (the second drain returns empty), mirroring the registry's
 /// take-mark-evict semantics so the consume-once invariant is testable
 /// without a real registry.
-struct OnceTaskNotifications(std::sync::Mutex<Vec<traits::task_registry::TaskNotification>>);
+struct OnceTaskNotifications(std::sync::Mutex<Vec<platform_api::task_registry::TaskNotification>>);
 #[async_trait::async_trait]
 impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
     async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<traits::task_registry::TaskNotification> {
+    ) -> Vec<platform_api::task_registry::TaskNotification> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
@@ -581,7 +581,7 @@ impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNoti
 async fn task_notification_reminder_folds_in_then_drains_once() {
     let reg = ToolRegistry::new();
     // One terminal `local_bash` task — the minimal faithful surface.
-    let bash = traits::task_registry::TaskNotification {
+    let bash = platform_api::task_registry::TaskNotification {
         task_id: "b12345678".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),

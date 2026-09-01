@@ -2,7 +2,7 @@
 //! called by `lingxi-orchestrator` and the CLI binary.
 //!
 //! Introduced by M5-09 (commands surface). The trait lives here in
-//! `lingxi-traits` so the orchestrator and CLI can depend on the dispatch
+//! `platform-api` so the orchestrator and CLI can depend on the dispatch
 //! abstraction without pulling in `lingxi-commands` directly.
 
 use async_trait::async_trait;

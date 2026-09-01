@@ -11,7 +11,7 @@
 //!
 //! lingxi cannot mirror that exactly: server-pushed notifications are only
 //! reachable through `McpTransport::notifications(&McpRawConnection)`
-//! (`traits/src/mcp.rs`), keyed by the *private* `McpRawConnection` that the
+//! (`platform-api/src/mcp.rs`), keyed by the *private* `McpRawConnection` that the
 //! registry hides inside `McpConnectionState::Connected`. Neither
 //! [`mcp::McpRegistry`] nor the [`mcp::McpClient`] handle returned by
 //! `get_client` exposes a notification stream. So this handler **polls**
@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
-use traits::{BackgroundTaskHandle, FileSystem};
+use platform_api::{BackgroundTaskHandle, FileSystem};
 
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -356,7 +356,7 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     use test_harness::mocks::{MockMcpTransport, MockRuntimeSpawner};
-    use traits::{FileContent, FileEvent, FlockGuard, FsError, RuntimeSpawner};
+    use platform_api::{FileContent, FileEvent, FlockGuard, FsError, RuntimeSpawner};
 
     // ---- minimal in-memory FileSystem (mirrors handle.rs tests) ----------
     struct InMemoryFs {

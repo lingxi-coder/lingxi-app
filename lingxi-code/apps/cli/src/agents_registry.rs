@@ -1092,7 +1092,7 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
     let Some(session_id) = record.session_id.as_deref() else {
         return;
     };
-    let dir = traits::live_sessions::LiveSessionDir::at(root);
+    let dir = platform_api::live_sessions::LiveSessionDir::at(root);
     let Ok(subscriptions) = dir.drain_idle_subscriptions(session_id) else {
         return;
     };
@@ -1113,7 +1113,7 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
             _ if exited => format!("{from} exited"),
             _ => format!("{from} is idle"),
         });
-        let msg = traits::live_sessions::PeerMessage {
+        let msg = platform_api::live_sessions::PeerMessage {
             from: from.clone(),
             from_session_id: from_session_id.clone(),
             content: if exited {
@@ -1431,10 +1431,10 @@ mod tests {
     fn idle_notification_fires_once_on_busy_to_idle_edge() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = SessionRegistration::register(tmp.path(), Some("target-session"), Some("peer"));
-        let dir = traits::live_sessions::LiveSessionDir::at(sessions_dir(tmp.path()));
+        let dir = platform_api::live_sessions::LiveSessionDir::at(sessions_dir(tmp.path()));
         dir.append_idle_subscription(
             "target-session",
-            &traits::live_sessions::IdleNotificationRequest {
+            &platform_api::live_sessions::IdleNotificationRequest {
                 from: "lead".to_string(),
                 from_session_id: "subscriber-session".to_string(),
                 summary: Some("review finished".to_string()),
@@ -1459,7 +1459,7 @@ mod tests {
 
         dir.append_idle_subscription(
             "target-session",
-            &traits::live_sessions::IdleNotificationRequest {
+            &platform_api::live_sessions::IdleNotificationRequest {
                 from: "lead".to_string(),
                 from_session_id: "subscriber-session".to_string(),
                 summary: None,

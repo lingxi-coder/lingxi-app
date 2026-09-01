@@ -22,7 +22,7 @@ use session::jsonl::MIN_COMPACT_FILE_BYTES;
 use session::TRANSCRIPT_LOCAL_GC_ENV;
 use std::sync::Arc;
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 

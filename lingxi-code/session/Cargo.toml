@@ -10,8 +10,8 @@ license.workspace = true
 # (`branding::PRODUCT_NAME`, `branding::DOT_DIR`).
 branding.workspace = true
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
-engine = { path = "../engine" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true

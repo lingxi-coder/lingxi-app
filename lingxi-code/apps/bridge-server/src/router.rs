@@ -11,8 +11,8 @@
 //! non-turn/non-permission command to — exactly the way
 //! [`crate::server::TurnDriver`] abstracts the turn entry. The production server
 //! binds an [`EngineCommandRouter`] wrapping the real engine handles
-//! ([`traits::OrchestratorHandle`], [`traits::AuthHandle`],
-//! [`traits::task_registry::TaskRegistryHandle`], and the slash dispatcher); a
+//! ([`platform_api::OrchestratorHandle`], [`platform_api::AuthHandle`],
+//! [`platform_api::task_registry::TaskRegistryHandle`], and the slash dispatcher); a
 //! test binds the SAME router over the engine's `MockOrchestratorHandle` / mock
 //! task + auth handles, so the routing-and-lowering path under test is the
 //! production one (no test-only router shim).
@@ -89,10 +89,10 @@ use command_api::model::CommandSource;
 use command_api::registry::CommandRegistry;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use traits::auth::{AuthHandle, LoginInfo};
-use traits::orchestrator::OrchestratorHandle;
-use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
-use traits::SlashCommandDispatcher;
+use platform_api::auth::{AuthHandle, LoginInfo};
+use platform_api::orchestrator::OrchestratorHandle;
+use platform_api::task_registry::{TaskListFilter, TaskRegistryHandle};
+use platform_api::SlashCommandDispatcher;
 
 use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::{
@@ -112,14 +112,14 @@ const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
 pub struct SessionStoreContext {
     lingxi_home: PathBuf,
     session_cwd: String,
-    fs: Arc<dyn traits::FileSystem>,
+    fs: Arc<dyn platform_api::FileSystem>,
 }
 
 impl SessionStoreContext {
     /// Build a session-store context rooted at the desktop config directory and
     /// the connection's project cwd.
     #[must_use]
-    pub fn new(lingxi_home: PathBuf, session_cwd: String, fs: Arc<dyn traits::FileSystem>) -> Self {
+    pub fn new(lingxi_home: PathBuf, session_cwd: String, fs: Arc<dyn platform_api::FileSystem>) -> Self {
         Self {
             lingxi_home,
             session_cwd,
@@ -162,7 +162,7 @@ pub trait CommandRouter: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct SlashDispatchOutcome {
     /// The single engine dispatch result for the submitted command.
-    pub result: traits::SlashDispatchResult,
+    pub result: platform_api::SlashDispatchResult,
     /// Full authoritative state/catalog events produced by that dispatch.
     pub authority_events: Vec<ClientEvent>,
 }
@@ -915,7 +915,7 @@ impl EngineCommandRouter {
         let snapshot = self.handle.get_status_snapshot().await;
         SlashAuthoritySnapshot {
             session_id: self.handle.current_session_id().await.to_string(),
-            model: traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            model: platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
             permission_mode: self.handle.permission_mode().await,
             auth: lower_auth_state(self.auth.current_user().await),
             catalog: self.slash_command_catalog().await,
@@ -972,19 +972,19 @@ impl EngineCommandRouter {
                 let available = self.handle.list_available_models().await;
                 let listings = self.handle.list_model_listings().await;
                 let snapshot = self.handle.get_status_snapshot().await;
-                let curated = traits::curated_model_listings(
+                let curated = platform_api::curated_model_listings(
                     &listings,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let models = traits::curated_model_refs(
+                let models = platform_api::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
                 let current =
-                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 sink.emit(ClientEvent::ModelList {
                     models,
                     current,
@@ -1264,7 +1264,7 @@ impl CommandRouter for EngineCommandRouter {
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
                         let active = self.handle.permission_mode().await.unwrap_or(mode);
-                        traits::live_sessions::set_process_permission_mode(
+                        platform_api::live_sessions::set_process_permission_mode(
                             &active,
                             active == "bypassPermissions",
                         );
@@ -1285,25 +1285,25 @@ impl CommandRouter for EngineCommandRouter {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
-                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
                 match self
                     .handle
                     .switch_model(&model_id, profile.as_deref())
                     .await
                 {
                     Ok(()) => {
-                        let selected = traits::qualified_model_ref(&model_id, profile.as_deref());
+                        let selected = platform_api::qualified_model_ref(&model_id, profile.as_deref());
                         sink.emit(ClientEvent::ModelChanged { model: selected })
                             .await;
                         if let Some(controls) = self.handle.conversation_controls().await {
                             if controls.requested_reasoning_selection
-                                != traits::ReasoningSelection::Automatic
+                                != platform_api::ReasoningSelection::Automatic
                                 && controls.requested_reasoning_selection
                                     != controls.effective_reasoning_selection
                             {
                                 let _ = self
                                     .handle
-                                    .set_reasoning_selection(traits::ReasoningSelection::Automatic)
+                                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
                                     .await;
                             }
                         }
@@ -1376,14 +1376,14 @@ impl CommandRouter for EngineCommandRouter {
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
                     let before = self.capture_slash_authority().await;
                     let (display, is_error) = match dispatcher.dispatch(&raw).await {
-                        traits::SlashDispatchResult::Handled { display } => (display, false),
-                        traits::SlashDispatchResult::Unknown { display, .. } => (display, true),
+                        platform_api::SlashDispatchResult::Handled { display } => (display, false),
+                        platform_api::SlashDispatchResult::Unknown { display, .. } => (display, true),
                         // A `type: "prompt"` command reached the display-only
                         // fallback (the connection should have intercepted it via
                         // `dispatch_slash` and run it as a turn). Surface the
                         // expanded prompt so nothing is silently dropped.
-                        traits::SlashDispatchResult::RunAsTurn { prompt } => (prompt, false),
-                        traits::SlashDispatchResult::NotASlashCommand => {
+                        platform_api::SlashDispatchResult::RunAsTurn { prompt } => (prompt, false),
+                        platform_api::SlashDispatchResult::NotASlashCommand => {
                             (format!("not a slash command: {raw}"), true)
                         }
                     };
@@ -1553,7 +1553,7 @@ impl CommandRouter for EngineCommandRouter {
 
                 if let Some(model) = model {
                     let listings = self.handle.list_model_listings().await;
-                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                    let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
                     if let Err(error) = self
                         .handle
                         .switch_model(&model_id, profile.as_deref())
@@ -1661,7 +1661,7 @@ impl CommandRouter for EngineCommandRouter {
                             replayed.state.history,
                             replayed.last_message_uuid.map(|value| value.to_string()),
                             replayed.state.active_goal.clone().map(|goal| {
-                                traits::ActiveGoalSnapshot {
+                                platform_api::ActiveGoalSnapshot {
                                     condition: goal.condition,
                                     set_at: goal.set_at,
                                     last_reason: goal.last_reason,
@@ -1700,7 +1700,7 @@ impl CommandRouter for EngineCommandRouter {
                 let status = self.handle.get_status_snapshot().await;
                 if !status.model.is_empty() {
                     sink.emit(ClientEvent::ModelChanged {
-                        model: traits::qualified_model_ref(
+                        model: platform_api::qualified_model_ref(
                             &status.model,
                             status.model_profile.as_deref(),
                         ),
@@ -1830,28 +1830,28 @@ impl CommandRouter for EngineCommandRouter {
     }
 }
 
-fn lower_reasoning_selection(selection: &traits::ReasoningSelection) -> ReasoningSelectionDto {
+fn lower_reasoning_selection(selection: &platform_api::ReasoningSelection) -> ReasoningSelectionDto {
     match selection {
-        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
-        traits::ReasoningSelection::TokenBudget { tokens } => {
+        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
 }
 
-fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> traits::ReasoningSelection {
+fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> platform_api::ReasoningSelection {
     match selection {
-        ReasoningSelectionDto::Automatic => traits::ReasoningSelection::Automatic,
-        ReasoningSelectionDto::Disabled => traits::ReasoningSelection::Disabled,
-        ReasoningSelectionDto::Enabled => traits::ReasoningSelection::Enabled,
-        ReasoningSelectionDto::Level { id } => traits::ReasoningSelection::Level { id },
+        ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
+        ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
+        ReasoningSelectionDto::Enabled => platform_api::ReasoningSelection::Enabled,
+        ReasoningSelectionDto::Level { id } => platform_api::ReasoningSelection::Level { id },
         ReasoningSelectionDto::TokenBudget { tokens } => {
-            traits::ReasoningSelection::TokenBudget { tokens }
+            platform_api::ReasoningSelection::TokenBudget { tokens }
         }
-        _ => traits::ReasoningSelection::Automatic,
+        _ => platform_api::ReasoningSelection::Automatic,
     }
 }
 

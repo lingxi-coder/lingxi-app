@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use traits::{
+use platform_api::{
     CalendarProvider, CameraControl, Clipboard, ContactsProvider, DeepLinkOpener,
     DeviceStatusProvider, HapticService, LocationProvider, NotificationService, SharingService,
     SpeechToText, TextToSpeech, VoiceRecorder,
@@ -138,7 +138,7 @@ impl SharedDeviceCapabilities {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use traits::{CameraError, CapturePhotoOpts, CapturedImage};
+    use platform_api::{CameraError, CapturePhotoOpts, CapturedImage};
 
     struct FakeCamera;
 

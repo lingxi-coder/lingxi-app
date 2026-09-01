@@ -21,7 +21,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
-use traits::{FileSystem, FsError};
+use platform_api::{FileSystem, FsError};
 
 /// Build the byte-locked `agent-color` JSONL entry value for `session_id` /
 /// `color`. Pure (no I/O) so the wire shape is unit-testable in isolation —

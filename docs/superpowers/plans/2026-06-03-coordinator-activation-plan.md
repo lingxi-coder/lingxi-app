@@ -57,7 +57,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 | T14 | Separate teammate `StateMachinePool` + pool-starvation regression | engine-desktop, agent | 1 | T13 |
 | T15 | ANTI-HOLLOW end-to-end engine integration (active_workers>0 → ClientEvent) | engine-desktop | 1 | T09, T13, T14 |
 | T16 | Workspace regression + version-guard/contract snapshot gate | workspace | 1 | T10, T15 |
-| T17 | `traits::team_registry::TeamRegistryHandle` + coordinator impl | traits, coordinator | 2 | T02 |
+| T17 | `platform_api::team_registry::TeamRegistryHandle` + coordinator impl | traits, coordinator | 2 | T02 |
 | T18 | Roster DTO + `ListingKindDto::Coordinator` + `lower_worker_agent` + version-guard index | client-protocol, client-adapter | 2 | T10 |
 | T19 | `EngineCommandRouter`: optional coordinator handle + `spawn_coordinator_poll` + emit_listing arm | bridge-server | 2 | T17, T18 |
 | T20 | TUI `WorkersRefreshed` live feed over `TeamRegistryHandle` + feed-slot resolution | tui | 2 | T17, T18 |
@@ -122,7 +122,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 - **Goal:** Change the factory so it returns ONLY `TeamCreate` + `TeamDelete` (the two carrying net-new behavior) and threads the new dependencies. Today `internal_tools.rs:22` takes only `Arc<TeamRegistry>` and returns all four.
 - **Files:** `coordinator/src/internal_tools.rs`.
 - **Approach:**
-  - New signature: `pub fn coordinator_internal_tools(team: Arc<TeamRegistry>, mode: Arc<CoordinatorMode>, spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam>) -> Vec<Arc<dyn Tool>>` (the `TeamSpawnSeam` trait lands in T04).
+  - New signature: `pub fn coordinator_internal_tools(team: Arc<TeamRegistry>, mode: Arc<CoordinatorMode>, spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>) -> Vec<Arc<dyn Tool>>` (the `TeamSpawnSeam` trait lands in T04).
   - Return `vec![TeamCreateTool::new(team.clone(), mode.clone(), spawn_seam.clone()), TeamDeleteTool::new(team, mode, spawn_seam)]`.
   - **Drop** `SendMessageTool`/`SyntheticOutputTool` from the returned vec (satisfied by the in-tree builtins once the mailbox router is wired — see T13). Leave the tool source files in place (not deleted) but no longer assembled here; update the module doc comment accordingly.
 - **Tests-first** (`coordinator/src/internal_tools.rs` tests):
@@ -135,7 +135,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 ### T04 — `TeamSpawnSeam` trait + `TaskRegistry` impl
 
 - **Goal:** Give `TeamCreateTool` a typed spawn seam to start a real `InProcessTeammate` without a coordinator→tasks dependency cycle (the existing `TaskRegistryHandle::create` cannot carry `agent_id`/`name` — it builds a placeholder with `AgentId::nil()` + empty name at `tasks/src/handle.rs:118-121`). Mirror the `TaskRegistryHandle` decoupling pattern.
-- **Files:** `traits/src/team_spawn.rs` (NEW narrow trait), `traits/src/lib.rs` (module export), `tasks/src/registry.rs` or `tasks/src/handle.rs` (impl on `TaskRegistry`).
+- **Files:** `platform-api/src/team_spawn.rs` (NEW narrow trait), `platform-api/src/lib.rs` (module export), `tasks/src/registry.rs` or `tasks/src/handle.rs` (impl on `TaskRegistry`).
 - **Approach:**
   - Define `#[async_trait] pub trait TeamSpawnSeam: Send + Sync { async fn spawn_teammate(&self, agent_id: protocol::AgentId, name: String, description: String) -> Result<String, TeamSpawnError>; async fn kill(&self, task_id: &str) -> Result<(), TeamSpawnError>; }` returning the handler-generated `task_id`.
   - Impl `TeamSpawnSeam for tasks::registry::TaskRegistry` by calling the new `TaskRegistry::spawn(TaskType::InProcessTeammate, TaskSpawnInput::InProcessTeammate{ agent_id, name }, description)` (T01) and `kill`.
@@ -143,7 +143,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 - **Tests-first:**
   - `traits` compile-only doc test that the trait is object-safe (`Arc<dyn TeamSpawnSeam>`).
   - `tasks/tests` (or registry tests): `team_spawn_seam_spawns_real_teammate`: with an `InProcessTeammate` handler registered, `TeamSpawnSeam::spawn_teammate` returns a non-empty handler-generated id and the handler ran (reuse the T01 fake/recording handler).
-- **Verify:** `cargo test -p tasks team_spawn` && `cargo test -p traits team_spawn`
+- **Verify:** `cargo test -p tasks team_spawn` && `cargo test -p platform-api team_spawn`
 - **depends_on:** T01
 
 ---
@@ -210,11 +210,11 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 
 ### T08 — `OutputStream::emit_coordinator_status` default no-op (trait)
 
-- **Goal:** Add the additive PUSH hook to the orchestrator-facing trait, exactly alongside the verified default-no-op `emit_thinking` (`traits/src/orchestrator.rs:550`) / `emit_usage` (`:565`).
-- **Files:** `traits/src/orchestrator.rs`.
+- **Goal:** Add the additive PUSH hook to the orchestrator-facing trait, exactly alongside the verified default-no-op `emit_thinking` (`platform-api/src/orchestrator.rs:550`) / `emit_usage` (`:565`).
+- **Files:** `platform-api/src/orchestrator.rs`.
 - **Approach:** `async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}` (default no-op so every existing `OutputStream` impl — TUI/CLI/Mock — keeps compiling unchanged).
 - **Tests-first:** compile-gate is the test; add a tiny unit asserting the default does nothing for a unit struct impl (no panic, returns).
-- **Verify:** `cargo test -p traits orchestrator`
+- **Verify:** `cargo test -p platform-api orchestrator`
 - **depends_on:** —
 
 ---
@@ -308,7 +308,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
      ```
      (`subagent_api` exists; `budget_enforcer`/`subagent_spawner` exist at `:445/:455`.) **Definition resolver:** rely on the handler default `DefaultTeammateDefinition` (permissive) — state this explicitly; a catalog-backed resolver returning `None` for the team-lead name would silently fail every spawn at `in_process_teammate.rs:293`. Do NOT attach `.with_definitions` this pass.
   4. **Spawn seam:** after `task_registry = Arc::new(task_registry_inner)` (`:608`), build `let spawn_seam: Arc<dyn TeamSpawnSeam> = task_registry.clone();` (T04 impl).
-  5. **Mailbox router:** set `mailbox_router: Some(team.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)` in `BuiltinToolContext` (was `None` at `:636`) — `MailboxRouter` already impls the trait (`coordinator/src/handle.rs:30`), so the builtin `SendMessage` (`tools/ui/src/send_message.rs`) and coordinator routing share the SAME mailboxes.
+  5. **Mailbox router:** set `mailbox_router: Some(team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>)` in `BuiltinToolContext` (was `None` at `:636`) — `MailboxRouter` already impls the trait (`coordinator/src/handle.rs:30`), so the builtin `SendMessage` (`tools/ui/src/send_message.rs`) and coordinator routing share the SAME mailboxes.
   6. **Tool registry:** call `desktop_tool_registry(tool_ctx, coordinator_wiring)` (T12) passing `Some(team)`/`Some(spawn_seam)`/`mode` when `config.session_started_as_coordinator`, else `None`/`None`/`mode`.
   7. **Activate mode at build:** if `config.session_started_as_coordinator` → `mode.enter()` and set `CoordinatorMode.session_started_as_coordinator = true` (note the field is `pub` and constructed via `default()` then mutated, or via a constructor — confirm `mode.rs:11-15`).
   8. **Surface on runtime:** set `DesktopRuntime { coordinator: team, coordinator_mode: mode, .. }`.
@@ -372,13 +372,13 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 
 > The PUSH scalar alone (T01–T16) satisfies "active_workers>0 fed live to all clients, reserved→live". PHASE 2 is required ONLY for per-worker TUI `WorkerRow` chrome.
 
-### T17 — `traits::team_registry::TeamRegistryHandle` + coordinator impl
+### T17 — `platform_api::team_registry::TeamRegistryHandle` + coordinator impl
 
-- **Goal:** Narrow trait so the bridge/TUI PULL path reads workers without depending on the concrete `coordinator` crate (mirrors `traits::task_registry::TaskRegistryHandle`).
-- **Files:** `traits/src/team_registry.rs` (NEW), `traits/src/lib.rs` (export), `coordinator/src/handle.rs` (impl for `TeamRegistry`).
+- **Goal:** Narrow trait so the bridge/TUI PULL path reads workers without depending on the concrete `coordinator` crate (mirrors `platform_api::task_registry::TaskRegistryHandle`).
+- **Files:** `platform-api/src/team_registry.rs` (NEW), `platform-api/src/lib.rs` (export), `coordinator/src/handle.rs` (impl for `TeamRegistry`).
 - **Approach:** `#[async_trait] pub trait TeamRegistryHandle: Send + Sync { async fn list_workers(&self) -> Vec<WorkerInfo>; async fn team_name(&self) -> Option<String>; }` with a `WorkerInfo` POD `{agent_id, agent_type, name, status}` in `traits`. Impl on `coordinator::TeamRegistry` lowering `WorkerAgent`→`WorkerInfo`.
 - **Tests-first:** `team_registry_handle_lists_workers` in `coordinator` (spawn 2, assert 2 `WorkerInfo`s with mapped status).
-- **Verify:** `cargo test -p coordinator team_registry_handle` && `cargo test -p traits team_registry`
+- **Verify:** `cargo test -p coordinator team_registry_handle` && `cargo test -p platform-api team_registry`
 - **depends_on:** T02
 
 ### T18 — Roster DTO + `ListingKindDto::Coordinator` + `lower_worker_agent` + version-guard index
@@ -397,7 +397,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 
 - **Goal:** PULL roster on the bridge, mirroring the EXISTING task PULL pattern (NOT `OrchestratorHandle` — it holds no `TeamRegistry`; that was the wrong seam in the original design).
 - **Files:** `apps/bridge-server/src/router.rs`.
-- **Approach:** add optional `coordinator: Option<Arc<dyn traits::team_registry::TeamRegistryHandle>>` to `EngineCommandRouter::new` (`:125`); add a `ListingKindDto::Coordinator` arm in `emit_listing` (`:186`/`:235`); add `spawn_coordinator_poll(sink, interval)` mirroring `spawn_task_poll` (`:158`) + `emit_task_rows` (`:259`/`:235`) emitting one roster DTO per worker. Like `spawn_task_poll`, it needs a deliberate connection-lifecycle start point — note it is NOT auto-started in prod today either.
+- **Approach:** add optional `coordinator: Option<Arc<dyn platform_api::team_registry::TeamRegistryHandle>>` to `EngineCommandRouter::new` (`:125`); add a `ListingKindDto::Coordinator` arm in `emit_listing` (`:186`/`:235`); add `spawn_coordinator_poll(sink, interval)` mirroring `spawn_task_poll` (`:158`) + `emit_task_rows` (`:259`/`:235`) emitting one roster DTO per worker. Like `spawn_task_poll`, it needs a deliberate connection-lifecycle start point — note it is NOT auto-started in prod today either.
 - **Tests-first:** `spawn_coordinator_poll_emits_worker_rows` + `emit_listing_coordinator_arm` (mirror the `spawn_task_poll` test; mock handle returning 2 workers → 2 roster DTOs on the sink).
 - **Verify:** `cargo test -p bridge-server coordinator_poll`
 - **depends_on:** T17, T18
@@ -414,7 +414,7 @@ Make coordinator multi-agent mode **actually enterable and observable in the pro
 ### T21 — Optional `StatusSnapshot.active_workers` surfacing on `/status`
 
 - **Goal:** Surface the count on `/status` (adding-optional-field is compatible — `version_guard_test.rs:603`).
-- **Files:** `traits/src/orchestrator.rs` (`StatusSnapshot`), `client-protocol/src/listings.rs` (`StatusSnapshotDto`), `client-adapter/src/lowering.rs` (`lower_status_snapshot`).
+- **Files:** `platform-api/src/orchestrator.rs` (`StatusSnapshot`), `client-protocol/src/listings.rs` (`StatusSnapshotDto`), `client-adapter/src/lowering.rs` (`lower_status_snapshot`).
 - **Approach:** append optional `active_workers: u32` (mirrors the optional `status_line` append); lower it through; re-bless snapshots with `BLESS=1`.
 - **Tests-first:** `status_snapshot_carries_active_workers_roundtrip` + classify compatible.
 - **Verify:** `BLESS=1 cargo test -p client-protocol status_snapshot` then `cargo test -p client-protocol status_snapshot`

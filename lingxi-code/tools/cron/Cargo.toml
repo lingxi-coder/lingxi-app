@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 branding.workspace = true
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
@@ -30,7 +30,7 @@ cron = { path = "../../cron" }
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

@@ -5,7 +5,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tool_api::{SessionCwd, ToolRegistry};
-use traits::{
+use platform_api::{
     RegisterRepoRootRequest, RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader,
 };
 

@@ -83,7 +83,7 @@ cli = [
 [dependencies]
 engine-mobile = { path = "../engine-mobile" }
 skill-api = { path = "../../skill-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 branding.workspace = true
 thiserror.workspace = true

@@ -157,27 +157,27 @@ impl ConversationOrchestrator {
     pub(crate) async fn generate_recap_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::RecapOutcome, traits::HandleError> {
+    ) -> Result<platform_api::RecapOutcome, platform_api::HandleError> {
         let runner = self
             .recap_runner
             .clone()
-            .ok_or_else(|| traits::HandleError::ActionFailed("recap unavailable".into()))?;
+            .ok_or_else(|| platform_api::HandleError::ActionFailed("recap unavailable".into()))?;
         let params = self
             .model_runtime
             .cache_safe_slot
             .as_ref()
-            .ok_or_else(|| traits::HandleError::ActionFailed("recap: no cache-safe slot".into()))?
+            .ok_or_else(|| platform_api::HandleError::ActionFailed("recap: no cache-safe slot".into()))?
             .get_last()
             .await
             .ok_or_else(|| {
-                traits::HandleError::ActionFailed("recap: no cache-safe params".into())
+                platform_api::HandleError::ActionFailed("recap: no cache-safe params".into())
             })?;
 
         // Fast-path cancel (deterministic even when the runner completes
         // synchronously, e.g. the stub side-query path), mirroring
         // `force_compact_with_cancel`.
         if cancel.is_cancelled() {
-            return Ok(traits::RecapOutcome::Cancelled);
+            return Ok(platform_api::RecapOutcome::Cancelled);
         }
 
         let req = sidequery::ForkedAgentRequest {
@@ -193,10 +193,10 @@ impl ConversationOrchestrator {
 
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Ok(traits::RecapOutcome::Cancelled),
+            () = cancel.cancelled() => Ok(platform_api::RecapOutcome::Cancelled),
             r = runner.run(req) => match r {
-                Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
-                Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+                Ok(res) => Ok(platform_api::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(platform_api::HandleError::ActionFailed(e.to_string())),
             }
         }
     }
@@ -209,16 +209,16 @@ impl ConversationOrchestrator {
     pub(crate) async fn generate_session_name_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<String>, traits::HandleError> {
+    ) -> Result<Option<String>, platform_api::HandleError> {
         let runner = self.recap_runner.clone().ok_or_else(|| {
-            traits::HandleError::ActionFailed("session name generation unavailable".into())
+            platform_api::HandleError::ActionFailed("session name generation unavailable".into())
         })?;
         let Some(params) = self
             .model_runtime
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                traits::HandleError::ActionFailed("session name generation unavailable".into())
+                platform_api::HandleError::ActionFailed("session name generation unavailable".into())
             })?
             .get_last()
             .await
@@ -245,10 +245,10 @@ impl ConversationOrchestrator {
             result = runner.run(req) => match result {
                 Ok(result) => parse_generated_session_name(&result.final_text)
                     .map(Some)
-                    .ok_or_else(|| traits::HandleError::ActionFailed(
+                    .ok_or_else(|| platform_api::HandleError::ActionFailed(
                         "session name response did not contain a non-empty name".into()
                     )),
-                Err(error) => Err(traits::HandleError::ActionFailed(error.to_string())),
+                Err(error) => Err(platform_api::HandleError::ActionFailed(error.to_string())),
             }
         }
     }
@@ -276,28 +276,28 @@ impl ConversationOrchestrator {
         &self,
         question: &str,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::RecapOutcome, traits::HandleError> {
+    ) -> Result<platform_api::RecapOutcome, platform_api::HandleError> {
         let runner = self
             .recap_runner
             .clone()
-            .ok_or_else(|| traits::HandleError::ActionFailed("side question unavailable".into()))?;
+            .ok_or_else(|| platform_api::HandleError::ActionFailed("side question unavailable".into()))?;
         let params = self
             .model_runtime
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                traits::HandleError::ActionFailed("side question: no cache-safe slot".into())
+                platform_api::HandleError::ActionFailed("side question: no cache-safe slot".into())
             })?
             .get_last()
             .await
             .ok_or_else(|| {
-                traits::HandleError::ActionFailed(
+                platform_api::HandleError::ActionFailed(
                     "side question: no context yet — send a message first".into(),
                 )
             })?;
 
         if cancel.is_cancelled() {
-            return Ok(traits::RecapOutcome::Cancelled);
+            return Ok(platform_api::RecapOutcome::Cancelled);
         }
 
         let wrapped = format!("{}\n\n{}", Self::SIDE_QUESTION_SYSTEM_REMINDER, question);
@@ -313,10 +313,10 @@ impl ConversationOrchestrator {
 
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Ok(traits::RecapOutcome::Cancelled),
+            () = cancel.cancelled() => Ok(platform_api::RecapOutcome::Cancelled),
             r = runner.run(req) => match r {
-                Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
-                Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+                Ok(res) => Ok(platform_api::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(platform_api::HandleError::ActionFailed(e.to_string())),
             }
         }
     }
@@ -400,7 +400,7 @@ impl ConversationOrchestrator {
 
     /// Task 8 (llm-client future-work batch 3): forward the API client's
     /// latest unified rate-limit header snapshot to
-    /// [`traits::OutputStream::emit_rate_limit`], emitting ONLY when it
+    /// [`platform_api::OutputStream::emit_rate_limit`], emitting ONLY when it
     /// differs from the last emitted value (emit-on-change dedup against
     /// [`Self::last_emitted_rate_limit`]).
     ///
@@ -444,7 +444,7 @@ impl ConversationOrchestrator {
 
     /// Task 2 (llm-client future-work batch 5): forward the API client's
     /// latest RAW per-window utilization snapshot to
-    /// [`traits::OutputStream::emit_raw_utilization`] when it CHANGED since
+    /// [`platform_api::OutputStream::emit_raw_utilization`] when it CHANGED since
     /// the last emit. The empty snapshot is significant: it clears a
     /// previously-rendered utilization window in downstream clients.
     ///
@@ -539,7 +539,7 @@ impl ConversationOrchestrator {
     /// Returns `None` if no tracker was attached. Exposed so future M7
     /// renderers (per-model breakdown view) can access
     /// `CostState.per_model_usage` without going through the leaf-friendly
-    /// [`traits::CostSnapshot`] projection. (M6-06)
+    /// [`platform_api::CostSnapshot`] projection. (M6-06)
     pub async fn cost_state(&self) -> Option<cost::CostState> {
         let t = self.model_runtime.cost_tracker.as_ref()?;
         Some(t.snapshot().await)
@@ -557,18 +557,18 @@ impl ConversationOrchestrator {
     }
 
     /// Project the wired [`cost::CostTracker`] state onto the
-    /// leaf-friendly [`traits::CostSnapshot`]. Used by both the
+    /// leaf-friendly [`platform_api::CostSnapshot`]. Used by both the
     /// trait method `snapshot_cost` and the per-turn end-of-turn emitter
     /// (`OutputStream::emit_end_turn`). (M6-06)
     ///
     /// If no tracker is wired, returns a zero-valued snapshot keyed to
     /// the current session id (backward-compat shape).
-    pub async fn snapshot_cost_real(&self) -> traits::CostSnapshot {
+    pub async fn snapshot_cost_real(&self) -> platform_api::CostSnapshot {
         let session_id = self.session.lock().await.session_id;
         let Some(tracker) = self.model_runtime.cost_tracker.as_ref() else {
-            return traits::CostSnapshot {
+            return platform_api::CostSnapshot {
                 session_id,
-                ..traits::CostSnapshot::default()
+                ..platform_api::CostSnapshot::default()
             };
         };
         let state = tracker.snapshot().await;
@@ -596,7 +596,7 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
-        traits::CostSnapshot {
+        platform_api::CostSnapshot {
             session_id,
             total_nano_usd: state.total_nano_usd,
             total_tokens: input_tokens.saturating_add(output_tokens),
@@ -613,7 +613,7 @@ impl ConversationOrchestrator {
             by_model: state
                 .per_model_usage
                 .values()
-                .map(|mu| traits::orchestrator::ModelUsageRow {
+                .map(|mu| platform_api::orchestrator::ModelUsageRow {
                     model: mu.model_ref.model.clone(),
                     // (cc 2.1.218) `n.provider=n_(r)` — the serving provider,
                     // pre-stringified so the transport row stays cost-free.
@@ -626,7 +626,7 @@ impl ConversationOrchestrator {
                 })
                 .collect(),
             unknown_models: !state.unpriced_models.is_empty(),
-            current_usage: state.last_usage.map(|usage| traits::CurrentUsageSnapshot {
+            current_usage: state.last_usage.map(|usage| platform_api::CurrentUsageSnapshot {
                 input_tokens: usage.tokens.input,
                 output_tokens: usage.tokens.output,
                 cache_read_input_tokens: state.last_cache_read_input_tokens,
@@ -1345,8 +1345,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = effort
             .clone()
-            .map(|id| traits::ReasoningSelection::Level { id })
-            .unwrap_or(traits::ReasoningSelection::Automatic);
+            .map(|id| platform_api::ReasoningSelection::Level { id })
+            .unwrap_or(platform_api::ReasoningSelection::Automatic);
         self.apply_effort(effort);
     }
 
@@ -1368,8 +1368,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         let selection = effort
             .clone()
-            .map(|id| traits::ReasoningSelection::Level { id })
-            .unwrap_or(traits::ReasoningSelection::Automatic);
+            .map(|id| platform_api::ReasoningSelection::Level { id })
+            .unwrap_or(platform_api::ReasoningSelection::Automatic);
         let (validated, thinking, provider_effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         *self
@@ -1393,7 +1393,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: traits::ReasoningSelection,
+        selection: platform_api::ReasoningSelection,
     ) {
         if self
             .model_runtime
@@ -1428,7 +1428,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     #[must_use]
-    pub fn current_reasoning_selection(&self) -> traits::ReasoningSelection {
+    pub fn current_reasoning_selection(&self) -> platform_api::ReasoningSelection {
         self.model_runtime
             .current_reasoning_selection
             .read()
@@ -1445,7 +1445,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-    ) -> traits::ReasoningControlSpec {
+    ) -> platform_api::ReasoningControlSpec {
         let mut matches = self
             .api
             .list_model_listings()
@@ -1464,9 +1464,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // arbitrary or custom ids remain Auto-only instead of inheriting
         // Anthropic controls by name.
         let inferred_provider = provider_id.or_else(|| {
-            traits::model_capabilities::has_capability(
+            platform_api::model_capabilities::has_capability(
                 model,
-                traits::model_capabilities::ModelCapability::Effort,
+                platform_api::model_capabilities::ModelCapability::Effort,
             )
             .then_some("builtin")
         });
@@ -1503,7 +1503,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 llm_client::ProtocolFamily::OpenAiChat,
                 "https://openrouter.ai/api/v1",
             ),
-            _ => return traits::reasoning_control_spec_for_model(model, inferred_provider),
+            _ => return platform_api::reasoning_control_spec_for_model(model, inferred_provider),
         };
 
         let raw = llm_client::reasoning_controls::reasoning_control_spec(
@@ -1519,19 +1519,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .as_ref()
             .map(|selection| match selection {
                 llm_client::reasoning_controls::ReasoningSelection::Automatic => {
-                    traits::ReasoningSelection::Automatic
+                    platform_api::ReasoningSelection::Automatic
                 }
                 llm_client::reasoning_controls::ReasoningSelection::Disabled => {
-                    traits::ReasoningSelection::Disabled
+                    platform_api::ReasoningSelection::Disabled
                 }
                 llm_client::reasoning_controls::ReasoningSelection::Enabled => {
-                    traits::ReasoningSelection::Enabled
+                    platform_api::ReasoningSelection::Enabled
                 }
                 llm_client::reasoning_controls::ReasoningSelection::Level(id) => {
-                    traits::ReasoningSelection::Level { id: id.clone() }
+                    platform_api::ReasoningSelection::Level { id: id.clone() }
                 }
                 llm_client::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
-                    traits::ReasoningSelection::TokenBudget {
+                    platform_api::ReasoningSelection::TokenBudget {
                         tokens: u64::from(*tokens),
                     }
                 }
@@ -1541,37 +1541,37 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if let Some(mandatory) = &mandatory {
             available.push(mandatory.clone());
         } else {
-            available.push(traits::ReasoningSelection::Automatic);
+            available.push(platform_api::ReasoningSelection::Automatic);
             if raw.can_disable {
-                available.push(traits::ReasoningSelection::Disabled);
+                available.push(platform_api::ReasoningSelection::Disabled);
             }
             if raw.can_enable {
-                available.push(traits::ReasoningSelection::Enabled);
+                available.push(platform_api::ReasoningSelection::Enabled);
             }
             available.extend(
                 raw.levels
                     .iter()
                     .cloned()
-                    .map(|id| traits::ReasoningSelection::Level { id }),
+                    .map(|id| platform_api::ReasoningSelection::Level { id }),
             );
         }
 
         let auto_only = available.len() == 1
             && matches!(
                 available.first(),
-                Some(traits::ReasoningSelection::Automatic)
+                Some(platform_api::ReasoningSelection::Automatic)
             )
             && raw.token_budget.is_none();
-        traits::ReasoningControlSpec {
+        platform_api::ReasoningControlSpec {
             available,
             selections_persistable: mandatory.is_none(),
-            budget_range: raw.token_budget.map(|range| traits::ReasoningBudgetRange {
+            budget_range: raw.token_budget.map(|range| platform_api::ReasoningBudgetRange {
                 min_tokens: range.min,
                 max_tokens: range.max,
                 supports_dynamic: false,
                 supports_disabled: raw.can_disable,
             }),
-            provider_default: mandatory.unwrap_or(traits::ReasoningSelection::Automatic),
+            provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
             forced: raw.mandatory_selection.is_some(),
             modifiable: raw.mandatory_selection.is_none() && !auto_only,
             disabled_reason: if raw.mandatory_selection.is_some() {
@@ -1586,14 +1586,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     fn validate_reasoning_selection(
         &self,
-        selection: &traits::ReasoningSelection,
+        selection: &platform_api::ReasoningSelection,
         model: &str,
         provider_id: Option<&str>,
-    ) -> traits::ReasoningSelection {
+    ) -> platform_api::ReasoningSelection {
         let spec = self.reasoning_spec_for_model(model, provider_id);
         let supported = match selection {
-            traits::ReasoningSelection::Automatic => true,
-            traits::ReasoningSelection::TokenBudget { tokens } => {
+            platform_api::ReasoningSelection::Automatic => true,
+            platform_api::ReasoningSelection::TokenBudget { tokens } => {
                 spec.budget_range.as_ref().is_some_and(|range| {
                     (*tokens >= u64::from(range.min_tokens)
                         && *tokens <= u64::from(range.max_tokens))
@@ -1607,7 +1607,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         } else if supported {
             selection.clone()
         } else {
-            traits::ReasoningSelection::Automatic
+            platform_api::ReasoningSelection::Automatic
         }
     }
 
@@ -1615,9 +1615,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: &traits::ReasoningSelection,
+        selection: &platform_api::ReasoningSelection,
     ) -> (
-        traits::ReasoningSelection,
+        platform_api::ReasoningSelection,
         llm_client::model::thinking::ThinkingConfig,
         Option<serde_json::Value>,
         Option<String>,
@@ -1627,9 +1627,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
         let legacy = |id: &str| Some(id.to_string());
         let provider_id = provider_id.or_else(|| {
-            traits::model_capabilities::has_capability(
+            platform_api::model_capabilities::has_capability(
                 model,
-                traits::model_capabilities::ModelCapability::Effort,
+                platform_api::model_capabilities::ModelCapability::Effort,
             )
             .then_some("builtin")
         });
@@ -1638,13 +1638,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         match provider_id {
             "anthropic" | "builtin" => match &validated {
-                traits::ReasoningSelection::Automatic => {
+                platform_api::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                traits::ReasoningSelection::Disabled => {
+                platform_api::ReasoningSelection::Disabled => {
                     (validated, ThinkingConfig::Disabled, None, None)
                 }
-                traits::ReasoningSelection::TokenBudget { tokens } => (
+                platform_api::ReasoningSelection::TokenBudget { tokens } => (
                     validated.clone(),
                     ThinkingConfig::Enabled {
                         budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -1652,27 +1652,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     None,
                     None,
                 ),
-                traits::ReasoningSelection::Level { id } => (
+                platform_api::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                traits::ReasoningSelection::Enabled => {
+                platform_api::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "openai" | "openai-chatgpt" => match &validated {
-                traits::ReasoningSelection::Automatic => {
+                platform_api::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                traits::ReasoningSelection::Level { id } => (
+                platform_api::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                traits::ReasoningSelection::Disabled => {
+                platform_api::ReasoningSelection::Disabled => {
                     // Responses API uses the explicit `none` effort value to
                     // distinguish a user-off override from provider Auto.
                     (
@@ -1682,41 +1682,41 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         None,
                     )
                 }
-                traits::ReasoningSelection::Enabled => {
+                platform_api::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
-                traits::ReasoningSelection::TokenBudget { .. } => {
+                platform_api::ReasoningSelection::TokenBudget { .. } => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "gemini" => {
                 if model_lc.starts_with("gemini-3.") {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => {
+                        platform_api::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        traits::ReasoningSelection::Level { id } => (
+                        platform_api::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        traits::ReasoningSelection::Disabled => {
+                        platform_api::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        traits::ReasoningSelection::Enabled => {
+                        platform_api::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        traits::ReasoningSelection::TokenBudget { .. } => {
+                        platform_api::ReasoningSelection::TokenBudget { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 } else {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => {
+                        platform_api::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        traits::ReasoningSelection::TokenBudget { tokens } => (
+                        platform_api::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
                             ThinkingConfig::Enabled {
                                 budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -1724,87 +1724,87 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             None,
                             None,
                         ),
-                        traits::ReasoningSelection::Disabled => {
+                        platform_api::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        traits::ReasoningSelection::Enabled => {
+                        platform_api::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        traits::ReasoningSelection::Level { .. } => {
+                        platform_api::ReasoningSelection::Level { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 }
             }
             "deepseek" => match &validated {
-                traits::ReasoningSelection::Automatic => {
+                platform_api::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                traits::ReasoningSelection::Disabled => (
+                platform_api::ReasoningSelection::Disabled => (
                     validated,
                     ThinkingConfig::Disabled,
                     effort_level("off"),
                     None,
                 ),
-                traits::ReasoningSelection::Level { id } => (
+                platform_api::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                traits::ReasoningSelection::Enabled => {
+                platform_api::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
-                traits::ReasoningSelection::TokenBudget { .. } => {
+                platform_api::ReasoningSelection::TokenBudget { .. } => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "kimi" | "kimi-code" => {
                 if matches!(model_lc.as_str(), "kimi-k3" | "k3" | "k3-256k") {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => {
+                        platform_api::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        traits::ReasoningSelection::Level { id } => (
+                        platform_api::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        traits::ReasoningSelection::Disabled => {
+                        platform_api::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        traits::ReasoningSelection::Enabled => {
+                        platform_api::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        traits::ReasoningSelection::TokenBudget { .. } => {
+                        platform_api::ReasoningSelection::TokenBudget { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 } else {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => {
+                        platform_api::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        traits::ReasoningSelection::Disabled => (
+                        platform_api::ReasoningSelection::Disabled => (
                             validated,
                             ThinkingConfig::Disabled,
                             effort_level("off"),
                             None,
                         ),
-                        traits::ReasoningSelection::Enabled => (
+                        platform_api::ReasoningSelection::Enabled => (
                             validated,
                             ThinkingConfig::Adaptive,
                             effort_level("on"),
                             None,
                         ),
-                        traits::ReasoningSelection::Level { id } => (
+                        platform_api::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        traits::ReasoningSelection::TokenBudget { tokens } => (
+                        platform_api::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
                             ThinkingConfig::Enabled {
                                 budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -1816,7 +1816,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             }
             _ => match &validated {
-                traits::ReasoningSelection::Automatic => {
+                platform_api::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
                 _ => (validated, ThinkingConfig::Adaptive, None, None),
@@ -1828,8 +1828,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: traits::ReasoningSelection,
-    ) -> traits::ReasoningSelection {
+        selection: platform_api::ReasoningSelection,
+    ) -> platform_api::ReasoningSelection {
         self.model_runtime
             .current_effort_explicit
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1857,8 +1857,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: traits::ReasoningSelection,
-    ) -> traits::ReasoningSelection {
+        selection: platform_api::ReasoningSelection,
+    ) -> platform_api::ReasoningSelection {
         let (validated, thinking, effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         self.model_runtime
@@ -1884,7 +1884,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-    ) -> traits::ConversationControls {
+    ) -> platform_api::ConversationControls {
         let reasoning_spec = self.reasoning_spec_for_model(model, provider_id);
         let requested_reasoning = self.current_reasoning_selection();
         let effective_reasoning =
@@ -1905,16 +1905,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         .map(|mode| {
             let unavailable =
                 mode == "bypassPermissions" && !self.perms.can_request_bypass_permissions();
-            traits::PermissionModeAvailability {
+            platform_api::PermissionModeAvailability {
                 mode: mode.to_string(),
                 available: !unavailable,
                 disabled_reason: unavailable.then(|| "not_yet_available".to_string()),
             }
         })
         .collect();
-        traits::ConversationControls {
-            model_reference: traits::qualified_model_ref(model, provider_id),
-            permission: traits::PermissionControlState {
+        platform_api::ConversationControls {
+            model_reference: platform_api::qualified_model_ref(model, provider_id),
+            permission: platform_api::PermissionControlState {
                 requested: requested_permission,
                 effective: effective_permission,
                 modes: permission_modes,
@@ -1927,7 +1927,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     /// Apply a LIVE session permission-mode change (stream-json
     /// `set_permission_mode` control_request). Delegates to the gate's
-    /// [`traits::PermissionGate::set_permission_mode`]; only the enforcing
+    /// [`platform_api::PermissionGate::set_permission_mode`]; only the enforcing
     /// `PolicyPermissionGate` actually mutates (other gates no-op). Returns the
     /// gate's validation error string on an invalid / disallowed mode.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {

@@ -37,7 +37,7 @@ use crate::registry::{XaaConfigProvider, XaaInputs};
 use protocol::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use traits::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
+use platform_api::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
 
 /// IdP request deadline (xaaIdpLogin.ts `IDP_REQUEST_TIMEOUT_MS = 30000`).
 const IDP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1017,7 +1017,7 @@ mod tests {
             service: &str,
             account: &str,
             data: protocol::SecureStorageData,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map.lock().await.insert(
                 (service.into(), account.into()),
                 data.expose_secret_bytes().to_vec(),
@@ -1028,7 +1028,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
             let map = self.map.lock().await;
             Ok(map.get(&(service.into(), account.into())).map(|bytes| {
                 protocol::SecureStorageData::new(
@@ -1045,14 +1045,14 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), traits::SecureStorageError> {
+        ) -> Result<(), platform_api::SecureStorageError> {
             self.map
                 .lock()
                 .await
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
             let map = self.map.lock().await;
             Ok(map
                 .keys()
@@ -1063,8 +1063,8 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> traits::SecureStorageBackend {
-            traits::SecureStorageBackend::PlainText
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::PlainText
         }
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
         async fn request(
             &self,
             req: HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
             for (method, needle, status, body) in &self.routes {
                 if *method == req.method && req.url.contains(needle.as_str()) {
                     return Ok(protocol::HttpResponse {
@@ -1088,7 +1088,7 @@ mod tests {
                     });
                 }
             }
-            Err(traits::HttpError::Connection(format!(
+            Err(platform_api::HttpError::Connection(format!(
                 "no route for {}",
                 req.url
             )))
@@ -1096,7 +1096,7 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
             unreachable!("XAA IdP tests never stream SSE")
         }
     }

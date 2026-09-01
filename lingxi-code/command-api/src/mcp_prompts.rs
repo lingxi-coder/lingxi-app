@@ -35,7 +35,7 @@ pub fn mcp_prompt_command_name(server: &str, prompt: &str) -> String {
 /// one, mirroring the same flag on markdown commands.
 #[must_use]
 pub fn mcp_prompt_commands(
-    prompts: &[(String, McpConnectionId, traits::McpPromptDto)],
+    prompts: &[(String, McpConnectionId, platform_api::McpPromptDto)],
 ) -> Vec<SlashCommand> {
     prompts
         .iter()
@@ -90,11 +90,11 @@ mod tests {
         server: &str,
         name: &str,
         description: Option<&str>,
-    ) -> (String, McpConnectionId, traits::McpPromptDto) {
+    ) -> (String, McpConnectionId, platform_api::McpPromptDto) {
         (
             server.to_string(),
             McpConnectionId::new(),
-            traits::McpPromptDto {
+            platform_api::McpPromptDto {
                 name: name.to_string(),
                 description: description.map(str::to_string),
                 arguments: Vec::new(),
@@ -155,12 +155,12 @@ mod tests {
     fn prompt_arguments_drive_hint_and_positional_names() {
         let mut advertised = prompt("github", "review", Some("Review"));
         advertised.2.arguments = vec![
-            traits::McpPromptArgumentDto {
+            platform_api::McpPromptArgumentDto {
                 name: "owner".to_string(),
                 description: Some("Repository owner".to_string()),
                 required: true,
             },
-            traits::McpPromptArgumentDto {
+            platform_api::McpPromptArgumentDto {
                 name: "focus".to_string(),
                 description: None,
                 required: false,

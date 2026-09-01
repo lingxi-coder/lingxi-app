@@ -2,7 +2,7 @@
 //!
 //! This crate owns the boundary types (`Effect`, `EffectResult`, `EffectError`,
 //! IDs, message DTOs, transport DTOs, capability flags) consumed by both
-//! `lingxi-core` and `lingxi-traits`. Both depend on this crate to avoid a
+//! `core` and `platform-api`. Both depend on this crate to avoid a
 //! cyclic dependency.
 //!
 //! See spec §3 (D16 Shared protocol boundary).

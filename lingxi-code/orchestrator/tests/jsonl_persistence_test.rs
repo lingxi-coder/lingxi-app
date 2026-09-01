@@ -14,7 +14,7 @@ use session::jsonl::reader::JsonlReader;
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 #[tokio::test]
 async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
@@ -109,7 +109,7 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let snap = output.snapshot().await;
     let end_turns = snap
         .iter()
-        .filter(|e| matches!(e, traits::OutputEvent::EndTurn { .. }))
+        .filter(|e| matches!(e, platform_api::OutputEvent::EndTurn { .. }))
         .count();
     assert_eq!(end_turns, 2, "expected 2 EndTurn events; got snap {snap:?}");
 }

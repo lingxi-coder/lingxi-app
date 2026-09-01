@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use protocol::{HttpMethod, HttpRequest};
 use regex::Regex;
-use traits::{HttpError, HttpTransport};
+use platform_api::{HttpError, HttpTransport};
 
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::hook_payload::parse_response;
@@ -479,7 +479,7 @@ mod tests {
     use async_trait::async_trait;
     use protocol::{HookId, HttpResponse};
     use std::sync::Mutex;
-    use traits::ResolvedAddressOverride;
+    use platform_api::ResolvedAddressOverride;
 
     struct MockHttp {
         recorded: Mutex<Vec<HttpRequest>>,
@@ -525,7 +525,7 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<traits::http::SseStream, HttpError> {
+        ) -> Result<platform_api::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest("not implemented".into()))
         }
     }

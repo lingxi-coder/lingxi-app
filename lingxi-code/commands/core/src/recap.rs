@@ -58,7 +58,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use traits::{OrchestratorHandle, RecapOutcome};
+use platform_api::{OrchestratorHandle, RecapOutcome};
 
 /// Fixed no-arg-invocation display when the session has had zero qualifying
 /// turns yet. Byte-exact from the 2.1.198 binary.
@@ -95,7 +95,7 @@ const COMPACT_SUMMARY_PREFIX: &str =
 ///
 /// Wires the real no-turn gate against the live transcript; the forked
 /// side-query itself is a documented GAP (see module docs) — no
-/// `traits::OrchestratorHandle` method exists yet to run it.
+/// `platform_api::OrchestratorHandle` method exists yet to run it.
 #[derive(Clone)]
 pub struct RecapHandler {
     handle: Arc<dyn OrchestratorHandle>,
@@ -213,7 +213,7 @@ mod tests {
     /// pre-seam fallback tests keep asserting that branch.
     struct TranscriptStub {
         history: Vec<ConversationMessage>,
-        recap: Option<Result<RecapOutcome, traits::HandleError>>,
+        recap: Option<Result<RecapOutcome, platform_api::HandleError>>,
     }
 
     impl TranscriptStub {
@@ -225,7 +225,7 @@ mod tests {
         }
         fn with_recap(
             history: Vec<ConversationMessage>,
-            recap: Result<RecapOutcome, traits::HandleError>,
+            recap: Result<RecapOutcome, platform_api::HandleError>,
         ) -> Self {
             Self {
                 history,
@@ -239,20 +239,20 @@ mod tests {
         async fn current_session_id(&self) -> protocol::SessionId {
             protocol::SessionId::new()
         }
-        async fn clear_session(&self) -> Result<(), traits::HandleError> {
+        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
             Ok(())
         }
-        async fn force_compact(&self) -> Result<traits::CompactionSummary, traits::HandleError> {
-            Ok(traits::CompactionSummary::default())
+        async fn force_compact(&self) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+            Ok(platform_api::CompactionSummary::default())
         }
-        async fn snapshot_cost(&self) -> traits::CostSnapshot {
-            traits::CostSnapshot::default()
+        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+            platform_api::CostSnapshot::default()
         }
         async fn switch_model(
             &self,
             _model: &str,
             _profile: Option<&str>,
-        ) -> Result<(), traits::HandleError> {
+        ) -> Result<(), platform_api::HandleError> {
             Ok(())
         }
         async fn request_exit(&self) {}
@@ -261,36 +261,36 @@ mod tests {
         }
         async fn open_memory_editor(
             &self,
-        ) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
-            Err(traits::HandleError::Unimplemented("stub".into()))
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            Err(platform_api::HandleError::Unimplemented("stub".into()))
         }
-        async fn list_mcp_servers(&self) -> Vec<traits::McpServerInfo> {
+        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
             Vec::new()
         }
-        async fn list_skills(&self) -> Vec<traits::SkillInfo> {
+        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
             Vec::new()
         }
-        async fn list_hooks(&self) -> Vec<traits::HookInfo> {
+        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
             Vec::new()
         }
-        async fn list_agents(&self) -> Vec<traits::AgentInfo> {
+        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
             Vec::new()
         }
-        async fn run_doctor_checks(&self) -> traits::DoctorReport {
-            traits::DoctorReport::default()
+        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
+            platform_api::DoctorReport::default()
         }
-        async fn get_status_snapshot(&self) -> traits::StatusSnapshot {
-            traits::StatusSnapshot::default()
+        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
+            platform_api::StatusSnapshot::default()
         }
         async fn edit_config_file(
             &self,
-        ) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
-            Err(traits::HandleError::Unimplemented("stub".into()))
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            Err(platform_api::HandleError::Unimplemented("stub".into()))
         }
         async fn edit_permissions_file(
             &self,
-        ) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
-            Err(traits::HandleError::Unimplemented("stub".into()))
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            Err(platform_api::HandleError::Unimplemented("stub".into()))
         }
         async fn list_available_models(&self) -> Vec<String> {
             Vec::new()
@@ -298,11 +298,11 @@ mod tests {
         async fn conversation_transcript(&self) -> Vec<ConversationMessage> {
             self.history.clone()
         }
-        async fn generate_recap(&self) -> Result<RecapOutcome, traits::HandleError> {
+        async fn generate_recap(&self) -> Result<RecapOutcome, platform_api::HandleError> {
             match &self.recap {
                 Some(Ok(outcome)) => Ok(outcome.clone()),
                 Some(Err(e)) => Err(e.clone()),
-                None => Err(traits::HandleError::Unimplemented("stub".into())),
+                None => Err(platform_api::HandleError::Unimplemented("stub".into())),
             }
         }
     }
@@ -418,7 +418,7 @@ mod tests {
         // The seam fails internally → the fixed generic-failure text (spec item 6).
         let handle = Arc::new(TranscriptStub::with_recap(
             vec![assistant_text("Done.")],
-            Err(traits::HandleError::ActionFailed("boom".into())),
+            Err(platform_api::HandleError::ActionFailed("boom".into())),
         ));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {

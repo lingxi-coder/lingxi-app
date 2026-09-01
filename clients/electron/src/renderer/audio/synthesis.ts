@@ -2,7 +2,7 @@
  * Speech synthesis for the desktop renderer, over `window.speechSynthesis`.
  *
  * This is the client side of the engine's `TextToSpeech` trait
- * (`lingxi-code/traits/src/tts.rs`), proxied over the wire by
+ * (`lingxi-code/platform-api/src/tts.rs`), proxied over the wire by
  * `lingxi-code/apps/bridge-server/src/audio_bridge.rs`'s `AudioBridge`
  * (`AudioOpDto::Synthesize` / `AudioResultDto::Audio`). `requests.ts` is the
  * caller that services those requests and lowers the outcome onto

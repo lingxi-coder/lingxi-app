@@ -27,7 +27,7 @@ dependencies = [
  "base64 0.22.1",
  "boon",
  "branding",
- "engine",
+ "core",
  "futures",
  "hooks",
  "llm-client",
@@ -35,6 +35,7 @@ dependencies = [
  "memory",
  "migrations",
  "permission",
+ "platform-api",
  "platform-posix",
  "protocol",
  "serde",
@@ -48,7 +49,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "unicode-normalization",
 ]
 
@@ -93,6 +93,7 @@ dependencies = [
  "orchestrator",
  "platform-android",
  "platform-android-minijail",
+ "platform-api",
  "platform-posix-minimal",
  "protocol",
  "serde",
@@ -104,7 +105,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tool-git-mobile",
- "traits",
  "uniffi",
 ]
 
@@ -771,6 +771,7 @@ dependencies = [
  "http",
  "jsonrpc",
  "mcp",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "reqwest",
@@ -782,7 +783,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -798,8 +798,8 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "core",
  "dirs",
- "engine",
  "engine-desktop",
  "futures-util",
  "http",
@@ -809,6 +809,7 @@ dependencies = [
  "once_cell",
  "orchestrator",
  "permission",
+ "platform-api",
  "platform-posix",
  "protocol",
  "secret",
@@ -825,7 +826,6 @@ dependencies = [
  "tool-cron",
  "tracing",
  "tracing-subscriber",
- "traits",
  "tui-core",
  "uuid",
 ]
@@ -1081,10 +1081,10 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "core",
  "cost",
  "crossterm",
  "dirs",
- "engine",
  "engine-desktop",
  "filetime",
  "futures",
@@ -1098,6 +1098,7 @@ dependencies = [
  "nix 0.27.1",
  "orchestrator",
  "permission",
+ "platform-api",
  "platform-posix",
  "platform-pty",
  "plugin",
@@ -1124,7 +1125,6 @@ dependencies = [
  "tool-web",
  "tracing",
  "tracing-subscriber",
- "traits",
  "tui",
  "tui-core",
  "unicode-width 0.1.14",
@@ -1142,13 +1142,13 @@ dependencies = [
  "llm-client",
  "orchestrator",
  "permission",
+ "platform-api",
  "protocol",
  "serde_json",
  "session",
  "tokio",
  "tokio-util",
  "tracing",
- "traits",
  "tui-core",
  "uniffi",
  "uuid",
@@ -1158,11 +1158,11 @@ dependencies = [
 name = "client-protocol"
 version = "0.1.0"
 dependencies = [
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "traits",
  "uniffi",
 ]
 
@@ -1194,6 +1194,7 @@ dependencies = [
  "async-trait",
  "branding",
  "hooks",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -1201,7 +1202,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -1218,6 +1218,7 @@ dependencies = [
  "llm-client",
  "orchestrator",
  "permission",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -1230,7 +1231,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -1253,11 +1253,12 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "core",
  "cost",
- "engine",
  "hooks",
  "llm-client",
  "once_cell",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -1269,7 +1270,6 @@ dependencies = [
  "tool-api",
  "tool-cron",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -1334,9 +1334,10 @@ dependencies = [
  "agent",
  "async-trait",
  "branding",
- "engine",
+ "core",
  "memory",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -1348,8 +1349,25 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "uuid",
+]
+
+[[package]]
+name = "core"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "branding",
+ "figment",
+ "protocol",
+ "schemars",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1409,13 +1427,13 @@ dependencies = [
  "async-trait",
  "chrono",
  "indexmap 2.7.1",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
  "telemetry",
  "thiserror 2.0.18",
  "tokio",
- "traits",
 ]
 
 [[package]]
@@ -1444,6 +1462,7 @@ dependencies = [
  "branding",
  "futures",
  "libc",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -1453,7 +1472,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "windows-sys 0.59.0",
 ]
 
@@ -1770,24 +1788,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
-name = "engine"
-version = "0.12.0"
-dependencies = [
- "async-trait",
- "branding",
- "figment",
- "protocol",
- "schemars",
- "serde",
- "serde_json",
- "telemetry",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "engine-desktop"
 version = "0.9.0"
 dependencies = [
@@ -1800,10 +1800,10 @@ dependencies = [
  "command-core",
  "compaction",
  "coordinator",
+ "core",
  "cost",
  "cron",
  "dirs",
- "engine",
  "futures",
  "futures-core",
  "hooks",
@@ -1817,6 +1817,7 @@ dependencies = [
  "orchestrator",
  "outputstyles",
  "permission",
+ "platform-api",
  "platform-common",
  "platform-macos-computer-control",
  "platform-posix",
@@ -1857,7 +1858,6 @@ dependencies = [
  "tool-workflow",
  "tool-worktree",
  "tracing",
- "traits",
  "tui",
  "tui-core",
  "workflow",
@@ -1891,6 +1891,7 @@ dependencies = [
  "outputstyles",
  "permission",
  "platform-android",
+ "platform-api",
  "platform-common",
  "platform-ios",
  "platform-posix-minimal",
@@ -1928,7 +1929,6 @@ dependencies = [
  "tool-web",
  "tool-workflow",
  "tracing",
- "traits",
  "uniffi",
  "url",
  "uuid",
@@ -2616,8 +2616,9 @@ name = "hooks"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "permission",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -2626,7 +2627,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "url",
 ]
 
@@ -2701,6 +2701,7 @@ dependencies = [
  "http",
  "pem",
  "pkcs8",
+ "platform-api",
  "protocol",
  "rcgen",
  "reqwest",
@@ -2715,7 +2716,6 @@ dependencies = [
  "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tracing",
- "traits",
  "url",
  "webpki-roots 0.26.11",
 ]
@@ -3022,6 +3022,7 @@ dependencies = [
  "engine-mobile",
  "local-apps",
  "orchestrator",
+ "platform-api",
  "platform-ios",
  "platform-ios-ish-runtime",
  "platform-posix-minimal",
@@ -3033,7 +3034,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.5.11",
- "traits",
  "uniffi",
  "uniffi_bindgen",
  "uniffi_meta",
@@ -3333,6 +3333,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "iana-time-zone",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "regex",
@@ -3344,7 +3345,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "url",
  "urlencoding",
 ]
@@ -3356,6 +3356,7 @@ dependencies = [
  "async-trait",
  "branding",
  "git2",
+ "platform-api",
  "rand 0.9.4",
  "rusqlite",
  "serde",
@@ -3365,7 +3366,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "tree-sitter",
  "tree-sitter-javascript",
 ]
@@ -3429,6 +3429,7 @@ dependencies = [
  "jsonrpc",
  "lsp-types",
  "once_cell",
+ "platform-api",
  "platform-posix",
  "protocol",
  "serde",
@@ -3439,7 +3440,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "traits",
  "url",
 ]
 
@@ -3523,6 +3523,7 @@ dependencies = [
  "indexmap 2.7.1",
  "jsonrpc",
  "migrations",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "regex",
@@ -3535,7 +3536,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "traits",
  "unicode-normalization",
  "url",
  "urlencoding",
@@ -3584,6 +3584,7 @@ dependencies = [
  "cost",
  "filetime",
  "glob",
+ "platform-api",
  "protocol",
  "regex",
  "secret",
@@ -3597,7 +3598,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "walkdir",
 ]
 
@@ -4351,9 +4351,9 @@ dependencies = [
  "branding",
  "chrono",
  "compaction",
+ "core",
  "cost",
  "dirs",
- "engine",
  "futures",
  "hooks",
  "iana-time-zone",
@@ -4365,6 +4365,7 @@ dependencies = [
  "once_cell",
  "outputstyles",
  "permission",
+ "platform-api",
  "platform-posix",
  "protocol",
  "rand 0.8.6",
@@ -4386,7 +4387,6 @@ dependencies = [
  "tool-workflow",
  "tracing",
  "tracing-subscriber",
- "traits",
  "unicode-segmentation",
  "unicode-width 0.1.14",
  "url",
@@ -4527,6 +4527,7 @@ dependencies = [
  "branding",
  "ignore",
  "libc",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -4542,7 +4543,6 @@ dependencies = [
  "tool-shell",
  "tool-web",
  "tracing",
- "traits",
  "tree-sitter",
  "tree-sitter-bash",
  "url",
@@ -4721,6 +4721,7 @@ dependencies = [
  "http-client",
  "nix 0.27.1",
  "platform-android-minijail",
+ "platform-api",
  "platform-common",
  "platform-posix-minimal",
  "platform-pty",
@@ -4729,7 +4730,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -4756,6 +4756,30 @@ name = "platform-android-shellbin"
 version = "0.1.0"
 
 [[package]]
+name = "platform-api"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "branding",
+ "fs2",
+ "futures-core",
+ "futures-util",
+ "indexmap 2.7.1",
+ "jsonrpc",
+ "libc",
+ "protocol",
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "platform-common"
 version = "0.12.0"
 dependencies = [
@@ -4770,6 +4794,7 @@ dependencies = [
  "ignore",
  "jsonrpc",
  "llm-client",
+ "platform-api",
  "protocol",
  "reqwest",
  "serde",
@@ -4781,7 +4806,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
- "traits",
  "url",
 ]
 
@@ -4791,11 +4815,11 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "http-client",
+ "platform-api",
  "platform-common",
  "platform-posix-minimal",
  "tempfile",
  "tokio",
- "traits",
 ]
 
 [[package]]
@@ -4803,11 +4827,11 @@ name = "platform-ios-ish-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "platform-api",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "traits",
 ]
 
 [[package]]
@@ -4822,10 +4846,10 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "platform-api",
  "plist",
  "time-core",
  "tokio",
- "traits",
  "xcap",
 ]
 
@@ -4850,6 +4874,7 @@ dependencies = [
  "nix 0.27.1",
  "notify",
  "notify-debouncer-mini",
+ "platform-api",
  "platform-common",
  "protocol",
  "sandbox",
@@ -4862,7 +4887,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "traits",
  "unicode-normalization",
  "url",
  "which 6.0.3",
@@ -4880,6 +4904,7 @@ dependencies = [
  "jsonrpc",
  "libc",
  "mcp",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -4887,7 +4912,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -4922,6 +4946,7 @@ dependencies = [
  "lsp",
  "notify",
  "notify-debouncer-mini",
+ "platform-api",
  "platform-common",
  "protocol",
  "serde",
@@ -4932,7 +4957,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -4963,6 +4987,7 @@ dependencies = [
  "lsp",
  "mcp",
  "outputstyles",
+ "platform-api",
  "platform-posix",
  "protocol",
  "regex",
@@ -4980,7 +5005,6 @@ dependencies = [
  "tool-api",
  "tool-mcp",
  "tracing",
- "traits",
  "url",
  "workflow",
  "zip",
@@ -5253,13 +5277,13 @@ dependencies = [
  "async-trait",
  "cost",
  "llm-client",
+ "platform-api",
  "protocol",
  "secret",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -5912,6 +5936,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "permission",
+ "platform-api",
  "protocol",
  "sandbox-runtime",
  "serde",
@@ -5920,7 +5945,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "which 6.0.3",
 ]
 
@@ -6072,6 +6096,7 @@ name = "secret"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -6079,7 +6104,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -6245,9 +6269,10 @@ dependencies = [
  "async-trait",
  "branding",
  "chrono",
- "engine",
+ "core",
  "filetime",
  "once_cell",
+ "platform-api",
  "platform-posix",
  "pretty_assertions",
  "protocol",
@@ -6259,7 +6284,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "traits",
  "uuid",
  "zstd",
 ]
@@ -6323,11 +6347,12 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "core",
  "cost",
- "engine",
  "futures-core",
  "hooks",
  "llm-client",
+ "platform-api",
  "platform-common",
  "protocol",
  "serde",
@@ -6337,7 +6362,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "url",
 ]
 
@@ -6412,13 +6436,13 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
- "traits",
 ]
 
 [[package]]
@@ -6643,7 +6667,7 @@ name = "task-store"
 version = "0.12.0"
 dependencies = [
  "branding",
- "engine",
+ "core",
  "once_cell",
  "serde",
  "serde_json",
@@ -6657,13 +6681,14 @@ dependencies = [
  "agent",
  "async-trait",
  "branding",
- "engine",
+ "core",
  "futures",
  "hooks",
  "llm-client",
  "local-apps",
  "mcp",
  "permission",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "serde",
@@ -6676,7 +6701,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "traits",
  "workflow",
 ]
 
@@ -6690,6 +6714,7 @@ dependencies = [
  "opentelemetry-prometheus",
  "opentelemetry-stdout",
  "opentelemetry_sdk",
+ "platform-api",
  "prometheus",
  "protocol",
  "reqwest",
@@ -6701,7 +6726,6 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
- "traits",
 ]
 
 [[package]]
@@ -6774,10 +6798,10 @@ dependencies = [
  "command-core",
  "compaction",
  "coordinator",
+ "core",
  "cost",
  "cron",
  "crossterm",
- "engine",
  "filetime",
  "futures",
  "futures-core",
@@ -6793,6 +6817,7 @@ dependencies = [
  "orchestrator",
  "outputstyles",
  "permission",
+ "platform-api",
  "platform-posix",
  "platform-posix-minimal",
  "platform-windows",
@@ -6825,7 +6850,6 @@ dependencies = [
  "tool-web",
  "tool-worktree",
  "tracing",
- "traits",
  "uuid",
 ]
 
@@ -7176,9 +7200,10 @@ name = "tool-agent"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7188,7 +7213,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -7198,11 +7222,11 @@ dependencies = [
  "async-trait",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7213,13 +7237,14 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "branding",
- "engine",
+ "core",
  "futures",
  "image 0.24.9",
  "lsp",
  "mcp",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "sandbox",
  "serde",
@@ -7231,7 +7256,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -7244,12 +7268,12 @@ dependencies = [
  "nix 0.27.1",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "telemetry",
  "tokio",
  "tool-api",
- "traits",
  "tui-core",
 ]
 
@@ -7259,10 +7283,11 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "core",
  "cron",
- "engine",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "serde",
@@ -7273,7 +7298,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "unicode-segmentation",
  "unicode-width 0.1.14",
 ]
@@ -7295,6 +7319,7 @@ dependencies = [
  "lopdf",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7305,7 +7330,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "walkdir",
 ]
 
@@ -7317,6 +7341,7 @@ dependencies = [
  "git2",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "telemetry",
@@ -7324,7 +7349,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7334,11 +7358,11 @@ dependencies = [
  "async-trait",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7346,10 +7370,11 @@ name = "tool-lsp"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "lsp",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7358,7 +7383,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7368,12 +7392,13 @@ dependencies = [
  "async-trait",
  "branding",
  "bytes",
- "engine",
+ "core",
  "futures",
  "jsonrpc",
  "mcp",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7383,7 +7408,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7392,10 +7416,11 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
- "engine",
+ "core",
  "mcp",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7404,7 +7429,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7414,11 +7438,11 @@ dependencies = [
  "async-trait",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7426,9 +7450,10 @@ name = "tool-plan"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7436,7 +7461,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7449,6 +7473,7 @@ dependencies = [
  "nix 0.27.1",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "sandbox",
  "serde",
@@ -7460,7 +7485,6 @@ dependencies = [
  "tokio-util",
  "tool-api",
  "tracing",
- "traits",
 ]
 
 [[package]]
@@ -7470,11 +7494,11 @@ dependencies = [
  "async-trait",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7484,9 +7508,10 @@ dependencies = [
  "async-trait",
  "command-api",
  "compaction",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "sandbox",
  "serde",
@@ -7497,7 +7522,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7506,10 +7530,11 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "core",
  "cron",
- "engine",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "regex",
@@ -7520,7 +7545,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7529,9 +7553,10 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7540,7 +7565,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
 ]
 
 [[package]]
@@ -7548,9 +7572,10 @@ name = "tool-ui"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "rand 0.9.4",
  "serde",
@@ -7560,7 +7585,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
  "tui-core",
 ]
 
@@ -7575,6 +7599,7 @@ dependencies = [
  "htmd",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7585,7 +7610,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "traits",
  "url",
 ]
 
@@ -7597,11 +7621,11 @@ dependencies = [
  "branding",
  "once_cell",
  "permission",
+ "platform-api",
  "serde",
  "serde_json",
  "tokio",
  "tool-api",
- "traits",
  "workflow",
 ]
 
@@ -7610,9 +7634,10 @@ name = "tool-worktree"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "engine",
+ "core",
  "once_cell",
  "permission",
+ "platform-api",
  "protocol",
  "regex",
  "serde",
@@ -7623,7 +7648,6 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
- "traits",
  "unicode-normalization",
 ]
 
@@ -7756,30 +7780,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "traits"
-version = "0.12.0"
-dependencies = [
- "async-trait",
- "branding",
- "fs2",
- "futures-core",
- "futures-util",
- "indexmap 2.7.1",
- "jsonrpc",
- "libc",
- "protocol",
- "rustix 0.38.44",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "tree-sitter"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7867,6 +7867,7 @@ dependencies = [
  "memory",
  "orchestrator",
  "permission",
+ "platform-api",
  "protocol",
  "ratatui",
  "ratatui-image",
@@ -7880,7 +7881,6 @@ dependencies = [
  "tool-web",
  "tool-workflow",
  "tracing",
- "traits",
  "tui-core",
  "unicode-width 0.1.14",
  "url",
@@ -7897,6 +7897,7 @@ dependencies = [
  "insta",
  "memory",
  "permission",
+ "platform-api",
  "protocol",
  "pulldown-cmark",
  "rustix 0.38.44",
@@ -7909,7 +7910,6 @@ dependencies = [
  "tokio",
  "tool-shell",
  "tracing",
- "traits",
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width 0.1.14",

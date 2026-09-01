@@ -18,7 +18,7 @@ use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
 use sandbox::wrap::wrap_with_sandbox;
-use traits::{
+use platform_api::{
     NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -350,7 +350,7 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::{runtime_config_from_policy, split_bare_repo_paths};
-    use traits::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+    use platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
 
     /// Build a minimal `SandboxPolicy` literal for net-mapping tests.
     /// `SandboxPolicy` does not derive `Default`, so construct each field.

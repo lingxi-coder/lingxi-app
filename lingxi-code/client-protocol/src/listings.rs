@@ -18,24 +18,24 @@
 //! - [`SessionRowDto`] ← `session::jsonl::loader::SessionMetadata` (`.path` is
 //!   mapped DIRECTLY — it exists at `session/src/jsonl/loader.rs:33`, decision
 //!   per plan line 152 — do NOT synthesize).
-//! - [`McpServerDto`]/[`McpStatusDto`] ← `traits::orchestrator::{McpServerInfo,
+//! - [`McpServerDto`]/[`McpStatusDto`] ← `platform_api::orchestrator::{McpServerInfo,
 //!   McpStatus}` (`McpStatus::Error(String)` is lowered to the STRUCT variant
 //!   [`McpStatusDto::Error`] for `UniFFI` flatness, plan line 154).
-//! - [`HookDto`] ← `traits::orchestrator::HookInfo`.
-//! - [`AgentDto`] ← `traits::orchestrator::AgentInfo`.
+//! - [`HookDto`] ← `platform_api::orchestrator::HookInfo`.
+//! - [`AgentDto`] ← `platform_api::orchestrator::AgentInfo`.
 //! - [`SlashCommandDto`] ← `command_api::model::SlashCommand` (display fields).
 //! - [`MemoryEntryDto`]/[`MemoryTierDto`] ← `protocol::{MemoryEntry,
 //!   MemoryEntryTier}`.
-//! - [`StatusSnapshotDto`] ← `traits::orchestrator::StatusSnapshot` (traits
+//! - [`StatusSnapshotDto`] ← `platform_api::orchestrator::StatusSnapshot` (traits
 //!   shape canonical; status-line fields appended OPTIONAL, plan line 155).
-//! - [`AuthStateDto`] ← `Option<traits::auth::LoginInfo>`.
+//! - [`AuthStateDto`] ← `Option<platform_api::auth::LoginInfo>`.
 //! - [`DoctorReportDto`]/[`DoctorCheckDto`]/[`CheckStatusDto`]/[`DoctorSummaryDto`]
-//!   ← `traits::orchestrator::{DoctorReport, DoctorCheck, CheckStatus,
+//!   ← `platform_api::orchestrator::{DoctorReport, DoctorCheck, CheckStatus,
 //!   DoctorSummary}`.
-//! - [`TaskRowDto`]/[`TaskStatusDto`] ← `traits::task_registry::TaskRecord` +
+//! - [`TaskRowDto`]/[`TaskStatusDto`] ← `platform_api::task_registry::TaskRecord` +
 //!   `tasks::TaskStatus`. (`TaskOutputChunk` is carried inline by
 //!   [`crate::events::ClientEvent::TaskOutputChunk`], mirroring
-//!   `traits::task_registry::TaskOutputChunk`.)
+//!   `platform_api::task_registry::TaskOutputChunk`.)
 //!
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`,
@@ -187,7 +187,7 @@ pub struct ModelDetailsDto {
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// One MCP server entry — the lowered `McpServerInfo`
-/// (`traits/src/orchestrator.rs:122`). Carried by
+/// (`platform-api/src/orchestrator.rs:122`). Carried by
 /// [`crate::events::ClientEvent::McpServers`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -201,7 +201,7 @@ pub struct McpServerDto {
 }
 
 /// Connection status for an MCP server — the lowered `McpStatus`
-/// (`traits/src/orchestrator.rs:133`).
+/// (`platform-api/src/orchestrator.rs:133`).
 ///
 /// The engine's `McpStatus::Error(String)` is a *tuple* variant; it is lowered
 /// here to the STRUCT variant [`McpStatusDto::Error`] for `UniFFI` flatness
@@ -227,7 +227,7 @@ pub enum McpStatusDto {
 // ── Skills ───────────────────────────────────────────────────────────────────
 
 /// One discovered skill — the lowered `SkillInfo`
-/// (`traits/src/orchestrator.rs`). Carried by
+/// (`platform-api/src/orchestrator.rs`). Carried by
 /// [`crate::events::ClientEvent::Skills`].
 ///
 /// Skills are directory-discovered, not configured key-by-key: there is no
@@ -248,7 +248,7 @@ pub struct SkillDto {
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
-/// One hook entry — the lowered `HookInfo` (`traits/src/orchestrator.rs:144`).
+/// One hook entry — the lowered `HookInfo` (`platform-api/src/orchestrator.rs:144`).
 /// Carried by [`crate::events::ClientEvent::Hooks`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -267,7 +267,7 @@ pub struct HookDto {
 // ── Agents ───────────────────────────────────────────────────────────────────
 
 /// One subagent entry — the lowered `AgentInfo`
-/// (`traits/src/orchestrator.rs:157`). Carried by
+/// (`platform-api/src/orchestrator.rs:157`). Carried by
 /// [`crate::events::ClientEvent::Agents`] (WIRE name; reconciled from spec
 /// §4.1 `AgentList`, plan line 149).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,7 +446,7 @@ pub enum MemoryTierDto {
 // ── Status ───────────────────────────────────────────────────────────────────
 
 /// The `/status` panel snapshot — the lowered `StatusSnapshot`
-/// (`traits/src/orchestrator.rs:214`). The traits-shape fields are canonical;
+/// (`platform-api/src/orchestrator.rs:214`). The traits-shape fields are canonical;
 /// status-line fields are appended OPTIONAL (plan line 155). Carried by
 /// [`crate::events::ClientEvent::StatusSnapshot`].
 ///
@@ -495,8 +495,8 @@ pub struct StatusSnapshotDto {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-/// Auth state — the lowered `Option<traits::auth::LoginInfo>`
-/// (`traits/src/auth.rs:13`). Carried by
+/// Auth state — the lowered `Option<platform_api::auth::LoginInfo>`
+/// (`platform-api/src/auth.rs:13`). Carried by
 /// [`crate::events::ClientEvent::AuthState`]. Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future state (e.g. `LoggingIn`) is
 /// additive.
@@ -519,7 +519,7 @@ pub enum AuthStateDto {
 // ── Doctor ───────────────────────────────────────────────────────────────────
 
 /// Aggregate diagnostic report — the lowered `DoctorReport`
-/// (`traits/src/orchestrator.rs:168`). Carried by
+/// (`platform-api/src/orchestrator.rs:168`). Carried by
 /// [`crate::events::ClientEvent::DoctorReport`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -531,7 +531,7 @@ pub struct DoctorReportDto {
 }
 
 /// One `/doctor` check result — the lowered `DoctorCheck`
-/// (`traits/src/orchestrator.rs:177`).
+/// (`platform-api/src/orchestrator.rs:177`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorCheckDto {
@@ -545,7 +545,7 @@ pub struct DoctorCheckDto {
 }
 
 /// Outcome of a single [`DoctorCheckDto`] — the lowered `CheckStatus`
-/// (`traits/src/orchestrator.rs:188`). Internally tagged on `type`,
+/// (`platform-api/src/orchestrator.rs:188`). Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future outcome is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -561,7 +561,7 @@ pub enum CheckStatusDto {
 }
 
 /// Pass/warn/fail tallies in a [`DoctorReportDto`] — the lowered
-/// `DoctorSummary` (`traits/src/orchestrator.rs:198`).
+/// `DoctorSummary` (`platform-api/src/orchestrator.rs:198`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorSummaryDto {
@@ -575,7 +575,7 @@ pub struct DoctorSummaryDto {
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-/// One task row — the lowered `TaskRecord` (`traits/src/task_registry.rs:36`).
+/// One task row — the lowered `TaskRecord` (`platform-api/src/task_registry.rs:36`).
 /// The engine's `status` wire `String` is lowered to a [`TaskStatusDto`] enum.
 /// Carried by [`crate::events::ClientEvent::TaskRow`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,7 +622,7 @@ pub enum TaskStatusDto {
 
 // ── Coordinator (T18 — per-worker roster) ─────────────────────────────────────
 
-/// One coordinator-team worker row — the lowered `traits::team_registry::WorkerInfo`
+/// One coordinator-team worker row — the lowered `platform_api::team_registry::WorkerInfo`
 /// (itself the POD projection of the coordinator's `WorkerAgent`). Field-shaped
 /// to lower 1:1 onto the TUI `WorkerRow` (`tui/src/multiagent/state.rs:25`):
 /// `agent_id` / `name` / `agent_type` / `status`. Carried by

@@ -470,7 +470,7 @@ async fn load_exact_transcript(
 ) -> Result<Vec<session::jsonl::JsonlMessage>, String> {
     let canonical_path = validate_exact_transcript_path(config_home, launch)?;
     let cwd = nonempty_path(&launch.cwd)?;
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
     let reader = session::jsonl::JsonlReader::new(canonical_path, fs);
     let loaded = reader.read_routed().await.map_err(|e| e.to_string())?;
     let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &launch.session_id);

@@ -63,7 +63,7 @@ const LEARNING: BuiltinOutputStyle = BuiltinOutputStyle {
 };
 
 /// Resolve the active builtin output style from the engine settings
-/// `output_style` value (the `Option<String>` from `engine::settings`).
+/// `output_style` value (the `Option<String>` from `lingxi_core::settings`).
 ///
 /// Faithful to the built-in branch of TS `getOutputStyleConfig`
 /// (`outputStyles.ts:181-211`): `settings.outputStyle || 'default'`, then

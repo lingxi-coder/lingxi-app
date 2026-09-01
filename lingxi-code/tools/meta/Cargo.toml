@@ -8,11 +8,11 @@ license.workspace = true
 [dependencies]
 branding = { path = "../../branding" }
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,7 +22,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 mcp = { path = "../../mcp" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -18,7 +18,7 @@ use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use traits::{
+use platform_api::{
     McpConfiguredToolPolicyDto, McpHeaders, McpOAuthConfigDto, McpPermissionCeiling,
     McpToolPermissionPolicy, McpTransportSpec,
 };
@@ -50,7 +50,7 @@ fn expand_map_values(
 
 /// Order-preserving variant of [`expand_map_values`] for `headers`. The header
 /// key order must survive parse → spec so the `getServerKey` config hash
-/// byte-matches claude-code (see [`traits::McpHeaders`]).
+/// byte-matches claude-code (see [`platform_api::McpHeaders`]).
 fn expand_header_values(map: McpHeaders, missing: &mut Vec<String>) -> McpHeaders {
     map.into_iter()
         .map(|(k, v)| {
@@ -443,7 +443,7 @@ where
 /// schema also rejects. Ports above `u16::MAX` are schema-valid at the oracle
 /// (`z.number().int().positive()` has no upper bound) but already fail to
 /// deserialize into this port's `McpOAuthConfigDto::callback_port: u16`
-/// (`traits/src/mcp.rs`, owned by another batch) before this function ever
+/// (`platform-api/src/mcp.rs`, owned by another batch) before this function ever
 /// runs — a stricter, not more permissive, divergence, and out of scope for
 /// this fix (changing the DTO's field type is a wire-shape change).
 fn validate_oauth_child(oauth: Option<McpOAuthConfigDto>) -> Option<Option<McpOAuthConfigDto>> {

@@ -11,7 +11,7 @@ license.workspace = true
 
 [dependencies]
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 async-trait.workspace = true
 serde.workspace = true

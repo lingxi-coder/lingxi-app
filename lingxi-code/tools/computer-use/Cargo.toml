@@ -12,7 +12,7 @@ license.workspace = true
 
 [dependencies]
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 # `request_access`'s interactive resolver (mirrors `tool-ui`'s
 # `AskUserQuestionResolver`, which depends on `tui-core` the same way).

@@ -145,16 +145,16 @@ pub fn is_push_notif_enabled() -> bool {
 /// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927).
 #[must_use]
 fn agent_push_notif_setting() -> bool {
-    traits::session_flags::agent_push_notif_enabled()
+    platform_api::session_flags::agent_push_notif_enabled()
 }
 
 fn env_truthy(key: &str) -> bool {
     // PARITY: binary `rt(e)` (cc_all.txt) is an ALLOWLIST, not a denylist:
     // `String(e).toLowerCase().trim()` must be exactly one of `1|true|yes|on`.
-    // The workspace-canonical `traits::env::is_env_truthy` implements precisely
+    // The workspace-canonical `platform_api::env::is_env_truthy` implements precisely
     // this (and is used by ~10 other gates), so delegate to it — an earlier
     // denylist here wrongly treated `no`/`off`/`2`/`foo` as truthy.
-    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 // ── Preambles (binary `aJr` / `VVi`) ─────────────────────────────────────────
@@ -674,7 +674,7 @@ mod tests {
         reset_autonomous_loop_delivered();
         std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
-        traits::session_flags::set_agent_push_notif_enabled(false);
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
         // The resolver gate (`fJr`/`is_loop_default_prompt_enabled`) DEFAULTS off
         // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY — no env). Turn it on
         // for the resolution tests via the test-only flag override (binary `ROt`/
@@ -788,12 +788,12 @@ mod tests {
             !is_push_notif_enabled(),
             "Yke needs BOTH the flag and the agentPushNotifEnabled setting"
         );
-        traits::session_flags::set_agent_push_notif_enabled(true);
+        platform_api::session_flags::set_agent_push_notif_enabled(true);
         assert!(
             is_push_notif_enabled(),
             "Yke enables only after both gates are true"
         );
-        traits::session_flags::set_agent_push_notif_enabled(false);
+        platform_api::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 

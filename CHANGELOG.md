@@ -164,7 +164,7 @@ Highlights:
   `apps/engine-mobile` (cross-platform subset + camera/voice/share) own all
   registry assembly; the `cli` binary delegates to `engine-desktop` and now
   ships real tools (previously an empty registry).
-- **Mobile:** `traits::Platform` aggregate + device-capability callback traits
+- **Mobile:** `platform_api::Platform` aggregate + device-capability callback traits
   (`CameraControl`/`VoiceRecorder`/`SharingService`/`ComputerControl`);
   `platform-ios`/`platform-android` skeletons; `tool-camera/voice/share` +
   `tool-computer-use/android-use/ios-use`; `apps/ios-framework`/`android-aar`
@@ -714,7 +714,7 @@ users of `lingxi-core` as a library MUST update accordingly:
   `find_relevant_memories(query, k) -> Vec<MemoryEntry>` and
   `load_claude_md_hierarchy(repo_root) -> Vec<MemoryEntry>`. Existing
   callers of the M2 shape see `non_exhaustive` warnings.
-- **`lingxi-core::settings`** is a new module. The 4-layer loader
+- **`lingxi_core::settings`** is a new module. The 4-layer loader
   (`Settings::load(LoadInputs)`) replaces any ad-hoc settings reading.
   Downstream code that read settings via direct `serde_json::from_str`
   on `.claude/settings.json` should switch to the loader so it picks up

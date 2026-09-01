@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use protocol::AgentId;
-use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 /// Stub swarm backend.
 #[derive(Default)]

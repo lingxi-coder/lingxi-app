@@ -47,8 +47,8 @@
 //! with `shouldShowUpsell = isClaudeAISubscriber()` at :78).
 
 use llm_client::model::rate_limit::format_reset_time;
-use traits::env::is_env_truthy;
-use traits::subscription::SubscriptionSnapshot;
+use platform_api::env::is_env_truthy;
+use platform_api::subscription::SubscriptionSnapshot;
 
 /// Locked upsell strings. Mirrors claude-code 2.1.206 `getUpsellMessage`
 /// (binary `Gid` @221157422: `function

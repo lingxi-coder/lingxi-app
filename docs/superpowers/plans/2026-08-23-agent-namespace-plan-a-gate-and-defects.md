@@ -772,7 +772,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ## Task 4: B1 — 把死接缝 `branding::ENV_PREFIX` 接上它的两个真实消费者
 
 **Files:**
-- Modify: `lingxi-code/engine/src/settings/env_parser.rs:14-16`
+- Modify: `lingxi-code/core/src/settings/env_parser.rs:14-16`
 - Modify: `lingxi-code/apps/cli/src/background_dispatch.rs:931-933`
 - Test: 沿用现有测试（见下）
 
@@ -782,7 +782,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 `branding::ENV_PREFIX` 有**零个外部调用点**：`git grep -n ENV_PREFIX` 只返回 3 行，全在 `branding/src/lib.rs` 自己里（定义 + 它自己的自测两处）。而这个文件里其他每个常量都有真实消费者。真正的前缀硬编码在两处。
 
-漂移在一个目录内就可证：`engine/src/settings/loader.rs:91` 已经用 `std::env::var_os(branding::CONFIG_DIR_ENV)`、`:100` 用 `project_dir.join(branding::DOT_DIR)`——同一个模块把目录名路由进了 branding，却把 env 前缀留成了字面量。
+漂移在一个目录内就可证：`core/src/settings/loader.rs:91` 已经用 `std::env::var_os(branding::CONFIG_DIR_ENV)`、`:100` 用 `project_dir.join(branding::DOT_DIR)`——同一个模块把目录名路由进了 branding，却把 env 前缀留成了字面量。
 
 ⚠️ 两个 crate 的 `Cargo.toml` **都已经**声明了 `branding.workspace = true`，无需改 manifest。`background_dispatch.rs:146` 已经在用全限定的 `branding::DOT_DIR`，无需加 `use`。
 
@@ -791,7 +791,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 Run:
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p engine --lib settings::env_parser --no-fail-fast 2>&1 | tail -5
+cargo test -p core --lib settings::env_parser --no-fail-fast 2>&1 | tail -5
 cargo test -p cli --lib launch_environment_keeps_runtime_context_but_rejects_worker_identity --no-fail-fast 2>&1 | tail -5
 ```
 Expected: 两处都 PASS。
@@ -800,7 +800,7 @@ Expected: 两处都 PASS。
 
 - [ ] **Step 2: 接上 `env_parser`**
 
-`lingxi-code/engine/src/settings/env_parser.rs:14-16`，把
+`lingxi-code/core/src/settings/env_parser.rs:14-16`，把
 
 ```rust
 /// Settings env-override prefix. Clean break: LingXi reads only `LINGXI_*`
@@ -857,7 +857,7 @@ pub const PREFIX_PRIORITY: &[&str] = &[branding::ENV_PREFIX];
 Run:
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p engine --lib settings::env_parser --no-fail-fast 2>&1 | tee /tmp/t4a.txt | tail -5
+cargo test -p core --lib settings::env_parser --no-fail-fast 2>&1 | tee /tmp/t4a.txt | tail -5
 cargo test -p cli --lib launch_environment --no-fail-fast 2>&1 | tee /tmp/t4b.txt | tail -5
 grep -A20 '^failures:' /tmp/t4a.txt /tmp/t4b.txt || echo "no failures block"
 ```
@@ -869,7 +869,7 @@ Expected: 全 PASS，测试数与 Step 1 相同。
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-code/engine/src/settings/env_parser.rs lingxi-code/apps/cli/src/background_dispatch.rs
+git add lingxi-code/core/src/settings/env_parser.rs lingxi-code/apps/cli/src/background_dispatch.rs
 git commit -m "Wire the env-prefix seam to its two real consumers
 
 branding::ENV_PREFIX had zero call sites while the live prefix sat hardcoded
@@ -894,7 +894,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 今天的代码是 `std::env::var("LINGXI_TMPDIR").or_else(|_| std::env::var("LINGXI_TMPDIR"))` —— 第二个 arm 是死的。而**该函数自己的文档注释**和 `sandbox-runtime/src/env.rs:41` 都把第二个 arm 描述成 CLAUDE 别名。
 
-顺序取自树里唯一另一处双名 tmpdir 优先级：`traits/src/uds_inbox.rs:123` 是 `["XDG_RUNTIME_DIR", "CLAUDE_CODE_TMPDIR", "LINGXI_TMPDIR"]` —— **`CLAUDE_CODE_TMPDIR` 在前并胜出**。这是全树唯一一处 LINGXI_ 不在最前的，所以它是判据而不是例外。
+顺序取自树里唯一另一处双名 tmpdir 优先级：`platform-api/src/uds_inbox.rs:123` 是 `["XDG_RUNTIME_DIR", "CLAUDE_CODE_TMPDIR", "LINGXI_TMPDIR"]` —— **`CLAUDE_CODE_TMPDIR` 在前并胜出**。这是全树唯一一处 LINGXI_ 不在最前的，所以它是判据而不是例外。
 
 ⛔ **默认值 `/tmp/claude` 在本计划里不动。** 那是磁盘路径变更，属于 Plan B（连同 `path_utils.rs:401-402` 的写白名单和 `linux.rs` 的 socket 名，它们是一组 lockstep）。
 
@@ -907,7 +907,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
     ///
     /// 第 3、4 两个分支今天是红的：函数把 `LINGXI_TMPDIR` 读了两遍，
     /// `CLAUDE_CODE_TMPDIR` 从来没被读过，尽管本函数的文档和 `env.rs:41`
-    /// 都说它是第一优先。顺序与 `traits::uds_inbox::safe_runtime_dir`
+    /// 都说它是第一优先。顺序与 `platform_api::uds_inbox::safe_runtime_dir`
     /// (uds_inbox.rs:123) 一致 —— 那是树里唯一另一处双名 tmpdir 优先级。
     #[test]
     fn resolve_tmpdir_honors_both_names_in_documented_order() {
@@ -980,7 +980,7 @@ Expected: **FAILED**，断言消息形如 `assertion \`left == right\` failed: l
     ///
     /// `CLAUDE_CODE_TMPDIR` — a kept SDK-contract var — stays FIRST so this
     /// agrees with the only other two-name tmpdir precedence in the tree,
-    /// `traits::uds_inbox::safe_runtime_dir` (uds_inbox.rs:123).
+    /// `platform_api::uds_inbox::safe_runtime_dir` (uds_inbox.rs:123).
     ///
     /// The default must stay in lockstep with
     /// `path_utils::get_default_write_paths_with` — it is the `$TMPDIR`
@@ -1180,20 +1180,20 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ## Task 7: B7 — 一对成对的 system-prompt 段落只改了一半
 
 **Files:**
-- Modify: `lingxi-code/traits/src/live_sessions.rs:38-49`
-- Test: `lingxi-code/traits/src/live_sessions.rs` 的 `mod tests`
+- Modify: `lingxi-code/platform-api/src/live_sessions.rs:38-49`
+- Test: `lingxi-code/platform-api/src/live_sessions.rs` 的 `mod tests`
 
 **Interfaces:**
 - Consumes: 无
 - Produces: 无新符号
 
-**这段文字确实进入了活的对话，传播链已逐跳追实：** `peer_message_reminder`（`live_sessions.rs:962-980`）插值这两个常量 → `traits::uds_inbox::take_accepted_peer_reminders`（`uds_inbox.rs:996-1004`）调用它 → `traits::live_sessions::take_accepted_peer_reminders`（`:1374-1380`）包装 → `ConversationOrchestrator::drain_peer_inbox`（`orchestrator/src/conversation.rs:5389-5399`）把每条字符串经 `inject_user_text(&body, /*is_meta=*/true)` 推进 `history` 并落盘 JSONL。`drain_peer_inbox` 的三个调用点：`conversation.rs:3240`（mid_turn=true）、`conversation.rs:9433` 与 `turn_loop.rs:389`（mid_turn=false）。
+**这段文字确实进入了活的对话，传播链已逐跳追实：** `peer_message_reminder`（`live_sessions.rs:962-980`）插值这两个常量 → `platform_api::uds_inbox::take_accepted_peer_reminders`（`uds_inbox.rs:996-1004`）调用它 → `platform_api::live_sessions::take_accepted_peer_reminders`（`:1374-1380`）包装 → `ConversationOrchestrator::drain_peer_inbox`（`orchestrator/src/conversation.rs:5389-5399`）把每条字符串经 `inject_user_text(&body, /*is_meta=*/true)` 推进 `history` 并落盘 JSONL。`drain_peer_inbox` 的三个调用点：`conversation.rs:3240`（mid_turn=true）、`conversation.rs:9433` 与 `turn_loop.rs:389`（mid_turn=false）。
 
 所以文本里的 `CLAUDE.md` 指向一个**本 build 不存在的文件**，那条权限升级护栏因此是空的。它的成对兄弟 `agent/src/handle.rs` 的 `SUBAGENT_CONSENT_PARAGRAPH` 早已改好，且被 `handle.rs:4041` 的 `make_subagent_context_appends_byte_locked_notes_trailer` 钉住——这一半没有任何测试。
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `lingxi-code/traits/src/live_sessions.rs` 的 `mod tests` 追加：
+在 `lingxi-code/platform-api/src/live_sessions.rs` 的 `mod tests` 追加：
 
 ```rust
     /// 对等消息提醒是逐字注入活对话的（`drain_peer_inbox` →
@@ -1227,13 +1227,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 Run:
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p traits --lib peer_suffixes_name_this_builds_memory_file --no-fail-fast 2>&1 | tee /tmp/t7.txt | tail -20
+cargo test -p platform-api --lib peer_suffixes_name_this_builds_memory_file --no-fail-fast 2>&1 | tee /tmp/t7.txt | tail -20
 ```
 Expected: **FAILED**，`mid-turn suffix names CLAUDE.md, a file this build never loads`。
 
 - [ ] **Step 3: 修两个常量**
 
-`lingxi-code/traits/src/live_sessions.rs:38-49`：
+`lingxi-code/platform-api/src/live_sessions.rs:38-49`：
 
 ```rust
 /// Mid-turn suffix (2.1.232 `x2n` + `vsi`). Branding: the oracle's
@@ -1261,7 +1261,7 @@ const PEER_IDLE_SUFFIX: &str = "This is from another LingXi session, not your us
 Run:
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p traits --lib live_sessions --no-fail-fast 2>&1 | tee /tmp/t7b.txt | tail -5
+cargo test -p platform-api --lib live_sessions --no-fail-fast 2>&1 | tee /tmp/t7b.txt | tail -5
 grep -A20 '^failures:' /tmp/t7b.txt || echo "no failures block"
 cargo test -p agent --lib make_subagent_context_appends_byte_locked_notes_trailer --no-fail-fast 2>&1 | tail -3
 ```
@@ -1271,7 +1271,7 @@ Expected: 全 PASS。最后一条是确认成对的兄弟没被碰坏。
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-code/traits/src/live_sessions.rs
+git add lingxi-code/platform-api/src/live_sessions.rs
 git commit -m "Finish a half-done rebrand that ships into the live prompt
 
 The peer-message suffixes are injected verbatim into the conversation as meta

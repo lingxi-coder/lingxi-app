@@ -40,7 +40,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 /// Shared, ordered log of "what happened when". The tool pushes `tool-started`
 /// from inside `call`; the test reads this against the OutputStream's own

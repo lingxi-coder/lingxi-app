@@ -27,7 +27,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use tui_core::theme::ThemeName;
 
-use traits::CostSnapshot;
+use platform_api::CostSnapshot;
 
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
 use crate::renderable::Renderable;
@@ -307,9 +307,9 @@ impl ScreenView {
     /// counts and percentages.
     ///
     /// Category cells and the legend are projected from the same
-    /// [`traits::ContextUsageSnapshot`] the headless `/context` command uses.
+    /// [`platform_api::ContextUsageSnapshot`] the headless `/context` command uses.
     #[must_use]
-    pub fn context(model: &str, usage: &traits::ContextUsageSnapshot) -> Self {
+    pub fn context(model: &str, usage: &platform_api::ContextUsageSnapshot) -> Self {
         const GRID_COLS: usize = 20;
         const GRID_ROWS: usize = 5;
         const CELLS: usize = GRID_COLS * GRID_ROWS;
@@ -320,9 +320,9 @@ impl ScreenView {
         let fallback;
         let breakdown = if usage.breakdown.is_empty() {
             fallback = vec![
-                traits::ContextUsageCategory::new(traits::ContextUsageCategoryKind::Messages, used),
-                traits::ContextUsageCategory::new(
-                    traits::ContextUsageCategoryKind::FreeSpace,
+                platform_api::ContextUsageCategory::new(platform_api::ContextUsageCategoryKind::Messages, used),
+                platform_api::ContextUsageCategory::new(
+                    platform_api::ContextUsageCategoryKind::FreeSpace,
                     max.saturating_sub(used),
                 ),
             ];
@@ -347,7 +347,7 @@ impl ScreenView {
             for c in 0..GRID_COLS {
                 let idx = r * GRID_COLS + c;
                 let kind = category_for_cell(breakdown, idx, CELLS, max);
-                let glyph = if kind == traits::ContextUsageCategoryKind::FreeSpace {
+                let glyph = if kind == platform_api::ContextUsageCategoryKind::FreeSpace {
                     "□ "
                 } else {
                     "■ "
@@ -359,7 +359,7 @@ impl ScreenView {
         lines.push(Line::from(""));
         for row in breakdown {
             let row_pct = context_percentage(row.tokens, max);
-            let glyph = if row.kind == traits::ContextUsageCategoryKind::FreeSpace {
+            let glyph = if row.kind == platform_api::ContextUsageCategoryKind::FreeSpace {
                 "□ "
             } else {
                 "■ "
@@ -617,12 +617,12 @@ fn context_percentage(tokens: u64, max: u64) -> u64 {
 }
 
 fn category_for_cell(
-    breakdown: &[traits::ContextUsageCategory],
+    breakdown: &[platform_api::ContextUsageCategory],
     cell: usize,
     cells: usize,
     max: u64,
-) -> traits::ContextUsageCategoryKind {
-    use traits::ContextUsageCategoryKind as Kind;
+) -> platform_api::ContextUsageCategoryKind {
+    use platform_api::ContextUsageCategoryKind as Kind;
     if max == 0 || cells == 0 {
         return Kind::FreeSpace;
     }
@@ -639,8 +639,8 @@ fn category_for_cell(
     Kind::FreeSpace
 }
 
-fn context_category_label(kind: traits::ContextUsageCategoryKind) -> &'static str {
-    use traits::ContextUsageCategoryKind as Kind;
+fn context_category_label(kind: platform_api::ContextUsageCategoryKind) -> &'static str {
+    use platform_api::ContextUsageCategoryKind as Kind;
     match kind {
         Kind::SystemPrompt => "System prompt",
         Kind::SystemTools => "System tools",
@@ -653,9 +653,9 @@ fn context_category_label(kind: traits::ContextUsageCategoryKind) -> &'static st
     }
 }
 
-fn context_category_style(kind: traits::ContextUsageCategoryKind) -> Style {
+fn context_category_style(kind: platform_api::ContextUsageCategoryKind) -> Style {
     use ratatui::style::Color;
-    use traits::ContextUsageCategoryKind as Kind;
+    use platform_api::ContextUsageCategoryKind as Kind;
     match kind {
         Kind::SystemPrompt => Style::default().fg(Color::Magenta),
         Kind::SystemTools => Style::default().fg(Color::Blue),
@@ -1075,10 +1075,10 @@ mod tests {
 
     #[test]
     fn context_screen_uses_shared_category_snapshot() {
-        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+        use platform_api::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
         let view = ScreenView::context(
             "claude-opus-5",
-            &traits::ContextUsageSnapshot {
+            &platform_api::ContextUsageSnapshot {
                 live_context_tokens: 100_000,
                 max_context_tokens: 1_000_000,
                 breakdown: vec![
@@ -1103,7 +1103,7 @@ mod tests {
     fn context_screen_warns_when_usage_exceeds_the_window() {
         let view = ScreenView::context(
             "claude-opus-5",
-            &traits::ContextUsageSnapshot {
+            &platform_api::ContextUsageSnapshot {
                 live_context_tokens: 1_012_345,
                 max_context_tokens: 1_000_000,
                 ..Default::default()
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn usage_stats_tab_renders_byte_exact_cost_block() {
-        use traits::orchestrator::ModelUsageRow;
+        use platform_api::orchestrator::ModelUsageRow;
         let snap = CostSnapshot {
             total_usd: 0.1234,
             api_duration: std::time::Duration::from_millis(5_000),

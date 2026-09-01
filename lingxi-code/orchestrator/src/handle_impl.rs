@@ -8,7 +8,7 @@
 //!
 //! Behavioural notes:
 //!
-//! - `clear_session` wipes [`engine::SessionState::history`] and mints
+//! - `clear_session` wipes [`lingxi_core::SessionState::history`] and mints
 //!   a fresh `SessionId`.
 //! - `force_compact` drives the production `CompactionOrchestrator`, including
 //!   the summarizer request, compact boundary, post-compact attachments and
@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::Command;
-use traits::{
+use platform_api::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
     SkillInfo, StatusSnapshot,
@@ -46,9 +46,9 @@ use traits::{
 fn normalize_session_model_ref(
     model: &str,
     explicit_profile: Option<&str>,
-    listings: &[traits::ModelListing],
+    listings: &[platform_api::ModelListing],
 ) -> (String, Option<String>) {
-    let (parsed_model, parsed_profile) = traits::parse_model_ref(model, listings);
+    let (parsed_model, parsed_profile) = platform_api::parse_model_ref(model, listings);
     match explicit_profile {
         Some(profile) if parsed_profile.as_deref() == Some(profile) => {
             (parsed_model, Some(profile.to_string()))
@@ -105,7 +105,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
         s.active_goal = None;
-        s.message_timing = engine::session::MessageTimingState::default();
+        s.message_timing = lingxi_core::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
         let new_session_id = s.session_id.to_string();
         self.compaction_runtime
@@ -156,7 +156,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
-        runtime: traits::ResumeRuntimeSnapshot,
+        runtime: platform_api::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         // See clear_session: a resumed history and its session-memory epoch
         // must be published atomically with respect to an active turn.
@@ -199,7 +199,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             runtime.post_compact_skill_attachments.into_iter().collect();
-        s.active_goal = active_goal.map(|goal| engine::session::ActiveGoalState {
+        s.active_goal = active_goal.map(|goal| lingxi_core::session::ActiveGoalState {
             condition: goal.condition,
             set_at: goal.set_at,
             last_reason: goal.last_reason,
@@ -316,7 +316,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn set_active_goal(&self, condition: &str) {
         let tokens_at_start = self.snapshot_cost_real().await.total_tokens;
         let mut s = self.session.lock().await;
-        s.active_goal = Some(engine::session::ActiveGoalState {
+        s.active_goal = Some(lingxi_core::session::ActiveGoalState {
             condition: condition.to_string(),
             set_at: SystemTime::now(),
             last_reason: None,
@@ -392,7 +392,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             ));
         };
 
-        let fork_msgs = traits::fork_subagent::build_forked_messages(directive, &assistant);
+        let fork_msgs = platform_api::fork_subagent::build_forked_messages(directive, &assistant);
         // The parent's rendered system-prompt bytes for a cache-identical child
         // prefix (`None` until the first successful turn).
         let parent_sys = self.current_turn_system_prompt().await;
@@ -403,8 +403,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // as "⑂ forked {name} ({id-tail})"). AsyncLaunch carries no name.
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
-        let request = traits::subagent_spawn::SubagentSpawnRequest {
-            subagent_type: traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+        let request = platform_api::subagent_spawn::SubagentSpawnRequest {
+            subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
             // ONLY wired async spawner — `BackgroundAgentSpawner::spawn_async` —
             // forwards `prompt` to the backgrounded LocalAgent and IGNORES
@@ -448,10 +448,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             resumed_history: None,
         };
 
-        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(
+        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone()),
         );
-        let inherit = traits::subagent_spawn::SubagentInheritance {
+        let inherit = platform_api::subagent_spawn::SubagentInheritance {
             tool_invoker: invoker,
             budget,
         };
@@ -470,7 +470,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `/fork` (2.1.212 `vAd`) — copy the CURRENT conversation into a NEW
     /// BACKGROUND session and keep the interactive session live. Reads the live
     /// history + the parent's rendered system prompt and hands them to the
-    /// injected [`traits::bg_session_forker::BgSessionForker`] seam (the CLI
+    /// injected [`platform_api::bg_session_forker::BgSessionForker`] seam (the CLI
     /// composition root's `CliBgSessionForker`), which snapshots the copy into
     /// the new session's transcript and dispatches a detached daemon worker that
     /// resumes it. Returns the system line for the live session (the seam owns
@@ -505,7 +505,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn background_conversation(
         &self,
-        snapshot: traits::BackgroundingSnapshot,
+        snapshot: platform_api::BackgroundingSnapshot,
     ) -> Result<String, HandleError> {
         let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
             HandleError::ActionFailed(
@@ -533,7 +533,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .current_turn_system_prompt()
             .await
             .map(|prompt| Arc::from(prompt.as_str()));
-        let continuation = if matches!(snapshot, traits::BackgroundingSnapshot::Idle { .. }) {
+        let continuation = if matches!(snapshot, platform_api::BackgroundingSnapshot::Idle { .. }) {
             ""
         } else {
             "Continue the interrupted turn from the backgrounding boundary. Preserve the user's intent and safely restart any interrupted work."
@@ -575,7 +575,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
-    async fn rewind_rows(&self) -> Vec<traits::RewindRowData> {
+    async fn rewind_rows(&self) -> Vec<platform_api::RewindRowData> {
         let Some(fh) = self.file_history.as_ref() else {
             return Vec::new();
         };
@@ -599,7 +599,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .take(80)
                 .collect();
             let has_code_changes = fh.has_any_changes(uuid).await;
-            rows.push(traits::RewindRowData {
+            rows.push(platform_api::RewindRowData {
                 message_uuid: uuid,
                 preview,
                 timestamp_label: format!("turn {turn}"),
@@ -702,7 +702,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn current_plan(&self) -> Result<Option<traits::PlanSnapshot>, HandleError> {
+    async fn current_plan(&self) -> Result<Option<platform_api::PlanSnapshot>, HandleError> {
         let session_id = self.session.lock().await.session_id;
         let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
             &session_id,
@@ -710,7 +710,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             self.config.plans_directory.as_deref(),
         ));
         match tokio::fs::read_to_string(&path).await {
-            Ok(content) => Ok(Some(traits::PlanSnapshot { path, content })),
+            Ok(content) => Ok(Some(platform_api::PlanSnapshot { path, content })),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(HandleError::ActionFailed(format!(
                 "could not read plan {}: {error}",
@@ -755,7 +755,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn workflow_size_guideline_state(
         &self,
-    ) -> traits::session_flags::WorkflowSizeGuidelineSnapshot {
+    ) -> platform_api::session_flags::WorkflowSizeGuidelineSnapshot {
         self.workflow_size_guideline.snapshot()
     }
 
@@ -792,8 +792,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
         let state = self.session.lock().await;
         let selection = effort
-            .map(|id| traits::ReasoningSelection::Level { id })
-            .unwrap_or(traits::ReasoningSelection::Automatic);
+            .map(|id| platform_api::ReasoningSelection::Level { id })
+            .unwrap_or(platform_api::ReasoningSelection::Automatic);
         self.set_reasoning_selection_for_model(
             &state.model,
             state.model_profile.as_deref(),
@@ -802,14 +802,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn conversation_controls(&self) -> Option<traits::ConversationControls> {
+    async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
         let state = self.session.lock().await;
         Some(self.conversation_controls_for_model(&state.model, state.model_profile.as_deref()))
     }
 
     async fn set_reasoning_selection(
         &self,
-        selection: traits::ReasoningSelection,
+        selection: platform_api::ReasoningSelection,
     ) -> Result<(), HandleError> {
         let state = self.session.lock().await;
         self.set_reasoning_selection_for_model(
@@ -879,7 +879,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // `managed_dir` mirrors the composition root's
         // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
         // (`apps/engine-desktop/src/lib.rs:3351-3354`) exactly — it is the
-        // SAME pure, env/platform-derived function (`traits::live_sessions::
+        // SAME pure, env/platform-derived function (`platform_api::live_sessions::
         // managed_settings_dir`), not a second computation; the loader
         // treats a non-existent managed dir as an empty tier, so this is
         // harmless when no managed policy is installed.
@@ -912,7 +912,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let Some(config_home) = self.config_home.as_ref() else {
             return Vec::new();
         };
-        let managed_dir = traits::live_sessions::managed_settings_dir();
+        let managed_dir = platform_api::live_sessions::managed_settings_dir();
         skill_api::load_file_skill_sections_with_roots(
             &self.cwd,
             config_home,
@@ -952,7 +952,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         (ok, failed)
     }
 
-    async fn mcp_server_states(&self) -> Vec<(String, traits::McpActionState)> {
+    async fn mcp_server_states(&self) -> Vec<(String, platform_api::McpActionState)> {
         match self.mcp_registry.as_ref() {
             Some(reg) => reg.action_states().await,
             None => Vec::new(),
@@ -963,7 +963,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         server: Option<&str>,
         disabled: bool,
-    ) -> Result<Vec<traits::McpToggleOutcome>, String> {
+    ) -> Result<Vec<platform_api::McpToggleOutcome>, String> {
         let Some(path) = migrations::global_config::global_config_path() else {
             return Err("global config path is unavailable".to_string());
         };
@@ -1012,15 +1012,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // is NOT an `Err` (see `McpRegistry::set_disabled`), so it lands here as
         // a settled `Failed`, letting the handler emit the "…but it isn't
         // connected yet." variant instead of a hard error.
-        let mut outcomes: Vec<traits::McpToggleOutcome> = Vec::new();
+        let mut outcomes: Vec<platform_api::McpToggleOutcome> = Vec::new();
         for name in &targets {
             let outcome = match registry.set_disabled(name, disabled).await {
                 Ok(None) => continue,
-                Ok(state @ Some(_)) => traits::McpToggleOutcome {
+                Ok(state @ Some(_)) => platform_api::McpToggleOutcome {
                     name: name.clone(),
                     state,
                 },
-                Err(_) => traits::McpToggleOutcome {
+                Err(_) => platform_api::McpToggleOutcome {
                     name: name.clone(),
                     state: None,
                 },
@@ -1034,14 +1034,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         directory: &str,
         source: &str,
-    ) -> traits::DirectoryAddedHookSummary {
+    ) -> platform_api::DirectoryAddedHookSummary {
         ConversationOrchestrator::fire_directory_added(self, directory, source).await
     }
 
     async fn register_repo_root(
         &self,
-        request: traits::RegisterRepoRootRequest,
-    ) -> Result<traits::RegisterRepoRootOutcome, traits::HandleError> {
+        request: platform_api::RegisterRepoRootRequest,
+    ) -> Result<platform_api::RegisterRepoRootOutcome, platform_api::HandleError> {
         ConversationOrchestrator::register_repo_root(self, request).await
     }
 
@@ -1181,7 +1181,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the
     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
     /// production `ProviderApiAdapter` sources from the llm-client catalog.
-    async fn list_model_listings(&self) -> Vec<traits::orchestrator::ModelListing> {
+    async fn list_model_listings(&self) -> Vec<platform_api::orchestrator::ModelListing> {
         self.api.list_model_listings()
     }
 
@@ -1195,7 +1195,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// Wiring it into `RenderedMessage::RateLimit` requires a new protocol
     /// event or a dedicated status-poll channel — both outside this task's
     /// scope (frozen protocol guard).  See the trait doc for details.
-    async fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+    async fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
         self.api.last_rate_limit_info()
     }
 
@@ -1203,16 +1203,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::TurnOutcome, HandleError> {
+    ) -> Result<platform_api::TurnOutcome, HandleError> {
         // Delegate to the inherent method on `ConversationOrchestrator`
         // (M6-03 T1). Disambiguate via fully-qualified call syntax since
         // the trait method has the same name.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
             .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
@@ -1222,7 +1222,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         prompt: &str,
         image_paths: &[std::path::PathBuf],
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<traits::TurnOutcome, HandleError> {
+    ) -> Result<platform_api::TurnOutcome, HandleError> {
         // Delegate to the inherent image-aware streaming entry point.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images(
             self,
@@ -1232,18 +1232,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
         )
         .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
 
-    async fn run_async_hook_rewake(&self) -> Result<traits::TurnOutcome, HandleError> {
+    async fn run_async_hook_rewake(&self) -> Result<platform_api::TurnOutcome, HandleError> {
         match crate::ConversationOrchestrator::run_async_hook_rewake(self).await {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
             Err(error) => Err(HandleError::ActionFailed(error.to_string())),
         }
     }
@@ -1275,8 +1275,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .model_context_keys()
     }
 
-    async fn context_usage_snapshot(&self) -> traits::ContextUsageSnapshot {
-        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+    async fn context_usage_snapshot(&self) -> platform_api::ContextUsageSnapshot {
+        use platform_api::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
 
         // Snapshot the live model and history together. The history component
         // uses the exact estimator auto-compaction uses, so replacing history
@@ -1321,7 +1321,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .saturating_sub(live_context_tokens)
             .saturating_sub(autocompact_buffer);
 
-        traits::ContextUsageSnapshot {
+        platform_api::ContextUsageSnapshot {
             live_context_tokens,
             max_context_tokens,
             breakdown: vec![
@@ -1411,7 +1411,7 @@ fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
 }
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
-/// populate [`traits::HookInfo::event`]. Avoids `Debug` derive
+/// populate [`platform_api::HookInfo::event`]. Avoids `Debug` derive
 /// drift — the locked names are part of the M6-07 surface and the
 /// claude-code parity. (M6-07)
 fn event_str(et: &hooks::events::HookEventType) -> &'static str {
@@ -1551,10 +1551,10 @@ fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
 /// tier). Project, then User, in splice order.
 fn setting_sources_for(cwd: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
-    if engine::settings::loader::project_settings_path(cwd).is_file() {
+    if lingxi_core::settings::loader::project_settings_path(cwd).is_file() {
         out.push("Project settings (.lingxi/settings.json)".to_string());
     }
-    if engine::settings::loader::user_settings_path().is_some_and(|p| p.is_file()) {
+    if lingxi_core::settings::loader::user_settings_path().is_some_and(|p| p.is_file()) {
         out.push("User settings (~/.lingxi/settings.json)".to_string());
     }
     out
@@ -1646,13 +1646,13 @@ mod tests {
     struct SessionMemoryTestRuntime;
 
     #[async_trait::async_trait]
-    impl traits::RuntimeSpawner for SessionMemoryTestRuntime {
+    impl platform_api::RuntimeSpawner for SessionMemoryTestRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal(
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal(
                 "unused session-memory test runtime".to_string(),
             ))
         }
@@ -1661,8 +1661,8 @@ mod tests {
 
         async fn cancel(
             &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }
@@ -1709,7 +1709,7 @@ mod tests {
             .await
             .insert(std::path::PathBuf::from("/old-session/nested.md"));
 
-        traits::OrchestratorHandle::clear_session(&orch)
+        platform_api::OrchestratorHandle::clear_session(&orch)
             .await
             .expect("clear session");
 
@@ -1768,7 +1768,7 @@ mod tests {
             other_scope,
         );
 
-        traits::OrchestratorHandle::request_exit(&orch).await;
+        platform_api::OrchestratorHandle::request_exit(&orch).await;
 
         assert!(compaction::invoked_skills::filter_for_scope(current_scope).is_empty());
         assert_eq!(
@@ -1820,7 +1820,7 @@ mod tests {
     async fn hot_resume_splits_a_qualified_model_ref_with_no_profile() {
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let api = Arc::new(MockApiClient::new(Vec::new()));
-        api.set_model_listings(vec![traits::ModelListing {
+        api.set_model_listings(vec![platform_api::ModelListing {
             display_model: "deepseek-v4-flash".to_string(),
             request_model: "deepseek-v4-flash".to_string(),
             provider_id: "deepseek".to_string(),
@@ -1842,13 +1842,13 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 model: "deepseek/deepseek-v4-flash".to_string(),
                 model_profile: None,
                 ..Default::default()
@@ -1875,7 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_splits_a_qualified_model_ref_with_matching_profile() {
         let api = Arc::new(MockApiClient::new(Vec::new()));
-        api.set_model_listings(vec![traits::ModelListing {
+        api.set_model_listings(vec![platform_api::ModelListing {
             display_model: "deepseek-v4-flash".to_string(),
             request_model: "deepseek-v4-flash".to_string(),
             provider_id: "deepseek".to_string(),
@@ -1897,13 +1897,13 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 model: "deepseek/deepseek-v4-flash".to_string(),
                 model_profile: Some("deepseek".to_string()),
                 ..Default::default()
@@ -1920,7 +1920,7 @@ mod tests {
         // The lower-level switch seam is also used outside the mobile command
         // adapter. It must uphold the same invariant even if a caller passes
         // the UI reference and explicit profile together.
-        traits::OrchestratorHandle::switch_model(
+        platform_api::OrchestratorHandle::switch_model(
             &orch,
             "deepseek/deepseek-v4-flash",
             Some("deepseek"),
@@ -1937,7 +1937,7 @@ mod tests {
     /// listing claims stays exactly as recorded.
     #[tokio::test]
     async fn hot_resume_leaves_unqualified_and_unknown_model_refs_alone() {
-        let listings = vec![traits::ModelListing {
+        let listings = vec![platform_api::ModelListing {
             display_model: "openrouter/auto".to_string(),
             request_model: "openrouter/auto".to_string(),
             provider_id: "openrouter".to_string(),
@@ -1972,13 +1972,13 @@ mod tests {
                 Arc::new(StaticMemoryProvider::empty()),
                 std::env::temp_dir(),
             );
-            traits::OrchestratorHandle::resume_session(
+            platform_api::OrchestratorHandle::resume_session(
                 &orch,
                 protocol::SessionId::new(),
                 Vec::new(),
                 None,
                 None,
-                traits::ResumeRuntimeSnapshot {
+                platform_api::ResumeRuntimeSnapshot {
                     model: recorded.to_string(),
                     model_profile: None,
                     ..Default::default()
@@ -2022,13 +2022,13 @@ mod tests {
             .last_response_input_tokens
             .store(99, std::sync::atomic::Ordering::Relaxed);
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 model: "claude-opus-4-8".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 effort: Some("high".to_string()),
@@ -2102,13 +2102,13 @@ mod tests {
             "an unpinned runtime inherits transcript effort"
         );
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot::default(),
+            platform_api::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("second hot resume");
@@ -2166,7 +2166,7 @@ mod tests {
         );
 
         assert_eq!(
-            traits::OrchestratorHandle::files_in_context(&orch).await,
+            platform_api::OrchestratorHandle::files_in_context(&orch).await,
             vec![visible]
         );
     }
@@ -2187,15 +2187,15 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 effort: Some("high".to_string()),
-                ..traits::ResumeRuntimeSnapshot::default()
+                ..platform_api::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -2279,18 +2279,18 @@ mod tests {
             observer: None,
         };
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot {
+            platform_api::ResumeRuntimeSnapshot {
                 main_thread_agent_type: Some("reviewer".to_string()),
                 main_thread_agent_definition: Some(
                     serde_json::to_value(definition).expect("serialize agent snapshot"),
                 ),
-                ..traits::ResumeRuntimeSnapshot::default()
+                ..platform_api::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -2310,13 +2310,13 @@ mod tests {
             .is_some());
         assert!(orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
 
-        traits::OrchestratorHandle::resume_session(
+        platform_api::OrchestratorHandle::resume_session(
             &orch,
             protocol::SessionId::new(),
             Vec::new(),
             None,
             None,
-            traits::ResumeRuntimeSnapshot::default(),
+            platform_api::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("resume default-agent session");
@@ -2525,7 +2525,7 @@ mod tests {
         {
             let mut s = orch.session.lock().await;
             s.model = "claude-opus-5".to_string();
-            s.usage.add(&engine::token::Usage {
+            s.usage.add(&lingxi_core::token::Usage {
                 input_tokens: 1_200,
                 output_tokens: 345,
                 cache_creation_input_tokens: 0,
@@ -2546,7 +2546,7 @@ mod tests {
         let messages = snapshot
             .breakdown
             .iter()
-            .find(|row| row.kind == traits::ContextUsageCategoryKind::Messages)
+            .find(|row| row.kind == platform_api::ContextUsageCategoryKind::Messages)
             .map_or(0, |row| row.tokens);
         assert_eq!(messages, expected_messages, "history estimator must match");
         assert_ne!(used, 1_545, "cumulative provider usage must not leak in");
@@ -2586,7 +2586,7 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        assert!(traits::OrchestratorHandle::current_plan(&orch)
+        assert!(platform_api::OrchestratorHandle::current_plan(&orch)
             .await
             .expect("read absent plan")
             .is_none());
@@ -2597,18 +2597,18 @@ mod tests {
             orch.config.plans_directory.as_deref(),
         );
         std::fs::write(&path, "# Plan\n\n- ship it\n").expect("write plan");
-        let plan = traits::OrchestratorHandle::current_plan(&orch)
+        let plan = platform_api::OrchestratorHandle::current_plan(&orch)
             .await
             .expect("read plan")
             .expect("plan exists");
         assert_eq!(plan.path, std::path::PathBuf::from(path));
         assert_eq!(plan.content, "# Plan\n\n- ship it\n");
 
-        traits::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
+        platform_api::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
             .await
             .expect("set effort");
         assert_eq!(
-            traits::OrchestratorHandle::current_effort(&orch)
+            platform_api::OrchestratorHandle::current_effort(&orch)
                 .await
                 .as_deref(),
             Some("xhigh")

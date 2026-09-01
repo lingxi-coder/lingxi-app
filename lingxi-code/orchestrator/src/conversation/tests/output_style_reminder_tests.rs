@@ -137,7 +137,7 @@ async fn builder_returns_none_for_default_and_unknown_styles() {
 async fn batched_active_style_appends_transient_reminder_not_persisted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
         dir.path().to_path_buf(),
     ));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -266,7 +266,7 @@ async fn batched_default_style_sends_no_reminder() {
 async fn streaming_active_style_appends_transient_reminder_not_persisted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
         dir.path().to_path_buf(),
     ));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(

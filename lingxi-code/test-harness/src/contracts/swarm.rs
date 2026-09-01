@@ -14,7 +14,7 @@
 //!   `Err(Unsupported)` for refusing platforms, `Err(Tmux)` for backends
 //!   that surface the underlying "no such session" error).
 
-use traits::swarm::{SwarmBackend, SwarmError, SwarmHandle};
+use platform_api::swarm::{SwarmBackend, SwarmError, SwarmHandle};
 
 /// Run the standard [`SwarmBackend`] contract against an impl.
 ///

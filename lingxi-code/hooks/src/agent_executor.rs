@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use traits::subagent_spawn::{
+use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
 
@@ -227,9 +227,9 @@ mod tests {
     use protocol::HookId;
     use serde_json::json;
     use std::sync::Mutex;
-    use traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use traits::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
-    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     struct InertInvoker;
     #[async_trait]

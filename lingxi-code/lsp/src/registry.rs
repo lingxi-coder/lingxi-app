@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{watch, RwLock};
-use traits::{LspError, LspServerConfig, LspTransport};
+use platform_api::{LspError, LspServerConfig, LspTransport};
 
 /// Crash-recovery cap: a server whose start keeps failing is retried until
 /// its failure count EXCEEDS this bound, then every further request returns
@@ -868,7 +868,7 @@ mod routing_tests {
     use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use traits::{LspRawConnection, LspServerCapabilities};
+    use platform_api::{LspRawConnection, LspServerCapabilities};
 
     fn caps() -> LspServerCapabilities {
         LspServerCapabilities {

@@ -35,7 +35,7 @@
 //!
 //! Production capability flow is now explicit: POSIX `initialize` decodes the
 //! oracle's `io.modelcontextprotocol/skills.directoryRead === true` extension
-//! into [`traits::ServerCapabilitiesDto::directory_read`], discovery cache
+//! into [`platform_api::ServerCapabilitiesDto::directory_read`], discovery cache
 //! persists that DTO bit, and this tool resolves cached/live registry state,
 //! lazy-dials if needed, then re-verifies the CURRENT live `Connected` DTO
 //! before issuing `resources/directory/read`.
@@ -767,8 +767,8 @@ mod tests {
                 ),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: traits::McpNegotiatedProtocol {
-                    era: traits::McpProtocolEra::Legacy,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -860,7 +860,7 @@ mod tests {
             "my_server",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(true),
-                live_capabilities: traits::ServerCapabilitiesDto {
+                live_capabilities: platform_api::ServerCapabilitiesDto {
                     directory_read: false,
                     ..resource_caps(false)
                 },
@@ -1002,7 +1002,7 @@ mod tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(true),
-                live_capabilities: traits::ServerCapabilitiesDto {
+                live_capabilities: platform_api::ServerCapabilitiesDto {
                     resources: false,
                     directory_read: true,
                     ..resource_caps(false)

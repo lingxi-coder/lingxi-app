@@ -92,7 +92,7 @@ pub struct LoginArgs {
 pub fn xaa_enabled() -> bool {
     ["LINGXI_ENABLE_XAA", "CLAUDE_CODE_ENABLE_XAA"]
         .iter()
-        .any(|k| traits::env::is_env_truthy(std::env::var(k).ok().as_deref()))
+        .any(|k| platform_api::env::is_env_truthy(std::env::var(k).ok().as_deref()))
 }
 
 /// Dispatch `mcp xaa`.
@@ -290,7 +290,7 @@ async fn run_setup(a: &SetupArgs) -> i32 {
                 Ok((storage, clock)) => {
                     mcp::xaa_idp::save_idp_client_secret(storage, clock, &a.issuer, secret).await
                 }
-                Err(e) => Err(traits::McpError::OAuth(e.clone())),
+                Err(e) => Err(platform_api::McpError::OAuth(e.clone())),
             };
             if let Err(e) = saved {
                 eprintln!(
@@ -539,7 +539,7 @@ fn write_xaa_settings(value: Option<serde_json::Value>) -> Result<(), String> {
 }
 
 async fn storage_and_clock(
-) -> Result<(Arc<dyn traits::SecureStorage>, Arc<dyn traits::Clock>), String> {
+) -> Result<(Arc<dyn platform_api::SecureStorage>, Arc<dyn platform_api::Clock>), String> {
     let home = crate::run::lingxi_home_dir();
     let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
     let storage = platform_posix::secure_storage_for_platform(
@@ -549,12 +549,12 @@ async fn storage_and_clock(
     )
     .await
     .map_err(|e| e.to_string())?;
-    let clock: Arc<dyn traits::Clock> = Arc::new(PosixClock::new());
+    let clock: Arc<dyn platform_api::Clock> = Arc::new(PosixClock::new());
     Ok((storage, clock))
 }
 
-fn http_transport() -> Result<Arc<dyn traits::HttpTransport>, String> {
-    Ok(Arc::new(PosixHttp::new()) as Arc<dyn traits::HttpTransport>)
+fn http_transport() -> Result<Arc<dyn platform_api::HttpTransport>, String> {
+    Ok(Arc::new(PosixHttp::new()) as Arc<dyn platform_api::HttpTransport>)
 }
 
 #[cfg(test)]

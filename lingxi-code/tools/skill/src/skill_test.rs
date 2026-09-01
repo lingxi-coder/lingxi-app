@@ -7,7 +7,7 @@ mod tests {
     use super::*;
     use protocol::{AgentId, SessionId};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -890,11 +890,11 @@ mod tests {
         stdout: String,
     }
     #[async_trait]
-    impl traits::process::ProcessRunner for CapturingProcess {
+    impl platform_api::process::ProcessRunner for CapturingProcess {
         async fn run(
             &self,
-            cmd: &traits::sandbox::SandboxedCommand,
-        ) -> Result<ProcessOutput, traits::process::ProcessError> {
+            cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
             if let Some(last) = cmd.inner().args.last() {
                 self.seen.lock().unwrap().push(last.clone());
             }
@@ -907,14 +907,14 @@ mod tests {
         }
         async fn spawn_background(
             &self,
-            _cmd: &traits::sandbox::SandboxedCommand,
-        ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
-            Err(traits::process::ProcessError::Unsupported)
+            _cmd: &platform_api::sandbox::SandboxedCommand,
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+            Err(platform_api::process::ProcessError::Unsupported)
         }
         async fn kill(
             &self,
-            _handle: &traits::process::ProcessHandle,
-        ) -> Result<(), traits::process::ProcessError> {
+            _handle: &platform_api::process::ProcessHandle,
+        ) -> Result<(), platform_api::process::ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -1329,7 +1329,7 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
         let mut call_ctx = fresh_ctx();
         call_ctx.session = Some(Arc::new(tokio::sync::Mutex::new(
-            engine::SessionState::empty(live_session_id, "model".into()),
+            lingxi_core::SessionState::empty(live_session_id, "model".into()),
         )));
 
         tool.call(json!({"skill": "regtest"}), call_ctx, fresh_tx())
@@ -1363,13 +1363,13 @@ mod fork_dispatch_tests {
     use super::*;
     use std::sync::Arc;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use traits::process::ProcessOutput;
-    use traits::subagent_spawn::{
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::process::ProcessOutput;
+    use platform_api::subagent_spawn::{
         AsyncLaunch, SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
         SubagentSpawnRequest, SubagentSpawner,
     };
-    use traits::task_registry::{
+    use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,
     };
@@ -1477,7 +1477,7 @@ mod fork_dispatch_tests {
             &self,
             _id: &str,
             _offset: Option<u64>,
-        ) -> Result<traits::task_registry::TaskOutputChunk, TaskRegistryError> {
+        ) -> Result<platform_api::task_registry::TaskOutputChunk, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
         fn get_total_agent_spawns(&self) -> u64 {

@@ -245,7 +245,7 @@ LingXi mobile composition root
 | `apps/engine-mobile/src/workflow_support.rs` | 按 Profile 硬编码两个 workflow 名 | 合并 workflow，由 resolved handle 注入可信 context |
 | `apps/engine-mobile/src/local_apps_host.rs` | `LINGXI.md` 写死 workflow 名 | 改成 Host 中立的能力描述 |
 | `apps/engine-mobile/src/local_app_runtime_profiles.rs` | 五套模板由 `include_bytes!` 编入 Core；Babylon unavailable | 移入 Plugin assets，由 builtin bundle provider 提供 |
-| `traits/src/mcp.rs` | `McpToolDto` 缺标准 Tool 字段 | 补完整 MCP 2025-11-25 DTO |
+| `platform-api/src/mcp.rs` | `McpToolDto` 缺标准 Tool 字段 | 补完整 MCP 2025-11-25 DTO |
 | MCP protocol constants | `mcp` client latest 为 2025-11-25；`apps/cli mcp serve` 有独立 2025-06-18 常量 | Local App in-process hub 只复用 `mcp::initialize_params::LATEST_PROTOCOL_VERSION`，不复制 CLI 常量 |
 | `mcp/src/registry.rs` | 支持远端 `notifications/tools/list_changed` | 增加 managed logical server 注册/注销 |
 | `apps/engine-mobile/src/local_apps_mcp.rs` | 一个 physical hub；Conversation/App 两种 scope；notifications 为空 | 增加 ConversationExport scope、active catalog 和 broadcast |

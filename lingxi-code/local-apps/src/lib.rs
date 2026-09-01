@@ -10,7 +10,7 @@
 //! onto `AppOperationFailed { code, message }`.
 //!
 //! Storage layout under the injected data root (all writes atomic via
-//! `traits::rooted_fs`; every file carries `schemaVersion`):
+//! `platform_api::rooted_fs`; every file carries `schemaVersion`):
 //!
 //! ```text
 //! apps/index.json                          — { schemaVersion, apps: [AppRecord] }

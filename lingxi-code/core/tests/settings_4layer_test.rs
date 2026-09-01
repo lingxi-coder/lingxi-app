@@ -10,8 +10,8 @@
 //! `crate::settings::test_support::HOME_LOCK` pattern used by the unit tests
 //! (which is `pub(crate)` and therefore unreachable from `tests/`).
 
-use engine::settings::schema::SettingsJson;
-use engine::settings::{LoadInputs, Settings};
+use lingxi_core::settings::schema::SettingsJson;
+use lingxi_core::settings::{LoadInputs, Settings};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Mutex;
@@ -33,7 +33,7 @@ fn user_settings_path_is_dot_claude_settings_json() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", tmp.path());
-    let p = engine::settings::loader::user_settings_path().unwrap();
+    let p = lingxi_core::settings::loader::user_settings_path().unwrap();
     // Byte-for-byte literal from spec §7.
     assert_eq!(p, tmp.path().join(".lingxi").join("settings.json"));
 }
@@ -41,14 +41,14 @@ fn user_settings_path_is_dot_claude_settings_json() {
 #[test]
 fn project_settings_path_is_dot_claude_settings_json() {
     let tmp = tempfile::tempdir().unwrap();
-    let p = engine::settings::loader::project_settings_path(tmp.path());
+    let p = lingxi_core::settings::loader::project_settings_path(tmp.path());
     assert_eq!(p, tmp.path().join(".lingxi").join("settings.json"));
 }
 
 #[test]
 fn local_settings_path_is_dot_claude_settings_local_json() {
     let tmp = tempfile::tempdir().unwrap();
-    let p = engine::settings::loader::local_settings_path(tmp.path());
+    let p = lingxi_core::settings::loader::local_settings_path(tmp.path());
     assert_eq!(p, tmp.path().join(".lingxi").join("settings.local.json"));
 }
 
@@ -231,7 +231,7 @@ fn effective_for_returns_provenance_for_each_field() {
     let prov = eff.effective_for("model").unwrap();
     assert_eq!(
         prov.contributors,
-        vec![engine::settings::tracer::Source::User]
+        vec![lingxi_core::settings::tracer::Source::User]
     );
     assert!(eff.effective_for("nonsense_field").is_none());
 }

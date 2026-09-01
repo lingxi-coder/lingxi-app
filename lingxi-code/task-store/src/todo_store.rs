@@ -4,7 +4,7 @@
 //! Each task list lives under `<lingxi_config_home>/tasks/<sanitize(list_id)>/`
 //! with one `<id>.json` per task (`id` is a decimal string `"1".."N"`) plus a
 //! `.highwatermark` file recording the highest id ever assigned (so deleting /
-//! resetting never reuses an id). Tasks carry `engine::TodoState`
+//! resetting never reuses an id). Tasks carry `lingxi_core::TodoState`
 //! (`pending`/`in_progress`/`completed`) — the V2 status enum — which is a
 //! SEPARATE space from the Product-B `TASK_STATUSES` in `task.rs`.
 //!
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use engine::TodoState;
+use lingxi_core::TodoState;
 
 /// High-water-mark file name (claude-code `HIGH_WATER_MARK_FILE`).
 const HIGH_WATER_MARK_FILE: &str = ".highwatermark";

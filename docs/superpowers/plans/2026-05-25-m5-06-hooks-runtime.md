@@ -41,7 +41,7 @@ This plan ships:
   - §6.3 telemetry growth (line 439) — "M5-06 后 253 (+8)".
   - §7 OQ-4 (line 494) — "Hook event JSON schema". Resolved by T0 below.
 - Predecessor M5-05 (committed at `297e3bc`):
-  - `ConversationOrchestrator` now has 10 fields including `hooks: Arc<HookExecutorImpl>` (added in M5-02 Task 10) and `perms: Arc<dyn PermissionGate>` (M5-05 promoted to `lingxi-traits::permission_gate`).
+  - `ConversationOrchestrator` now has 10 fields including `hooks: Arc<HookExecutorImpl>` (added in M5-02 Task 10) and `perms: Arc<dyn PermissionGate>` (M5-05 promoted to `lingxi-platform_api::permission_gate`).
   - `ALL_EVENT_NAMES.len() == 245`. `tengu::orchestrator::NAMES` has 7 entries (`conversation_started/completed/failed` + `turn_streaming_started/completed` + `permission_prompted/answered`).
   - `tengu::mod.rs:29` TOTAL formula reads `25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 7 + 1 = 245`. **Task 16 step 2 bumps the orchestrator's `7` to `15`** (orchestrator submodule grows from 7 → 15 entries), making `TOTAL = 253`.
 - Predecessor M5-02 (committed at `653de44`):
@@ -193,7 +193,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
       timeout: Duration,                      // HOOK_COMMAND_TIMEOUT_MS
   }
   ```
-  Single method `pub async fn execute(&self, hook: &HookDefinition, command: &str, args: &[String], env: &HashMap<String, String>, cwd: Option<&Path>, stdin_payload: &str, expected_event: &'static str) -> HookResult`. Uses `RuntimeSpawner::spawn_with_stdin(command, args, env, cwd, stdin_payload, self.timeout)` — that method already exists in `lingxi-traits::runtime::RuntimeSpawner` (M2-04 added it). On non-zero exit, returns `HookResult { outcome: HookOutcome::Error, exit_code: Some(code), .. }` but STILL attempts to parse stdout (claude-code's pattern: a hook can return JSON + non-zero exit to mean "non-fatal advisory").
+  Single method `pub async fn execute(&self, hook: &HookDefinition, command: &str, args: &[String], env: &HashMap<String, String>, cwd: Option<&Path>, stdin_payload: &str, expected_event: &'static str) -> HookResult`. Uses `RuntimeSpawner::spawn_with_stdin(command, args, env, cwd, stdin_payload, self.timeout)` — that method already exists in `lingxi-platform_api::runtime::RuntimeSpawner` (M2-04 added it). On non-zero exit, returns `HookResult { outcome: HookOutcome::Error, exit_code: Some(code), .. }` but STILL attempts to parse stdout (claude-code's pattern: a hook can return JSON + non-zero exit to mean "non-fatal advisory").
 
 - **`AgentExecutor` shape:**
   ```rust
@@ -868,7 +868,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use crate::definition::HookDefinition;
   use crate::response::HookResult;
   use crate::ssrf_guard::SsrfGuard;
-  use lingxi_traits::HttpTransport;
+  use lingxi_platform_api::HttpTransport;
   use std::collections::HashMap;
   use std::sync::Arc;
   use std::time::Duration;
@@ -929,7 +929,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use lingxi_hooks::definition::{HookDefinition, HookExecutor, HookSource};
   use lingxi_hooks::executor::HookExecutorImpl;
   use lingxi_protocol::{HookId, SessionId, ToolUseId};
-  use lingxi_traits::{HttpRequest, HttpResponse, HttpTransport};
+  use lingxi_platform_api::{HttpRequest, HttpResponse, HttpTransport};
   use serde_json::json;
   use std::collections::HashMap;
   use std::sync::{Arc, Mutex};
@@ -943,7 +943,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   }
   #[async_trait::async_trait]
   impl HttpTransport for MockHttp {
-      async fn request(&self, req: HttpRequest) -> Result<HttpResponse, lingxi_traits::HttpError> {
+      async fn request(&self, req: HttpRequest) -> Result<HttpResponse, lingxi_platform_api::HttpError> {
           self.recorded.lock().unwrap().push(req.url.clone());
           Ok(HttpResponse {
               status: 200,
@@ -957,7 +957,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   /// required to construct HookExecutorImpl.
   struct InertRuntime;
   #[async_trait::async_trait]
-  impl lingxi_traits::RuntimeSpawner for InertRuntime {
+  impl lingxi_platform_api::RuntimeSpawner for InertRuntime {
       async fn spawn_with_stdin(
           &self,
           _command: &str,
@@ -966,8 +966,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
           _cwd: Option<&std::path::Path>,
           _stdin: &str,
           _timeout: std::time::Duration,
-      ) -> Result<lingxi_traits::SpawnedProcessOutput, lingxi_traits::SpawnError> {
-          Err(lingxi_traits::SpawnError::Internal("inert".into()))
+      ) -> Result<lingxi_platform_api::SpawnedProcessOutput, lingxi_platform_api::SpawnError> {
+          Err(lingxi_platform_api::SpawnError::Internal("inert".into()))
       }
   }
 
@@ -1051,7 +1051,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 **Files:**
 - Modify: `lingxi-code/crates/hooks/src/http_executor.rs` (fill `execute` body).
-- Modify: `lingxi-code/crates/hooks/src/registry.rs` (add five new `HookContext` fields — actually completed in T11, but T4 needs the minimum for compile: add a `pub transcript_path: PathBuf` field with `Default` impl returning empty path, plus `pub inherit: Option<lingxi_traits::SubagentInheritance>` — the rest stay as `None`-typed `Option<String>`/`Option<AgentId>`.)
+- Modify: `lingxi-code/crates/hooks/src/registry.rs` (add five new `HookContext` fields — actually completed in T11, but T4 needs the minimum for compile: add a `pub transcript_path: PathBuf` field with `Default` impl returning empty path, plus `pub inherit: Option<lingxi_platform_api::SubagentInheritance>` — the rest stay as `None`-typed `Option<String>`/`Option<AgentId>`.)
 - Modify: `lingxi-code/crates/hooks/src/executor.rs` (replace the stubbed `HookExecutor::Http` arm with a delegating call to `HttpExecutor`).
 
 - [ ] **Step 1: Extend `HookContext` with the five new fields (forward-compatible).**
@@ -1059,7 +1059,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   Open `lingxi-code/crates/hooks/src/registry.rs`. Find the current `HookContext` struct (M1.4 shape: probably `pub struct HookContext { pub session_id: SessionId, pub cwd: PathBuf }`). Add the five new fields and update the `Default` impl. The exact struct now reads:
   ```rust
   use lingxi_protocol::{AgentId, SessionId};
-  use lingxi_traits::SubagentInheritance;
+  use lingxi_platform_api::SubagentInheritance;
   use std::path::PathBuf;
 
   /// Per-event context passed alongside the hook event to every matched hook.
@@ -1090,7 +1090,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use crate::hook_payload::parse_response;
   use crate::response::{HookOutcome, HookResponse, HookResult};
   use crate::ssrf_guard::SsrfGuard;
-  use lingxi_traits::{HttpRequest, HttpTransport};
+  use lingxi_platform_api::{HttpRequest, HttpTransport};
   use std::collections::HashMap;
   use std::sync::Arc;
   use std::time::Duration;
@@ -1437,7 +1437,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   struct PendingForeverHttp;
   #[async_trait::async_trait]
   impl HttpTransport for PendingForeverHttp {
-      async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, lingxi_traits::HttpError> {
+      async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, lingxi_platform_api::HttpError> {
           std::future::pending::<()>().await;
           unreachable!()
       }
@@ -1512,7 +1512,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
   use crate::definition::HookDefinition;
   use crate::response::{HookOutcome, HookResult};
-  use lingxi_traits::RuntimeSpawner;
+  use lingxi_platform_api::RuntimeSpawner;
   use std::collections::HashMap;
   use std::path::Path;
   use std::sync::Arc;
@@ -1575,7 +1575,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use lingxi_hooks::executor::HookExecutorImpl;
   use lingxi_hooks::{HookDecision, HookEventType, HookOutcome};
   use lingxi_protocol::{HookId, SessionId, ToolUseId};
-  use lingxi_traits::{
+  use lingxi_platform_api::{
       HttpRequest, HttpResponse, HttpTransport, RuntimeSpawner, SpawnError,
       SpawnedProcessOutput,
   };
@@ -1589,8 +1589,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   struct InertHttp;
   #[async_trait::async_trait]
   impl HttpTransport for InertHttp {
-      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_traits::HttpError> {
-          Err(lingxi_traits::HttpError::Transport("inert".into()))
+      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_platform_api::HttpError> {
+          Err(lingxi_platform_api::HttpError::Transport("inert".into()))
       }
   }
 
@@ -1713,7 +1713,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use crate::definition::{HookDefinition, HookExecutor};
   use crate::hook_payload::parse_response;
   use crate::response::{HookOutcome, HookResponse, HookResult};
-  use lingxi_traits::RuntimeSpawner;
+  use lingxi_platform_api::RuntimeSpawner;
   use std::collections::HashMap;
   use std::path::Path;
   use std::sync::Arc;
@@ -2096,7 +2096,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
   use crate::definition::HookDefinition;
   use crate::response::{HookOutcome, HookResult};
-  use lingxi_traits::{SubagentInheritance, SubagentSpawner};
+  use lingxi_platform_api::{SubagentInheritance, SubagentSpawner};
   use std::sync::Arc;
   use std::time::Duration;
 
@@ -2145,7 +2145,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
   In `executor.rs`, add the field to the struct definition (next to `builtin_handlers`):
   ```rust
-  agent_spawner: Option<Arc<dyn lingxi_traits::SubagentSpawner>>,
+  agent_spawner: Option<Arc<dyn lingxi_platform_api::SubagentSpawner>>,
   ```
   Initialize it to `None` in `new()`. Add the builder method:
   ```rust
@@ -2153,7 +2153,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   /// a subagent for their response. Without this, agent-arm hooks fail
   /// with a "not wired" error.
   #[must_use]
-  pub fn with_agent_spawner(mut self, spawner: Arc<dyn lingxi_traits::SubagentSpawner>) -> Self {
+  pub fn with_agent_spawner(mut self, spawner: Arc<dyn lingxi_platform_api::SubagentSpawner>) -> Self {
       self.agent_spawner = Some(spawner);
       self
   }
@@ -2173,7 +2173,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use lingxi_hooks::executor::HookExecutorImpl;
   use lingxi_hooks::{HookDecision, HookEventType, HookOutcome};
   use lingxi_protocol::{HookId, SessionId, ToolUseId};
-  use lingxi_traits::{
+  use lingxi_platform_api::{
       BudgetEnforcerHandle, HttpRequest, HttpResponse, HttpTransport, RuntimeSpawner,
       SpawnError, SpawnedProcessOutput, SubagentInheritance, SubagentResult,
       SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, SubagentUsage, ToolInvoker,
@@ -2186,8 +2186,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   struct InertHttp;
   #[async_trait::async_trait]
   impl HttpTransport for InertHttp {
-      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_traits::HttpError> {
-          Err(lingxi_traits::HttpError::Transport("inert".into()))
+      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_platform_api::HttpError> {
+          Err(lingxi_platform_api::HttpError::Transport("inert".into()))
       }
   }
   struct InertRuntime;
@@ -2208,15 +2208,15 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
           &self,
           _name: &str,
           _input: serde_json::Value,
-          _ctx: lingxi_traits::SubagentInvocationContext,
-      ) -> Result<serde_json::Value, lingxi_traits::ToolInvokerError> {
-          Err(lingxi_traits::ToolInvokerError::ToolNotFound("inert".into()))
+          _ctx: lingxi_platform_api::SubagentInvocationContext,
+      ) -> Result<serde_json::Value, lingxi_platform_api::ToolInvokerError> {
+          Err(lingxi_platform_api::ToolInvokerError::ToolNotFound("inert".into()))
       }
   }
   struct InertBudget;
   #[async_trait::async_trait]
   impl BudgetEnforcerHandle for InertBudget {
-      async fn charge(&self, _tokens: u64) -> Result<(), lingxi_traits::BudgetError> { Ok(()) }
+      async fn charge(&self, _tokens: u64) -> Result<(), lingxi_platform_api::BudgetError> { Ok(()) }
       async fn remaining(&self) -> u64 { u64::MAX }
   }
 
@@ -2333,7 +2333,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use crate::definition::HookDefinition;
   use crate::hook_payload::parse_response;
   use crate::response::{HookOutcome, HookResponse, HookResult};
-  use lingxi_traits::{SubagentInheritance, SubagentResult, SubagentSpawner, SubagentSpawnRequest};
+  use lingxi_platform_api::{SubagentInheritance, SubagentResult, SubagentSpawner, SubagentSpawnRequest};
   use std::sync::Arc;
   use std::time::Duration;
 
@@ -2625,7 +2625,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   use lingxi_hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
   use lingxi_hooks::HookEventType;
   use lingxi_protocol::{HookId, SessionId, ToolUseId};
-  use lingxi_traits::{
+  use lingxi_platform_api::{
       BudgetEnforcerHandle, HttpRequest, HttpResponse, HttpTransport, RuntimeSpawner,
       SpawnError, SpawnedProcessOutput, SubagentInheritance, SubagentResult,
       SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, SubagentUsage, ToolInvoker,
@@ -2638,7 +2638,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   struct EchoHttp { body: String }
   #[async_trait]
   impl HttpTransport for EchoHttp {
-      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_traits::HttpError> {
+      async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, lingxi_platform_api::HttpError> {
           Ok(HttpResponse { status: 200, headers: HashMap::new(), body: self.body.clone().into_bytes() })
       }
   }
@@ -2679,15 +2679,15 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   struct InertTools;
   #[async_trait]
   impl ToolInvoker for InertTools {
-      async fn invoke(&self, _: &str, _: serde_json::Value, _: lingxi_traits::SubagentInvocationContext)
-          -> Result<serde_json::Value, lingxi_traits::ToolInvokerError> {
-          Err(lingxi_traits::ToolInvokerError::ToolNotFound("inert".into()))
+      async fn invoke(&self, _: &str, _: serde_json::Value, _: lingxi_platform_api::SubagentInvocationContext)
+          -> Result<serde_json::Value, lingxi_platform_api::ToolInvokerError> {
+          Err(lingxi_platform_api::ToolInvokerError::ToolNotFound("inert".into()))
       }
   }
   struct InertBudget;
   #[async_trait]
   impl BudgetEnforcerHandle for InertBudget {
-      async fn charge(&self, _: u64) -> Result<(), lingxi_traits::BudgetError> { Ok(()) }
+      async fn charge(&self, _: u64) -> Result<(), lingxi_platform_api::BudgetError> { Ok(()) }
       async fn remaining(&self) -> u64 { u64::MAX }
   }
   struct AllowHandler;
@@ -2925,7 +2925,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
           permission_mode: None,
           agent_id: None,
           agent_type: None,
-          inherit: Some(lingxi_traits::SubagentInheritance {
+          inherit: Some(lingxi_platform_api::SubagentInheritance {
               tool_invoker: self.tools.invoker_arc(),
               budget: self.budget.clone(),
           }),

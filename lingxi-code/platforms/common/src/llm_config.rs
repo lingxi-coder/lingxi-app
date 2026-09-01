@@ -138,7 +138,7 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
 /// - `fallback` / `retry`: **parsed but inert** — `fallback_model` comes from
 ///   `DesktopConfig`/argv today; retry policy comes from
 ///   `LINGXI_MAX_RETRIES`. Wiring them is future work and is documented
-///   in `engine/src/settings/schema.rs`.
+///   in `core/src/settings/schema.rs`.
 ///
 /// ## Errors
 ///

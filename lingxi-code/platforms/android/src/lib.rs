@@ -1,6 +1,6 @@
 //! `platform-android` (M8-P10) — the Android platform skeleton.
 //!
-//! [`AndroidPlatform`] implements the [`traits::Platform`] aggregate. The core
+//! [`AndroidPlatform`] implements the [`platform_api::Platform`] aggregate. The core
 //! OS handles (filesystem/clock/process/sandbox/worktree) are currently reused
 //! from `platform-posix-minimal` (portable Rust, valid on Android). The `http`
 //! handle is the shared real client ([`http_client::ReqwestHttp`],
@@ -38,7 +38,7 @@ pub use sandbox::AndroidMinijailSandbox;
 use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{
+use platform_api::{
     AndroidUiAutomation, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
     DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
     LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
@@ -426,7 +426,7 @@ impl Platform for AndroidPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use traits::{
+    use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
         Platform, SandboxBackend, ShareError, SharePayload, ShareResult, SharingService,
         UnavailableMobileLinuxRuntime, VoiceError, VoiceRecorder, VoiceRecording,

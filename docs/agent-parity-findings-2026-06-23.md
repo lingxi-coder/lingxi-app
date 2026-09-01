@@ -74,7 +74,7 @@ no budget, no hooks.) Fixed by mirroring `PoolSubagentSpawner`'s wiring:
 build, in-process teammates' tool calls already land on the main-session gate and
 open the dialog there — so "surface in the main session" already worked; only
 ATTRIBUTION was missing. Fixed:
-- `traits::PromptWorker {name,team,is_async}` + additive-defaulted
+- `platform_api::PromptWorker {name,team,is_async}` + additive-defaulted
   `PermissionGate::check_with_worker` (default delegates to `check`);
   `SubagentInvocationContext` gains `can_show_permission_prompts`.
 - `RegistryToolInvoker` attributes a NAMED + prompt-eligible worker (one-shot

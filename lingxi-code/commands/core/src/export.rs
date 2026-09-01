@@ -22,7 +22,7 @@ use command_api::parser::ParsedSlashCommand;
 use protocol::{ContentBlock, ConversationMessage};
 use std::path::Path;
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 /// `/export` handler — renders + writes the conversation transcript.
 #[derive(Clone)]
@@ -411,9 +411,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lingxi-export-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_status_snapshot(traits::StatusSnapshot {
+        mock.set_status_snapshot(platform_api::StatusSnapshot {
             cwd: dir.clone(),
-            ..traits::StatusSnapshot::default()
+            ..platform_api::StatusSnapshot::default()
         });
         let h = ExportHandler::new(mock);
         let args = ParsedSlashCommand {

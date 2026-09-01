@@ -644,7 +644,7 @@ impl Tool for ToolSearchTool {
                     .await
                     .into_iter()
                     .filter_map(|(name, state)| {
-                        matches!(state, traits::McpActionState::Pending).then_some(name)
+                        matches!(state, platform_api::McpActionState::Pending).then_some(name)
                     })
                     .collect(),
                 None => Vec::new(),
@@ -815,7 +815,7 @@ fn empty_result_model_content(pending: &[String], failed: &[(String, Option<Stri
 mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use traits::process::ProcessOutput;
+    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1273,76 +1273,76 @@ mod tests {
     struct NeverDialledTransport;
 
     #[async_trait::async_trait]
-    impl traits::McpTransport for NeverDialledTransport {
+    impl platform_api::McpTransport for NeverDialledTransport {
         async fn connect(
             &self,
-            _spec: &traits::McpTransportSpec,
-        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            _spec: &platform_api::McpTransportSpec,
+        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
             unreachable!()
         }
         async fn initialize(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
             unreachable!()
         }
         async fn list_tools(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
             unreachable!()
         }
         async fn list_resources(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
             unreachable!()
         }
         async fn list_prompts(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
             unreachable!()
         }
         async fn call_tool(
             &self,
-            _conn: &traits::McpRawConnection,
+            _conn: &platform_api::McpRawConnection,
             _tool: &str,
             _input: serde_json::Value,
-        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
-            _conn: &traits::McpRawConnection,
+            _conn: &platform_api::McpRawConnection,
             _uri: &str,
-        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
             unreachable!()
         }
-        async fn ping(&self, _conn_id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn ping(&self, _conn_id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
             unreachable!()
         }
         async fn notifications(
             &self,
-            _conn: &traits::McpRawConnection,
-        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
             unreachable!()
         }
         async fn handle_elicitation(
             &self,
-            _conn: &traits::McpRawConnection,
-            _req: traits::ElicitRequestDto,
-        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            _conn: &platform_api::McpRawConnection,
+            _req: platform_api::ElicitRequestDto,
+        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
             unreachable!()
         }
         async fn disconnect(
             &self,
             _conn_id: protocol::McpConnectionId,
-        ) -> Result<(), traits::McpError> {
+        ) -> Result<(), platform_api::McpError> {
             unreachable!()
         }
-        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
-            vec![traits::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
+            vec![platform_api::McpTransportKind::Stdio]
         }
     }
 
@@ -1359,13 +1359,13 @@ mod tests {
         let registry = std::sync::Arc::new(mcp::registry::McpRegistry::new(std::sync::Arc::new(
             NeverDialledTransport,
         )
-            as std::sync::Arc<dyn traits::McpTransport>));
+            as std::sync::Arc<dyn platform_api::McpTransport>));
         registry.connections.write().await.insert(
             "flaky".into(),
             mcp::McpConnectionState::Failed {
                 config: mcp::McpServerConfig {
                     name: "flaky".into(),
-                    spec: traits::McpTransportSpec::Stdio {
+                    spec: platform_api::McpTransportSpec::Stdio {
                         command: "x".into(),
                         args: vec![],
                         env: Default::default(),

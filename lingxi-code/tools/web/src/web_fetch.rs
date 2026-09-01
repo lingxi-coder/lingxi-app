@@ -39,7 +39,7 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
-use traits::http::HttpError;
+use platform_api::http::HttpError;
 
 /// Maximum transfer size for the response body — byte-locked to claude-code
 /// `MAX_HTTP_CONTENT_LENGTH` (`WebFetchTool/utils.ts:112`, the axios
@@ -69,7 +69,7 @@ pub const WEBFETCH_TRUNCATION_SUFFIX: &str = "\n\n[Content truncated due to leng
 
 /// Legacy User-Agent prefix (kept for `web_search` + the parity fixture). The
 /// live WebFetch `User-Agent` is built by [`WebFetchTool::user_agent`] as
-/// `Claude-User (claude-code/{traits::CLAUDE_CODE_VERSION}; +https://support.anthropic.com/)`
+/// `Claude-User (claude-code/{platform_api::CLAUDE_CODE_VERSION}; +https://support.anthropic.com/)`
 /// — see R-V1; this prefix const is NOT the WebFetch header.
 /// Spec §7 lock.
 pub const WEBFETCH_USER_AGENT_PREFIX: &str = "claude-code-tool/";
@@ -414,12 +414,12 @@ impl WebFetchTool {
         // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
         // claude-code fetch traffic (distinct from the api-client UA).
         // R-V1: the version is claude-code's VERSION (the parity target,
-        // `traits::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
+        // `platform_api::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
         // WebFetch GET previously sent `claude-code/0.12.0` to Anthropic infra +
         // target servers instead of `claude-code/2.1.207`.
         format!(
             "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-            traits::CLAUDE_CODE_VERSION
+            platform_api::CLAUDE_CODE_VERSION
         )
     }
 

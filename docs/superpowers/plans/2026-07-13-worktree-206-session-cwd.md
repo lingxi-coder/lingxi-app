@@ -102,7 +102,7 @@ impl SessionCwd {
 
 ### Task 6: `WorktreeManager::enter_existing(path)`
 
-**Files:** Modify `traits/src/worktree.rs` (+ trait), `platforms/posix/src/**` posix impl, `tool-api/src/test_support.rs` `MockWorktreeManager`. Test: mock + posix.
+**Files:** Modify `platform-api/src/worktree.rs` (+ trait), `platforms/posix/src/**` posix impl, `tool-api/src/test_support.rs` `MockWorktreeManager`. Test: mock + posix.
 
 **Interfaces — Produces:**
 ```rust

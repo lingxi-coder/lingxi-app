@@ -1,6 +1,6 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use engine::session::ActiveGoalState;
+use lingxi_core::session::ActiveGoalState;
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
@@ -10,7 +10,7 @@ use serde_json::json;
 use session::jsonl::project_dir_name;
 use std::sync::Arc;
 use tempfile::TempDir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 use uuid::Uuid;
 
 async fn setup_two_turn_jsonl() -> (
@@ -273,14 +273,14 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
 fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     let sid = Uuid::new_v4();
     let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-    let snapshot = traits::ActiveGoalSnapshot {
+    let snapshot = platform_api::ActiveGoalSnapshot {
         condition: "ship it".to_string(),
         set_at,
         last_reason: Some("tests pending".to_string()),
         iterations: 2,
         tokens_at_start: 500,
     };
-    let attachment = |status, goal_state| traits::GoalStatusAttachment {
+    let attachment = |status, goal_state| platform_api::GoalStatusAttachment {
         kind: "goal_status".to_string(),
         status,
         condition: "ship it".to_string(),
@@ -290,7 +290,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         last_reason: Some("tests pending".to_string()),
         goal_state,
     };
-    let line = |payload: traits::GoalStatusAttachment| {
+    let line = |payload: platform_api::GoalStatusAttachment| {
         serde_json::from_value(json!({
             "type":"attachment", "attachment":payload,
             "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
@@ -300,7 +300,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         .unwrap()
     };
     let active = line(attachment(
-        traits::GoalStatusKind::Set,
+        platform_api::GoalStatusKind::Set,
         Some(snapshot.clone()),
     ));
     let state = state_from_messages(sid, &[active]);
@@ -310,7 +310,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     assert_eq!(goal.iterations, 2);
     assert_eq!(goal.tokens_at_start, 500);
 
-    let achieved = line(attachment(traits::GoalStatusKind::Achieved, None));
+    let achieved = line(attachment(platform_api::GoalStatusKind::Achieved, None));
     assert!(state_from_messages(sid, &[achieved]).active_goal.is_none());
 }
 
@@ -824,39 +824,39 @@ mod deferred_tool_resume_tests {
 
     struct UnusedHttp;
     #[async_trait]
-    impl traits::HttpTransport for UnusedHttp {
+    impl platform_api::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
 
         async fn stream_sse(
             &self,
             _req: protocol::HttpRequest,
-        ) -> Result<traits::http::SseStream, traits::HttpError> {
-            Err(traits::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
     }
 
     struct UnusedRuntime;
     #[async_trait]
-    impl traits::RuntimeSpawner for UnusedRuntime {
+    impl platform_api::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
-            Err(traits::RuntimeError::Internal("unused".into()))
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+            Err(platform_api::RuntimeError::Internal("unused".into()))
         }
 
         async fn sleep(&self, _d: std::time::Duration) {}
 
         async fn cancel(
             &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), traits::RuntimeError> {
+            _h: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), platform_api::RuntimeError> {
             Ok(())
         }
     }

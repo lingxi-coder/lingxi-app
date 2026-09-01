@@ -312,7 +312,7 @@ mod tests {
     /// authorize path fixes one layer up.
     #[tokio::test]
     async fn read_deny_excludes_are_computed_in_host_coordinates() {
-        use traits::permission_gate::PermissionGate as _;
+        use platform_api::permission_gate::PermissionGate as _;
 
         // A ROOTED pattern: `/secrets/**` resolves to `root_path_for_source`
         // (= roots.cwd), so it must be REBASED onto the search cwd. An
@@ -429,7 +429,7 @@ mod tests {
     /// through a denied directory.
     #[tokio::test]
     async fn a_fenced_guest_region_withholds_the_exclusion_list() {
-        use traits::permission_gate::PermissionGate as _;
+        use platform_api::permission_gate::PermissionGate as _;
 
         let policy =
             local_settings_policy(r#"{ "permissions": { "deny": ["Read(/secrets/**)"] } }"#);
@@ -1697,7 +1697,7 @@ mod tests {
             outcome,
             PermissionOutcome::Allow {
                 decision_classification: Some(
-                    traits::permission_gate::ToolDecisionClassification::UserTemporary
+                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary
                 ),
                 ..
             }
@@ -3390,7 +3390,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
 
     #[test]
     fn noninteractive_shell_check_reads_live_rules_mode_and_transient_allows() {
-        use traits::permission_gate::NonInteractivePermissionDecision;
+        use platform_api::permission_gate::NonInteractivePermissionDecision;
 
         let policy = Arc::new(
             PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())

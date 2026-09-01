@@ -19,7 +19,7 @@ use protocol::HttpResponse;
 
 const HISTORICAL_VERSION: &str = "2.1.207";
 
-/// The single source of truth (`traits::CLAUDE_CODE_VERSION`, R-V1) is bumped
+/// The single source of truth (`platform_api::CLAUDE_CODE_VERSION`, R-V1) is bumped
 /// to the parity target. A drift here means an outward identifier (AI_AGENT,
 /// WebFetch UA, `<env>` stamp) is silently emitting the wrong version.
 #[test]

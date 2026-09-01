@@ -29,7 +29,7 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-tools = { path = "../tools" }
 lingxi-hooks = { path = "../hooks" }
 lingxi-mcp = { path = "../mcp" }
@@ -58,7 +58,7 @@ workspace = true
 // manifest.rs (Claude Code component surface)
 use lingxi_hooks::HookDefinition;
 use lingxi_mcp::McpServerConfig;
-use lingxi_traits::LspServerConfig;
+use lingxi_platform_api::LspServerConfig;
 use lingxi_protocol::PluginId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -347,7 +347,7 @@ use lingxi_protocol::PluginId;
 use lingxi_secret::CredentialManager;
 use lingxi_skills::SkillRegistry;
 use lingxi_tools::ToolRegistry;
-use lingxi_traits::{FileSystem, HttpTransport, RuntimeSpawner};
+use lingxi_platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

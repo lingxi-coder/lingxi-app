@@ -1,7 +1,7 @@
 //! Byte-locked /status panel layout vs golden text fixture (M5-11 T14).
 
 use command_core::status::render_status;
-use traits::StatusSnapshot;
+use platform_api::StatusSnapshot;
 
 const GOLDEN: &str = include_str!("../src/parity/fixtures/parity_status_panel.txt");
 

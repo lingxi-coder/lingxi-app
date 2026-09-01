@@ -6,7 +6,7 @@
 
 **Architecture:** Add a `jsonl/` submodule under `lingxi-session/src/` with seven files (writer, reader, schema, path, djb2, uuid, mod). The existing single-file `jsonl.rs` (containing `read_recover` + `RecoveryResult` + `StorageError`) is folded into the new submodule as `jsonl/recover.rs` with no public-API changes (re-exported at the same paths). Three new telemetry events `tengu_session_appended/rotated/corrupted` are appended to `tengu::session::NAMES` (session category grows 15 → 18, total `ALL_EVENT_NAMES.len()` grows 253 → 256). The new `JsonlWriter` is wired into `lingxi-orchestrator::ConversationOrchestrator` (created in M5-02) via an `Option<Arc<JsonlWriter>>` constructor parameter — None for in-memory tests, Some for the real CLI driving claude-code's on-disk layout.
 
-**Tech Stack:** Rust async (tokio), `serde_json` with `preserve_order` (workspace lock), `uuid = "1.10"` (already in `lingxi-protocol`), `regex = "1"` (UUID validator), `tempfile = "3.13"` (test isolation), `lingxi-traits::FileSystem` for I/O.
+**Tech Stack:** Rust async (tokio), `serde_json` with `preserve_order` (workspace lock), `uuid = "1.10"` (already in `lingxi-protocol`), `regex = "1"` (UUID validator), `tempfile = "3.13"` (test isolation), `lingxi-platform_api::FileSystem` for I/O.
 
 ---
 
@@ -411,7 +411,7 @@ pub struct JsonlMessage {
 //! terminate every line with a single `\n`, file mode `0o600`, dir mode `0o700`.
 
 use crate::jsonl::schema::JsonlMessage;
-use lingxi_traits::{FileSystem, FsError};
+use lingxi_platform_api::{FileSystem, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -492,7 +492,7 @@ impl JsonlWriter {
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
 use crate::jsonl::schema::JsonlMessage;
-use lingxi_traits::{FileSystem, FsError};
+use lingxi_platform_api::{FileSystem, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -670,7 +670,7 @@ pub use jsonl::reader::SessionMetadata as JsonlSessionMetadata;
 ```toml
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
+lingxi-platform-api = { path = "../platform-api" }
 lingxi-core = { path = "../core" }
 lingxi-filestate = { path = "../filestate" }
 serde.workspace = true
@@ -1023,9 +1023,9 @@ git commit -m "test(M5-07 T5): JsonlMessage round-trip — 4 cases pin field ord
 - Modify: `lingxi-code/crates/session/src/jsonl/writer.rs` (implemented in T1)
 - Create: `lingxi-code/crates/session/tests/jsonl_writer_test.rs`
 
-- [ ] **Step 1: Confirm `lingxi-traits::FileSystem` exposes `mkdir_p` + `append_file`.**
+- [ ] **Step 1: Confirm `lingxi-platform_api::FileSystem` exposes `mkdir_p` + `append_file`.**
 
-Run: `grep -n "fn mkdir_p\|fn append_file" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/traits/src/fs.rs`
+Run: `grep -n "fn mkdir_p\|fn append_file" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/platform-api/src/fs.rs`
 Expected: both methods exist (they were added in M1.3). If `mkdir_p` does NOT exist, the writer in T1 falls back to `create_dir` or `write_file` (the writer code in T1 already swallows the result via `let _ =`, so a missing method only means we skip parent creation — `append_file` itself errors with a clear "no such directory" message which the test catches).
 
   If `mkdir_p` is missing, replace the `_ = self.fs.mkdir_p(parent_str).await;` line in `writer.rs` with:
@@ -1045,7 +1045,7 @@ Expected: both methods exist (they were added in M1.3). If `mkdir_p` does NOT ex
 
 use lingxi_session::jsonl::schema::JsonlMessage;
 use lingxi_session::jsonl::writer::JsonlWriter;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1145,7 +1145,7 @@ use lingxi_session::jsonl::reader::{JsonlReader, SessionMetadata};
 use lingxi_session::jsonl::schema::JsonlMessage;
 use lingxi_session::jsonl::writer::JsonlWriter;
 use lingxi_session::jsonl::LITE_READ_BUF_SIZE;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1417,7 +1417,7 @@ git commit -m "test(M5-07 T9): golden fixture single_turn_no_tools.jsonl + READM
 
 use lingxi_session::jsonl::schema::JsonlMessage;
 use lingxi_session::jsonl::writer::JsonlWriter;
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -1910,7 +1910,7 @@ if let Some(writer) = self.jsonl_writer.as_ref() {
 
 use lingxi_orchestrator::ConversationOrchestrator;
 use lingxi_session::{JsonlReader, JsonlWriter};
-use lingxi_traits::FileSystem;
+use lingxi_platform_api::FileSystem;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -2321,7 +2321,7 @@ Expected: all tests pass.
 
 | Failing test | Likely cause | Fix |
 |---|---|---|
-| `lingxi-session` build error: `cannot find function ... in trait FileSystem` | The session crate calls a method that doesn't exist on `lingxi-traits::FileSystem` (e.g. `mkdir_p` not present) | Open `lingxi-code/crates/traits/src/fs.rs`; check what's actually there. Adjust the writer/reader to use the available API. Do NOT add new trait methods in T15 — defer to a follow-up. |
+| `lingxi-session` build error: `cannot find function ... in trait FileSystem` | The session crate calls a method that doesn't exist on `lingxi-platform_api::FileSystem` (e.g. `mkdir_p` not present) | Open `lingxi-code/crates/platform-api/src/fs.rs`; check what's actually there. Adjust the writer/reader to use the available API. Do NOT add new trait methods in T15 — defer to a follow-up. |
 | `lingxi-orchestrator` compile error: `ConversationOrchestrator::new` signature mismatch | M5-02 changed the constructor since the plan was written | Open `lingxi-code/crates/orchestrator/src/conversation.rs` and update T13's integration code to match the actual signature. |
 | `parity_tengu_events` test fails with "extra entries" | The 3 new names landed in wrong slot in the JSON fixture | Re-open `tengu_events.json`; verify the 3 new names sit immediately after `tengu_session_import_failed` and before the first `tengu_tool_*` name. |
 | `category_ordering_preserved` index out of bounds | A downstream slice range wasn't shifted by +3 | Verify all slice ranges in `event_name_completeness_test.rs` step 3 of T14. |

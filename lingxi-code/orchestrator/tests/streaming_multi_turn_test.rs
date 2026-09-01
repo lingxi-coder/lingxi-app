@@ -17,7 +17,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::OutputEvent;
+use platform_api::OutputEvent;
 
 struct AlwaysOkTool;
 

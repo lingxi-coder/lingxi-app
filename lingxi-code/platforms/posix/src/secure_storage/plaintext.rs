@@ -12,7 +12,7 @@ use protocol::SecureStorageData;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
-use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Plain-text file-based secure storage rooted at a base directory.
 pub struct PlainTextSecureStorage {

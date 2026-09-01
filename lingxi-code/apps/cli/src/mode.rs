@@ -62,7 +62,7 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 struct TuiMsgQueueInput {
     queue: Arc<msgqueue::MessageQueueManager>,
@@ -130,30 +130,30 @@ fn format_price(value: Option<f64>) -> Option<String> {
     })
 }
 
-fn reasoning_summary(spec: &traits::ReasoningControlSpec) -> Option<String> {
+fn reasoning_summary(spec: &platform_api::ReasoningControlSpec) -> Option<String> {
     let labels = spec
         .available
         .iter()
         .filter_map(|selection| match selection {
-            traits::ReasoningSelection::Automatic => Some("auto".to_string()),
-            traits::ReasoningSelection::Disabled => Some("off".to_string()),
-            traits::ReasoningSelection::Enabled => Some("on".to_string()),
-            traits::ReasoningSelection::Level { id } => Some(id.clone()),
-            traits::ReasoningSelection::TokenBudget { tokens } => Some(format!("{tokens}t")),
+            platform_api::ReasoningSelection::Automatic => Some("auto".to_string()),
+            platform_api::ReasoningSelection::Disabled => Some("off".to_string()),
+            platform_api::ReasoningSelection::Enabled => Some("on".to_string()),
+            platform_api::ReasoningSelection::Level { id } => Some(id.clone()),
+            platform_api::ReasoningSelection::TokenBudget { tokens } => Some(format!("{tokens}t")),
         })
         .collect::<Vec<_>>();
     (!labels.is_empty()).then(|| labels.join(", "))
 }
 
-fn pricing_summary(pricing: Option<&traits::ModelPricing>) -> String {
+fn pricing_summary(pricing: Option<&platform_api::ModelPricing>) -> String {
     let Some(pricing) = pricing else {
         return "价格 未提供".to_string();
     };
     match pricing.billing_mode {
-        traits::ModelBillingMode::Subscription => "价格 套餐/订阅内".to_string(),
-        traits::ModelBillingMode::Free => "价格 免费".to_string(),
-        traits::ModelBillingMode::Unknown => "价格 未提供".to_string(),
-        traits::ModelBillingMode::PerToken => match (
+        platform_api::ModelBillingMode::Subscription => "价格 套餐/订阅内".to_string(),
+        platform_api::ModelBillingMode::Free => "价格 免费".to_string(),
+        platform_api::ModelBillingMode::Unknown => "价格 未提供".to_string(),
+        platform_api::ModelBillingMode::PerToken => match (
             format_price(pricing.input_per_million),
             format_price(pricing.output_per_million),
         ) {
@@ -163,7 +163,7 @@ fn pricing_summary(pricing: Option<&traits::ModelPricing>) -> String {
     }
 }
 
-fn build_model_details(m: &traits::ModelListing) -> Vec<String> {
+fn build_model_details(m: &platform_api::ModelListing) -> Vec<String> {
     let mut summary_bits = Vec::new();
     let mut details = Vec::new();
 
@@ -355,11 +355,11 @@ async fn run_tui(argv: &Argv) -> i32 {
             Some(initial_session_id.to_string()).as_deref(),
             display,
         ));
-        let dir = traits::live_sessions::LiveSessionDir::at_live(
+        let dir = platform_api::live_sessions::LiveSessionDir::at_live(
             crate::agents_registry::sessions_dir(&home),
         );
         let claim =
-            traits::live_sessions::install_process(dir, &initial_session_id.to_string(), user_name);
+            platform_api::live_sessions::install_process(dir, &initial_session_id.to_string(), user_name);
         if let Some(claim) = claim {
             let source = if claim.notice.is_some() {
                 "collision"
@@ -368,7 +368,7 @@ async fn run_tui(argv: &Argv) -> i32 {
             };
             reg.set_name(&claim.name, source);
         } else if let Some(derived) = display {
-            traits::live_sessions::set_process_name(derived);
+            platform_api::live_sessions::set_process_name(derived);
         }
         ensure_live_messaging(&initial_session_id.to_string(), user_name, Some(&reg));
         reg
@@ -418,9 +418,9 @@ pub(crate) fn ensure_live_messaging(
 ) {
     let home = crate::run::lingxi_home_dir();
     let dir =
-        traits::live_sessions::LiveSessionDir::at_live(crate::agents_registry::sessions_dir(&home));
-    if traits::live_sessions::process_dir().is_none() {
-        let claim = traits::live_sessions::install_process(dir.clone(), session_id, user_name);
+        platform_api::live_sessions::LiveSessionDir::at_live(crate::agents_registry::sessions_dir(&home));
+    if platform_api::live_sessions::process_dir().is_none() {
+        let claim = platform_api::live_sessions::install_process(dir.clone(), session_id, user_name);
         if let Some(claim) = claim {
             if let Some(reg) = registration {
                 reg.set_name(
@@ -434,13 +434,13 @@ pub(crate) fn ensure_live_messaging(
             }
         }
     } else {
-        traits::live_sessions::set_process_session_id(session_id);
+        platform_api::live_sessions::set_process_session_id(session_id);
         if let Some(name) = user_name.filter(|s| !s.is_empty()) {
-            traits::live_sessions::set_process_name(name);
+            platform_api::live_sessions::set_process_name(name);
         }
     }
     let mut derived_name: Option<String> = None;
-    if traits::live_sessions::process_name()
+    if platform_api::live_sessions::process_name()
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -456,19 +456,19 @@ pub(crate) fn ensure_live_messaging(
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             })
         {
-            traits::live_sessions::set_process_name(derived.clone());
+            platform_api::live_sessions::set_process_name(derived.clone());
             derived_name = Some(derived);
         }
     }
-    let path = match traits::uds_inbox::process_socket_path() {
+    let path = match platform_api::uds_inbox::process_socket_path() {
         Some(existing) => existing,
         None => {
             // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
             // auto-generated `mum()` path; absent, the oracle's own default
-            // applies (`traits::uds_inbox::default_socket_path`).
+            // applies (`platform_api::uds_inbox::default_socket_path`).
             let sock = messaging_socket_override()
-                .unwrap_or_else(|| traits::uds_inbox::default_socket_path(std::process::id()));
-            match traits::uds_inbox::start_process_inbox(sock) {
+                .unwrap_or_else(|| platform_api::uds_inbox::default_socket_path(std::process::id()));
+            match platform_api::uds_inbox::start_process_inbox(sock) {
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox unavailable");
@@ -485,17 +485,17 @@ pub(crate) fn ensure_live_messaging(
         if let Some(name) = derived_name.as_deref().filter(|s| !s.trim().is_empty()) {
             reg.set_name(name, "derived");
         }
-        if let Some(class) = traits::live_sessions::process_permission_class() {
+        if let Some(class) = platform_api::live_sessions::process_permission_class() {
             reg.set_permission_class(&class);
         }
     }
     let _ = dir.upsert_identity(
         std::process::id(),
         session_id,
-        traits::live_sessions::process_name().as_deref(),
+        platform_api::live_sessions::process_name().as_deref(),
         name_source,
         Some(&path),
-        traits::live_sessions::process_permission_class().as_deref(),
+        platform_api::live_sessions::process_permission_class().as_deref(),
     );
 }
 
@@ -611,7 +611,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
     initial_prompt: Option<String>,
-    handoff: Option<traits::BackgroundingSnapshot>,
+    handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> RunOutcome {
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     tui_build
@@ -638,7 +638,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
-    traits::live_sessions::set_process_permission_mode(
+    platform_api::live_sessions::set_process_permission_mode(
         initial_permission_mode.wire_str(),
         bypass_available,
     );
@@ -796,7 +796,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/tasks) The live background-task registry (already `TaskRegistryHandle`),
     // cloned as a trait object for the widget's snapshot read; plus a handle +
     // tx clone for the off-loop stop effect (mirrors the sandbox triplet).
-    let task_registry_handle: std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle> =
+    let task_registry_handle: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
         tui_build.runtime.task_registry.clone();
     if let Some(workflow_events) = workflow_events {
         spawn_workflow_event_forwarder(
@@ -976,7 +976,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     // reply and end the turn so the spinner + any "Retrying…" status
                     // clear.
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
                 }
                 queue.clear_active_turn().await;
             });
@@ -1165,12 +1165,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
             };
             let (body, is_error) = match orch.rename_session(name.clone()).await {
                 Ok(()) => {
-                    let advertised = if let Some(dir) = traits::live_sessions::process_dir() {
-                        let sid = traits::live_sessions::process_session_id()
+                    let advertised = if let Some(dir) = platform_api::live_sessions::process_dir() {
+                        let sid = platform_api::live_sessions::process_session_id()
                             .unwrap_or_default();
                         match dir.claim_unique_name(&name, &sid, std::process::id()) {
                             Ok(claim) => {
-                                traits::live_sessions::set_process_name(claim.name.clone());
+                                platform_api::live_sessions::set_process_name(claim.name.clone());
                                 if let Some(reg) = rename_reg.as_ref() {
                                     reg.set_name(
                                         &claim.name,
@@ -1307,9 +1307,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     is_error: true,
                 });
             } else {
-                traits::live_sessions::set_process_permission_mode(&mode, bypass_available);
+                platform_api::live_sessions::set_process_permission_mode(&mode, bypass_available);
                 if let Some(reg) = set_mode_reg.as_ref() {
-                    reg.set_permission_class(traits::live_sessions::permission_class_for(
+                    reg.set_permission_class(platform_api::live_sessions::permission_class_for(
                         &mode,
                         bypass_available,
                     ));
@@ -1362,7 +1362,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let orch = dispatch_orch.clone();
         let tx = dispatch_turn_tx.clone();
         dispatch_handle.spawn(async move {
-            use traits::{SlashCommandDispatcher, SlashDispatchResult};
+            use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
             match dispatcher.dispatch(&input).await {
                 SlashDispatchResult::RunAsTurn { prompt } => {
                     // The widget already set this token as `current_turn`; pass it
@@ -1374,7 +1374,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         .await
                     {
                         let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                        let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                        let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
                     }
                 }
                 // A local / unknown result runs no turn: surface the text and
@@ -1386,10 +1386,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         body: display,
                         is_error: false,
                     });
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
                 }
                 SlashDispatchResult::NotASlashCommand => {
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
                 }
             }
         });
@@ -1510,7 +1510,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         loop {
             interval.tick().await;
             let Ok(records) = agent_status_registry
-                .list(traits::task_registry::TaskListFilter::default())
+                .list(platform_api::task_registry::TaskListFilter::default())
                 .await
             else {
                 continue;
@@ -1805,7 +1805,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
 /// Render the same plan file used by the plan-mode reminder. The defensive
 /// character cap prevents an unexpectedly large or replaced file from flooding
 /// the TUI event channel while preserving valid UTF-8 boundaries.
-fn render_plan_snapshot(plan: &traits::PlanSnapshot) -> String {
+fn render_plan_snapshot(plan: &platform_api::PlanSnapshot) -> String {
     const MAX_PLAN_CHARS: usize = 1_000_000;
     let content: String = plan.content.chars().take(MAX_PLAN_CHARS).collect();
     format!("Current Plan\n{}\n\n{content}", plan.path.display())
@@ -1834,7 +1834,7 @@ fn build_company_announcement_message(
     announcements: Option<&[String]>,
 ) -> Option<tui::RenderedMessage> {
     let (num_startups, organization_name) = read_startup_config();
-    let sa = engine::settings::company_announcements::startup_announcement(
+    let sa = lingxi_core::settings::company_announcements::startup_announcement(
         announcements,
         num_startups,
         organization_name.as_deref(),
@@ -1842,12 +1842,12 @@ fn build_company_announcement_message(
     Some(announcement_message(sa))
 }
 
-/// Format a selected [`engine::settings::company_announcements::StartupAnnouncement`]
+/// Format a selected [`lingxi_core::settings::company_announcements::StartupAnnouncement`]
 /// into the dim startup-banner `SystemText` block: the `Message from <org>:`
 /// prefix line (when present) directly above the announcement body — CC's `LVs`
 /// column `[em_, PVs]`.
 fn announcement_message(
-    sa: engine::settings::company_announcements::StartupAnnouncement,
+    sa: lingxi_core::settings::company_announcements::StartupAnnouncement,
 ) -> tui::RenderedMessage {
     let body = match sa.org_prefix {
         Some(prefix) => format!("{prefix}\n{}", sa.body),
@@ -2225,7 +2225,7 @@ async fn run_permission_action(
     // (2.1.219) after a directory is actually added. Taken as the TRAIT handle
     // (not the concrete orchestrator) so this stays on the same seam every
     // other permission effect uses.
-    orch: std::sync::Arc<dyn traits::OrchestratorHandle>,
+    orch: std::sync::Arc<dyn platform_api::OrchestratorHandle>,
 ) {
     use permission::{
         persist_permission_update, remove_permission_update, PermissionBehavior, PermissionRule,
@@ -2482,7 +2482,7 @@ async fn run_permission_action(
 async fn run_web_action(
     action: tui::bottom_pane::WebAction,
     key_store: Arc<secret::CredentialManager>,
-    http: Arc<dyn traits::HttpTransport>,
+    http: Arc<dyn platform_api::HttpTransport>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
     snapshot: std::sync::Arc<std::sync::Mutex<tui::web::picker::WebConfigSnapshot>>,
 ) {
@@ -2788,7 +2788,7 @@ fn forward_desktop_workflow_event(
 
 fn spawn_workflow_event_forwarder(
     mut src: tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>,
-    registry: Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
     use std::collections::HashMap;
@@ -3027,7 +3027,7 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
     let mcp_connected = u32::try_from(
         servers
             .iter()
-            .filter(|s| matches!(s.status, traits::orchestrator::McpStatus::Connected))
+            .filter(|s| matches!(s.status, platform_api::orchestrator::McpStatus::Connected))
             .count(),
     )
     .unwrap_or(u32::MAX);
@@ -3036,9 +3036,9 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .into_iter()
         .map(|s| {
             let status = match &s.status {
-                traits::orchestrator::McpStatus::Connected => "connected".to_string(),
-                traits::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
-                traits::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+                platform_api::orchestrator::McpStatus::Connected => "connected".to_string(),
+                platform_api::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
+                platform_api::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
             };
             InfoRow::new(s.name, Some(format!("{} · {status}", s.transport)))
         })
@@ -3263,7 +3263,7 @@ fn read_status_line_configs_from(
     project_dir: &std::path::Path,
     managed_tiers: &[String],
     workspace_trusted: bool,
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     source_scope: (bool, bool, bool),
 ) -> ResolvedStatusLineConfigs {
     use migrations::settings_update::read_settings_map;
@@ -3383,7 +3383,7 @@ fn workspace_is_trusted(
 }
 
 async fn read_status_line_configs(
-    flag_settings: Option<&engine::settings::SettingsJson>,
+    flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     source_scope: (bool, bool, bool),
 ) -> ResolvedStatusLineConfigs {
     let (lingxi_home, project_dir) = settings_dirs();
@@ -4024,7 +4024,7 @@ mod tests {
             read_status_line_configs_from(&home, &project, &[], false, None, (true, true, true));
         assert!(!configs.subagent.unwrap().should_run(true));
 
-        let flag = engine::settings::SettingsJson {
+        let flag = lingxi_core::settings::SettingsJson {
             status_line: Some(serde_json::json!({
                 "type":"command",
                 "command":"flag-main"
@@ -4103,7 +4103,7 @@ mod tests {
 
     #[test]
     fn plan_snapshot_renders_path_and_utf8_body() {
-        let plan = traits::PlanSnapshot {
+        let plan = platform_api::PlanSnapshot {
             path: PathBuf::from("/tmp/session-plan.md"),
             content: "步骤一\n步骤二".to_string(),
         };
@@ -4205,7 +4205,7 @@ mod tests {
     /// `SystemText` block: `Message from <org>:` directly above the body.
     #[test]
     fn announcement_message_joins_org_prefix_above_body() {
-        use engine::settings::company_announcements::{
+        use lingxi_core::settings::company_announcements::{
             startup_announcement_with, AnnouncementMemo,
         };
         let memo = AnnouncementMemo::new();
@@ -4224,7 +4224,7 @@ mod tests {
     /// No org name → the body alone (no `Message from …:` prefix).
     #[test]
     fn announcement_message_body_only_without_org() {
-        use engine::settings::company_announcements::{
+        use lingxi_core::settings::company_announcements::{
             startup_announcement_with, AnnouncementMemo,
         };
         let memo = AnnouncementMemo::new();

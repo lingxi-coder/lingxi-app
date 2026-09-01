@@ -234,7 +234,7 @@ fs2 = "0.4"  # flock
 ```rust
 use async_trait::async_trait;
 use futures::stream::{empty, Stream};
-use lingxi_traits::*;
+use lingxi_platform_api::*;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -347,7 +347,7 @@ impl FlockGuard for PosixFlockGuard {
 ```rust
 // src/runtime.rs — wraps tokio for the engine's RuntimeSpawner
 use async_trait::async_trait;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -387,7 +387,7 @@ impl RuntimeSpawner for PosixRuntime {
 use async_trait::async_trait;
 use futures::stream::Stream;
 use lingxi_protocol::{HttpRequest, HttpResponse, SseEvent};
-use lingxi_traits::{HttpError, HttpTransport, http::SseStream};
+use lingxi_platform_api::{HttpError, HttpTransport, http::SseStream};
 use std::pin::Pin;
 
 pub struct PosixHttp { client: reqwest::Client }

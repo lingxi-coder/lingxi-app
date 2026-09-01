@@ -16,7 +16,7 @@
 - ❌ `aws-config` (any 1.8.x) **cannot build on 1.82**: requires `aws-smithy-types ^1.4.8` (rustc 1.91) *and* pulls `const-oid 0.10.2` (unstable `edition2024` Cargo feature). Pins do not converge. → **Stage 4 hand-rolls a lightweight AWS credential chain instead of `aws-config`.**
 - Pinning `aws-smithy-types =1.3.6` satisfies the existing `aws-sigv4`/`aws-credential-types` (`^1.x`) AND `aws-smithy-eventstream 0.60.13` (`^1.3.4`); confirmed `cargo build -p providers` is green on 1.82 with it.
 
-**Already verified done (was on the user's list, but is stale):** the `traits/` `doc_markdown` clippy lint was fixed in commit `aa1f5bb` ("backtick UniFFI/16_000"); `cargo clippy -p traits --all-targets -- -D warnings` is clean. **No task for it.** The `--no-deps` clippy workaround is no longer needed.
+**Already verified done (was on the user's list, but is stale):** the `traits/` `doc_markdown` clippy lint was fixed in commit `aa1f5bb` ("backtick UniFFI/16_000"); `cargo clippy -p platform-api --all-targets -- -D warnings` is clean. **No task for it.** The `--no-deps` clippy workaround is no longer needed.
 
 ---
 
@@ -28,8 +28,8 @@
 | 2 Pricing | `cost/src/pricing.rs`; `orchestrator/src/cost_wiring.rs`; `providers/src/bedrock.rs` | no |
 | 3 `/model` | `providers/src/profile.rs`, `providers/src/registry.rs`, `providers/src/settings.rs`; `orchestrator/src/conversation.rs`, `orchestrator/src/provider_adapter.rs`, `orchestrator/src/handle_impl.rs` | no |
 | 4 Cred discovery | `providers/src/authenticator.rs`, `providers/src/profile.rs`, `providers/src/registry.rs`, `providers/Cargo.toml` | no |
-| 5 Bedrock streaming | `traits/src/http.rs` (**+ method, default impl**); `platforms/{posix,windows,posix-minimal}/src/http.rs`; `providers/src/anthropic_wire.rs` (new), `providers/src/bedrock.rs`, `providers/src/testutil.rs`, `providers/Cargo.toml` | **YES (additive)** |
-| 6 Paste→image | `traits/src/orchestrator.rs` (**+ method, default impl**); `protocol/src/messages.rs`; `orchestrator/src/conversation.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`; `tui/src/app.rs` | **YES (additive)** |
+| 5 Bedrock streaming | `platform-api/src/http.rs` (**+ method, default impl**); `platforms/{posix,windows,posix-minimal}/src/http.rs`; `providers/src/anthropic_wire.rs` (new), `providers/src/bedrock.rs`, `providers/src/testutil.rs`, `providers/Cargo.toml` | **YES (additive)** |
+| 6 Paste→image | `platform-api/src/orchestrator.rs` (**+ method, default impl**); `protocol/src/messages.rs`; `orchestrator/src/conversation.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`; `tui/src/app.rs` | **YES (additive)** |
 | 7 Docs+gates | `CHANGELOG.md`, `README.md`, `docs/LLM_PROVIDERS.md` | no |
 
 Run all `cargo` from `lingxi-code/`. Per-stage gate: `cargo build -p <crate>` + `cargo test -p <crate>` + `cargo clippy -p <crate> --no-deps --all-targets -- -D warnings`. Stages that change the dep graph also run `bash scripts/check-deps.sh`.
@@ -301,9 +301,9 @@ Spec §3.5. Add a raw-byte stream method (default impl keeps all existing transp
 
 ### Task 5.1: `HttpTransport::stream_raw_bytes` (frozen `traits/`, additive + default)
 
-**Files:** Modify `traits/src/http.rs`.
+**Files:** Modify `platform-api/src/http.rs`.
 
-- [ ] **Step 1 — add the type + method.** In `traits/src/http.rs`:
+- [ ] **Step 1 — add the type + method.** In `platform-api/src/http.rs`:
 ```rust
 /// A pinned, boxed stream of raw response-body byte chunks. Returned by
 /// [`HttpTransport::stream_raw_bytes`] for binary protocols (e.g. the AWS
@@ -326,8 +326,8 @@ Add to the trait (after `stream_sse`), **with a default impl** so existing impls
     }
 ```
 - [ ] **Step 2 — dep for the default.** `traits` currently uses `futures_core`. Add `futures-util` (workspace) to `traits/Cargo.toml` IF not present, OR avoid it by hand-rolling a once-stream with `futures_core` + a tiny `poll`-based wrapper. Prefer reusing the workspace `futures-util` if `traits` may depend on it; otherwise keep the default impl `futures_core`-only. Decide by checking `traits/Cargo.toml` and `scripts/check-deps.sh` graph rules (traits is a leaf — adding `futures-util` may violate the dep-gate; if so, hand-roll).
-- [ ] **Step 3 — keep the trait's existing unit test green;** add a test that a trivial mock returns one chunk from the default. `cargo test -p traits`.
-- [ ] **Step 4 — gate `traits` clippy.** `cargo clippy -p traits --no-deps --all-targets -- -D warnings` clean (this is the crate that previously had the doc lint — keep it pristine).
+- [ ] **Step 3 — keep the trait's existing unit test green;** add a test that a trivial mock returns one chunk from the default. `cargo test -p platform-api`.
+- [ ] **Step 4 — gate `traits` clippy.** `cargo clippy -p platform-api --no-deps --all-targets -- -D warnings` clean (this is the crate that previously had the doc lint — keep it pristine).
 - [ ] **Step 5 — commit.** `git add lingxi-code/traits && git commit -m "feat(traits): additive HttpTransport::stream_raw_bytes (default-impl, parity-safe) for binary streams"` (+ trailer).
 
 ### Task 5.2: production transports — true incremental `stream_raw_bytes`
@@ -336,7 +336,7 @@ Add to the trait (after `stream_sse`), **with a default impl** so existing impls
 
 - [ ] **Step 1 — posix override** (mirror `stream_sse`'s request build, then map `resp.bytes_stream()`):
 ```rust
-    async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<traits::http::RawByteStream, HttpError> {
+    async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<platform_api::http::RawByteStream, HttpError> {
         // ...build `rb` exactly as stream_sse does (method/headers/body/timeout)...
         let resp = rb.send().await.map_err(|e| HttpError::Connection(e.to_string()))?;
         let status = resp.status().as_u16();
@@ -376,7 +376,7 @@ If the build pulls `aws-smithy-types` back to a 1.91 version, re-pin `=1.3.6` an
 - [ ] **Step 6 — re-export** `anthropic_wire` (if public surface is needed) and verify `cargo test -p providers`.
 - [ ] **Step 7 — commit.** `git add lingxi-code/providers lingxi-code/Cargo.lock && git commit -m "feat(llm-v2): real Bedrock event-stream streaming (aws-smithy-eventstream + anthropic_wire)"` (+ trailer).
 
-**Stage 5 gate:** `cargo build --workspace` Finished on 1.82; `cargo test -p traits -p providers -p orchestrator -p test-harness` pass (parity green); `cargo clippy -p providers -p traits --no-deps --all-targets -- -D warnings` clean; `bash scripts/check-deps.sh` OK.
+**Stage 5 gate:** `cargo build --workspace` Finished on 1.82; `cargo test -p platform-api -p providers -p orchestrator -p test-harness` pass (parity green); `cargo clippy -p providers -p platform-api --no-deps --all-targets -- -D warnings` clean; `bash scripts/check-deps.sh` OK.
 
 ---
 
@@ -396,9 +396,9 @@ Spec §3.1 / R3. TUI records pasted-image attachments (`state.paste.attachments`
 
 ### Task 6.2: images-aware handle method (frozen `traits/`, additive + default)
 
-**Files:** Modify `traits/src/orchestrator.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`.
+**Files:** Modify `platform-api/src/orchestrator.rs`, `orchestrator/src/handle_impl.rs`, `orchestrator/src/test_support.rs`.
 
-- [ ] **Step 1 — trait method with default** (traits/src/orchestrator.rs, after `run_turn_streaming_with_cancel`):
+- [ ] **Step 1 — trait method with default** (platform-api/src/orchestrator.rs, after `run_turn_streaming_with_cancel`):
 ```rust
     /// Streaming turn carrying pasted image file paths (TUI paste→image).
     /// Default delegates to [`Self::run_turn_streaming_with_cancel`] ignoring
@@ -414,7 +414,7 @@ Spec §3.1 / R3. TUI records pasted-image attachments (`state.paste.attachments`
     }
 ```
 - [ ] **Step 2 — `OrchestratorHandleImpl` override** (handle_impl.rs): map to `ConversationOrchestrator::run_turn_streaming_with_cancel_images`, converting outcomes like the existing override does.
-- [ ] **Step 3 — keep `traits` clippy/tests green;** object-safety test (`_g<T: OrchestratorHandle>`) still compiles. `cargo test -p traits`.
+- [ ] **Step 3 — keep `traits` clippy/tests green;** object-safety test (`_g<T: OrchestratorHandle>`) still compiles. `cargo test -p platform-api`.
 - [ ] **Step 4 — commit.** `git commit -m "feat(traits): additive OrchestratorHandle::run_turn_streaming_with_images (default-impl)"` (+ trailer).
 
 ### Task 6.3: TUI threads attachments → handle, clears after submit
@@ -428,7 +428,7 @@ Spec §3.1 / R3. TUI records pasted-image attachments (`state.paste.attachments`
 - [ ] **Step 5 — session JSONL round-trip test** (orchestrator): a user message with an `Image` block writes + reads back byte-identically (additive serde variant). Place where the existing `message_to_jsonl` tests live.
 - [ ] **Step 6 — commit.** `git commit -m "feat(tui): route pasted images into ContentBlock::Image on the outgoing turn"` (+ trailer).
 
-**Stage 6 gate:** `cargo test -p traits -p protocol -p orchestrator -p tui` pass; clippy clean on touched crates; full parity suite (`test-harness`) green.
+**Stage 6 gate:** `cargo test -p platform-api -p protocol -p orchestrator -p tui` pass; clippy clean on touched crates; full parity suite (`test-harness`) green.
 
 ---
 
@@ -442,7 +442,7 @@ Spec §3.1 / R3. TUI records pasted-image attachments (`state.paste.attachments`
 - [ ] **Step 4 — full workspace gate.** From `lingxi-code/`:
 ```bash
 cargo build --workspace
-cargo test -p providers -p orchestrator -p engine -p cost -p traits -p protocol -p tui -p test-harness
+cargo test -p providers -p orchestrator -p core -p cost -p platform-api -p protocol -p tui -p test-harness
 cargo clippy --workspace --all-targets -- -D warnings   # NOTE: full workspace, NOT --no-deps — confirm green now that traits is clean
 bash scripts/check-deps.sh
 ```

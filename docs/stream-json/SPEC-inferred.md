@@ -306,7 +306,7 @@ Out-of-scope frames also include: `system/compact_boundary`, `system/status`, `s
 ## 7. LINGXI INTEGRATION PLAN
 
 ### 7.1 The seam (reuse, don't invent)
-LingXi already has the exact abstraction: the push-based `traits::OutputStream` trait (orchestrator.rs:761) that the orchestrator emits every turn event to. **stream-json = a fourth `OutputStream` impl** (alongside CLI `SinkAdapter`, bridge `AdapterOutputStream`, TUI `BridgeOutputStream`).
+LingXi already has the exact abstraction: the push-based `platform_api::OutputStream` trait (orchestrator.rs:761) that the orchestrator emits every turn event to. **stream-json = a fourth `OutputStream` impl** (alongside CLI `SinkAdapter`, bridge `AdapterOutputStream`, TUI `BridgeOutputStream`).
 
 - **Install point — `lib.rs:129`**: today
   ```rust

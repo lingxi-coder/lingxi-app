@@ -10,7 +10,7 @@
 //! - **Product-A V2 (todo store):** `TaskCreate` / `TaskGet` / `TaskList` /
 //!   `TaskUpdate` are the claude-code todo-list tools. They persist through the
 //!   file-backed [`crate::todo_store::TodoStore`] (decimal ids `"1".."N"`,
-//!   `engine::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
+//!   `lingxi_core::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
 //!   `validate_task_id`, `TASK_TYPES`, or `TASK_STATUSES`.
 //! - **Product-B (background-registry):** `TaskStop` / `TaskOutput` dispatch the
 //!   M1 background `TaskRegistry` (9-char `[bartwmdks][0-9a-z]{8}` ids). The
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use engine::TodoState;
+use lingxi_core::TodoState;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -40,7 +40,7 @@ use telemetry::tengu::tool::{
     TASK_UPDATE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use traits::task_registry::TaskRegistryError;
+use platform_api::task_registry::TaskRegistryError;
 
 use crate::todo_store::{TodoStore, TodoTask};
 use tool_api::context::ToolUseContext;
@@ -175,13 +175,13 @@ fn iso8601_utc(t: std::time::SystemTime) -> String {
 /// Port of `isEnvTruthy(process.env[key])` (`envUtils.ts:32-37`): lower-cased,
 /// trimmed value ∈ {`1`,`true`,`yes`,`on`}.
 fn env_truthy(key: &str) -> bool {
-    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Pure core of [`is_todo_v2_enabled`] — 1:1 with the v2.1.183 binary `TE()`:
 /// `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
 /// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
-/// `_l` = [`traits::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
+/// `_l` = [`platform_api::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
 /// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
 ///
 /// There is NO non-interactive term in the binary — the prior
@@ -202,7 +202,7 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
 /// signal.
 #[must_use]
 pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
-    todo_v2_enabled_inner(traits::env::is_env_defined_falsy(
+    todo_v2_enabled_inner(platform_api::env::is_env_defined_falsy(
         std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ))
 }
@@ -212,7 +212,7 @@ pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
 /// auto-owner + owner-change mailbox notification side-effects and the
 /// teammate completion reminder.
 ///
-/// Delegates to the SHARED [`traits::env::agent_swarms_enabled`] — one
+/// Delegates to the SHARED [`platform_api::env::agent_swarms_enabled`] — one
 /// implementation for this crate and `tool-ui`'s SendMessage (the
 /// previously-divergent private copies are gone). `isEnabled()` for the swarm
 /// *tools* reads the `agent_swarms_enabled` [`ToolStaticContext`] feature
@@ -220,12 +220,12 @@ pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
 /// env read.
 #[must_use]
 pub fn is_agent_swarms_enabled() -> bool {
-    traits::env::agent_swarms_enabled()
+    platform_api::env::agent_swarms_enabled()
 }
 
 // ==== Product-A V2 shared helpers ==========================================
 
-/// Wire string for an `engine::TodoState` (`pending`/`in_progress`/`completed`).
+/// Wire string for an `lingxi_core::TodoState` (`pending`/`in_progress`/`completed`).
 fn status_wire(state: TodoState) -> &'static str {
     match state {
         TodoState::Pending => "pending",
@@ -270,7 +270,7 @@ enum StatusInput {
 ///    leader's task list.
 /// 3. `LINGXI_TEAM_NAME` env (TS `getTeamName()`, set when running as a
 ///    process-based teammate).
-/// 4. Leader team name ([`traits::team_registry::leader_team_name`], TS
+/// 4. Leader team name ([`platform_api::team_registry::leader_team_name`], TS
 ///    `leaderTeamName` set by `TeamCreate`).
 /// 5. Session id (fallback for standalone sessions).
 ///
@@ -293,7 +293,7 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
         }
     }
     // 4. Leader team name (set by TeamCreate via setLeaderTeamName).
-    if let Some(team) = traits::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
+    if let Some(team) = platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
         return team;
     }
     // 5. Session id fallback.
@@ -1680,7 +1680,7 @@ impl Tool for TaskUpdateTool {
                     "timestamp": timestamp,
                 }))
                 .unwrap_or_default();
-                let msg = traits::mailbox::MailboxMessage {
+                let msg = platform_api::mailbox::MailboxMessage {
                     message_id: fresh_invocation_id(),
                     content: assignment_message,
                     timestamp: std::time::SystemTime::now(),

@@ -27,7 +27,7 @@ M-01（`apps/cli/src/lib.rs:404` `--brief`）、M-03（`load_merged_disable_agen
 - **L-02 — CLOSED**。原述"fixtures 锁在 `cc_2_1_198`、无 2.1.214/215 delta
   suite"已过时：`test-harness/tests/` 下已有 198/207/208/215/216/217 六套
   suite，`cc_2_1_215_*_help.txt` fixture 也在。**但复核时发现了一个真问题**：
-  `traits::CLAUDE_CODE_VERSION` 停在 `2.1.217`，而本 session 全部行为都是从
+  `platform_api::CLAUDE_CODE_VERSION` 停在 `2.1.217`，而本 session 全部行为都是从
   **2.1.220** 二进制读出来移植的 —— 端口在实现 2.1.220 的同时，向服务器和子进程
   宣称自己是 2.1.217。已 bump 至 2.1.220 并新增 `parity_claude_2_1_220.rs`；
   217 suite 降级为历史 fixture（不再钉 live 常量），
@@ -87,7 +87,7 @@ Claude Code 基线：`2.1.215`（npm `latest` / `next`；native binary SHA-256 `
 
 ### H-03 settings precedence 与 scope 模型错误
 
-**当前行为**：`engine/src/settings/mod.rs:137-155` 按 defaults → project → user → env 合并，实际是 **user 覆盖 project**；`171-173` 明确承认没有独立 `settings.local.json`，`--setting-sources local` 只能映射到 project 或忽略。managed/CLI/local 也没有形成 Claude 的统一 precedence source-of-truth。
+**当前行为**：`core/src/settings/mod.rs:137-155` 按 defaults → project → user → env 合并，实际是 **user 覆盖 project**；`171-173` 明确承认没有独立 `settings.local.json`，`--setting-sources local` 只能映射到 project 或忽略。managed/CLI/local 也没有形成 Claude 的统一 precedence source-of-truth。
 
 **Claude 2.1.215**：正式顺序是 managed > CLI > local > project > user；local 文件位于 repo root，并通过 worktree 解析到主 checkout。
 
@@ -95,7 +95,7 @@ Claude Code 基线：`2.1.215`（npm `latest` / `next`；native binary SHA-256 `
 
 ### H-04 settings 文件缺少 2 MiB fail-fast，上游 read 仍无界
 
-**当前行为**：`engine/src/settings/loader.rs:24-40` 直接 `std::fs::read(path)`，读取前没有 metadata/type/2 MiB 检查。
+**当前行为**：`core/src/settings/loader.rs:24-40` 直接 `std::fs::read(path)`，读取前没有 metadata/type/2 MiB 检查。
 
 **Claude 2.1.215**：>2 MiB 立即以 `Settings file exceeds the 2MiB limit` 失败；2.1.214 专门修复 device file / multi-GB file 导致的无界内存增长。
 
@@ -224,7 +224,7 @@ Claude Code 基线：`2.1.215`（npm `latest` / `next`；native binary SHA-256 `
 ## 验证记录
 
 - `cargo test -p permission`：879 tests passed，0 failed。
-- `cargo test -q -p engine settings`：通过。
+- `cargo test -q -p core settings`：通过。
 - `cargo test -q -p hooks`：通过。
 - `cargo test -q -p memory`：通过。
 - `cargo test -q -p session`：通过。

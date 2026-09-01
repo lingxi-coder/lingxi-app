@@ -331,7 +331,7 @@ impl ConversationOrchestrator {
             |environment| {
                 !matches!(
                     environment.host.launch_mode,
-                    traits::MobileLaunchMode::ScheduledHeadless
+                    platform_api::MobileLaunchMode::ScheduledHeadless
                 )
             },
         )

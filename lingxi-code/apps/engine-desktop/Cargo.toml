@@ -12,7 +12,7 @@ license.workspace = true
 
 [dependencies]
 tool-api = { path = "../../tool-api" }
-traits = { path = "../../traits" }
+platform-api = { path = "../../platform-api" }
 # Namespace branding constants (`.claude` dir name, `CLAUDE.md`, etc.) routed
 # through one place so the dir/file literals are not scattered across the source.
 branding = { path = "../../branding" }
@@ -28,7 +28,7 @@ cron = { path = "../../cron" }
 # construct an identical runtime. These are the engine-tier + platform crates
 # the lifted wiring touches; all are non-leaf so the dep-rule gate stays green.
 protocol = { path = "../../protocol" }
-engine = { path = "../../engine" }
+core = { path = "../../core" }
 orchestrator = { path = "../../orchestrator" }
 # Gap #5: the production composition root constructs the `JsonlWriter`
 # (`session::jsonl::writer::JsonlWriter`) that persists the interactive session's

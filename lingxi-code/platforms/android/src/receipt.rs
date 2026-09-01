@@ -6,7 +6,7 @@
 //! path exists) and `fs_confinement` records the real shape (`app_uid_only`).
 
 use crate::policy::{AndroidSandboxPlan, ExecTarget, NetProfile};
-use traits::SandboxBackend;
+use platform_api::SandboxBackend;
 
 /// Honest record of one jailed execution.
 #[derive(Debug, Clone, PartialEq, Eq)]

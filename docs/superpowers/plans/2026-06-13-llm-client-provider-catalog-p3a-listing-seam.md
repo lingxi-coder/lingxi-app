@@ -26,10 +26,10 @@
 
 ## File structure (Phase 3-A)
 
-- Modify `lingxi-code/traits/src/orchestrator.rs` — add `ModelListing` DTO + defaulted `list_model_listings()` on `OrchestratorHandle` (additive).
+- Modify `lingxi-code/platform-api/src/orchestrator.rs` — add `ModelListing` DTO + defaulted `list_model_listings()` on `OrchestratorHandle` (additive).
 - Modify `lingxi-code/orchestrator/src/conversation.rs` — defaulted `list_model_listings()` on `OrchestratorApiClient`.
 
-**Type path (PINNED):** `traits/src/lib.rs` only does `pub mod orchestrator;` (no crate-root re-exports), so the DTO is referenced everywhere as **`traits::orchestrator::ModelListing`**, added to each file's existing `use traits::orchestrator::{...}` import group (e.g. `handle_impl.rs:32` already imports `OrchestratorHandle, StatusSnapshot, …` from there). No `traits/src/lib.rs` edit is needed.
+**Type path (PINNED):** `platform-api/src/lib.rs` only does `pub mod orchestrator;` (no crate-root re-exports), so the DTO is referenced everywhere as **`platform_api::orchestrator::ModelListing`**, added to each file's existing `use platform_api::orchestrator::{...}` import group (e.g. `handle_impl.rs:32` already imports `OrchestratorHandle, StatusSnapshot, …` from there). No `platform-api/src/lib.rs` edit is needed.
 - Modify `lingxi-code/orchestrator/src/provider_adapter.rs` — override it; map `builtin_presets()` → DTO + provider-label helper + tests.
 - Modify `lingxi-code/orchestrator/src/handle_impl.rs` — override `OrchestratorHandle::list_model_listings()` delegating to `self.api`.
 - Modify `lingxi-code/orchestrator/Cargo.toml` only if `llm-client` is not already a dep (it is — `model/count_tokens.rs` uses it; no change expected).
@@ -45,16 +45,16 @@
 ### Task 0: worktree + baseline
 
 - [ ] **Step 1:** Create an isolated worktree via `superpowers:using-git-worktrees`, off `parity-llm-client-3a` HEAD. Suggested `provider-catalog-p3a`. Do NOT work in the primary checkout.
-- [ ] **Step 2:** `cd lingxi-code && cargo build -p orchestrator -p traits` → clean.
+- [ ] **Step 2:** `cd lingxi-code && cargo build -p orchestrator -p platform-api` → clean.
 - [ ] **Step 3:** `cd lingxi-code && cargo test -p orchestrator 2>&1 | grep -E 'test result:' | awk '{s+=$4} END{print "baseline orchestrator passed:", s}'` — record. No commit.
 
 ---
 
 ### Task 1: additive `ModelListing` DTO + `OrchestratorHandle::list_model_listings` (frozen traits/)
 
-**Files:** Modify `lingxi-code/traits/src/orchestrator.rs` only. In every orchestrator file that uses the DTO, add `ModelListing` to the existing `use traits::orchestrator::{...}` import group and reference it bare as `ModelListing`.
+**Files:** Modify `lingxi-code/platform-api/src/orchestrator.rs` only. In every orchestrator file that uses the DTO, add `ModelListing` to the existing `use platform_api::orchestrator::{...}` import group and reference it bare as `ModelListing`.
 
-- [ ] **Step 1: Add the DTO.** In `lingxi-code/traits/src/orchestrator.rs`, immediately BEFORE the `#[async_trait] pub trait OrchestratorHandle` line (line ~253), add this new struct (purely additive — inserts new lines, removes none):
+- [ ] **Step 1: Add the DTO.** In `lingxi-code/platform-api/src/orchestrator.rs`, immediately BEFORE the `#[async_trait] pub trait OrchestratorHandle` line (line ~253), add this new struct (purely additive — inserts new lines, removes none):
 
 ```rust
 /// One model entry for the grouped `/model` picker. Sourced from the llm-client
@@ -86,7 +86,7 @@ pub struct ModelListing {
     }
 ```
 
-- [ ] **Step 3: Re-export check.** None needed — `traits/src/lib.rs` only does `pub mod orchestrator;`, and downstream already names these types via `traits::orchestrator::{...}`. Do NOT edit `lib.rs`.
+- [ ] **Step 3: Re-export check.** None needed — `platform-api/src/lib.rs` only does `pub mod orchestrator;`, and downstream already names these types via `platform_api::orchestrator::{...}`. Do NOT edit `lib.rs`.
 
 - [ ] **Step 4: Frozen guard.** From the worktree repo root:
 
@@ -116,12 +116,12 @@ mod model_listing_default_tests {
 
 NOTE to implementer: `OrchestratorHandle` likely has MANY required methods, making a `Dummy` impl impractical. If so, DELETE this smoke test and instead just confirm the crate compiles; the real default-vs-override coverage lands in Tasks 2–3. Use your judgment; do not write a 40-method stub.
 
-- [ ] **Step 6:** `cd lingxi-code && cargo build -p traits` → clean. `cargo clippy -p traits --all-targets --no-deps -- -D warnings` → clean.
+- [ ] **Step 6:** `cd lingxi-code && cargo build -p platform-api` → clean. `cargo clippy -p platform-api --all-targets --no-deps -- -D warnings` → clean.
 
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add lingxi-code/traits/src/orchestrator.rs
+git add lingxi-code/platform-api/src/orchestrator.rs
 git commit -F - <<'EOF'
 feat(traits): additive ModelListing DTO + OrchestratorHandle::list_model_listings
 
@@ -149,7 +149,7 @@ EOF
     }
 ```
 
-NOTE: use the path by which `traits::ModelListing` is reachable in the orchestrator crate. If orchestrator re-exports it (e.g. `pub use traits::...`), prefer that; otherwise use the fully-qualified `traits::orchestrator::ModelListing` (or `traits::ModelListing` if re-exported in Task 1). Pick ONE path and use it consistently in Tasks 2–3. Confirm by grepping how the orchestrator already names `OrchestratorHandle`'s types.
+NOTE: use the path by which `platform_api::ModelListing` is reachable in the orchestrator crate. If orchestrator re-exports it (e.g. `pub use platform_api::...`), prefer that; otherwise use the fully-qualified `platform_api::orchestrator::ModelListing` (or `platform_api::ModelListing` if re-exported in Task 1). Pick ONE path and use it consistently in Tasks 2–3. Confirm by grepping how the orchestrator already names `OrchestratorHandle`'s types.
 
 - [ ] **Step 2: Write the failing adapter test.** In `provider_adapter.rs`'s `#[cfg(test)] mod tests`, add (use the same `ModelListing` path as Step 1):
 
@@ -251,7 +251,7 @@ git commit -F - <<'EOF'
 feat(orchestrator): ProviderApiAdapter exposes catalog model listings
 
 OrchestratorApiClient::list_model_listings (default empty) overridden by the
-adapter to map llm_client::builtin_presets() into traits::ModelListing with
+adapter to map llm_client::builtin_presets() into platform_api::ModelListing with
 pretty provider labels. Listing only; routing deferred to 3c.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
@@ -319,7 +319,7 @@ EOF
 
 - [ ] **Step 1:** Full orchestrator + traits test:
 
-Run: `cd lingxi-code && cargo test -p orchestrator -p traits 2>&1 | grep -E 'test result:' | awk '{s+=$4; f+=$6} END{print "passed:", s, "failed:", f}'`
+Run: `cd lingxi-code && cargo test -p orchestrator -p platform-api 2>&1 | grep -E 'test result:' | awk '{s+=$4; f+=$6} END{print "passed:", s, "failed:", f}'`
 Expected: `failed: 0`.
 
 - [ ] **Step 2:** Consumers build (the new defaulted handle method must not break any impl; engine + tui must compile):
@@ -348,4 +348,4 @@ Run: `git status --short | grep -E '^\?\?' || echo "(clean)"`
 
 **Placeholder scan:** all code shown. Two tests (Task 1 smoke, Task 3 handle test) are explicitly conditioned on existing construction patterns the implementer must mirror — with a clear "delete it rather than fabricate a brittle stub" instruction; the load-bearing coverage is the Task 2 adapter test (concrete, against real `builtin_presets()` data: deepseek-chat → "DeepSeek Chat"/"DeepSeek", a "GitHub Copilot" label, ≥347 models). ✓
 
-**Type consistency:** `ModelListing { display_model, request_model, provider_id, provider_label }` used identically in traits decl, `OrchestratorApiClient` default, adapter override, handle override. The catalog mapping reads `llm_client::ModelListing.{display_model, request_model, profile_name}` (per registry.rs). The `ModelListing` path (`traits::ModelListing` vs `traits::orchestrator::ModelListing` vs an orchestrator re-export) is pinned by the implementer in Task 1/2 and used consistently. ✓
+**Type consistency:** `ModelListing { display_model, request_model, provider_id, provider_label }` used identically in traits decl, `OrchestratorApiClient` default, adapter override, handle override. The catalog mapping reads `llm_client::ModelListing.{display_model, request_model, profile_name}` (per registry.rs). The `ModelListing` path (`platform_api::ModelListing` vs `platform_api::orchestrator::ModelListing` vs an orchestrator re-export) is pinned by the implementer in Task 1/2 and used consistently. ✓

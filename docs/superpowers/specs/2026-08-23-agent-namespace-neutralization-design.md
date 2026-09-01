@@ -93,7 +93,7 @@ pub fn config_home(home: &Path, config_dir_env: Option<OsString>) -> PathBuf;
 
 ### 2.2 注入点：照抄既有形状
 
-`traits/src/session_flags.rs:69-98` 已经是这个形状，且其注释明说它就是为了解决「一个进程里多个嵌入式运行时共存」：
+`platform-api/src/session_flags.rs:69-98` 已经是这个形状，且其注释明说它就是为了解决「一个进程里多个嵌入式运行时共存」：
 
 ```
 进程级默认值  +  tokio::task_local! 覆盖  +  effective_*() 读取
@@ -126,7 +126,7 @@ splitter 不再持有 `const HEADER`，由装配方传入。今天的漂移是�
 
 ### 2.4 D6 的两个口子
 
-**(a) 设置合成路径。** `engine/src/settings/env_parser.rs:64` 用 `format!("{prefix}{suffix}")` **合成**设置名，`FIELD_MAP[0]` 是 `("MODEL","model",Scalar)`，而 `settings.model` 是活的模型选择输入（`apps/cli/src/init.rs:465,:480`）✅。翻成 `AGENT_` 后，**用户 shell 里任何别的 agent CLI 导出的 `AGENT_MODEL` 会静默接管本产品的模型选择**。唯一的守卫 `unrelated_env_vars_are_ignored`（`env_parser.rs:176-181`）只喂了 `PATH`/`HOME`，永远绿。
+**(a) 设置合成路径。** `core/src/settings/env_parser.rs:64` 用 `format!("{prefix}{suffix}")` **合成**设置名，`FIELD_MAP[0]` 是 `("MODEL","model",Scalar)`，而 `settings.model` 是活的模型选择输入（`apps/cli/src/init.rs:465,:480`）✅。翻成 `AGENT_` 后，**用户 shell 里任何别的 agent CLI 导出的 `AGENT_MODEL` 会静默接管本产品的模型选择**。唯一的守卫 `unrelated_env_vars_are_ignored`（`env_parser.rs:176-181`）只喂了 `PATH`/`HOME`，永远绿。
 
 → 改成**显式后缀白名单**：未知 `AGENT_*` 忽略，不进入设置。
 
@@ -244,13 +244,13 @@ S2/S3 的两段式是上一次重命名验证过的手法：上次 173 个 fixtu
 
 | ID | Bug | 位置 |
 |---|---|---|
-| **B1** ✅ | `branding::ENV_PREFIX` 是**零调用点的死接缝**；真正的前缀硬编码在另外两处 | `branding/src/lib.rs:49`；实际消费者 `engine/src/settings/env_parser.rs:16`、`apps/cli/src/background_dispatch.rs:932` |
+| **B1** ✅ | `branding::ENV_PREFIX` 是**零调用点的死接缝**；真正的前缀硬编码在另外两处 | `branding/src/lib.rs:49`；实际消费者 `core/src/settings/env_parser.rs:16`、`apps/cli/src/background_dispatch.rs:932` |
 | **B2** ✅ | `resolve_tmpdir()` 把 `LINGXI_TMPDIR` **读了两遍**；第二个 arm 本该是其文档注释描述的 CLAUDE 别名 | `sandbox-runtime/src/manager.rs:91-95`（文档在 `:88`） |
 | **B3** ✅ | auto-mode 自我修改 BLOCK 规则列举了 **14 个本 build 不使用的配置面**。分类器读的是这段散文，所以这条安全护栏对真实配置目录是盲的 | `apps/cli/src/commands/auto_mode.rs:78,:129,:131,:133,:153` |
 | **B4** ✅ | B3 的反向守卫存在，**且恰好差一个文件**：`SOURCES: [(&str,&str);7]` 只列了 7 个 `permission/src/auto_mode_*.rs`，`apps/cli/src/commands/auto_mode.rs` 不在其中。它一直是绿的 | `permission/src/auto_mode_pregather.rs:840-854` |
 | **B5** ✅ | `.claude/routines/` 是**幽灵路径** —— `git grep '\.lingxi/routines'` 零命中 | `auto_mode.rs:78,:129` |
 | **B6** ✅ | `.claude/loop.md` **低估了面**：加载器同时读 `<cwd>/.lingxi/loop.md` 和裸 `<cwd>/loop.md` | `cron/src/autonomous_loop.rs:347-350` |
-| **B7** ✅ | 一对成对的 system-prompt 段落只改了一半：兄弟段落仍把 `CLAUDE.md` 和 "another Claude session" 送进**活的 prompt**。无 parity / 字节锁覆盖 | `traits/src/live_sessions.rs:39-46` vs `agent/src/handle.rs:1122` |
+| **B7** ✅ | 一对成对的 system-prompt 段落只改了一半：兄弟段落仍把 `CLAUDE.md` 和 "another Claude session" 送进**活的 prompt**。无 parity / 字节锁覆盖 | `platform-api/src/live_sessions.rs:39-46` vs `agent/src/handle.rs:1122` |
 | **B8** ✅ | `CLAUDECODE=1` 仍在写入 shell-snapshot 子进程，而读端早已改成裸 `LINGXI` 标记。全树无人读 `CLAUDECODE` | 写 `tools/skill/src/prompt_shell.rs:191`；读 `permission/src/cli_mode.rs:198` |
 | **B9** ✅ | 同一概念的写/读端不匹配：MCP headersHelper 子进程拿到 `CLAUDE_PLUGIN_ROOT`，hooks 与 plugins 拿到 `LINGXI_PLUGIN_ROOT`。一个 fixture 把这个泄漏钉住了 | `mcp/src/headers_helper.rs:99-108,:240` vs `hooks/src/executor.rs:2217`、`plugin/src/manager.rs:1320` |
 | **B10** ✅ | `/cd` 确认提示对用户说 `CLAUDE.md`，且被 142 字节锁 + 逐字断言钉住 | `command-api/src/cd.rs:24`（断言 `:63-72`） |
@@ -306,7 +306,7 @@ D3 授权丢弃 `~/.lingxi`。下列状态**都不在它下面**，且大多编�
 | **G4** | 注释里出现 `LINGXI_*` 却声称是 claude-code 源码引用（B18 那 21 行假引用的形状） |
 | **G5** | L3 豁免清单里存在**目标已消失**的条目（死豁免 = 清单在腐烂的信号） |
 
-> **G3 不含 `ENV_PREFIX`。** `"AGENT_"` 这个前缀值按设计会出现在 §2.4(b) 枚举的消费点上。作为补偿，B1 的修法是**把那两个硬编码消费者（`engine/src/settings/env_parser.rs:16`、`apps/cli/src/background_dispatch.rs:932`）接到 `branding::ENV_PREFIX`**，而不是删掉这个死常量——接上之后消费点收敛到可枚举的少数几处，G3 才有可能在未来收紧到覆盖它。
+> **G3 不含 `ENV_PREFIX`。** `"AGENT_"` 这个前缀值按设计会出现在 §2.4(b) 枚举的消费点上。作为补偿，B1 的修法是**把那两个硬编码消费者（`core/src/settings/env_parser.rs:16`、`apps/cli/src/background_dispatch.rs:932`）接到 `branding::ENV_PREFIX`**，而不是删掉这个死常量——接上之后消费点收敛到可枚举的少数几处，G3 才有可能在未来收紧到覆盖它。
 
 ### 7.2 G1 的 needle 集合按区域不同
 
@@ -416,7 +416,7 @@ L12 启动抛异常 · L5 静默降级到 Store 路径 · iOS 数据根分叉（
 | 项 | 裁定 | 理由 / 代价 |
 |---|---|---|
 | `CLAUDE_CODE_X` → | **`AGENT_X`**（丢掉 `CODE_`） | 留着 `CODE_` 就是把无意义的历史段永久化。代价：88 组撞名 ⚠️，其中 **31 组同文件共存**必须逐处读 |
-| 31 组同文件共存的合并 | **逐处读，禁止套用统一优先级规则** | `traits/src/uds_inbox.rs:123` 的数组是 `["XDG_RUNTIME_DIR","CLAUDE_CODE_TMPDIR","LINGXI_TMPDIR"]`，**`CLAUDE_CODE_TMPDIR` 排在前面并胜出** ✅ —— 它是唯一一处 LINGXI_ 不在前的。套用「LINGXI_ 总是赢」会合并到错的那个 arm，静默改变 UDS socket 目录 |
+| 31 组同文件共存的合并 | **逐处读，禁止套用统一优先级规则** | `platform-api/src/uds_inbox.rs:123` 的数组是 `["XDG_RUNTIME_DIR","CLAUDE_CODE_TMPDIR","LINGXI_TMPDIR"]`，**`CLAUDE_CODE_TMPDIR` 排在前面并胜出** ✅ —— 它是唯一一处 LINGXI_ 不在前的。套用「LINGXI_ 总是赢」会合并到错的那个 arm，静默改变 UDS socket 目录 |
 | parity 的 13 个 sha 清单 | **把注入名归一化掉**，而非按 "Agent" 重算 | 与 `<CWD>`/`<MEMORY_DIR>` 一致；下次产品改名不用再算。代价见 §8.1 ④ |
 | `claude_code.*` OTel 命名空间（22 个值 / 56 处：19 个 instrument 名 + `METER_NAME = "com.anthropic.claude_code"` + 2 个 log signal + `DEFAULT_SERVICE_NAME`） | **跟随 L2 注入**，默认 `agent.*` | 这些发往**用户自己的** Grafana/Datadog，不是 Anthropic 的 tengu，`tengu_*` 豁免不覆盖它们。代价：破坏所有已有用户看板 |
 | `window.lingxi.v2`（本地应用 JS bridge 全局） | **改**，走 client-protocol **major bump** 与既有 re-bless 流程 | 不改则每个生成的本地应用源码里都留着 `lingxi` |

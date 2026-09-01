@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use platform_windows::WindowsFileSystem;
 use std::time::Duration;
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 #[tokio::test]
 async fn create_modify_delete_emits_events() {

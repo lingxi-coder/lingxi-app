@@ -7,7 +7,7 @@
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use std::sync::Arc;
 use test_harness::mocks::MockMcpTransport;
-use traits::{McpTransport, McpTransportSpec};
+use platform_api::{McpTransport, McpTransportSpec};
 
 fn mock_config() -> McpServerConfig {
     McpServerConfig {

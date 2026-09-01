@@ -13,7 +13,7 @@ use orchestrator::test_support::MockOrchestratorHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// A fresh, uniquely-named temp directory (no `tempfile` dependency here — same
 /// idiom as the handler unit tests). Callers are responsible for removing it.

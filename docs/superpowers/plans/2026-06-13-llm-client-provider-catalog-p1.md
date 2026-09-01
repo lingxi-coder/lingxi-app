@@ -23,7 +23,7 @@
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
   Commit with `git commit -F <tempfile>` from the repo root.
-- Frozen crates: do **not** touch `lingxi-code/traits` or `lingxi-code/protocol`. This plan touches only `lingxi-code/llm-client`.
+- Frozen crates: do **not** touch `lingxi-code/platform-api` or `lingxi-code/protocol`. This plan touches only `lingxi-code/llm-client`.
 - `engine-mobile` must keep building (no new non-optional heavy deps; this plan adds none).
 
 ## File structure (created/modified in Phase 1)

@@ -34,7 +34,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 /// A trivial concurrency-safe tool whose result echoes its own name, so the
 /// per-result blocks can be matched back to received (in-stream) order.

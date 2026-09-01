@@ -10,7 +10,7 @@ use session::jsonl::schema::JsonlMessage;
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
-use traits::FileSystem;
+use platform_api::FileSystem;
 
 const UUID1: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const UUID2: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";

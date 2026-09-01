@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use traits::{SandboxCapability, SandboxFeatures};
+use platform_api::{SandboxCapability, SandboxFeatures};
 
 /// Locked toybox applet inventory for the bundled shell (toybox 0.8.11).
 ///

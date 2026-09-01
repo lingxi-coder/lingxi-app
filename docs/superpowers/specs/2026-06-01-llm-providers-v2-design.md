@@ -29,7 +29,7 @@ deferred (v1 spec §1 non-goals, §14 future work). v2 closes them:
 | # | Decision | Choice |
 |---|---|---|
 | Slicing | One spec, phased execution | **All six in a single spec**, P1–P8 sub-plans |
-| Auth impl | Signing / token-minting strategy | **Official cloud crates** (`aws-sigv4`, `aws-config`, `gcp_auth`, `aws-smithy-eventstream`) — for signing/token/frame-decode only; the model request still flows through `traits::HttpTransport` |
+| Auth impl | Signing / token-minting strategy | **Official cloud crates** (`aws-sigv4`, `aws-config`, `gcp_auth`, `aws-smithy-eventstream`) — for signing/token/frame-decode only; the model request still flows through `platform_api::HttpTransport` |
 | Bedrock breadth | Which Bedrock models | **Claude-on-Bedrock only** (reuse the Anthropic Messages body) |
 | Router scope | Which router features | **Core only**: aliases + fallback chains + retry/backoff. No budgets, no load-balancing, no cooldowns |
 
@@ -394,7 +394,7 @@ Gate actions in P8 (and incrementally as each is introduced): update `deny.toml`
 (licenses + advisory allowlist) and `scripts/check-deps.sh` graph rules so
 `providers` may depend on these while still forbidding leakage upward. **Usage is
 confined to signing / token-minting / frame-decode** — the actual model inference
-request is always issued through `traits::HttpTransport`, preserving the v1
+request is always issued through `platform_api::HttpTransport`, preserving the v1
 testability seam. `aws-config`/`gcp_auth` may perform their *own* side-channel I/O
 for credential discovery; that is acceptable (auth resolution, not inference).
 

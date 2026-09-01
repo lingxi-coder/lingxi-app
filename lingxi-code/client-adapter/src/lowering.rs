@@ -47,23 +47,23 @@ use protocol::ConversationMessage;
 
 use permission::PromptDefault;
 use session::jsonl::loader::SessionMetadata;
-use traits::orchestrator::{
+use platform_api::orchestrator::{
     AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
     McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
 };
-use traits::task_registry::{TaskOutputChunk, TaskRecord};
-use traits::team_registry::WorkerInfo;
+use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
+use platform_api::team_registry::WorkerInfo;
 
 fn lower_reasoning_selection(
-    selection: &traits::ReasoningSelection,
+    selection: &platform_api::ReasoningSelection,
 ) -> client_protocol::controls::ReasoningSelectionDto {
     use client_protocol::controls::ReasoningSelectionDto;
     match selection {
-        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
-        traits::ReasoningSelection::TokenBudget { tokens } => {
+        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
@@ -72,7 +72,7 @@ fn lower_reasoning_selection(
 /// Lower the exact route-level reasoning contract used by request validation.
 #[must_use]
 pub fn lower_reasoning_control_spec(
-    spec: &traits::ReasoningControlSpec,
+    spec: &platform_api::ReasoningControlSpec,
 ) -> client_protocol::controls::ReasoningControlSpecDto {
     use client_protocol::controls::{
         ControlDisabledReasonDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
@@ -109,17 +109,17 @@ pub fn lower_reasoning_control_spec(
 
 /// Lower one provider-qualified model listing without inventing missing facts.
 #[must_use]
-pub fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
+pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
     let pricing = listing
         .metadata
         .pricing
         .as_ref()
         .map(|pricing| ModelPricingDto {
             billing_mode: match pricing.billing_mode {
-                traits::ModelBillingMode::PerToken => ModelBillingModeDto::PerToken,
-                traits::ModelBillingMode::Subscription => ModelBillingModeDto::Subscription,
-                traits::ModelBillingMode::Free => ModelBillingModeDto::Free,
-                traits::ModelBillingMode::Unknown => ModelBillingModeDto::Unknown,
+                platform_api::ModelBillingMode::PerToken => ModelBillingModeDto::PerToken,
+                platform_api::ModelBillingMode::Subscription => ModelBillingModeDto::Subscription,
+                platform_api::ModelBillingMode::Free => ModelBillingModeDto::Free,
+                platform_api::ModelBillingMode::Unknown => ModelBillingModeDto::Unknown,
             },
             input_per_million: pricing.input_per_million,
             output_per_million: pricing.output_per_million,
@@ -141,7 +141,7 @@ pub fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
             source: pricing.source.clone(),
         });
     ModelDetailsDto {
-        reference: traits::qualified_model_ref(&listing.request_model, Some(&listing.provider_id)),
+        reference: platform_api::qualified_model_ref(&listing.request_model, Some(&listing.provider_id)),
         provider_id: listing.provider_id.clone(),
         provider_label: listing.provider_label.clone(),
         display_name: listing.display_model.clone(),
@@ -171,9 +171,9 @@ pub fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
         },
         reasoning: lower_reasoning_control_spec(&listing.reasoning),
         supports_fast_mode: listing.provider_id == "anthropic"
-            && traits::model_capabilities::has_capability(
+            && platform_api::model_capabilities::has_capability(
                 &listing.request_model,
-                traits::model_capabilities::ModelCapability::FastMode,
+                platform_api::model_capabilities::ModelCapability::FastMode,
             ),
     }
 }
@@ -433,7 +433,7 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
     }
 }
 
-/// Lower a `traits::team_registry::WorkerInfo` (the POD projection of the
+/// Lower a `platform_api::team_registry::WorkerInfo` (the POD projection of the
 /// coordinator's `WorkerAgent`) to a [`CoordinatorWorkerDto`] (T18).
 ///
 /// The mapping is 1:1 — `WorkerInfo` is already the simplified roster shape that

@@ -109,7 +109,7 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use traits::{ActiveGoalSnapshot, OrchestratorHandle};
+use platform_api::{ActiveGoalSnapshot, OrchestratorHandle};
 
 /// `wEt` — the max goal-condition length (v2.1.198).
 const MAX_CONDITION_CHARS: usize = 4000;

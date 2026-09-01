@@ -28,7 +28,7 @@ fn parse_wrapper(raw: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
-fn parse_flag_settings(raw: Option<&str>) -> Option<engine::settings::SettingsJson> {
+fn parse_flag_settings(raw: Option<&str>) -> Option<lingxi_core::settings::SettingsJson> {
     let raw = raw?.trim();
     let text = if raw.starts_with('{') {
         raw.to_string()
@@ -46,7 +46,7 @@ pub(crate) async fn configure(
     let raw = if let Some(raw) = process_wrapper_from_environment() {
         Some(raw)
     } else {
-        let managed_layers: Vec<engine::settings::SettingsJson> =
+        let managed_layers: Vec<lingxi_core::settings::SettingsJson> =
             engine_desktop::settings_watch::managed_settings_raw_tiers()
                 .await
                 .into_iter()
@@ -54,18 +54,18 @@ pub(crate) async fn configure(
                 .collect();
         let cli_layer = parse_flag_settings(flag_settings);
         let empty_env = std::collections::BTreeMap::new();
-        engine::settings::Settings::load_with_layers_from_user_path(
-            engine::settings::LoadInputs {
+        lingxi_core::settings::Settings::load_with_layers_from_user_path(
+            lingxi_core::settings::LoadInputs {
                 env: &empty_env,
                 project_dir,
-                defaults: engine::settings::SettingsJson::default(),
+                defaults: lingxi_core::settings::SettingsJson::default(),
             },
-            engine::settings::FileLayerScope {
+            lingxi_core::settings::FileLayerScope {
                 include_user: true,
                 include_project: false,
                 include_local: false,
             },
-            engine::settings::SupplementalLayers {
+            lingxi_core::settings::SupplementalLayers {
                 cli_layer: cli_layer.as_ref(),
                 managed_layers: &managed_layers,
             },

@@ -1,8 +1,8 @@
 //! `android-aar` (M8-P12 → M10-F3) — the Android `UniFFI` packager.
 //!
 //! The FFI boundary between the Rust engine and the Android app. The Kotlin
-//! layer implements the [`traits::CameraControl`] / [`traits::VoiceRecorder`] /
-//! [`traits::SharingService`] callback interfaces (skeletons under `kotlin/`),
+//! layer implements the [`platform_api::CameraControl`] / [`platform_api::VoiceRecorder`] /
+//! [`platform_api::SharingService`] callback interfaces (skeletons under `kotlin/`),
 //! hands them across as a [`PlatformImpls`] record, and Rust uses them to build
 //! an `AndroidPlatform` and assemble the mobile engine — Rust calls *back* into
 //! Kotlin for native capabilities.
@@ -54,12 +54,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(feature = "uniffi")]
-use traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
-use traits::{CameraControl, SharingService, VoiceRecorder};
+use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
+use platform_api::{CameraControl, SharingService, VoiceRecorder};
 // `Platform` is named only inside the `cfg(target_os = "android")` constructor
 // body; importing it unconditionally warns on the host build, so scope it.
 #[cfg(all(feature = "uniffi", target_os = "android"))]
-use traits::Platform;
+use platform_api::Platform;
 
 // F3-04: the shared session host + its error type are DEFINED ONCE in
 // `engine-mobile` and re-exported here. Both FFI packager crates re-export the
@@ -155,7 +155,7 @@ pub enum MobileLinuxRuntimeModeFfi {
     MobileLinux,
 }
 
-impl From<MobileLinuxRuntimeModeFfi> for traits::MobileLinuxRuntimeMode {
+impl From<MobileLinuxRuntimeModeFfi> for platform_api::MobileLinuxRuntimeMode {
     fn from(value: MobileLinuxRuntimeModeFfi) -> Self {
         match value {
             MobileLinuxRuntimeModeFfi::Legacy => Self::Legacy,
@@ -256,9 +256,9 @@ pub struct AndroidHostEnvironmentFfi {
     pub launch_mode: AndroidLaunchModeFfi,
 }
 
-impl From<AndroidHostEnvironmentFfi> for traits::mobile_runtime_environment::MobileHostEnvironment {
+impl From<AndroidHostEnvironmentFfi> for platform_api::mobile_runtime_environment::MobileHostEnvironment {
     fn from(value: AndroidHostEnvironmentFfi) -> Self {
-        use traits::mobile_runtime_environment::{
+        use platform_api::mobile_runtime_environment::{
             MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
             MobileLaunchMode,
         };
@@ -668,7 +668,7 @@ pub struct MobileLinuxTaskSnapshotFfi {
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct AndroidMobileLinuxRuntimeHandle {
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 }
 
 #[cfg(feature = "uniffi")]
@@ -700,12 +700,12 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_files_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_files_root).join(branding::DOT_DIR),
-            host_environment: Some(traits::MobileHostEnvironment::new(
-                traits::MobileHostOs::Android,
+            host_environment: Some(platform_api::MobileHostEnvironment::new(
+                platform_api::MobileHostOs::Android,
                 None,
-                traits::MobileDeviceClass::Unknown,
-                traits::MobileExecutionTarget::Unknown,
-                traits::MobileLaunchMode::Unknown,
+                platform_api::MobileDeviceClass::Unknown,
+                platform_api::MobileExecutionTarget::Unknown,
+                platform_api::MobileLaunchMode::Unknown,
             )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
@@ -716,7 +716,7 @@ pub fn build_mobile_engine(
         let mobile_linux_mode = impls
             .mobile_linux
             .as_ref()
-            .map_or(traits::MobileLinuxRuntimeMode::Legacy, |cfg| {
+            .map_or(platform_api::MobileLinuxRuntimeMode::Legacy, |cfg| {
                 cfg.mode.into()
             });
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new_with_mode(
@@ -774,31 +774,31 @@ pub fn build_android_mobile_linux_runtime_handle(
 }
 
 #[cfg(feature = "uniffi")]
-fn mobile_linux_backend_name(backend: traits::SandboxBackend) -> String {
+fn mobile_linux_backend_name(backend: platform_api::SandboxBackend) -> String {
     match backend {
-        traits::SandboxBackend::LinuxNamespaces => "linux-namespaces",
-        traits::SandboxBackend::LinuxFirejail => "linux-firejail",
-        traits::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
-        traits::SandboxBackend::WindowsJobObject => "windows-job-object",
-        traits::SandboxBackend::AndroidMinijail => "android-minijail",
-        traits::SandboxBackend::AndroidProot => "android-proot",
-        traits::SandboxBackend::IosIsh => "ios-ish",
-        traits::SandboxBackend::None => "none",
+        platform_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        platform_api::SandboxBackend::LinuxFirejail => "linux-firejail",
+        platform_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        platform_api::SandboxBackend::WindowsJobObject => "windows-job-object",
+        platform_api::SandboxBackend::AndroidMinijail => "android-minijail",
+        platform_api::SandboxBackend::AndroidProot => "android-proot",
+        platform_api::SandboxBackend::IosIsh => "ios-ish",
+        platform_api::SandboxBackend::None => "none",
     }
     .to_string()
 }
 
 #[cfg(feature = "uniffi")]
-fn rootfs_state_to_ffi(state: traits::RootfsState) -> MobileLinuxRootfsStateFfi {
+fn rootfs_state_to_ffi(state: platform_api::RootfsState) -> MobileLinuxRootfsStateFfi {
     match state {
-        traits::RootfsState::Missing => MobileLinuxRootfsStateFfi::Missing,
-        traits::RootfsState::Installing => MobileLinuxRootfsStateFfi::Installing,
-        traits::RootfsState::Ready => MobileLinuxRootfsStateFfi::Ready,
-        traits::RootfsState::Corrupt => MobileLinuxRootfsStateFfi::Corrupt,
-        traits::RootfsState::Repairing => MobileLinuxRootfsStateFfi::Repairing,
-        traits::RootfsState::Resetting => MobileLinuxRootfsStateFfi::Resetting,
-        traits::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
-        traits::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
+        platform_api::RootfsState::Missing => MobileLinuxRootfsStateFfi::Missing,
+        platform_api::RootfsState::Installing => MobileLinuxRootfsStateFfi::Installing,
+        platform_api::RootfsState::Ready => MobileLinuxRootfsStateFfi::Ready,
+        platform_api::RootfsState::Corrupt => MobileLinuxRootfsStateFfi::Corrupt,
+        platform_api::RootfsState::Repairing => MobileLinuxRootfsStateFfi::Repairing,
+        platform_api::RootfsState::Resetting => MobileLinuxRootfsStateFfi::Resetting,
+        platform_api::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
+        platform_api::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
     }
 }
 
@@ -820,13 +820,13 @@ fn configured_workspace_guest_path(cfg: &AndroidMobileLinuxConfigFfi) -> String 
 }
 
 #[cfg(feature = "uniffi")]
-fn capability_to_ffi(capability: traits::MobileLinuxCapability) -> MobileLinuxCapabilityFfi {
+fn capability_to_ffi(capability: platform_api::MobileLinuxCapability) -> MobileLinuxCapabilityFfi {
     MobileLinuxCapabilityFfi {
         available: capability.available,
         backend: mobile_linux_backend_name(capability.backend),
         mode: match capability.mode {
-            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
         },
         reason: capability.reason,
         streaming_output: capability.streaming_output,
@@ -838,13 +838,13 @@ fn capability_to_ffi(capability: traits::MobileLinuxCapability) -> MobileLinuxCa
 }
 
 #[cfg(feature = "uniffi")]
-fn status_to_ffi(status: traits::RootfsStatus) -> MobileLinuxStatusFfi {
+fn status_to_ffi(status: platform_api::RootfsStatus) -> MobileLinuxStatusFfi {
     MobileLinuxStatusFfi {
         state: rootfs_state_to_ffi(status.state),
         backend: mobile_linux_backend_name(status.backend),
         mode: match status.mode {
-            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
         },
         platform: status.platform,
         abi: status.abi,
@@ -862,22 +862,22 @@ fn status_to_ffi(status: traits::RootfsStatus) -> MobileLinuxStatusFfi {
 }
 
 #[cfg(feature = "uniffi")]
-fn mount_purpose_to_traits(value: MobileLinuxMountPurposeFfi) -> traits::MountPurpose {
+fn mount_purpose_to_traits(value: MobileLinuxMountPurposeFfi) -> platform_api::MountPurpose {
     match value {
-        MobileLinuxMountPurposeFfi::Workspace => traits::MountPurpose::Workspace,
-        MobileLinuxMountPurposeFfi::LocalAppBuild => traits::MountPurpose::LocalAppBuild,
-        MobileLinuxMountPurposeFfi::Memory => traits::MountPurpose::Memory,
-        MobileLinuxMountPurposeFfi::Skills => traits::MountPurpose::Skills,
-        MobileLinuxMountPurposeFfi::Shared => traits::MountPurpose::Shared,
-        MobileLinuxMountPurposeFfi::External => traits::MountPurpose::External,
-        MobileLinuxMountPurposeFfi::Temp => traits::MountPurpose::Temp,
+        MobileLinuxMountPurposeFfi::Workspace => platform_api::MountPurpose::Workspace,
+        MobileLinuxMountPurposeFfi::LocalAppBuild => platform_api::MountPurpose::LocalAppBuild,
+        MobileLinuxMountPurposeFfi::Memory => platform_api::MountPurpose::Memory,
+        MobileLinuxMountPurposeFfi::Skills => platform_api::MountPurpose::Skills,
+        MobileLinuxMountPurposeFfi::Shared => platform_api::MountPurpose::Shared,
+        MobileLinuxMountPurposeFfi::External => platform_api::MountPurpose::External,
+        MobileLinuxMountPurposeFfi::Temp => platform_api::MountPurpose::Temp,
     }
 }
 
 #[cfg(feature = "uniffi")]
 fn command_request_to_traits(
     request: MobileLinuxCommandRequestFfi,
-) -> Result<traits::LinuxCommandRequest, MobileLinuxApiErrorFfi> {
+) -> Result<platform_api::LinuxCommandRequest, MobileLinuxApiErrorFfi> {
     let command = request.command.trim();
     if command.is_empty() {
         return Err(MobileLinuxApiErrorFfi::InvalidRequest {
@@ -889,7 +889,7 @@ fn command_request_to_traits(
         .into_iter()
         .map(mount_spec_to_traits)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(traits::LinuxCommandRequest {
+    Ok(platform_api::LinuxCommandRequest {
         command: command.to_string(),
         args: request.args,
         cwd: request.cwd,
@@ -901,17 +901,17 @@ fn command_request_to_traits(
         stdin: request.stdin,
         timeout_ms: request.timeout_ms,
         network: if request.allow_network {
-            traits::NetworkPolicy::Allowed
+            platform_api::NetworkPolicy::Allowed
         } else {
-            traits::NetworkPolicy::Disabled
+            platform_api::NetworkPolicy::Disabled
         },
-        resource_limits: traits::ResourceLimits::default(),
+        resource_limits: platform_api::ResourceLimits::default(),
         mounts,
     })
 }
 
 #[cfg(feature = "uniffi")]
-fn command_result_to_ffi(result: traits::LinuxCommandResult) -> MobileLinuxCommandResultFfi {
+fn command_result_to_ffi(result: platform_api::LinuxCommandResult) -> MobileLinuxCommandResultFfi {
     MobileLinuxCommandResultFfi {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -922,20 +922,20 @@ fn command_result_to_ffi(result: traits::LinuxCommandResult) -> MobileLinuxComma
 }
 
 #[cfg(feature = "uniffi")]
-fn task_status_to_ffi(status: traits::MobileLinuxTaskStatus) -> MobileLinuxTaskStateFfi {
+fn task_status_to_ffi(status: platform_api::MobileLinuxTaskStatus) -> MobileLinuxTaskStateFfi {
     match status {
-        traits::MobileLinuxTaskStatus::Queued => MobileLinuxTaskStateFfi::Queued,
-        traits::MobileLinuxTaskStatus::Running => MobileLinuxTaskStateFfi::Running,
-        traits::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Backgrounded,
-        traits::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
-        traits::MobileLinuxTaskStatus::Failed => MobileLinuxTaskStateFfi::Failed,
-        traits::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
-        traits::MobileLinuxTaskStatus::TimedOut => MobileLinuxTaskStateFfi::TimedOut,
+        platform_api::MobileLinuxTaskStatus::Queued => MobileLinuxTaskStateFfi::Queued,
+        platform_api::MobileLinuxTaskStatus::Running => MobileLinuxTaskStateFfi::Running,
+        platform_api::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Backgrounded,
+        platform_api::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
+        platform_api::MobileLinuxTaskStatus::Failed => MobileLinuxTaskStateFfi::Failed,
+        platform_api::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
+        platform_api::MobileLinuxTaskStatus::TimedOut => MobileLinuxTaskStateFfi::TimedOut,
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn task_snapshot_to_ffi(task: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTaskSnapshotFfi {
+fn task_snapshot_to_ffi(task: platform_api::MobileLinuxTaskSnapshot) -> MobileLinuxTaskSnapshotFfi {
     MobileLinuxTaskSnapshotFfi {
         task_id: task.task_id,
         status: task_status_to_ffi(task.status),
@@ -948,9 +948,9 @@ fn task_snapshot_to_ffi(task: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTas
 }
 
 #[cfg(feature = "uniffi")]
-fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
+fn event_to_ffi(event: platform_api::MobileLinuxEvent) -> MobileLinuxEventFfi {
     match event.kind {
-        traits::MobileLinuxEventKind::TaskStatusChanged {
+        platform_api::MobileLinuxEventKind::TaskStatusChanged {
             status,
             exit_code,
             detail,
@@ -963,11 +963,11 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
             session_id: None,
             status: Some(task_status_to_ffi(status)),
             exit_code,
-            timed_out: Some(matches!(status, traits::MobileLinuxTaskStatus::TimedOut)),
-            cancelled: Some(matches!(status, traits::MobileLinuxTaskStatus::Cancelled)),
+            timed_out: Some(matches!(status, platform_api::MobileLinuxTaskStatus::TimedOut)),
+            cancelled: Some(matches!(status, platform_api::MobileLinuxTaskStatus::Cancelled)),
             detail,
         },
-        traits::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxEventFfi {
+        platform_api::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxEventFfi {
             sequence: event.sequence,
             task_id: event.task_id,
             kind: MobileLinuxEventKindFfi::StdoutLine,
@@ -980,7 +980,7 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
             cancelled: None,
             detail: None,
         },
-        traits::MobileLinuxEventKind::StderrChunk { chunk } => MobileLinuxEventFfi {
+        platform_api::MobileLinuxEventKind::StderrChunk { chunk } => MobileLinuxEventFfi {
             sequence: event.sequence,
             task_id: event.task_id,
             kind: MobileLinuxEventKindFfi::StderrChunk,
@@ -993,7 +993,7 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
             cancelled: None,
             detail: None,
         },
-        traits::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxEventFfi {
+        platform_api::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxEventFfi {
             sequence: event.sequence,
             task_id: event.task_id,
             kind: MobileLinuxEventKindFfi::PtyOutput,
@@ -1006,7 +1006,7 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
             cancelled: None,
             detail: None,
         },
-        traits::MobileLinuxEventKind::PtyClosed {
+        platform_api::MobileLinuxEventKind::PtyClosed {
             session_id,
             exit_code,
             detail,
@@ -1023,7 +1023,7 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
             cancelled: None,
             detail,
         },
-        traits::MobileLinuxEventKind::RuntimeError { detail } => MobileLinuxEventFfi {
+        platform_api::MobileLinuxEventKind::RuntimeError { detail } => MobileLinuxEventFfi {
             sequence: event.sequence,
             task_id: event.task_id,
             kind: MobileLinuxEventKindFfi::RuntimeError,
@@ -1042,7 +1042,7 @@ fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
 #[cfg(feature = "uniffi")]
 fn mount_spec_to_traits(
     mount: MobileLinuxMountSpecFfi,
-) -> Result<traits::MountSpec, MobileLinuxApiErrorFfi> {
+) -> Result<platform_api::MountSpec, MobileLinuxApiErrorFfi> {
     if mount.guest_path.trim().is_empty() || !mount.guest_path.starts_with('/') {
         return Err(MobileLinuxApiErrorFfi::InvalidRequest {
             message: format!("invalid guest mount path: {}", mount.guest_path),
@@ -1053,7 +1053,7 @@ fn mount_spec_to_traits(
             message: "host mount path must not be empty".to_string(),
         });
     }
-    Ok(traits::MountSpec {
+    Ok(platform_api::MountSpec {
         host_path: std::path::PathBuf::from(mount.host_path),
         guest_path: mount.guest_path,
         read_only: mount.read_only,
@@ -1064,7 +1064,7 @@ fn mount_spec_to_traits(
 #[cfg(feature = "uniffi")]
 fn pty_open_request_to_traits(
     request: MobileLinuxPtyOpenRequestFfi,
-) -> Result<traits::PtyOpenRequest, MobileLinuxApiErrorFfi> {
+) -> Result<platform_api::PtyOpenRequest, MobileLinuxApiErrorFfi> {
     let command = request.command.trim();
     if command.is_empty() {
         return Err(MobileLinuxApiErrorFfi::InvalidRequest {
@@ -1076,7 +1076,7 @@ fn pty_open_request_to_traits(
         .into_iter()
         .map(mount_spec_to_traits)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(traits::PtyOpenRequest {
+    Ok(platform_api::PtyOpenRequest {
         command: command.to_string(),
         args: request.args,
         cwd: request.cwd,
@@ -1085,7 +1085,7 @@ fn pty_open_request_to_traits(
             .into_iter()
             .map(|entry| (entry.key, entry.value))
             .collect(),
-        size: traits::PtySize {
+        size: platform_api::PtySize {
             cols: request.size.cols,
             rows: request.size.rows,
         },
@@ -1094,71 +1094,71 @@ fn pty_open_request_to_traits(
 }
 
 #[cfg(feature = "uniffi")]
-fn process_handle_to_ffi(handle: traits::LinuxProcessHandle) -> MobileLinuxProcessHandleFfi {
+fn process_handle_to_ffi(handle: platform_api::LinuxProcessHandle) -> MobileLinuxProcessHandleFfi {
     MobileLinuxProcessHandleFfi { id: handle.id }
 }
 
 #[cfg(feature = "uniffi")]
 fn process_handle_to_traits(
     handle: MobileLinuxProcessHandleFfi,
-) -> Result<traits::LinuxProcessHandle, MobileLinuxApiErrorFfi> {
+) -> Result<platform_api::LinuxProcessHandle, MobileLinuxApiErrorFfi> {
     if handle.id.trim().is_empty() {
         return Err(MobileLinuxApiErrorFfi::InvalidRequest {
             message: "process handle id must not be empty".to_string(),
         });
     }
-    Ok(traits::LinuxProcessHandle {
+    Ok(platform_api::LinuxProcessHandle {
         id: handle.id,
-        enforcement: traits::LinuxEnforcementReceipt::default(),
+        enforcement: platform_api::LinuxEnforcementReceipt::default(),
     })
 }
 
 #[cfg(feature = "uniffi")]
-fn pty_handle_to_ffi(handle: traits::PtySessionHandle) -> MobileLinuxPtySessionHandleFfi {
+fn pty_handle_to_ffi(handle: platform_api::PtySessionHandle) -> MobileLinuxPtySessionHandleFfi {
     MobileLinuxPtySessionHandleFfi { id: handle.id }
 }
 
 #[cfg(feature = "uniffi")]
 fn pty_handle_to_traits(
     handle: MobileLinuxPtySessionHandleFfi,
-) -> Result<traits::PtySessionHandle, MobileLinuxApiErrorFfi> {
+) -> Result<platform_api::PtySessionHandle, MobileLinuxApiErrorFfi> {
     if handle.id.trim().is_empty() {
         return Err(MobileLinuxApiErrorFfi::InvalidRequest {
             message: "pty handle id must not be empty".to_string(),
         });
     }
-    Ok(traits::PtySessionHandle { id: handle.id })
+    Ok(platform_api::PtySessionHandle { id: handle.id })
 }
 
 #[cfg(feature = "uniffi")]
-fn mobile_linux_error_to_ffi(error: traits::MobileLinuxError) -> MobileLinuxApiErrorFfi {
+fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLinuxApiErrorFfi {
     match error {
-        traits::MobileLinuxError::Unsupported => MobileLinuxApiErrorFfi::Unavailable {
+        platform_api::MobileLinuxError::Unsupported => MobileLinuxApiErrorFfi::Unavailable {
             message: "runtime unsupported on this build".to_string(),
         },
-        traits::MobileLinuxError::Unavailable(message) => {
+        platform_api::MobileLinuxError::Unavailable(message) => {
             MobileLinuxApiErrorFfi::Unavailable { message }
         }
-        traits::MobileLinuxError::LicenseBlocked(message) => {
+        platform_api::MobileLinuxError::LicenseBlocked(message) => {
             MobileLinuxApiErrorFfi::LicenseBlocked { message }
         }
-        traits::MobileLinuxError::InvalidRequest(message) => {
+        platform_api::MobileLinuxError::InvalidRequest(message) => {
             MobileLinuxApiErrorFfi::InvalidRequest { message }
         }
-        traits::MobileLinuxError::Integrity(message) | traits::MobileLinuxError::Io(message) => {
+        platform_api::MobileLinuxError::Integrity(message) | platform_api::MobileLinuxError::Io(message) => {
             MobileLinuxApiErrorFfi::OperationFailed { message }
         }
-        traits::MobileLinuxError::NetworkPolicyUnavailable(message) => {
+        platform_api::MobileLinuxError::NetworkPolicyUnavailable(message) => {
             MobileLinuxApiErrorFfi::OperationFailed {
                 message: format!("network_policy_unavailable: {message}"),
             }
         }
-        traits::MobileLinuxError::ResourceLimitExceeded(message) => {
+        platform_api::MobileLinuxError::ResourceLimitExceeded(message) => {
             MobileLinuxApiErrorFfi::OperationFailed {
                 message: format!("resource_limit_exceeded: {message}"),
             }
         }
-        traits::MobileLinuxError::Timeout => MobileLinuxApiErrorFfi::OperationFailed {
+        platform_api::MobileLinuxError::Timeout => MobileLinuxApiErrorFfi::OperationFailed {
             message: "timeout".to_string(),
         },
     }
@@ -1179,8 +1179,8 @@ impl AndroidMobileLinuxEventSinkBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::ProcessStreamSink for AndroidMobileLinuxEventSinkBridge {
-    async fn stdout_line(&self, line: String) -> Result<(), traits::ProcessError> {
+impl platform_api::ProcessStreamSink for AndroidMobileLinuxEventSinkBridge {
+    async fn stdout_line(&self, line: String) -> Result<(), platform_api::ProcessError> {
         self.inner
             .on_event(MobileLinuxEventFfi {
                 sequence: 0,
@@ -1196,10 +1196,10 @@ impl traits::ProcessStreamSink for AndroidMobileLinuxEventSinkBridge {
                 detail: None,
             })
             .await
-            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+            .map_err(|err| platform_api::ProcessError::Io(err.to_string()))
     }
 
-    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), traits::ProcessError> {
+    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), platform_api::ProcessError> {
         self.inner
             .on_event(MobileLinuxEventFfi {
                 sequence: 0,
@@ -1215,14 +1215,14 @@ impl traits::ProcessStreamSink for AndroidMobileLinuxEventSinkBridge {
                 detail: None,
             })
             .await
-            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+            .map_err(|err| platform_api::ProcessError::Io(err.to_string()))
     }
 }
 
 #[cfg(feature = "uniffi")]
 fn require_mobile_linux_runtime(
     config: Option<&AndroidMobileLinuxConfigFfi>,
-) -> Result<Arc<dyn traits::MobileLinuxRuntime>, MobileLinuxApiErrorFfi> {
+) -> Result<Arc<dyn platform_api::MobileLinuxRuntime>, MobileLinuxApiErrorFfi> {
     match config {
         None => Err(MobileLinuxApiErrorFfi::LegacySelected),
         Some(cfg) if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) => {
@@ -1240,9 +1240,9 @@ fn require_mobile_linux_runtime(
 fn block_on_mobile_linux_call<T>(
     config: Option<&AndroidMobileLinuxConfigFfi>,
     op: impl FnOnce(
-        Arc<dyn traits::MobileLinuxRuntime>,
+        Arc<dyn platform_api::MobileLinuxRuntime>,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<T, traits::MobileLinuxError>> + Send>,
+        Box<dyn std::future::Future<Output = Result<T, platform_api::MobileLinuxError>> + Send>,
     >,
 ) -> Result<T, MobileLinuxApiErrorFfi> {
     let runtime = require_mobile_linux_runtime(config)?;
@@ -1414,7 +1414,7 @@ impl AndroidMobileLinuxRuntimeHandle {
         self.runtime
             .resize_pty(
                 &pty_handle_to_traits(handle)?,
-                traits::PtySize {
+                platform_api::PtySize {
                     cols: size.cols,
                     rows: size.rows,
                 },
@@ -1559,7 +1559,7 @@ fn android_mobile_linux_status_from_config(
 #[cfg(feature = "uniffi")]
 fn android_mobile_linux_runtime(
     config: Option<&AndroidMobileLinuxConfigFfi>,
-) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+) -> Option<Arc<dyn platform_api::MobileLinuxRuntime>> {
     let cfg = config?;
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
@@ -1569,7 +1569,7 @@ fn android_mobile_linux_runtime(
         use std::collections::HashMap;
         use std::sync::{LazyLock, Mutex};
 
-        static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<dyn traits::MobileLinuxRuntime>>>> =
+        static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<dyn platform_api::MobileLinuxRuntime>>>> =
             LazyLock::new(|| Mutex::new(HashMap::new()));
         let key = format!(
             "{}|{}|{}|{}|{}",
@@ -1596,7 +1596,7 @@ fn android_mobile_linux_runtime(
                 archive_sha256: cfg.archive_sha256.clone(),
             },
         );
-        let runtime = Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>;
+        let runtime = Arc::new(runtime) as Arc<dyn platform_api::MobileLinuxRuntime>;
         RUNTIMES
             .lock()
             .expect("Android MobileLinux runtime registry")
@@ -1605,14 +1605,14 @@ fn android_mobile_linux_runtime(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let runtime = traits::UnavailableMobileLinuxRuntime::unavailable(
-            traits::SandboxBackend::AndroidProot,
-            traits::MobileLinuxRuntimeMode::MobileLinux,
+        let runtime = platform_api::UnavailableMobileLinuxRuntime::unavailable(
+            platform_api::SandboxBackend::AndroidProot,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux,
             "android",
             cfg.abi.clone(),
             "Android PRoot runtime requires an Android target",
         );
-        Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+        Some(Arc::new(runtime) as Arc<dyn platform_api::MobileLinuxRuntime>)
     }
 }
 
@@ -1663,10 +1663,10 @@ fn android_mobile_linux_capability_from_config(
 fn block_on_mobile_linux_status(
     config: Option<&AndroidMobileLinuxConfigFfi>,
     op: fn(
-        Arc<dyn traits::MobileLinuxRuntime>,
+        Arc<dyn platform_api::MobileLinuxRuntime>,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+            dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
                 + Send,
         >,
     >,
@@ -1693,10 +1693,10 @@ fn block_on_mobile_linux_status(
 
 #[cfg(feature = "uniffi")]
 fn verify_rootfs_op(
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
             + Send,
     >,
 > {
@@ -1705,10 +1705,10 @@ fn verify_rootfs_op(
 
 #[cfg(feature = "uniffi")]
 fn repair_rootfs_op(
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
             + Send,
     >,
 > {
@@ -1717,10 +1717,10 @@ fn repair_rootfs_op(
 
 #[cfg(feature = "uniffi")]
 fn reset_rootfs_op(
-    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+    runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
             + Send,
     >,
 > {
@@ -1845,7 +1845,7 @@ pub fn android_mobile_linux_run_command_streaming(
                 detail: None,
             })
             .await
-            .map_err(|err| traits::MobileLinuxError::Io(err.to_string()))?;
+            .map_err(|err| platform_api::MobileLinuxError::Io(err.to_string()))?;
             Ok(result)
         })
     })
@@ -1922,7 +1922,7 @@ pub fn android_mobile_linux_resize_pty(
             runtime
                 .resize_pty(
                     &handle,
-                    traits::PtySize {
+                    platform_api::PtySize {
                         cols: size.cols,
                         rows: size.rows,
                     },
@@ -2019,7 +2019,7 @@ pub fn android_mobile_linux_task_status(
 // The Kotlin layer implements two crate-local async callback interfaces —
 // `AndroidStt` (system `SpeechRecognizer`) and `AndroidTts` (system
 // `TextToSpeech`) — and hands them across the FFI seam. The engine consumes the
-// SHARED `traits::SpeechToText` / `traits::TextToSpeech` seams, so a thin bridge
+// SHARED `platform_api::SpeechToText` / `platform_api::TextToSpeech` seams, so a thin bridge
 // struct adapts each crate-local interface to its `traits` counterpart.
 //
 // These interfaces are DEFINED IN THIS CRATE (mirroring the `IosEventListener`
@@ -2035,7 +2035,7 @@ pub fn android_mobile_linux_task_status(
 
 /// FFI error surface for the Android speech callback interfaces. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer `traits::SttError` / `traits::TtsError`.
+/// fans it back out onto the richer `platform_api::SttError` / `platform_api::TtsError`.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2066,7 +2066,7 @@ pub enum SpeechFfiError {
 /// Crate-local foreign callback interface for native speech-to-text — the Kotlin
 /// app implements it over the system `SpeechRecognizer` (opens the live mic,
 /// listens for one utterance, returns the final transcript). Bridged to
-/// [`traits::SpeechToText`] by [`AndroidSttBridge`].
+/// [`platform_api::SpeechToText`] by [`AndroidSttBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -2078,7 +2078,7 @@ pub trait AndroidStt: Send + Sync {
 
 /// Crate-local foreign callback interface for native text-to-speech — the Kotlin
 /// app implements it over the system `TextToSpeech` engine, returning 16-bit
-/// signed little-endian mono PCM. Bridged to [`traits::TextToSpeech`] by
+/// signed little-endian mono PCM. Bridged to [`platform_api::TextToSpeech`] by
 /// [`AndroidTtsBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -2112,15 +2112,15 @@ pub struct TtsAudioFfi {
 // Mirrors the AndroidStt/AndroidTts/AndroidCamera pattern: the Kotlin layer
 // implements a crate-local async `AndroidShare` callback interface (the system
 // `Intent.ACTION_SEND` share sheet) and hands it across the FFI seam. The
-// engine consumes the SHARED `traits::SharingService` seam, so
+// engine consumes the SHARED `platform_api::SharingService` seam, so
 // `AndroidShareBridge` adapts the crate-local interface to its `traits`
-// counterpart. The shared `traits::SharePayload` is destructured into the three
+// counterpart. The shared `platform_api::SharePayload` is destructured into the three
 // flat `text` / `url` / `image_bytes` args to keep the FFI flat; the bridge
-// maps the FFI result/error back onto `traits::ShareResult` / `traits::ShareError`.
+// maps the FFI result/error back onto `platform_api::ShareResult` / `platform_api::ShareError`.
 
 /// FFI error surface for the Android share callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::ShareError`].
+/// fans it back out onto the richer [`platform_api::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2137,7 +2137,7 @@ pub enum ShareFfiError {
 }
 
 /// FFI carrier for the outcome of a native share — whether the user completed
-/// or dismissed the system share sheet. Mapped to [`traits::ShareResult`].
+/// or dismissed the system share sheet. Mapped to [`platform_api::ShareResult`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Debug, Clone)]
@@ -2150,7 +2150,7 @@ pub enum ShareResultFfi {
 
 /// Crate-local foreign callback interface for native sharing — the Kotlin app
 /// implements it over the system `Intent.ACTION_SEND` share sheet. Bridged to
-/// [`traits::SharingService`] by [`AndroidShareBridge`]. The payload crosses the
+/// [`platform_api::SharingService`] by [`AndroidShareBridge`]. The payload crosses the
 /// seam as three flat optionals (`text` / `url` / `image_bytes`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -2167,10 +2167,10 @@ pub trait AndroidShare: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidShare`] callback interface to the shared
-/// [`traits::SharingService`] seam the engine consumes. Destructures
-/// [`traits::SharePayload`] into the flat `text` / `url` / `image_bytes` args
+/// [`platform_api::SharingService`] seam the engine consumes. Destructures
+/// [`platform_api::SharePayload`] into the flat `text` / `url` / `image_bytes` args
 /// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
-/// [`traits::ShareResult`] / [`traits::ShareError`].
+/// [`platform_api::ShareResult`] / [`platform_api::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidShareBridge {
@@ -2179,21 +2179,21 @@ struct AndroidShareBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::SharingService for AndroidShareBridge {
+impl platform_api::SharingService for AndroidShareBridge {
     async fn share(
         &self,
-        payload: traits::SharePayload,
-    ) -> Result<traits::ShareResult, traits::ShareError> {
-        let traits::SharePayload {
+        payload: platform_api::SharePayload,
+    ) -> Result<platform_api::ShareResult, platform_api::ShareError> {
+        let platform_api::SharePayload {
             text,
             url,
             image_bytes,
         } = payload;
         match self.inner.share(text, url, image_bytes).await {
-            Ok(ShareResultFfi::Success) => Ok(traits::ShareResult::Success),
-            Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
-            Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
-            Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+            Ok(ShareResultFfi::Success) => Ok(platform_api::ShareResult::Success),
+            Ok(ShareResultFfi::Cancelled) => Ok(platform_api::ShareResult::Cancelled),
+            Err(ShareFfiError::Unsupported) => Err(platform_api::ShareError::Unsupported),
+            Err(ShareFfiError::Other { message }) => Err(platform_api::ShareError::Other(message)),
         }
     }
 }
@@ -2257,19 +2257,19 @@ struct AndroidLocationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::LocationProvider for AndroidLocationBridge {
-    async fn current_location(&self) -> Result<traits::LocationFix, traits::LocationError> {
+impl platform_api::LocationProvider for AndroidLocationBridge {
+    async fn current_location(&self) -> Result<platform_api::LocationFix, platform_api::LocationError> {
         match self.inner.current_location().await {
-            Ok(fix) => Ok(traits::LocationFix {
+            Ok(fix) => Ok(platform_api::LocationFix {
                 latitude: fix.latitude,
                 longitude: fix.longitude,
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
-            Err(LocationFfiError::PermissionDenied) => Err(traits::LocationError::PermissionDenied),
-            Err(LocationFfiError::Unavailable) => Err(traits::LocationError::Unavailable),
-            Err(LocationFfiError::Timeout) => Err(traits::LocationError::Timeout),
-            Err(LocationFfiError::Other { message }) => Err(traits::LocationError::Other(message)),
+            Err(LocationFfiError::PermissionDenied) => Err(platform_api::LocationError::PermissionDenied),
+            Err(LocationFfiError::Unavailable) => Err(platform_api::LocationError::Unavailable),
+            Err(LocationFfiError::Timeout) => Err(platform_api::LocationError::Timeout),
+            Err(LocationFfiError::Other { message }) => Err(platform_api::LocationError::Other(message)),
         }
     }
 }
@@ -2281,16 +2281,16 @@ impl traits::LocationProvider for AndroidLocationBridge {
 // Mirrors the AndroidShare pattern: the Kotlin layer implements a crate-local
 // async `AndroidNotification` callback interface (the system
 // `NotificationManager`) and hands it across the FFI seam. The engine consumes
-// the SHARED `traits::NotificationService` seam, so `AndroidNotificationBridge`
+// the SHARED `platform_api::NotificationService` seam, so `AndroidNotificationBridge`
 // adapts the crate-local interface to its `traits` counterpart. The shared
-// `traits::NotificationRequest` is destructured into the flat `title` / `body`
+// `platform_api::NotificationRequest` is destructured into the flat `title` / `body`
 // / `tag` args to keep the FFI flat; the bridge maps the FFI error back onto
-// `traits::NotificationError`. This is ENGINE-DRIVEN by `tool-notification`
+// `platform_api::NotificationError`. This is ENGINE-DRIVEN by `tool-notification`
 // (the model posts a notification) — no user-facing UI affordance.
 
 /// FFI error surface for the Android notification callback interface. A flat
 /// enum so `UniFFI` can render it for an async `callback_interface` method; the
-/// bridge fans it back out onto the richer [`traits::NotificationError`].
+/// bridge fans it back out onto the richer [`platform_api::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2308,7 +2308,7 @@ pub enum NotificationFfiError {
 
 /// Crate-local foreign callback interface for native notifications — the Kotlin
 /// app implements it over the system `NotificationManager`. Bridged to
-/// [`traits::NotificationService`] by [`AndroidNotificationBridge`]. The request
+/// [`platform_api::NotificationService`] by [`AndroidNotificationBridge`]. The request
 /// crosses the seam as the flat `title` / `body` / `tag` args.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -2325,10 +2325,10 @@ pub trait AndroidNotification: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidNotification`] callback interface to the
-/// shared [`traits::NotificationService`] seam the engine consumes.
-/// Destructures [`traits::NotificationRequest`] into the flat `title` / `body`
+/// shared [`platform_api::NotificationService`] seam the engine consumes.
+/// Destructures [`platform_api::NotificationRequest`] into the flat `title` / `body`
 /// / `tag` args and fans [`NotificationFfiError`] back out onto
-/// [`traits::NotificationError`].
+/// [`platform_api::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidNotificationBridge {
@@ -2337,19 +2337,19 @@ struct AndroidNotificationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::NotificationService for AndroidNotificationBridge {
+impl platform_api::NotificationService for AndroidNotificationBridge {
     async fn notify(
         &self,
-        req: traits::NotificationRequest,
-    ) -> Result<(), traits::NotificationError> {
-        let traits::NotificationRequest { title, body, tag } = req;
+        req: platform_api::NotificationRequest,
+    ) -> Result<(), platform_api::NotificationError> {
+        let platform_api::NotificationRequest { title, body, tag } = req;
         match self.inner.notify(title, body, tag).await {
             Ok(()) => Ok(()),
             Err(NotificationFfiError::PermissionDenied) => {
-                Err(traits::NotificationError::PermissionDenied)
+                Err(platform_api::NotificationError::PermissionDenied)
             }
             Err(NotificationFfiError::Other { message }) => {
-                Err(traits::NotificationError::Other(message))
+                Err(platform_api::NotificationError::Other(message))
             }
         }
     }
@@ -2362,9 +2362,9 @@ impl traits::NotificationService for AndroidNotificationBridge {
 // Mirrors the AndroidNotification pattern: the Kotlin layer implements a
 // crate-local async `AndroidClipboard` callback interface (the system
 // `ClipboardManager`) and hands it across the FFI seam. The engine consumes
-// the SHARED `traits::Clipboard` seam, so `AndroidClipboardBridge` adapts the
+// the SHARED `platform_api::Clipboard` seam, so `AndroidClipboardBridge` adapts the
 // crate-local interface to its `traits` counterpart; the bridge maps the FFI
-// error back onto `traits::ClipboardError`. This is ENGINE-DRIVEN by
+// error back onto `platform_api::ClipboardError`. This is ENGINE-DRIVEN by
 // `tool-clipboard` (the model reads/writes the pasteboard) — no user-facing UI
 // affordance. NOTE Android 10+ restricts clipboard READS to the focused app /
 // default IME — when a read is not permitted the Kotlin side returns `None`
@@ -2372,7 +2372,7 @@ impl traits::NotificationService for AndroidNotificationBridge {
 
 /// FFI error surface for the Android clipboard callback interface. A flat enum
 /// so `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::ClipboardError`].
+/// fans it back out onto the richer [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2392,7 +2392,7 @@ pub enum ClipboardFfiError {
 /// Crate-local foreign callback interface for native clipboard access — the
 /// Kotlin app implements it over the system `ClipboardManager` (set via
 /// `ClipData.newPlainText` + `setPrimaryClip`; get via
-/// `primaryClip.getItemAt(0).coerceToText`). Bridged to [`traits::Clipboard`]
+/// `primaryClip.getItemAt(0).coerceToText`). Bridged to [`platform_api::Clipboard`]
 /// by [`AndroidClipboardBridge`]. `get_text` returns `None` when the clipboard
 /// is empty or a read is not permitted by the platform.
 #[cfg(feature = "uniffi")]
@@ -2407,8 +2407,8 @@ pub trait AndroidClipboard: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidClipboard`] callback interface to the shared
-/// [`traits::Clipboard`] seam the engine consumes. One forwarding hop per call;
-/// maps [`ClipboardFfiError`] back out onto [`traits::ClipboardError`].
+/// [`platform_api::Clipboard`] seam the engine consumes. One forwarding hop per call;
+/// maps [`ClipboardFfiError`] back out onto [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidClipboardBridge {
@@ -2417,14 +2417,14 @@ struct AndroidClipboardBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::Clipboard for AndroidClipboardBridge {
-    async fn set_text(&self, text: String) -> Result<(), traits::ClipboardError> {
+impl platform_api::Clipboard for AndroidClipboardBridge {
+    async fn set_text(&self, text: String) -> Result<(), platform_api::ClipboardError> {
         self.inner
             .set_text(text)
             .await
             .map_err(clipboard_error_from_ffi)
     }
-    async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
+    async fn get_text(&self) -> Result<Option<String>, platform_api::ClipboardError> {
         self.inner
             .get_text()
             .await
@@ -2433,13 +2433,13 @@ impl traits::Clipboard for AndroidClipboardBridge {
 }
 
 /// Fan a flat [`ClipboardFfiError`] back out onto the richer
-/// [`traits::ClipboardError`].
+/// [`platform_api::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
+fn clipboard_error_from_ffi(e: ClipboardFfiError) -> platform_api::ClipboardError {
     match e {
-        ClipboardFfiError::Unsupported => traits::ClipboardError::Unsupported,
-        ClipboardFfiError::Other { message } => traits::ClipboardError::Other(message),
+        ClipboardFfiError::Unsupported => platform_api::ClipboardError::Unsupported,
+        ClipboardFfiError::Other { message } => platform_api::ClipboardError::Other(message),
     }
 }
 
@@ -2467,7 +2467,7 @@ pub enum DeviceControlFfiError {
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
 pub trait AndroidDeviceControl: Send + Sync {
-    /// Return a JSON-encoded bounded [`traits::DeviceStatus`] record.
+    /// Return a JSON-encoded bounded [`platform_api::DeviceStatus`] record.
     async fn status_json(&self) -> Result<String, DeviceControlFfiError>;
     /// Trigger one host-approved style.
     async fn trigger_haptic(&self, style: String) -> Result<(), DeviceControlFfiError>;
@@ -2487,38 +2487,38 @@ struct AndroidDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::DeviceStatusProvider for AndroidDeviceControlBridge {
-    async fn status(&self) -> Result<traits::DeviceStatus, traits::DeviceStatusError> {
+impl platform_api::DeviceStatusProvider for AndroidDeviceControlBridge {
+    async fn status(&self) -> Result<platform_api::DeviceStatus, platform_api::DeviceStatusError> {
         let body = self
             .inner
             .status_json()
             .await
             .map_err(device_control_error)?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::DeviceStatusError::Other(format!("invalid native device status: {error}"))
+            platform_api::DeviceStatusError::Other(format!("invalid native device status: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::HapticService for AndroidDeviceControlBridge {
-    async fn trigger(&self, style: traits::HapticStyle) -> Result<(), traits::HapticError> {
+impl platform_api::HapticService for AndroidDeviceControlBridge {
+    async fn trigger(&self, style: platform_api::HapticStyle) -> Result<(), platform_api::HapticError> {
         self.inner
             .trigger_haptic(haptic_style_to_wire(style).to_string())
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::HapticError::Unavailable,
+                DeviceControlFfiError::Unavailable => platform_api::HapticError::Unavailable,
                 DeviceControlFfiError::Rejected { message }
-                | DeviceControlFfiError::Other { message } => traits::HapticError::Other(message),
+                | DeviceControlFfiError::Other { message } => platform_api::HapticError::Other(message),
             })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::DeepLinkOpener for AndroidDeviceControlBridge {
-    async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+impl platform_api::DeepLinkOpener for AndroidDeviceControlBridge {
+    async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
         self.inner
             .open_deep_link(url)
             .await
@@ -2528,80 +2528,80 @@ impl traits::DeepLinkOpener for AndroidDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::CalendarProvider for AndroidDeviceControlBridge {
+impl platform_api::CalendarProvider for AndroidDeviceControlBridge {
     async fn list_events(
         &self,
-        query: traits::CalendarQuery,
-    ) -> Result<Vec<traits::CalendarEvent>, traits::CalendarError> {
+        query: platform_api::CalendarQuery,
+    ) -> Result<Vec<platform_api::CalendarEvent>, platform_api::CalendarError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| traits::CalendarError::Other(error.to_string()))?;
+            .map_err(|error| platform_api::CalendarError::Other(error.to_string()))?;
         let body = self
             .inner
             .calendar_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::CalendarError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => traits::CalendarError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => traits::CalendarError::Other(message),
+                DeviceControlFfiError::Unavailable => platform_api::CalendarError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => platform_api::CalendarError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => platform_api::CalendarError::Other(message),
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::CalendarError::Other(format!("invalid native calendar response: {error}"))
+            platform_api::CalendarError::Other(format!("invalid native calendar response: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::ContactsProvider for AndroidDeviceControlBridge {
+impl platform_api::ContactsProvider for AndroidDeviceControlBridge {
     async fn search(
         &self,
-        query: traits::ContactsQuery,
-    ) -> Result<Vec<traits::Contact>, traits::ContactsError> {
+        query: platform_api::ContactsQuery,
+    ) -> Result<Vec<platform_api::Contact>, platform_api::ContactsError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| traits::ContactsError::Other(error.to_string()))?;
+            .map_err(|error| platform_api::ContactsError::Other(error.to_string()))?;
         let body = self
             .inner
             .contacts_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => traits::ContactsError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => traits::ContactsError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => traits::ContactsError::Other(message),
+                DeviceControlFfiError::Unavailable => platform_api::ContactsError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => platform_api::ContactsError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => platform_api::ContactsError::Other(message),
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            traits::ContactsError::Other(format!("invalid native contacts response: {error}"))
+            platform_api::ContactsError::Other(format!("invalid native contacts response: {error}"))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn haptic_style_to_wire(style: traits::HapticStyle) -> &'static str {
+fn haptic_style_to_wire(style: platform_api::HapticStyle) -> &'static str {
     match style {
-        traits::HapticStyle::Light => "light",
-        traits::HapticStyle::Medium => "medium",
-        traits::HapticStyle::Heavy => "heavy",
-        traits::HapticStyle::Success => "success",
-        traits::HapticStyle::Warning => "warning",
-        traits::HapticStyle::Error => "error",
+        platform_api::HapticStyle::Light => "light",
+        platform_api::HapticStyle::Medium => "medium",
+        platform_api::HapticStyle::Heavy => "heavy",
+        platform_api::HapticStyle::Success => "success",
+        platform_api::HapticStyle::Warning => "warning",
+        platform_api::HapticStyle::Error => "error",
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn device_control_error(error: DeviceControlFfiError) -> traits::DeviceStatusError {
+fn device_control_error(error: DeviceControlFfiError) -> platform_api::DeviceStatusError {
     match error {
-        DeviceControlFfiError::Unavailable => traits::DeviceStatusError::Unavailable,
+        DeviceControlFfiError::Unavailable => platform_api::DeviceStatusError::Unavailable,
         DeviceControlFfiError::Rejected { message } | DeviceControlFfiError::Other { message } => {
-            traits::DeviceStatusError::Other(message)
+            platform_api::DeviceStatusError::Other(message)
         }
     }
 }
 
 #[cfg(feature = "uniffi")]
-fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> traits::DeepLinkError {
+fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> platform_api::DeepLinkError {
     match error {
-        DeviceControlFfiError::Unavailable => traits::DeepLinkError::Unavailable,
-        DeviceControlFfiError::Rejected { message } => traits::DeepLinkError::Rejected(message),
-        DeviceControlFfiError::Other { message } => traits::DeepLinkError::Other(message),
+        DeviceControlFfiError::Unavailable => platform_api::DeepLinkError::Unavailable,
+        DeviceControlFfiError::Rejected { message } => platform_api::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Other { message } => platform_api::DeepLinkError::Other(message),
     }
 }
 
@@ -2614,7 +2614,7 @@ fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> traits::D
 // engine's `protocol::SecureStorageData` is serde-encoded by the bridge into an
 // OPAQUE `blob: Vec<u8>` keyed by (service, account); the native side stores /
 // returns the blob verbatim (encrypted at rest by the Keystore). The bridge
-// adapts it to the shared `traits::SecureStorage` seam and reports
+// adapts it to the shared `platform_api::SecureStorage` seam and reports
 // is_encrypted()=true / backend=AndroidKeystore so OAuth /login can persist.
 //
 // The bridge struct/impl + its error-fan-out are gated to `target_os =
@@ -2626,7 +2626,7 @@ fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> traits::D
 
 /// FFI error surface for the Android secure-storage callback interface. A flat
 /// enum so `UniFFI` can render it for an async `callback_interface` method; the
-/// bridge fans it back out onto the richer [`traits::SecureStorageError`].
+/// bridge fans it back out onto the richer [`platform_api::SecureStorageError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2654,7 +2654,7 @@ pub enum SecureStorageFfiError {
 /// Crate-local foreign callback interface for the native Android Keystore-backed
 /// secure store. The engine's serialized `SecureStorageData` crosses the seam as
 /// an opaque `blob` keyed by `(service, account)`; the Kotlin side persists it in
-/// the Keystore / EncryptedSharedPreferences. Bridged to [`traits::SecureStorage`]
+/// the Keystore / EncryptedSharedPreferences. Bridged to [`platform_api::SecureStorage`]
 /// by [`AndroidSecureStorageBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -2680,7 +2680,7 @@ pub trait AndroidSecureStorage: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidSecureStorage`] (opaque-blob FFI) to the
-/// shared [`traits::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
+/// shared [`platform_api::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
 /// blob on store, decodes on retrieve, and reports the Keystore as an encrypted
 /// backend so the engine persists secrets there.
 #[cfg(all(feature = "uniffi", target_os = "android"))]
@@ -2690,15 +2690,15 @@ struct AndroidSecureStorageBridge {
 
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 #[async_trait::async_trait]
-impl traits::SecureStorage for AndroidSecureStorageBridge {
+impl platform_api::SecureStorage for AndroidSecureStorageBridge {
     async fn store(
         &self,
         service: &str,
         account: &str,
         data: protocol::SecureStorageData,
-    ) -> Result<(), traits::SecureStorageError> {
+    ) -> Result<(), platform_api::SecureStorageError> {
         let blob = serde_json::to_vec(&data)
-            .map_err(|e| traits::SecureStorageError::Io(format!("serialize: {e}")))?;
+            .map_err(|e| platform_api::SecureStorageError::Io(format!("serialize: {e}")))?;
         self.inner
             .store(service.to_string(), account.to_string(), blob)
             .await
@@ -2708,7 +2708,7 @@ impl traits::SecureStorage for AndroidSecureStorageBridge {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
         match self
             .inner
             .retrieve(service.to_string(), account.to_string())
@@ -2717,19 +2717,19 @@ impl traits::SecureStorage for AndroidSecureStorageBridge {
         {
             Some(blob) => {
                 let data = serde_json::from_slice(&blob)
-                    .map_err(|e| traits::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                    .map_err(|e| platform_api::SecureStorageError::Io(format!("deserialize: {e}")))?;
                 Ok(Some(data))
             }
             None => Ok(None),
         }
     }
-    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
         self.inner
             .delete(service.to_string(), account.to_string())
             .await
             .map_err(securestorage_error_from_ffi)
     }
-    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
         self.inner
             .list(service.to_string())
             .await
@@ -2738,22 +2738,22 @@ impl traits::SecureStorage for AndroidSecureStorageBridge {
     fn is_encrypted(&self) -> bool {
         true
     }
-    fn backend(&self) -> traits::SecureStorageBackend {
-        traits::SecureStorageBackend::AndroidKeystore
+    fn backend(&self) -> platform_api::SecureStorageBackend {
+        platform_api::SecureStorageBackend::AndroidKeystore
     }
 }
 
-/// Fan a flat [`SecureStorageFfiError`] back out onto [`traits::SecureStorageError`].
+/// Fan a flat [`SecureStorageFfiError`] back out onto [`platform_api::SecureStorageError`].
 #[cfg(all(feature = "uniffi", target_os = "android"))]
-fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> traits::SecureStorageError {
+fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> platform_api::SecureStorageError {
     match e {
         SecureStorageFfiError::PermissionDenied { message } => {
-            traits::SecureStorageError::PermissionDenied(message)
+            platform_api::SecureStorageError::PermissionDenied(message)
         }
         SecureStorageFfiError::BackendUnavailable { message } => {
-            traits::SecureStorageError::BackendUnavailable(message)
+            platform_api::SecureStorageError::BackendUnavailable(message)
         }
-        SecureStorageFfiError::Io { message } => traits::SecureStorageError::Io(message),
+        SecureStorageFfiError::Io { message } => platform_api::SecureStorageError::Io(message),
     }
 }
 
@@ -2764,14 +2764,14 @@ fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> traits::SecureStora
 // Mirrors the AndroidStt/AndroidTts speech pattern: the Kotlin layer implements
 // a crate-local async `AndroidCamera` callback interface (CameraX capture +
 // system photo picker) and hands it across the FFI seam. The engine consumes
-// the SHARED `traits::CameraControl` seam, so `AndroidCameraBridge` adapts the
+// the SHARED `platform_api::CameraControl` seam, so `AndroidCameraBridge` adapts the
 // crate-local interface to its `traits` counterpart. Camera position crosses
 // the seam as a plain `front: bool` (true = front/selfie, false = rear) to keep
-// the FFI flat; the bridge maps it to `traits::CameraPosition`.
+// the FFI flat; the bridge maps it to `platform_api::CameraPosition`.
 
 /// FFI error surface for the Android camera callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`traits::CameraError`].
+/// fans it back out onto the richer [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2809,7 +2809,7 @@ pub struct CapturedImageFfi {
 
 /// Crate-local foreign callback interface for native camera access — the Kotlin
 /// app implements it over `CameraX` (capture) and the system photo picker
-/// (library). Bridged to [`traits::CameraControl`] by [`AndroidCameraBridge`].
+/// (library). Bridged to [`platform_api::CameraControl`] by [`AndroidCameraBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -2827,10 +2827,10 @@ pub trait AndroidCamera: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidCamera`] callback interface to the shared
-/// [`traits::CameraControl`] seam the engine consumes. Maps
-/// [`traits::CameraPosition`] onto the flat `front` bool, threads
+/// [`platform_api::CameraControl`] seam the engine consumes. Maps
+/// [`platform_api::CameraPosition`] onto the flat `front` bool, threads
 /// `allow_editing`, and fans [`CameraFfiError`] back out onto
-/// [`traits::CameraError`].
+/// [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidCameraBridge {
@@ -2839,18 +2839,18 @@ struct AndroidCameraBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::CameraControl for AndroidCameraBridge {
+impl platform_api::CameraControl for AndroidCameraBridge {
     async fn capture_photo(
         &self,
-        opts: traits::CapturePhotoOpts,
-    ) -> Result<traits::CapturedImage, traits::CameraError> {
-        let front = matches!(opts.position, traits::CameraPosition::Front);
+        opts: platform_api::CapturePhotoOpts,
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+        let front = matches!(opts.position, platform_api::CameraPosition::Front);
         match self.inner.capture_photo(front, opts.allow_editing).await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
         }
     }
-    async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
+    async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
         match self.inner.pick_from_library().await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -2858,26 +2858,26 @@ impl traits::CameraControl for AndroidCameraBridge {
     }
 }
 
-/// Convert an FFI [`CapturedImageFfi`] into the shared [`traits::CapturedImage`].
+/// Convert an FFI [`CapturedImageFfi`] into the shared [`platform_api::CapturedImage`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn captured_image_from_ffi(img: CapturedImageFfi) -> traits::CapturedImage {
-    traits::CapturedImage {
+fn captured_image_from_ffi(img: CapturedImageFfi) -> platform_api::CapturedImage {
+    platform_api::CapturedImage {
         jpeg_bytes: img.jpeg_bytes,
         width: img.width,
         height: img.height,
     }
 }
 
-/// Fan a flat [`CameraFfiError`] back out onto the richer [`traits::CameraError`].
+/// Fan a flat [`CameraFfiError`] back out onto the richer [`platform_api::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
+fn camera_error_from_ffi(e: CameraFfiError) -> platform_api::CameraError {
     match e {
-        CameraFfiError::PermissionDenied => traits::CameraError::PermissionDenied,
-        CameraFfiError::Cancelled => traits::CameraError::Cancelled,
-        CameraFfiError::DeviceUnavailable => traits::CameraError::DeviceUnavailable,
-        CameraFfiError::Other { message } => traits::CameraError::Other(message),
+        CameraFfiError::PermissionDenied => platform_api::CameraError::PermissionDenied,
+        CameraFfiError::Cancelled => platform_api::CameraError::Cancelled,
+        CameraFfiError::DeviceUnavailable => platform_api::CameraError::DeviceUnavailable,
+        CameraFfiError::Other { message } => platform_api::CameraError::Other(message),
     }
 }
 
@@ -2888,17 +2888,17 @@ fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
 // Mirrors the AndroidShare/AndroidCamera pattern: the Kotlin layer implements a
 // crate-local async `AndroidVoice` callback interface (the system
 // `MediaRecorder` capturing the raw mic) and hands it across the FFI seam. The
-// engine consumes the SHARED `traits::VoiceRecorder` seam, so
+// engine consumes the SHARED `platform_api::VoiceRecorder` seam, so
 // `AndroidVoiceBridge` adapts the crate-local interface to its `traits`
 // counterpart. This is the RAW mic recorder driven by `tool-voice`
 // (start/stop/is_recording), distinct from the `AndroidStt` system recognizer.
-// `traits::VoiceRecordingOpts` is destructured into the flat `sample_rate_hz` /
+// `platform_api::VoiceRecordingOpts` is destructured into the flat `sample_rate_hz` /
 // `format` args to keep the FFI flat; the bridge maps the FFI result/error back
-// onto `traits::VoiceRecording` / `traits::VoiceError`.
+// onto `platform_api::VoiceRecording` / `platform_api::VoiceError`.
 
 /// FFI error surface for the Android mic-recorder callback interface. A flat
 /// enum so `UniFFI` can render it for an async `callback_interface` method; the
-/// bridge fans it back out onto the richer [`traits::VoiceError`].
+/// bridge fans it back out onto the richer [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -2918,7 +2918,7 @@ pub enum VoiceFfiError {
 }
 
 /// FFI carrier for a finished recording crossing the callback-interface seam:
-/// the encoded audio bytes + their MIME type. Mapped to [`traits::VoiceRecording`].
+/// the encoded audio bytes + their MIME type. Mapped to [`platform_api::VoiceRecording`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -2931,7 +2931,7 @@ pub struct VoiceRecordingFfi {
 
 /// Crate-local foreign callback interface for native mic recording — the Kotlin
 /// app implements it over the system `MediaRecorder`. Bridged to
-/// [`traits::VoiceRecorder`] by [`AndroidVoiceBridge`]. Driven by the engine
+/// [`platform_api::VoiceRecorder`] by [`AndroidVoiceBridge`]. Driven by the engine
 /// through `tool-voice` (start/stop/is_recording); the recording opts cross the
 /// seam as the flat `sample_rate_hz` / `format` args.
 #[cfg(feature = "uniffi")]
@@ -2951,10 +2951,10 @@ pub trait AndroidVoice: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidVoice`] callback interface to the shared
-/// [`traits::VoiceRecorder`] seam the engine consumes. Destructures
-/// [`traits::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
-/// args, converts [`VoiceRecordingFfi`] back to [`traits::VoiceRecording`], and
-/// fans [`VoiceFfiError`] back out onto [`traits::VoiceError`].
+/// [`platform_api::VoiceRecorder`] seam the engine consumes. Destructures
+/// [`platform_api::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
+/// args, converts [`VoiceRecordingFfi`] back to [`platform_api::VoiceRecording`], and
+/// fans [`VoiceFfiError`] back out onto [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidVoiceBridge {
@@ -2963,12 +2963,12 @@ struct AndroidVoiceBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::VoiceRecorder for AndroidVoiceBridge {
+impl platform_api::VoiceRecorder for AndroidVoiceBridge {
     async fn start_recording(
         &self,
-        opts: traits::VoiceRecordingOpts,
-    ) -> Result<(), traits::VoiceError> {
-        let traits::VoiceRecordingOpts {
+        opts: platform_api::VoiceRecordingOpts,
+    ) -> Result<(), platform_api::VoiceError> {
+        let platform_api::VoiceRecordingOpts {
             sample_rate_hz,
             format,
         } = opts;
@@ -2977,9 +2977,9 @@ impl traits::VoiceRecorder for AndroidVoiceBridge {
             .await
             .map_err(voice_error_from_ffi)
     }
-    async fn stop_recording(&self) -> Result<traits::VoiceRecording, traits::VoiceError> {
+    async fn stop_recording(&self) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
         match self.inner.stop_recording().await {
-            Ok(rec) => Ok(traits::VoiceRecording {
+            Ok(rec) => Ok(platform_api::VoiceRecording {
                 audio_bytes: rec.audio_bytes,
                 mime_type: rec.mime_type,
             }),
@@ -2991,14 +2991,14 @@ impl traits::VoiceRecorder for AndroidVoiceBridge {
     }
 }
 
-/// Fan a flat [`VoiceFfiError`] back out onto the richer [`traits::VoiceError`].
+/// Fan a flat [`VoiceFfiError`] back out onto the richer [`platform_api::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
+fn voice_error_from_ffi(e: VoiceFfiError) -> platform_api::VoiceError {
     match e {
-        VoiceFfiError::PermissionDenied => traits::VoiceError::PermissionDenied,
-        VoiceFfiError::NotRecording => traits::VoiceError::NotRecording,
-        VoiceFfiError::Other { message } => traits::VoiceError::Other(message),
+        VoiceFfiError::PermissionDenied => platform_api::VoiceError::PermissionDenied,
+        VoiceFfiError::NotRecording => platform_api::VoiceError::NotRecording,
+        VoiceFfiError::Other { message } => platform_api::VoiceError::Other(message),
     }
 }
 
@@ -3035,8 +3035,8 @@ impl tool_api::GitCredentialProvider for AndroidGitCredentialProviderBridge {
 }
 
 /// Adapts the crate-local [`AndroidStt`] callback interface to the shared
-/// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
-/// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
+/// [`platform_api::SpeechToText`] seam the engine consumes. One forwarding hop per
+/// call; maps [`SpeechFfiError`] onto [`platform_api::SttError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidSttBridge {
@@ -3045,31 +3045,31 @@ struct AndroidSttBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::SpeechToText for AndroidSttBridge {
+impl platform_api::SpeechToText for AndroidSttBridge {
     async fn transcribe(
         &self,
-        opts: traits::SttOpts,
-    ) -> Result<traits::SttTranscript, traits::SttError> {
+        opts: platform_api::SttOpts,
+    ) -> Result<platform_api::SttTranscript, platform_api::SttError> {
         match self.inner.transcribe(opts.language.clone()).await {
-            Ok(text) => Ok(traits::SttTranscript {
+            Ok(text) => Ok(platform_api::SttTranscript {
                 text,
                 language: opts.language,
                 confidence: None,
             }),
             Err(e) => Err(match e {
-                SpeechFfiError::PermissionDenied => traits::SttError::PermissionDenied,
-                SpeechFfiError::NoSpeech => traits::SttError::NoSpeech,
-                SpeechFfiError::Unavailable => traits::SttError::Unavailable,
-                SpeechFfiError::Retriable { message } => traits::SttError::Retriable(message),
-                SpeechFfiError::Other { message } => traits::SttError::Other(message),
+                SpeechFfiError::PermissionDenied => platform_api::SttError::PermissionDenied,
+                SpeechFfiError::NoSpeech => platform_api::SttError::NoSpeech,
+                SpeechFfiError::Unavailable => platform_api::SttError::Unavailable,
+                SpeechFfiError::Retriable { message } => platform_api::SttError::Retriable(message),
+                SpeechFfiError::Other { message } => platform_api::SttError::Other(message),
             }),
         }
     }
 }
 
 /// Adapts the crate-local [`AndroidTts`] callback interface to the shared
-/// [`traits::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
-/// onto [`traits::TtsError`].
+/// [`platform_api::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
+/// onto [`platform_api::TtsError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 struct AndroidTtsBridge {
@@ -3078,27 +3078,27 @@ struct AndroidTtsBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::TextToSpeech for AndroidTtsBridge {
+impl platform_api::TextToSpeech for AndroidTtsBridge {
     async fn synthesize(
         &self,
-        opts: traits::TtsOpts,
-    ) -> Result<traits::TtsAudio, traits::TtsError> {
+        opts: platform_api::TtsOpts,
+    ) -> Result<platform_api::TtsAudio, platform_api::TtsError> {
         match self.inner.synthesize(opts.text, opts.voice).await {
-            Ok(audio) => Ok(traits::TtsAudio {
+            Ok(audio) => Ok(platform_api::TtsAudio {
                 pcm: audio.pcm,
                 sample_rate_hz: audio.sample_rate_hz,
             }),
             Err(e) => Err(match e {
-                SpeechFfiError::Unavailable => traits::TtsError::Unavailable,
+                SpeechFfiError::Unavailable => platform_api::TtsError::Unavailable,
                 SpeechFfiError::Retriable { message } | SpeechFfiError::Other { message } => {
-                    traits::TtsError::SynthesisFailed(message)
+                    platform_api::TtsError::SynthesisFailed(message)
                 }
                 // STT-only variants are not produced by a TTS impl; fold them
                 // into a generic TTS error rather than panic.
                 SpeechFfiError::PermissionDenied => {
-                    traits::TtsError::Other("permission denied".to_string())
+                    platform_api::TtsError::Other("permission denied".to_string())
                 }
-                SpeechFfiError::NoSpeech => traits::TtsError::Other("no speech".to_string()),
+                SpeechFfiError::NoSpeech => platform_api::TtsError::Other("no speech".to_string()),
             }),
         }
     }
@@ -3114,7 +3114,7 @@ impl traits::TextToSpeech for AndroidTtsBridge {
 // voice / share capabilities + a no-op permission sink, threading the runtime
 // config into a `MobileConfig`, and delegating to the shared
 // `engine_mobile::build_mobile_engine`. ADDITIVE — it does not touch the
-// existing non-exported `build_mobile_engine` above, the `traits` crate, or iOS.
+// existing non-exported `build_mobile_engine` above, the `platform-api` crate, or iOS.
 
 /// Device-capability stubs for the camera / voice / share callbacks the Android
 /// constructor does not (yet) wire. A text/speech conversation never invokes
@@ -3124,7 +3124,7 @@ impl traits::TextToSpeech for AndroidTtsBridge {
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod stub_capabilities {
     use async_trait::async_trait;
-    use traits::{
+    use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
         ShareResult, SharingService, VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
     };
@@ -3274,8 +3274,8 @@ struct AndroidComputerUseBridge {
 #[cfg(feature = "uniffi")]
 fn computer_use_error_from_ffi(
     error: AndroidComputerUseFfiError,
-) -> traits::AndroidAutomationError {
-    use traits::AndroidAutomationError as Target;
+) -> platform_api::AndroidAutomationError {
+    use platform_api::AndroidAutomationError as Target;
     match error {
         AndroidComputerUseFfiError::ServiceDisabled => Target::ServiceDisabled,
         AndroidComputerUseFfiError::SessionInactive => Target::SessionInactive,
@@ -3301,27 +3301,27 @@ fn computer_use_error_from_ffi(
 #[cfg(feature = "uniffi")]
 fn decode_computer_use_json<T: serde::de::DeserializeOwned>(
     value: String,
-) -> Result<T, traits::AndroidAutomationError> {
+) -> Result<T, platform_api::AndroidAutomationError> {
     serde_json::from_str(&value).map_err(|error| {
-        traits::AndroidAutomationError::Other(format!("invalid host JSON: {error}"))
+        platform_api::AndroidAutomationError::Other(format!("invalid host JSON: {error}"))
     })
 }
 
 #[cfg(feature = "uniffi")]
 fn encode_computer_use_json<T: serde::Serialize>(
     value: &T,
-) -> Result<String, traits::AndroidAutomationError> {
+) -> Result<String, platform_api::AndroidAutomationError> {
     serde_json::to_string(value).map_err(|error| {
-        traits::AndroidAutomationError::Other(format!("cannot encode host JSON: {error}"))
+        platform_api::AndroidAutomationError::Other(format!("cannot encode host JSON: {error}"))
     })
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
+impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
     async fn status(
         &self,
-    ) -> Result<traits::AndroidAutomationStatus, traits::AndroidAutomationError> {
+    ) -> Result<platform_api::AndroidAutomationStatus, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .status_json()
@@ -3332,8 +3332,8 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn request_access(
         &self,
-        request: traits::AndroidAccessRequest,
-    ) -> Result<Vec<traits::AndroidAppInfo>, traits::AndroidAutomationError> {
+        request: platform_api::AndroidAccessRequest,
+    ) -> Result<Vec<platform_api::AndroidAppInfo>, platform_api::AndroidAutomationError> {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -3345,7 +3345,7 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn list_granted_apps(
         &self,
-    ) -> Result<Vec<traits::AndroidAppInfo>, traits::AndroidAutomationError> {
+    ) -> Result<Vec<platform_api::AndroidAppInfo>, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .list_granted_apps_json()
@@ -3356,20 +3356,20 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn screenshot(
         &self,
-    ) -> Result<traits::AndroidScreenshot, traits::AndroidAutomationError> {
+    ) -> Result<platform_api::AndroidScreenshot, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .screenshot()
             .await
             .map_err(computer_use_error_from_ffi)?;
-        Ok(traits::AndroidScreenshot {
+        Ok(platform_api::AndroidScreenshot {
             width: value.width,
             height: value.height,
             png_bytes: value.png_bytes,
         })
     }
 
-    async fn ui_tree(&self) -> Result<traits::AndroidUiSnapshot, traits::AndroidAutomationError> {
+    async fn ui_tree(&self) -> Result<platform_api::AndroidUiSnapshot, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .ui_tree_json()
@@ -3380,8 +3380,8 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn find_nodes(
         &self,
-        query: traits::AndroidNodeQuery,
-    ) -> Result<Vec<traits::AndroidUiNode>, traits::AndroidAutomationError> {
+        query: platform_api::AndroidNodeQuery,
+    ) -> Result<Vec<platform_api::AndroidUiNode>, platform_api::AndroidAutomationError> {
         let query = encode_computer_use_json(&query)?;
         let value = self
             .inner
@@ -3394,7 +3394,7 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
     async fn inspect_node(
         &self,
         node_id: String,
-    ) -> Result<traits::AndroidUiNode, traits::AndroidAutomationError> {
+    ) -> Result<platform_api::AndroidUiNode, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .inspect_node_json(node_id)
@@ -3405,8 +3405,8 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn perform(
         &self,
-        action: traits::AndroidAction,
-    ) -> Result<traits::AndroidActionResult, traits::AndroidAutomationError> {
+        action: platform_api::AndroidAction,
+    ) -> Result<platform_api::AndroidActionResult, platform_api::AndroidAutomationError> {
         let action = encode_computer_use_json(&action)?;
         let value = self
             .inner
@@ -3418,9 +3418,9 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn wait_for(
         &self,
-        condition: traits::AndroidWaitCondition,
+        condition: platform_api::AndroidWaitCondition,
         timeout_ms: u64,
-    ) -> Result<traits::AndroidActionResult, traits::AndroidAutomationError> {
+    ) -> Result<platform_api::AndroidActionResult, platform_api::AndroidAutomationError> {
         let condition = encode_computer_use_json(&condition)?;
         let value = self
             .inner
@@ -3432,8 +3432,8 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn listen(
         &self,
-        request: traits::AndroidAudioListenRequest,
-    ) -> Result<traits::AndroidAudioTranscript, traits::AndroidAutomationError> {
+        request: platform_api::AndroidAudioListenRequest,
+    ) -> Result<platform_api::AndroidAudioTranscript, platform_api::AndroidAutomationError> {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -3445,8 +3445,8 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn speak(
         &self,
-        request: traits::AndroidAudioSpeakRequest,
-    ) -> Result<traits::AndroidAudioSpeakResult, traits::AndroidAutomationError> {
+        request: platform_api::AndroidAudioSpeakRequest,
+    ) -> Result<platform_api::AndroidAudioSpeakResult, platform_api::AndroidAutomationError> {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -3456,14 +3456,14 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
         decode_computer_use_json(value)
     }
 
-    async fn stop_audio(&self) -> Result<(), traits::AndroidAutomationError> {
+    async fn stop_audio(&self) -> Result<(), platform_api::AndroidAutomationError> {
         self.inner
             .stop_audio()
             .await
             .map_err(computer_use_error_from_ffi)
     }
 
-    async fn stop(&self) -> Result<(), traits::AndroidAutomationError> {
+    async fn stop(&self) -> Result<(), platform_api::AndroidAutomationError> {
         self.inner.stop().await.map_err(computer_use_error_from_ffi)
     }
 }
@@ -3738,15 +3738,15 @@ fn bootstrap_bundled_shell(native_library_dir: &str, app_files_root: &str) -> Op
 /// - `listener`  — the foreign [`AndroidEventListener`] (bridged to the shared
 ///   [`ClientEventListener`]).
 /// - `stt` / `tts` — the foreign speech callbacks (bridged to
-///   [`traits::SpeechToText`] / [`traits::TextToSpeech`]).
+///   [`platform_api::SpeechToText`] / [`platform_api::TextToSpeech`]).
 /// - `camera` — the foreign camera callback (bridged to
-///   [`traits::CameraControl`]) so `tool-camera` routes through `CameraX` +
+///   [`platform_api::CameraControl`]) so `tool-camera` routes through `CameraX` +
 ///   the system photo picker.
 /// - `share` — the foreign share callback (bridged to
-///   [`traits::SharingService`]) so `tool-share` routes through the system
+///   [`platform_api::SharingService`]) so `tool-share` routes through the system
 ///   `Intent.ACTION_SEND` share sheet.
 /// - `location` — the foreign one-shot location callback (bridged to
-///   [`traits::LocationProvider`]) used by approved local-app bridge requests.
+///   [`platform_api::LocationProvider`]) used by approved local-app bridge requests.
 /// - `shell` — optional Android sandbox/shell config (spec r3 §Android
 ///   inputs); `None`/`null` keeps shell support fully absent.
 /// - `git` — optional Android Git-tool config (spec P4 §G5 gate + §G3 auth);
@@ -3870,17 +3870,17 @@ pub fn build_android_engine_with_mobile_linux(
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
         let device_status = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::DeviceStatusProvider>);
+            .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
         let haptics = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::HapticService>);
+            .map(|service| service.clone() as Arc<dyn platform_api::HapticService>);
         let calendar = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::CalendarProvider>);
+            .map(|service| service.clone() as Arc<dyn platform_api::CalendarProvider>);
         let contacts = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn traits::ContactsProvider>);
-        let deep_link = device_control.map(|service| service as Arc<dyn traits::DeepLinkOpener>);
+            .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
+        let deep_link = device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
         // P5b: capture the app-private files root as an owned `String` up front —
         // `app_files_root` is consumed below into `AndroidPlatformInputs`, but the
         // bundled-shell bootstrap (which must run BEFORE `shell_cfg` is built +
@@ -3897,12 +3897,12 @@ pub fn build_android_engine_with_mobile_linux(
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(
                 || {
-                    traits::MobileHostEnvironment::new(
-                        traits::MobileHostOs::Android,
+                    platform_api::MobileHostEnvironment::new(
+                        platform_api::MobileHostOs::Android,
                         None,
-                        traits::MobileDeviceClass::Unknown,
-                        traits::MobileExecutionTarget::Unknown,
-                        traits::MobileLaunchMode::Unknown,
+                        platform_api::MobileDeviceClass::Unknown,
+                        platform_api::MobileExecutionTarget::Unknown,
+                        platform_api::MobileLaunchMode::Unknown,
                     )
                 },
                 Into::into,
@@ -3960,7 +3960,7 @@ pub fn build_android_engine_with_mobile_linux(
         let shell_cfg_for_gate = shell_cfg.clone();
         let mobile_linux_mode = mobile_linux
             .as_ref()
-            .map_or(traits::MobileLinuxRuntimeMode::Legacy, |cfg| {
+            .map_or(platform_api::MobileLinuxRuntimeMode::Legacy, |cfg| {
                 cfg.mode.into()
             });
         // Local-app generation always needs the verified internal Linux
@@ -4005,11 +4005,11 @@ pub fn build_android_engine_with_mobile_linux(
                 shell: shell_cfg,
                 secure_storage: secure_storage.map(|s| {
                     std::sync::Arc::new(AndroidSecureStorageBridge { inner: s })
-                        as std::sync::Arc<dyn traits::SecureStorage>
+                        as std::sync::Arc<dyn platform_api::SecureStorage>
                 }),
                 android_ui_automation: computer_use.map(|host| {
                     std::sync::Arc::new(AndroidComputerUseBridge { inner: host })
-                        as std::sync::Arc<dyn traits::AndroidUiAutomation>
+                        as std::sync::Arc<dyn platform_api::AndroidUiAutomation>
                 }),
             },
             mobile_linux_mode,
@@ -4033,7 +4033,7 @@ pub fn build_android_engine_with_mobile_linux(
         // drop it immediately — clean and correct (option (b) per the plan).
         if matches!(
             mobile_linux_mode,
-            traits::MobileLinuxRuntimeMode::MobileLinux
+            platform_api::MobileLinuxRuntimeMode::MobileLinux
         ) {
             if let Some(shell_cfg) = shell_cfg_for_gate.as_ref() {
                 cfg.android_shell = Some(tool_api::AndroidShellToolCtx::mobile_linux_guest(
@@ -4283,7 +4283,7 @@ pub fn android_sandbox_run_probe(command: String, workspace: String) -> String {
             AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
         };
         use std::collections::HashMap;
-        use traits::{
+        use platform_api::{
             NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
         };
 
@@ -4416,7 +4416,7 @@ pub fn android_bundled_shell_run_probe(
             AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
         };
         use std::collections::HashMap;
-        use traits::{
+        use platform_api::{
             NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
         };
 
@@ -4591,7 +4591,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
         use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
-        use traits::process::ProcessOutput;
+        use platform_api::process::ProcessOutput;
 
         // Parse the structured operation input. A malformed payload is a probe
         // error, not a tool failure.
@@ -4700,7 +4700,7 @@ pub fn android_git_probe_authed(
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
         use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
-        use traits::process::ProcessOutput;
+        use platform_api::process::ProcessOutput;
 
         let input: serde_json::Value = match serde_json::from_str(&operation_json) {
             Ok(v) => v,
@@ -4927,7 +4927,7 @@ mod tests {
     use client_protocol::permission::PermissionRequest as PermissionRequestDto;
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
     use tokio::sync::Mutex;
-    use traits::{
+    use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, LocationProvider, Platform, ProcessRunner,
         Sandbox, SharingService, VoiceRecorder, WorktreeManager,
     };
@@ -4979,7 +4979,7 @@ mod tests {
         .expect_err("permission failure");
         assert!(matches!(
             permission,
-            traits::LocationError::PermissionDenied
+            platform_api::LocationError::PermissionDenied
         ));
 
         let unavailable = super::AndroidLocationBridge {
@@ -4990,7 +4990,7 @@ mod tests {
         .current_location()
         .await
         .expect_err("unavailable failure");
-        assert!(matches!(unavailable, traits::LocationError::Unavailable));
+        assert!(matches!(unavailable, platform_api::LocationError::Unavailable));
 
         let timeout = super::AndroidLocationBridge {
             inner: Box::new(FakeAndroidLocation {
@@ -5000,7 +5000,7 @@ mod tests {
         .current_location()
         .await
         .expect_err("timeout failure");
-        assert!(matches!(timeout, traits::LocationError::Timeout));
+        assert!(matches!(timeout, platform_api::LocationError::Timeout));
 
         let other = super::AndroidLocationBridge {
             inner: Box::new(FakeAndroidLocation {
@@ -5012,13 +5012,13 @@ mod tests {
         .expect_err("other failure");
         assert!(matches!(
             other,
-            traits::LocationError::Other(message) if message == "native failure"
+            platform_api::LocationError::Other(message) if message == "native failure"
         ));
     }
 
     #[test]
     fn android_host_environment_maps_to_shared_stable_facts() {
-        let environment: traits::mobile_runtime_environment::MobileHostEnvironment =
+        let environment: platform_api::mobile_runtime_environment::MobileHostEnvironment =
             super::AndroidHostEnvironmentFfi {
                 host_os_version: Some("16 (API 36)".to_string()),
                 device_class: super::AndroidDeviceClassFfi::Tablet,
@@ -5029,20 +5029,20 @@ mod tests {
 
         assert_eq!(
             environment.host_os,
-            traits::mobile_runtime_environment::MobileHostOs::Android
+            platform_api::mobile_runtime_environment::MobileHostOs::Android
         );
         assert_eq!(environment.host_os_version.as_deref(), Some("16 (API 36)"));
         assert_eq!(
             environment.device_class,
-            traits::mobile_runtime_environment::MobileDeviceClass::Tablet
+            platform_api::mobile_runtime_environment::MobileDeviceClass::Tablet
         );
         assert_eq!(
             environment.execution_target,
-            traits::mobile_runtime_environment::MobileExecutionTarget::Emulator
+            platform_api::mobile_runtime_environment::MobileExecutionTarget::Emulator
         );
         assert_eq!(
             environment.launch_mode,
-            traits::mobile_runtime_environment::MobileLaunchMode::ScheduledHeadless
+            platform_api::mobile_runtime_environment::MobileLaunchMode::ScheduledHeadless
         );
     }
 

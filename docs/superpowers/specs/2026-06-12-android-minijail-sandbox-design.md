@@ -18,8 +18,8 @@ The v1 implementation must prove two Android-specific constraints before any run
 
 LingXi already has the right execution boundary:
 
-- `traits::Sandbox` converts a raw `ProcessCommand` plus `SandboxPolicy` into a `SandboxedCommand`.
-- `traits::ProcessRunner` accepts only `SandboxedCommand`, so process execution cannot bypass the sandbox decision path.
+- `platform_api::Sandbox` converts a raw `ProcessCommand` plus `SandboxPolicy` into a `SandboxedCommand`.
+- `platform_api::ProcessRunner` accepts only `SandboxedCommand`, so process execution cannot bypass the sandbox decision path.
 - `platform-android` currently wires `platform_posix_minimal::PosixProcess` and `PosixSandbox`, both stubs.
 - `engine-mobile` currently omits shell tools because process and sandbox support are not implemented.
 
@@ -191,7 +191,7 @@ pub struct AndroidSandboxReceipt {
 
 #### `AndroidMinijailSandbox`
 
-Implements `traits::Sandbox`.
+Implements `platform_api::Sandbox`.
 
 Responsibilities:
 
@@ -206,7 +206,7 @@ Responsibilities:
 
 #### `AndroidMinijailProcessRunner`
 
-Implements `traits::ProcessRunner`.
+Implements `platform_api::ProcessRunner`.
 
 Responsibilities:
 

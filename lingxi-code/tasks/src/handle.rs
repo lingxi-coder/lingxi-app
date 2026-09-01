@@ -15,7 +15,7 @@ use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
 use std::path::PathBuf;
-use traits::task_registry::{
+use platform_api::task_registry::{
     MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
     TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
@@ -426,7 +426,7 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn set_workflow_outcome(
         &self,
         id: &str,
-        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
         TaskRegistry::set_workflow_outcome(self, id, outcome).await;
     }
@@ -457,7 +457,7 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn set_agent_outcome(
         &self,
         id: &str,
-        outcome: traits::task_registry::AgentTerminalOutcome,
+        outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
         TaskRegistry::set_agent_outcome(self, id, outcome).await;
     }
@@ -492,7 +492,7 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn register_mcp_task(
         &self,
-        reg: traits::task_registry::McpTaskRegistration,
+        reg: platform_api::task_registry::McpTaskRegistration,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, TaskRegistryError> {
         TaskRegistry::register_mcp_task_owned(
@@ -608,7 +608,7 @@ impl TaskRegistryHandle for TaskRegistry {
         &self,
         id: &str,
         result: Option<String>,
-        usage: Option<traits::task_registry::AgentRunUsage>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
     ) {
         // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
         TaskRegistry::mark_task_rested(self, id, result, usage, None, None, None).await;
@@ -616,7 +616,7 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn take_pending_task_notifications(
         &self,
-    ) -> Result<Vec<traits::task_registry::TaskNotification>, TaskRegistryError> {
+    ) -> Result<Vec<platform_api::task_registry::TaskNotification>, TaskRegistryError> {
         // Dispatch to the inherent drain, which snapshots + marks-notified +
         // retains the terminal-not-notified tasks. Infallible at the registry
         // level (the lock is always acquirable), so the seam result is always
@@ -657,7 +657,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
-    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;

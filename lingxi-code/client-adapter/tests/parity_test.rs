@@ -40,11 +40,11 @@ use client_adapter::lowering::{
 use client_protocol::listings::{CheckStatusDto, McpStatusDto, TaskStatusDto};
 
 use session::jsonl::loader::SessionMetadata;
-use traits::orchestrator::{
+use platform_api::orchestrator::{
     AgentInfo, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, HookInfo, McpServerInfo,
     McpStatus, StatusSnapshot,
 };
-use traits::task_registry::{TaskOutputChunk, TaskRecord};
+use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
 
 // ── Sessions (resume screen) ───────────────────────────────────────────────
 

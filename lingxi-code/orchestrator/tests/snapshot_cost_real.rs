@@ -15,7 +15,7 @@ use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
-use traits::OrchestratorHandle;
+use platform_api::OrchestratorHandle;
 
 fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
     LlmResponse {
@@ -193,7 +193,7 @@ async fn emit_end_turn_carries_real_cost() {
     let end_turn_cost = events
         .iter()
         .find_map(|e| match e {
-            traits::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
+            platform_api::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
             _ => None,
         })
         .expect("end_turn event present");

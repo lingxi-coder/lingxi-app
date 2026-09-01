@@ -522,6 +522,9 @@ final class ConversationModel: ObservableObject {
     /// Engine-authoritative conversation controls. These remain provider
     /// neutral so the composer never guesses which effort values are valid.
     @Published var requestedPermissionMode: String = "auto"
+    @Published var requestedTypescriptLspMode: String = "auto"
+    @Published var effectiveTypescriptLspMode: String = "auto"
+    @Published var typescriptLspAvailable: Bool = true
     @Published var reasoningSelection: String = "automatic"
     @Published var reasoningOptions: [String] = []
     @Published var reasoningOptionDetails: [ConversationReasoningOption] = []
@@ -5081,6 +5084,11 @@ final class MockConversationSource: ConversationSource {
                 model.effectivePermissionMode = mode
                 // The following controls snapshot carries the requested value;
                 // do not infer it from this legacy effective-only event.
+
+            case let .typescriptLspModeChanged(requested: requested, effective: effective, available: available):
+                model.requestedTypescriptLspMode = requested
+                model.effectiveTypescriptLspMode = effective
+                model.typescriptLspAvailable = available
 
             case let .sessionList(sessions):
                 // Out-of-band session catalog: map each lowered `SessionRowDto`

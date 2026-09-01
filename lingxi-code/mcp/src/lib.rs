@@ -123,5 +123,8 @@ pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,
     McpServerBlockReason, McpServerDecision, BUILTIN_COMPUTER_USE_SERVER,
 };
-pub use platform_api::{McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpProtocolEra};
+pub use platform_api::{
+    McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpNotificationDto,
+    McpNotificationStream, McpProtocolEra,
+};
 pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

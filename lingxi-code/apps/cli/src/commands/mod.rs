@@ -33,6 +33,7 @@ pub mod doctor;
 pub mod gateway;
 pub mod import;
 pub mod install;
+pub mod logs;
 pub mod mcp;
 pub mod mcp_xaa;
 pub mod plugin;
@@ -47,9 +48,11 @@ pub mod plugin_settings;
 pub mod plugin_tag;
 pub mod project;
 pub mod remote_control;
+pub mod respawn;
 pub mod rm;
 pub mod sandbox;
 pub mod setup_token;
+pub mod stop;
 pub mod ultrareview;
 pub mod update;
 
@@ -117,6 +120,13 @@ pub enum Commands {
     Agents(agents::Cli),
     /// Open a background session here; Ctrl+Z returns to the shell
     Attach(attach::Cli),
+    /// Print a background session's recent terminal output
+    Logs(logs::Cli),
+    /// Stop a background session. Its conversation is kept: `claude attach <id>` opens it again, `claude --resume` works once it is stopped
+    #[command(name = "stop", visible_alias = "kill")]
+    Stop(stop::Cli),
+    /// Restart a background session, or all of them with --all, so it runs the current Claude Code version
+    Respawn(respawn::Cli),
     /// Delete a background session and its worktree. Unlike `stop`, works on
     /// already-exited sessions.
     Rm(rm::Cli),
@@ -162,6 +172,9 @@ impl Commands {
             Commands::Sandbox(_) => "sandbox",
             Commands::Agents(_) => "agents",
             Commands::Attach(_) => "attach",
+            Commands::Logs(_) => "logs",
+            Commands::Stop(_) => "stop",
+            Commands::Respawn(_) => "respawn",
             Commands::Rm(_) => "rm",
             Commands::Ultrareview(_) => "ultrareview",
             Commands::Update(_) => "update",
@@ -190,6 +203,9 @@ impl Commands {
             Commands::Sandbox(c) => sandbox::run(c).await,
             Commands::Agents(c) => agents::run(c).await,
             Commands::Attach(c) => attach::run(c).await,
+            Commands::Logs(c) => logs::run(c).await,
+            Commands::Stop(c) => stop::run(c).await,
+            Commands::Respawn(c) => respawn::run(c).await,
             Commands::Rm(c) => rm::run(c).await,
             Commands::Ultrareview(c) => ultrareview::run(c).await,
             Commands::Update(c) => update::run(c).await,
@@ -217,6 +233,9 @@ mod top_level_name_tests {
             ("mcp", "mcp"),
             ("auth", "auth"),
             ("remote-control", "remote-control"),
+            ("logs", "logs"),
+            ("stop", "stop"),
+            ("respawn", "respawn"),
         ] {
             let a = Argv::from_iter(["lingxi-cli", token]).unwrap();
             let cmd = a.command.expect("token must parse as a subcommand");
@@ -224,6 +243,8 @@ mod top_level_name_tests {
         }
         let a = Argv::from_iter(["lingxi-cli", "attach", "bead0001"]).unwrap();
         assert_eq!(a.command.unwrap().top_level_name(), "attach");
+        let a = Argv::from_iter(["lingxi-cli", "kill", "bead0001"]).unwrap();
+        assert_eq!(a.command.unwrap().top_level_name(), "stop");
         // `upgrade` is an alias of `update` — it must still report `update`.
         let a = Argv::from_iter(["lingxi-cli", "upgrade"]).unwrap();
         assert_eq!(a.command.unwrap().top_level_name(), "update");

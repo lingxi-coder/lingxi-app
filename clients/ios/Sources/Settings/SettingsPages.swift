@@ -25,6 +25,7 @@ struct SettingsPages: View {
         case .appIntegration:             AppIntegrationPage()
         case .privacy:                    PrivacyPage()
         case .permissionMode:             PermissionModePage(store: store, host: host)
+        case .typescriptLsp:              TypeScriptLspModePage(store: store, host: host)
         case .skills:                     SkillsPage(store: store, host: host)
         case .skillDetail(let id):        SkillDetailPage(store: store, host: host, skillId: id)
         case .localAppPlugin:             LocalAppPluginPage(host: host)
@@ -139,6 +140,12 @@ struct MainSettingsPage: View {
                                 ? store.permissionMode
                                 : "\(store.permissionMode) → \(store.effectivePermissionMode)",
                             onTap: { host.push(.permissionMode) })
+                SettingsRow(icon: .cog, iconColor: Color(srgb: 0.3503,0.6649,0.9741), label: "TypeScript LSP",
+                            sub: "JavaScript / JSX 实时代码诊断",
+                            value: store.typescriptLspMode == store.effectiveTypescriptLspMode
+                                ? store.typescriptLspMode
+                                : "\(store.typescriptLspMode) → \(store.effectiveTypescriptLspMode)",
+                            onTap: { host.push(.typescriptLsp) })
                 SettingsRow(icon: .sparkle, iconColor: t.text3, label: String(localized: "settings_usage_diagnostics"), chevron: false) { LXToggle(isOn: $store.telemetry) }
                 SettingsRow(icon: .check, iconColor: t.text3, label: String(localized: "settings_auto_update"), chevron: false, isLast: true) { LXToggle(isOn: $store.autoUpdate) }
             }

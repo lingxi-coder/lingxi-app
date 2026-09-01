@@ -1825,6 +1825,19 @@ pub trait OrchestratorHandle: Send + Sync {
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
+    /// Switch the active model while preserving the operation's provenance for
+    /// model-switch hooks. Existing handles may use the legacy
+    /// [`Self::switch_model`] implementation; the default delegates to it so
+    /// adding this seam does not break lightweight hosts or test doubles.
+    async fn switch_model_with_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        _source: &str,
+    ) -> Result<(), HandleError> {
+        self.switch_model(model, profile).await
+    }
+
     /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`
     /// tier). The DEFAULT is `false` so existing impls/mocks compile unchanged.
     async fn fast_mode(&self) -> bool {

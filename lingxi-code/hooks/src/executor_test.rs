@@ -1675,6 +1675,141 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn model_switch_events_serialize_required_cache_metadata() {
+        let pre = dispatch_and_capture(
+            HookEventType::PreModelSwitch,
+            HookEvent::PreModelSwitch {
+                from_model: "claude-sonnet-4-6".into(),
+                to_model: "claude-opus-4-6".into(),
+                requested_model: None,
+                source: "command".into(),
+                context_tokens: 12_345,
+                prompt_cache_warm: false,
+                cache_ttl: "5m".into(),
+                estimated_cache_write_usd: 0.123,
+                pricing: "catalog".into(),
+            },
+        )
+        .await;
+        assert!(pre.contains(r#""hook_event_name":"PreModelSwitch""#));
+        assert!(pre.contains(r#""from_model":"claude-sonnet-4-6""#));
+        assert!(pre.contains(r#""to_model":"claude-opus-4-6""#));
+        // `requested_model` is required-but-nullable, so null is retained.
+        assert!(pre.contains(r#""requested_model":null"#));
+        assert!(pre.contains(r#""source":"command""#));
+        assert!(pre.contains(r#""context_tokens":12345"#));
+        assert!(pre.contains(r#""prompt_cache_warm":false"#));
+        assert!(pre.contains(r#""cache_ttl":"5m""#));
+        assert!(pre.contains(r#""estimated_cache_write_usd":0.123"#));
+        assert!(pre.contains(r#""pricing":"catalog""#));
+
+        let post = dispatch_and_capture(
+            HookEventType::PostModelSwitch,
+            HookEvent::PostModelSwitch {
+                from_model: "claude-sonnet-4-6".into(),
+                to_model: "claude-opus-4-6".into(),
+                requested_model: Some("opus".into()),
+                source: "resume".into(),
+                context_tokens: 12_345,
+                prompt_cache_warm: true,
+                cache_ttl: "1h".into(),
+                estimated_cache_write_usd: 0.0,
+                pricing: "default".into(),
+            },
+        )
+        .await;
+        assert!(post.contains(r#""hook_event_name":"PostModelSwitch""#));
+        assert!(post.contains(r#""requested_model":"opus""#));
+        assert!(post.contains(r#""source":"resume""#));
+        assert!(post.contains(r#""cache_ttl":"1h""#));
+    }
+
+    #[tokio::test]
+    async fn pre_model_switch_execution_failure_blocks_the_switch() {
+        let runner = MockRunner::err(ProcessError::Timeout);
+        let exec = executor_for(HookEventType::PreModelSwitch, runner);
+
+        let agg = exec
+            .execute(
+                HookEvent::PreModelSwitch {
+                    from_model: "sonnet".into(),
+                    to_model: "opus".into(),
+                    requested_model: Some("opus".into()),
+                    source: "sdk".into(),
+                    context_tokens: 0,
+                    prompt_cache_warm: false,
+                    cache_ttl: "5m".into(),
+                    estimated_cache_write_usd: 0.0,
+                    pricing: "default".into(),
+                },
+                HookContext::default(),
+            )
+            .await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert!(agg
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn post_model_switch_failure_is_best_effort_and_additional_context_survives() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostModelSwitch","permissionDecision":"deny","additionalContext":"warm the new model"}}"#,
+            "late failure",
+            2,
+        ));
+        let exec = executor_for(HookEventType::PostModelSwitch, runner);
+        let agg = exec
+            .execute(
+                HookEvent::PostModelSwitch {
+                    from_model: "sonnet".into(),
+                    to_model: "opus".into(),
+                    requested_model: Some("opus".into()),
+                    source: "picker".into(),
+                    context_tokens: 42,
+                    prompt_cache_warm: false,
+                    cache_ttl: "5m".into(),
+                    estimated_cache_write_usd: 0.0,
+                    pricing: "default".into(),
+                },
+                HookContext::default(),
+            )
+            .await;
+
+        // A post-switch process failure cannot gate or undo the mutation. The
+        // valid response is still retained when the process exits non-zero.
+        assert_eq!(agg.decision, None);
+        assert!(agg.additional_contexts.is_empty());
+
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostModelSwitch","permissionDecision":"deny","additionalContext":"warm the new model"}}"#,
+            "",
+            0,
+        ));
+        let exec = executor_for(HookEventType::PostModelSwitch, runner);
+        let agg = exec
+            .execute(
+                HookEvent::PostModelSwitch {
+                    from_model: "sonnet".into(),
+                    to_model: "opus".into(),
+                    requested_model: Some("opus".into()),
+                    source: "picker".into(),
+                    context_tokens: 42,
+                    prompt_cache_warm: false,
+                    cache_ttl: "5m".into(),
+                    estimated_cache_write_usd: 0.0,
+                    pricing: "default".into(),
+                },
+                HookContext::default(),
+            )
+            .await;
+        assert_eq!(agg.decision, None, "post decisions never gate");
+        assert_eq!(agg.additional_contexts, vec!["warm the new model"]);
+    }
+
+    #[tokio::test]
     async fn notification_event_serializes_message_and_type() {
         let stdin = dispatch_and_capture(
             HookEventType::Notification,

@@ -523,6 +523,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/typescript_lsp_mode_changed.json",
+            ClientEvent::TypescriptLspModeChanged {
+                requested: "auto".to_string(),
+                effective: "off".to_string(),
+                available: false,
+            },
+        ),
+        (
             "event/hooks.json",
             ClientEvent::Hooks {
                 hooks: vec![HookDto {
@@ -1150,6 +1158,12 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::PauseTurn {
                 turn_id: 1,
                 reason: "background_time_expired".to_string(),
+            },
+        ),
+        (
+            "command/set_typescript_lsp_mode.json",
+            ClientCommand::SetTypescriptLspMode {
+                mode: "auto".to_string(),
             },
         ),
         (

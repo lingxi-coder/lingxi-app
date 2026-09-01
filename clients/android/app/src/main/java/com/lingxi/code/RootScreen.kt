@@ -334,6 +334,9 @@ fun RootScreen(
             sessionStrings = sessionCatalogStrings(context),
             webStorageCleanup = com.lingxi.code.localapps.AndroidLocalAppWebStorageCleanup.get(appContext),
             widgetSnapshotSync = AndroidLocalAppWidgetSnapshotSync.get(appContext),
+            currentConversationId = {
+                chatViewModel.state.value.session.id.takeUnless { it.isBlank() || it == "new" }
+            },
         ),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
@@ -570,6 +573,12 @@ fun RootScreen(
             .collect { event ->
                 if (event is ClientEvent.PermissionModeChanged) {
                     resolvedSettingsStore.setEffectivePermissionMode(event.mode)
+                } else if (event is ClientEvent.TypescriptLspModeChanged) {
+                    resolvedSettingsStore.setTypescriptLspState(
+                        requested = event.requested,
+                        effective = event.effective,
+                        available = event.available,
+                    )
                 } else if (event is ClientEvent.AppEvent) {
                     when (val appEvent = event.event) {
                         is AppEventDto.PluginStatusChanged -> {

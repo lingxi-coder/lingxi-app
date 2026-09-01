@@ -129,6 +129,7 @@ pub struct CommandRegistrySkillLoader {
     /// `getSessionId()`). `None` keeps the token un-substituted (e.g. tests that
     /// construct the loader without a session).
     session_id: Option<String>,
+    invocation_observer: Option<command_api::SkillInvocationObserver>,
 }
 
 impl CommandRegistrySkillLoader {
@@ -142,6 +143,7 @@ impl CommandRegistrySkillLoader {
         Self {
             registry,
             session_id: None,
+            invocation_observer: None,
         }
     }
 
@@ -154,6 +156,17 @@ impl CommandRegistrySkillLoader {
             ..Self::new(registry)
         }
     }
+
+    /// Wire the plugin-monitor observer used after a prompt descriptor passes
+    /// the Skill tool's invocation guards.
+    #[must_use]
+    pub fn with_invocation_observer(
+        mut self,
+        observer: command_api::SkillInvocationObserver,
+    ) -> Self {
+        self.invocation_observer = Some(observer);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -164,6 +177,12 @@ impl SkillLoader for CommandRegistrySkillLoader {
         Ok(reg
             .resolve(name)
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
+    }
+
+    async fn skill_invoked(&self, name: &str) {
+        if let Some(observer) = self.invocation_observer.as_ref() {
+            observer(name.to_string()).await;
+        }
     }
 }
 

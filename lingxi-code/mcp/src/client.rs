@@ -12,12 +12,13 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
+use futures_util::stream::unfold;
 use platform_api::{
-    McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpPermissionCeiling, McpPromptDto,
-    McpProtocolEra, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransportKind, ServerCapabilitiesDto,
+    McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream,
+    McpPermissionCeiling, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
+    McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
@@ -331,6 +332,43 @@ pub struct McpClient {
 }
 
 impl McpClient {
+    /// Subscribe to notifications from this live server connection.
+    ///
+    /// The subscription owns a fresh JSON-RPC broadcast receiver, so each
+    /// caller receives an independent stream and dropping it cannot affect
+    /// the client or any other subscriber. A lagged receiver emits a synthetic
+    /// list-changed notification so callers immediately reconcile against the
+    /// authoritative catalog instead of waiting for another server push.
+    #[must_use]
+    pub fn subscribe_notifications(&self) -> McpNotificationStream {
+        let receiver = self.connection.notifications();
+        let stream = unfold(receiver, |mut receiver| async move {
+            match receiver.recv().await {
+                Ok(notification) => Some((
+                    McpNotificationDto {
+                        method: notification.method,
+                        params: notification.params.unwrap_or(serde_json::Value::Null),
+                    },
+                    receiver,
+                )),
+                // A slow subscriber may have missed the only catalog
+                // invalidation in a burst. Force an authoritative resource
+                // reconciliation instead of waiting indefinitely for a
+                // later notification that may never arrive.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Some((
+                    McpNotificationDto {
+                        method: "notifications/resources/list_changed".to_string(),
+                        params: serde_json::json!({ "lagged": skipped }),
+                    },
+                    receiver,
+                )),
+                // Closing the connection naturally ends this subscription.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            }
+        });
+        Box::pin(stream)
+    }
+
     /// Build a new client wrapping a JSON-RPC `Connection`.
     ///
     /// Registers two inbound request handlers required by the
@@ -769,7 +807,9 @@ impl McpClient {
             // an org ceiling is present for the same raw tool name.
             if let Some(policy) = tool.permission_policy {
                 let policy_ceiling = match policy {
-                    platform_api::McpToolPermissionPolicy::AlwaysAllow => McpPermissionCeiling::Allow,
+                    platform_api::McpToolPermissionPolicy::AlwaysAllow => {
+                        McpPermissionCeiling::Allow
+                    }
                     platform_api::McpToolPermissionPolicy::AlwaysAsk => McpPermissionCeiling::Ask,
                     platform_api::McpToolPermissionPolicy::AlwaysDeny => McpPermissionCeiling::Deny,
                 };
@@ -2027,6 +2067,7 @@ fn is_env_truthy(name: &str) -> bool {
 mod constructor_tests {
     use super::*;
     use bytes::Bytes;
+    use futures_util::StreamExt;
     use jsonrpc::{Connection, Mode};
     use tokio::sync::mpsc;
 
@@ -2051,6 +2092,35 @@ mod constructor_tests {
         let client =
             McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
         assert_eq!(client.server_name(), "filesystem");
+    }
+
+    #[tokio::test]
+    async fn notification_subscription_forwards_server_push_and_can_be_dropped() {
+        let (conn, peer_tx, _peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
+        let mut notifications = client.subscribe_notifications();
+
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/list_changed",
+            "params": {}
+        }))
+        .unwrap();
+        frame.push(b'\n');
+        peer_tx.send(Bytes::from(frame)).await.unwrap();
+
+        let notification =
+            tokio::time::timeout(std::time::Duration::from_secs(2), notifications.next())
+                .await
+                .expect("notification subscription must receive a server push")
+                .expect("the live connection must remain open");
+        assert_eq!(notification.method, "notifications/resources/list_changed");
+        assert_eq!(notification.params, serde_json::json!({}));
+
+        // Dropping the stream releases only this receiver; the client remains
+        // usable and other subscribers are not affected.
+        drop(notifications);
     }
 
     #[tokio::test]
@@ -2705,8 +2775,8 @@ mod timeout_tests {
         resolve_idle_timeout_gld, resolve_tool_timeout, resolve_tool_timeout_bhs,
         DEFAULT_CALL_TOOL_TIMEOUT,
     };
-    use std::time::Duration;
     use platform_api::McpTransportKind;
+    use std::time::Duration;
 
     #[test]
     fn default_value_is_byte_locked_to_claude_code() {

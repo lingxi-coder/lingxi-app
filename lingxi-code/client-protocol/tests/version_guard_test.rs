@@ -415,6 +415,13 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientEvent::Skills", "skills");
     put("ClientEvent::Skills.skills", "Vec<SkillDto>");
+    put(
+        "ClientEvent::TypescriptLspModeChanged",
+        "typescript_lsp_mode_changed",
+    );
+    put("ClientEvent::TypescriptLspModeChanged.requested", "String");
+    put("ClientEvent::TypescriptLspModeChanged.effective", "String");
+    put("ClientEvent::TypescriptLspModeChanged.available", "bool");
 
     put("ClientEvent::Hooks", "hooks");
     put("ClientEvent::Hooks.hooks", "Vec<HookDto>");
@@ -638,6 +645,12 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::PauseTurn", "pause_turn");
     put("ClientCommand::PauseTurn.turn_id", "u64");
     put("ClientCommand::PauseTurn.reason", "String");
+
+    put(
+        "ClientCommand::SetTypescriptLspMode",
+        "set_typescript_lsp_mode",
+    );
+    put("ClientCommand::SetTypescriptLspMode.mode", "String");
 
     put("ClientCommand::ApprovePermission", "approve_permission");
     put("ClientCommand::ApprovePermission.request_id", "u64");

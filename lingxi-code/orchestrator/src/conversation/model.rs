@@ -3,6 +3,22 @@
 use super::*;
 
 impl ConversationOrchestrator {
+    /// Seed a provider profile for the model already selected at construction.
+    /// This is initialization, not a model switch, so it deliberately does not
+    /// emit Pre/PostModelSwitch hooks.
+    pub async fn seed_initial_model_profile(&self, model: &str, profile: &str) {
+        let mut session = self.session.lock().await;
+        if session.history.is_empty() && session.model == model {
+            session.model_profile = Some(profile.to_string());
+        } else {
+            tracing::warn!(
+                current_model = %session.model,
+                requested_model = %model,
+                "ignored late or mismatched initial model profile seed"
+            );
+        }
+    }
+
     /// `tengu_api_success` `timeSinceLastApiCallMs`: ms since the previous
     /// successful API call, then record this call's timestamp. Returns `None`
     /// on the first call (claude `W=G!==null?Math.max(0,Math.round(M-G)):void 0`).
@@ -166,7 +182,9 @@ impl ConversationOrchestrator {
             .model_runtime
             .cache_safe_slot
             .as_ref()
-            .ok_or_else(|| platform_api::HandleError::ActionFailed("recap: no cache-safe slot".into()))?
+            .ok_or_else(|| {
+                platform_api::HandleError::ActionFailed("recap: no cache-safe slot".into())
+            })?
             .get_last()
             .await
             .ok_or_else(|| {
@@ -218,7 +236,9 @@ impl ConversationOrchestrator {
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed("session name generation unavailable".into())
+                platform_api::HandleError::ActionFailed(
+                    "session name generation unavailable".into(),
+                )
             })?
             .get_last()
             .await
@@ -277,10 +297,9 @@ impl ConversationOrchestrator {
         question: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<platform_api::RecapOutcome, platform_api::HandleError> {
-        let runner = self
-            .recap_runner
-            .clone()
-            .ok_or_else(|| platform_api::HandleError::ActionFailed("side question unavailable".into()))?;
+        let runner = self.recap_runner.clone().ok_or_else(|| {
+            platform_api::HandleError::ActionFailed("side question unavailable".into())
+        })?;
         let params = self
             .model_runtime
             .cache_safe_slot
@@ -626,12 +645,14 @@ impl ConversationOrchestrator {
                 })
                 .collect(),
             unknown_models: !state.unpriced_models.is_empty(),
-            current_usage: state.last_usage.map(|usage| platform_api::CurrentUsageSnapshot {
-                input_tokens: usage.tokens.input,
-                output_tokens: usage.tokens.output,
-                cache_read_input_tokens: state.last_cache_read_input_tokens,
-                cache_creation_input_tokens: state.last_cache_creation_input_tokens,
-            }),
+            current_usage: state
+                .last_usage
+                .map(|usage| platform_api::CurrentUsageSnapshot {
+                    input_tokens: usage.tokens.input,
+                    output_tokens: usage.tokens.output,
+                    cache_read_input_tokens: state.last_cache_read_input_tokens,
+                    cache_creation_input_tokens: state.last_cache_creation_input_tokens,
+                }),
         }
     }
 
@@ -795,14 +816,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await
             .push(fallback.clone());
         // Persistently swap the session model to the fallback.
-        let original_model = {
+        let (original_model, original_profile) = {
             let mut s = self.session.lock().await;
             let prev = std::mem::replace(&mut s.model, fallback.clone());
+            let previous_profile = s.model_profile.take();
             // The fallback model has no associated provider profile (mirrors the
             // overload-fallback re-issue, which passes `profile = None`).
-            s.model_profile = None;
-            prev
+            (prev, previous_profile)
         };
+        if original_model != fallback || original_profile.is_some() {
+            self.run_post_model_switch_hooks(&original_model, &fallback, None, None, "auto")
+                .await;
+        }
         // User-visible warning. 2.1.206 `VPn(e,t,r)` =
         //   `${f_t(r) ? mmi(e) : hmi(e,r)} Switched to ${Mf(t)}. ${bxr(e)}`
         // for the common `category == "other"` path: `f_t("other")` is false, so
@@ -1565,12 +1590,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         platform_api::ReasoningControlSpec {
             available,
             selections_persistable: mandatory.is_none(),
-            budget_range: raw.token_budget.map(|range| platform_api::ReasoningBudgetRange {
-                min_tokens: range.min,
-                max_tokens: range.max,
-                supports_dynamic: false,
-                supports_disabled: raw.can_disable,
-            }),
+            budget_range: raw
+                .token_budget
+                .map(|range| platform_api::ReasoningBudgetRange {
+                    min_tokens: range.min,
+                    max_tokens: range.max,
+                    supports_dynamic: false,
+                    supports_disabled: raw.can_disable,
+                }),
             provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
             forced: raw.mandatory_selection.is_some(),
             modifiable: raw.mandatory_selection.is_none() && !auto_only,

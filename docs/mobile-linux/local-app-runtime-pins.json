@@ -1269,6 +1269,25 @@
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-11.22.0.tgz",
     "sha512": "H/hwxMYTPf2I+yr8Rt0T1H8JyXlLQ4xv20fKmMrzvBY4HuC+k6CRuOOCTPAfiJ9G19niCRD7C+GrD7W6qA3WIQ=="
   },
+  "typescript_native": {
+    "install_root": "/opt/lingxi/toolchains/typescript/7.0.2",
+    "license": "Apache-2.0",
+    "packages": {
+      "aarch64": {
+        "name": "@typescript/typescript-linux-arm64",
+        "sha512": "Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
+        "tsc_sha256": "f86e8070c267b12d6c119bf567cb82d8b245e9d93da1864bc7c603cea10a8b2f",
+        "url": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz"
+      },
+      "x86_64": {
+        "name": "@typescript/typescript-linux-x64",
+        "sha512": "EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
+        "tsc_sha256": "4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4",
+        "url": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz"
+      }
+    },
+    "version": "7.0.2"
+  },
   "release_ready": false,
   "runtime_packages": {
     "ca-certificates": "20260611-r0",

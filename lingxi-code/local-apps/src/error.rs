@@ -5,9 +5,9 @@
 //! one wire-level [`AppErrorCode`] so the engine can surface failures as a
 //! typed `AppOperationFailed { code, message }` client event.
 
+use platform_api::FsError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use platform_api::FsError;
 
 /// Stable machine-readable failure codes carried on `AppOperationFailed`
 /// client events. Extensible in later phases; each [`AppError`] variant maps
@@ -32,6 +32,8 @@ pub enum AppErrorCode {
     StorageCorrupt,
     /// The request itself is malformed (bad id, empty name, …).
     InvalidRequest,
+    /// Fresh LSP diagnostics blocked the requested build or authoring step.
+    LspDiagnosticsFailed,
     /// Underlying I/O failure.
     Io,
     /// The model is unreachable: offline, unauthenticated, or timed out.
@@ -73,6 +75,9 @@ pub enum AppError {
     /// The request is malformed.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// Recent LSP diagnostics blocked the operation.
+    #[error("lsp diagnostics failed: {0}")]
+    LspDiagnosticsFailed(String),
     /// Underlying I/O failure.
     #[error("io error: {0}")]
     Io(String),
@@ -98,6 +103,7 @@ impl AppError {
             Self::NotYetAvailable(_) => AppErrorCode::NotYetAvailable,
             Self::StorageCorrupt(_) => AppErrorCode::StorageCorrupt,
             Self::InvalidRequest(_) => AppErrorCode::InvalidRequest,
+            Self::LspDiagnosticsFailed(_) => AppErrorCode::LspDiagnosticsFailed,
             Self::Io(_) => AppErrorCode::Io,
             Self::LlmUnavailable(_) => AppErrorCode::LlmUnavailable,
             Self::LlmOutputRejected(_) => AppErrorCode::LlmOutputRejected,
@@ -161,6 +167,10 @@ mod tests {
             AppError::InvalidRequest("x".into()).code(),
             AppErrorCode::InvalidRequest
         );
+        assert_eq!(
+            AppError::LspDiagnosticsFailed("x".into()).code(),
+            AppErrorCode::LspDiagnosticsFailed
+        );
         assert_eq!(AppError::Io("x".into()).code(), AppErrorCode::Io);
         assert_eq!(
             AppError::LlmUnavailable("x".into()).code(),
@@ -189,6 +199,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AppErrorCode::LlmUnavailable).unwrap(),
             "\"llm_unavailable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppErrorCode::LspDiagnosticsFailed).unwrap(),
+            "\"lsp_diagnostics_failed\""
         );
         assert_eq!(
             serde_json::to_string(&AppErrorCode::LlmOutputRejected).unwrap(),

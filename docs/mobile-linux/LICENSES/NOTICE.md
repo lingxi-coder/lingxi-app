@@ -17,6 +17,7 @@ The source and license baseline is fixed by
 | Local-app Alpine rootfs | 3.24.1 | aggregate package licenses |
 | Alpine Node.js | 24.18.1-r0 | MIT |
 | Alpine npm / npx | 11.12.1-r0 | Artistic-2.0 |
+| TypeScript native compiler/LSP (Linux arm64/x64) | 7.0.2 | Apache-2.0 |
 | Alpine Git | 2.54.0-r0 | GPL-2.0-only |
 | Vite | 8.2.1 | MIT |
 | Rolldown | 1.2.4 | MIT |

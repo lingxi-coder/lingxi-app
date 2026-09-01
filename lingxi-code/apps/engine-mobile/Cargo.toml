@@ -131,6 +131,8 @@ uniffi = [
     # LSP or output-style subsystem.
     "dep:plugin",
     "dep:lsp",
+    "dep:lsp-types",
+    "dep:tool-lsp",
     "dep:outputstyles",
 ]
 
@@ -233,6 +235,8 @@ plugin = { path = "../../plugin", optional = true }
 # re-export `LspRegistry`/`OutputStyleRegistry`); mobile starts neither
 # subsystem otherwise. Optional + uniffi-gated.
 lsp = { path = "../../lsp", optional = true }
+lsp-types = { version = "0.95", optional = true }
+tool-lsp = { path = "../../tools/lsp", optional = true }
 outputstyles = { path = "../../outputstyles", optional = true }
 
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }

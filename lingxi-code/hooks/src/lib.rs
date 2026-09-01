@@ -57,8 +57,10 @@ pub use executor::{
 };
 pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use hook_payload::{
-    parse_response, HookBackgroundTask, HookEventEnvelope, HookEventNamePost, HookEventNamePre,
-    HookResponseParseError, HookSessionCron, PostToolUsePayload, PreToolUsePayload,
+    parse_response, HookBackgroundTask, HookEventEnvelope, HookEventNamePost,
+    HookEventNamePostModelSwitch, HookEventNamePre, HookEventNamePreModelSwitch,
+    HookResponseParseError, HookSessionCron, PostModelSwitchPayload, PostToolUsePayload,
+    PreModelSwitchPayload, PreToolUsePayload,
 };
 pub use loader::{
     parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated, HookPolicyGate,

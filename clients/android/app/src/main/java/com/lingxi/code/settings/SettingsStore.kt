@@ -59,6 +59,10 @@ data class SettingsUiState(
     val permissionMode: String = "auto",
     val effectivePermissionMode: String = "auto",
     val permissionModeError: String? = null,
+    val typescriptLspMode: String = "auto",
+    val effectiveTypescriptLspMode: String = "auto",
+    val typescriptLspAvailable: Boolean = true,
+    val typescriptLspError: String? = null,
 ) {
     /**
      * True until an enabled LLM has both a selected model and a credential that
@@ -203,6 +207,35 @@ class SettingsStore(
     fun setEffectivePermissionMode(mode: String) {
         if (mode in PermissionModeOptions.values) {
             _state.update { it.copy(effectivePermissionMode = mode) }
+        }
+    }
+    fun setTypescriptLspMode(mode: String, onApply: suspend (String) -> Unit) {
+        if (mode !in TypeScriptLspModeOptions.values) return
+        val previous = _state.value
+        _state.update { it.copy(typescriptLspMode = mode, typescriptLspError = null) }
+        viewModelScope.launch {
+            runCatching { onApply(mode) }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        typescriptLspMode = previous.typescriptLspMode,
+                        effectiveTypescriptLspMode = previous.effectiveTypescriptLspMode,
+                        typescriptLspAvailable = previous.typescriptLspAvailable,
+                        typescriptLspError = error.message ?: "TypeScript LSP mode rejected",
+                    )
+                }
+            }
+        }
+    }
+
+    fun setTypescriptLspState(requested: String, effective: String, available: Boolean) {
+        if (requested !in TypeScriptLspModeOptions.values || effective !in TypeScriptLspModeOptions.values) return
+        _state.update {
+            it.copy(
+                typescriptLspMode = requested,
+                effectiveTypescriptLspMode = effective,
+                typescriptLspAvailable = available,
+                typescriptLspError = null,
+            )
         }
     }
     fun setNotifs(notifs: NotifConfig) = _state.update { it.copy(notifs = notifs) }
@@ -698,6 +731,10 @@ class SettingsStore(
                 }
             }
     }
+}
+
+object TypeScriptLspModeOptions {
+    val values: Set<String> = linkedSetOf("auto", "off", "on")
 }
 
 internal fun providerLaunchConfigurationChanged(

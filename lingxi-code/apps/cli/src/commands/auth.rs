@@ -22,8 +22,9 @@ use lingxi_core::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgM
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
-use std::sync::Arc;
 use platform_api::AuthHandle;
+use std::path::Path;
+use std::sync::Arc;
 
 /// `auth` — Manage authentication.
 ///
@@ -339,6 +340,7 @@ async fn run_status(args: &StatusArgs) -> i32 {
     };
 
     let api_provider = resolve_api_provider();
+    let projects_directory = crate::run::lingxi_home_dir().join("projects");
 
     if args.text {
         print_status_text(
@@ -357,6 +359,7 @@ async fn run_status(args: &StatusArgs) -> i32 {
             has_stored_api_key,
             oauth_email.as_deref(),
             oauth_org.as_deref(),
+            &projects_directory,
         );
     }
 
@@ -377,6 +380,7 @@ fn print_status_json(
     has_stored_api_key: bool,
     oauth_email: Option<&str>,
     oauth_org: Option<&str>,
+    projects_directory: &Path,
 ) {
     let value = status_json(
         logged_in,
@@ -387,6 +391,7 @@ fn print_status_json(
         oauth_email,
         oauth_org,
         platform_api::traffic_mode::is_telemetry_disabled(),
+        projects_directory,
     );
     // Two-space pretty print, matching claude's `jsonStringify(_, null, 2)`.
     match serde_json::to_string_pretty(&value) {
@@ -405,9 +410,10 @@ fn status_json(
     oauth_email: Option<&str>,
     oauth_org: Option<&str>,
     analytics_disabled: bool,
+    projects_directory: &Path,
 ) -> serde_json::Value {
     // Preserve claude's key ordering: loggedIn, authMethod, apiProvider,
-    // analyticsDisabled, [apiKeySource], then the claude.ai block
+    // analyticsDisabled, projectsDirectory, [apiKeySource], then the claude.ai block
     // (email/orgId/orgName/subscriptionType).
     let mut map = serde_json::Map::new();
     map.insert("loggedIn".to_string(), serde_json::Value::Bool(logged_in));
@@ -422,6 +428,10 @@ fn status_json(
     map.insert(
         "analyticsDisabled".to_string(),
         serde_json::Value::Bool(analytics_disabled),
+    );
+    map.insert(
+        "projectsDirectory".to_string(),
+        serde_json::Value::String(projects_directory.to_string_lossy().into_owned()),
     );
 
     // apiKeySource: the stored key source first, else the env var, else absent.
@@ -525,7 +535,8 @@ pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle,
 pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {
     let mut method = None;
     for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(settings) = serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(&raw)
+        let Ok(settings) =
+            serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(&raw)
         else {
             continue;
         };
@@ -565,6 +576,7 @@ fn env_truthy(var: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse_manual_auth_code, status_json};
+    use std::path::Path;
 
     /// M8: `code#state` splitting mirrors claude's
     /// `f.trim().split("#")` + `!m || !g` validity check.
@@ -594,13 +606,60 @@ mod tests {
 
     #[test]
     fn status_json_emits_analytics_disabled_after_api_provider() {
-        let value = status_json(false, "none", "firstParty", false, false, None, None, true);
+        let projects_directory = Path::new("/tmp/fresh-home")
+            .join(branding::DOT_DIR)
+            .join("projects");
+        let value = status_json(
+            false,
+            "none",
+            "firstParty",
+            false,
+            false,
+            None,
+            None,
+            true,
+            &projects_directory,
+        );
         assert_eq!(value["analyticsDisabled"], serde_json::json!(true));
+        assert_eq!(
+            value["projectsDirectory"],
+            serde_json::json!(projects_directory)
+        );
 
         let rendered = serde_json::to_string_pretty(&value).unwrap();
         assert!(
             rendered.find("\"apiProvider\"").unwrap()
                 < rendered.find("\"analyticsDisabled\"").unwrap()
+        );
+        assert!(
+            rendered.find("\"analyticsDisabled\"").unwrap()
+                < rendered.find("\"projectsDirectory\"").unwrap()
+        );
+    }
+
+    #[test]
+    fn status_json_fresh_home_emits_exact_key_order() {
+        let projects_directory = Path::new("/tmp/fresh-home")
+            .join(branding::DOT_DIR)
+            .join("projects");
+        let value = status_json(
+            false,
+            "none",
+            "firstParty",
+            false,
+            false,
+            None,
+            None,
+            false,
+            &projects_directory,
+        );
+        let projects_directory_json =
+            serde_json::to_string(projects_directory.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&value).unwrap(),
+            format!(
+                "{{\n  \"loggedIn\": false,\n  \"authMethod\": \"none\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": false,\n  \"projectsDirectory\": {projects_directory_json}\n}}"
+            )
         );
     }
 }

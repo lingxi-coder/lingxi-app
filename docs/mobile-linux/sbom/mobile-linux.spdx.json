@@ -14,7 +14,9 @@
     "SPDXRef-OpenMinis",
     "SPDXRef-PRoot",
     "SPDXRef-talloc",
-    "SPDXRef-Alpine-rootfs"
+    "SPDXRef-Alpine-rootfs",
+    "SPDXRef-TypeScript-native-arm64",
+    "SPDXRef-TypeScript-native-x64"
   ],
   "packages": [
     {
@@ -62,6 +64,38 @@
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "TypeScript native compiler and LSP (Linux arm64)",
+      "SPDXID": "SPDXRef-TypeScript-native-arm64",
+      "versionInfo": "7.0.2",
+      "downloadLocation": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "421e1e538ff2df20e39df8e3c8f62284c8f9fce0c8966b7e073bb5ece23e7e24910d6e7b4265394a237addec4f44d24f294cdc73520d6b535776b27e32a1e351"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright Microsoft Corporation"
+    },
+    {
+      "name": "TypeScript native compiler and LSP (Linux x64)",
+      "SPDXID": "SPDXRef-TypeScript-native-x64",
+      "versionInfo": "7.0.2",
+      "downloadLocation": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "11875fd9c360eeb8025899f109d27e177577f4ef2285bdfb78702ed4b2bca00162ce04d06cf38aef31c75db3edf2b5f6e023aa3835de237b087f47c25c6ec7fc"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright Microsoft Corporation"
     }
   ]
 }

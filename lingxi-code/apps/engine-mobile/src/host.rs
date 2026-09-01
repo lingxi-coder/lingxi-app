@@ -88,14 +88,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
-use secret::CredentialManager;
-use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use tokio_util::sync::CancellationToken;
-use tool_api::AnthropicRequestBuilder;
-use tool_api::SessionCwd;
-use tool_api::{BuiltinToolContext, ToolRegistry};
-use tool_workflow::WorkflowLauncher as _;
 use platform_api::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -105,6 +97,14 @@ use platform_api::{
     MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
     SlashCommandDispatcher,
 };
+use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
+use secret::CredentialManager;
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
+use tool_api::AnthropicRequestBuilder;
+use tool_api::SessionCwd;
+use tool_api::{BuiltinToolContext, ToolRegistry};
+use tool_workflow::WorkflowLauncher as _;
 
 use crate::{
     local_apps_host::{
@@ -551,6 +551,13 @@ pub struct MobileRuntime {
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
     pub mcp_registry: Arc<McpRegistry>,
+    /// Shared mobile LSP registry used by plugin registration, file sync, and
+    /// passive diagnostics.
+    pub lsp_registry: Arc<lsp::LspRegistry>,
+    /// Whether the pinned TypeScript runtime passed the rootfs/target probe.
+    /// Kept separate from the requested policy so the UI can show a degraded
+    /// effective `off` without overwriting the user's preference.
+    pub typescript_lsp_runtime_available: bool,
     /// Per-server CAS watermarks for asynchronous MCP settings reconciliation.
     /// A detached reload job may only clean up or publish work while its
     /// watermark is still current.
@@ -834,19 +841,25 @@ struct SlashAuthoritySnapshot {
     catalog: Vec<SlashCommandDto>,
 }
 
-fn lower_reasoning_selection(selection: &platform_api::ReasoningSelection) -> ReasoningSelectionDto {
+fn lower_reasoning_selection(
+    selection: &platform_api::ReasoningSelection,
+) -> ReasoningSelectionDto {
     match selection {
         platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
         platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
         platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::Level { id } => {
+            ReasoningSelectionDto::Level { id: id.clone() }
+        }
         platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
 }
 
-fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> platform_api::ReasoningSelection {
+fn decode_reasoning_selection(
+    selection: ReasoningSelectionDto,
+) -> platform_api::ReasoningSelection {
     match selection {
         ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
         ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
@@ -1830,8 +1843,12 @@ fn build_mobile_runtime_environment(
         platform_api::MobileToolRuntime::MobileLinuxGuest => {
             platform_api::MobileNetworkPolicy::PermissionMediated
         }
-        platform_api::MobileToolRuntime::AndroidLegacy => platform_api::MobileNetworkPolicy::DeniedByHost,
-        platform_api::MobileToolRuntime::Unavailable => platform_api::MobileNetworkPolicy::DeniedByHost,
+        platform_api::MobileToolRuntime::AndroidLegacy => {
+            platform_api::MobileNetworkPolicy::DeniedByHost
+        }
+        platform_api::MobileToolRuntime::Unavailable => {
+            platform_api::MobileNetworkPolicy::DeniedByHost
+        }
     };
     let lifecycle_policy = match host_environment.launch_mode {
         platform_api::MobileLaunchMode::ScheduledHeadless => {
@@ -1845,11 +1862,16 @@ fn build_mobile_runtime_environment(
                 platform_api::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
             }
         },
-        platform_api::MobileLaunchMode::Unknown => platform_api::MobileLifecyclePolicy::UnknownBestEffort,
+        platform_api::MobileLaunchMode::Unknown => {
+            platform_api::MobileLifecyclePolicy::UnknownBestEffort
+        }
     };
 
-    let guest_cwd = matches!(tool_runtime, platform_api::MobileToolRuntime::MobileLinuxGuest)
-        .then(|| session_cwd.cwd().to_string_lossy().to_string());
+    let guest_cwd = matches!(
+        tool_runtime,
+        platform_api::MobileToolRuntime::MobileLinuxGuest
+    )
+    .then(|| session_cwd.cwd().to_string_lossy().to_string());
     Some(platform_api::MobileRuntimeEnvironment::new(
         host_environment,
         tool_runtime,
@@ -1861,13 +1883,66 @@ fn build_mobile_runtime_environment(
     ))
 }
 
-fn mobile_launch_is_interactive(host_environment: Option<&platform_api::MobileHostEnvironment>) -> bool {
+fn mobile_launch_is_interactive(
+    host_environment: Option<&platform_api::MobileHostEnvironment>,
+) -> bool {
     !host_environment.is_some_and(|environment| {
         matches!(
             environment.launch_mode,
             platform_api::MobileLaunchMode::ScheduledHeadless
         )
     })
+}
+
+async fn mobile_typescript_lsp_ready(
+    runtime: &Arc<dyn platform_api::MobileLinuxRuntime>,
+    capability: Option<&platform_api::MobileLinuxCapability>,
+    host_environment: Option<&platform_api::MobileHostEnvironment>,
+) -> bool {
+    if !capability.is_some_and(|value| value.available)
+        || host_environment.is_some_and(|environment| {
+            matches!(environment.host_os, platform_api::MobileHostOs::Ios)
+                && matches!(
+                    environment.execution_target,
+                    platform_api::MobileExecutionTarget::Simulator
+                )
+        })
+    {
+        return false;
+    }
+    let Ok(mut status) = runtime.rootfs_status().await else {
+        return false;
+    };
+    if matches!(status.state, platform_api::RootfsState::Missing) {
+        let Ok(booted) = runtime.boot().await else {
+            return false;
+        };
+        status = booted;
+    }
+    if !matches!(status.state, platform_api::RootfsState::Ready) {
+        return false;
+    }
+    let Some(active_root) = status.active_root else {
+        return false;
+    };
+    let relative = std::path::Path::new("opt/lingxi/toolchains/typescript/7.0.2");
+    let toolchain_root = match runtime.backend() {
+        platform_api::SandboxBackend::IosIsh => active_root.join("data").join(relative),
+        _ => active_root.join(relative),
+    };
+    if !toolchain_root.join("tsc").is_file() {
+        return false;
+    }
+    std::fs::read_to_string(toolchain_root.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|metadata| {
+            metadata.get("version").and_then(serde_json::Value::as_str) == Some("7.0.2")
+                && metadata
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| name.starts_with("@typescript/typescript-linux-"))
+        })
 }
 
 fn model_visible_mobile_cwd(
@@ -3975,9 +4050,81 @@ async fn build_mobile_inner_with_ask(
         std::path::PathBuf::new(),
     )));
     task_registry_inner.set_workflow_session_filter(Some(main_session_uuid.clone()));
+    let lsp_diagnostics = lsp::LspDiagnosticRegistry::new();
+    let typescript_lsp_mode =
+        match mobile_typescript_lsp_mode(&cfg.lingxi_home.join("settings.json")) {
+            Ok(mode) => mode,
+            Err(error) => {
+                tracing::warn!(%error, "invalid TypeScript LSP setting; using auto");
+                lsp::LspActivationMode::Auto
+            }
+        };
+    let mobile_lsp_ready = match mobile_linux.as_ref() {
+        Some(runtime) => {
+            mobile_typescript_lsp_ready(
+                runtime,
+                mobile_linux_capability.as_ref(),
+                cfg.host_environment.as_ref(),
+            )
+            .await
+        }
+        None => false,
+    };
+    let app_data_root = mobile_apps_data_root(&cfg);
+    let auto_workspace_root = app_data_root.clone();
+    let auto_workspace_predicate: Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync> =
+        Arc::new(move |workspace| {
+            crate::mobile_lsp::is_managed_local_app_workspace(&auto_workspace_root, workspace)
+        });
+    let (plugin_lsp_registry, mobile_lsp_path_mapper) =
+        match (mobile_linux.clone(), mobile_lsp_ready) {
+            (Some(runtime), true) => {
+                let mapper = Arc::new(crate::mobile_lsp::MobileLinuxGuestLspPathMapper::new(
+                    runtime.clone(),
+                ));
+                (
+                    Arc::new(
+                        lsp::LspRegistry::new(Arc::new(
+                            crate::mobile_lsp::MobileLinuxLspTransport::new(
+                                runtime,
+                                mapper.clone(),
+                                std::env::temp_dir().join("lingxi-lsp"),
+                            ),
+                        ))
+                        .with_path_mapper(mapper.clone())
+                        .with_workspace_activation_predicate(auto_workspace_predicate.clone())
+                        .with_diagnostics(lsp_diagnostics.clone()),
+                    ),
+                    Some(mapper),
+                )
+            }
+            _ => (
+                Arc::new(
+                    lsp::LspRegistry::new(Arc::new(
+                        crate::mobile_lsp::MobileLinuxLspTransport::unavailable(),
+                    ))
+                    .with_workspace_activation_predicate(auto_workspace_predicate)
+                    .with_diagnostics(lsp_diagnostics.clone()),
+                ),
+                None,
+            ),
+        };
+    plugin_lsp_registry.set_activation_mode(typescript_lsp_mode);
+    plugin_lsp_registry
+        .register_plugin_servers(
+            crate::mobile_lsp::global_typescript_lsp_plugin_id(),
+            vec![crate::mobile_lsp::global_typescript_lsp_config()],
+        )
+        .await;
+    let mobile_lsp_workspace_leases =
+        Arc::new(crate::mobile_lsp::MobileWorkspaceLspLeaseManager::new(
+            plugin_lsp_registry.clone(),
+            lsp_diagnostics.clone(),
+            mobile_lsp_path_mapper,
+        ));
 
     // (b) The subagent pool + spawner (adapted from engine-desktop; no
-    // worktree/LSP/coordinator seams on mobile). The spawner's set-once cells
+    // worktree/coordinator seams on mobile). The spawner's set-once cells
     // (tool registry / agent catalog / hook executor / skill loader) are
     // grabbed BEFORE boxing and filled once the tool registry exists below —
     // the same construction-cycle break as desktop. Subagents keep upstream
@@ -3986,7 +4133,8 @@ async fn build_mobile_inner_with_ask(
     // the SAME shared registry + `TuiBridgeResolver` channel as the main
     // session.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
-        Arc::new(platform_posix_minimal::PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+        Arc::new(platform_posix_minimal::PosixRuntime::new())
+            as Arc<dyn platform_api::RuntimeSpawner>,
         platform_api::subagent_spawn::max_concurrent_subagents(),
     ));
     let subagent_hook_session_id = protocol::SessionId::new();
@@ -4037,6 +4185,16 @@ async fn build_mobile_inner_with_ask(
         .with_subagents_dir_provider(subagents_dir_provider)
         .with_transcript_fs(fs.clone())
         .with_spawn_observer(session_agent_observer)
+        .with_new_diagnostics_source_factory(Arc::new({
+            let workspace_leases = mobile_lsp_workspace_leases.clone();
+            move |cwd| {
+                let host_root = cwd
+                    .map(std::path::PathBuf::from)
+                    .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+                workspace_leases
+                    .diagnostics_source(host_root, Some(std::time::Duration::from_millis(500)))
+            }
+        }))
         .with_subagent_env_renderer(subagent_env_renderer);
     if let Some(environment) = mobile_runtime_environment.clone() {
         subagent_spawner_concrete = subagent_spawner_concrete
@@ -4200,7 +4358,7 @@ async fn build_mobile_inner_with_ask(
         // an approval seam unbound on mobile.
         permission_gate: Some(perms.clone()),
         mcp_registry: Some(mcp_registry.clone()),
-        lsp_registry: None,
+        lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),
         voice: platform.voice(),
         stt: platform.stt(),
@@ -4261,14 +4419,10 @@ async fn build_mobile_inner_with_ask(
     //     and the Skill tool's loader all read below;
     //   - `hook_registry` / `mcp_registry` are the real live hook + MCP
     //     registries this connection already runs;
-    //   - `skill_registry` / `output_style_registry` / `lsp_registry` /
-    //     `tool_registry` have no mobile equivalent to share (mobile mirrors
-    //     plugin skills into `command_registry` instead, and starts no
-    //     output-style/LSP/second-tool-registry subsystem), so they stay
-    //     freshly constructed and inert — `PluginManager::new` still requires
-    //     them by signature (it does not re-export `LspRegistry`/
-    //     `OutputStyleRegistry`, hence this crate's direct `lsp`/`outputstyles`
-    //     deps).
+    //   - `skill_registry` / `output_style_registry` / `tool_registry` still
+    //     stay fresh and inert by design, while `lsp_registry` is now the
+    //     same live registry shared by plugin loading, file-write sync,
+    //     diagnostics, and the builtin `LSP` tool.
     // P1.10 (§19.2): the compiled-in plugin's manifest USED to declare zero
     // components (`lib.rs`'s `mobile_builtin_plugin_manifest`), which made
     // registering it below a no-op over live state — a manifest with nothing
@@ -4301,9 +4455,7 @@ async fn build_mobile_inner_with_ask(
             hook_registry.clone(),
             Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
             mcp_registry.clone(),
-            Arc::new(lsp::LspRegistry::new(Arc::new(
-                platform_posix_minimal::PosixLsp::new(),
-            ))),
+            plugin_lsp_registry.clone(),
             Arc::new(RwLock::new(ToolRegistry::new())),
         )
         .with_agent_catalog(plugin_agent_catalog.clone())
@@ -4378,12 +4530,13 @@ async fn build_mobile_inner_with_ask(
         plugin_workflows: plugin_workflow_registry.clone(),
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
-    let workflow_size_guideline_state = platform_api::session_flags::WorkflowSizeGuidelineState::new(
-        workflow_size_guideline.as_wire(),
-        false,
-        workflow_size_guideline_is_default,
-    )
-    .expect("mobile workflowSizeGuideline must be valid");
+    let workflow_size_guideline_state =
+        platform_api::session_flags::WorkflowSizeGuidelineState::new(
+            workflow_size_guideline.as_wire(),
+            false,
+            workflow_size_guideline_is_default,
+        )
+        .expect("mobile workflowSizeGuideline must be valid");
     let dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
@@ -4549,26 +4702,27 @@ async fn build_mobile_inner_with_ask(
     // stay byte-identical. On a device the env var is typically unset, so this is
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch =
-        if platform_api::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref()) {
-            // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
-            // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
-            let home = cfg
-                .lingxi_home
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| cwd.clone());
-            Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
-                cfg.api_key.clone(),
-                Some(cfg.api_base.clone()),
-                http.clone(),
-                Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                    as Arc<dyn platform_api::RuntimeSpawner>,
-                &home,
-            ))
-        } else {
-            None
-        };
+    let memdir_prefetch = if platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref(),
+    ) {
+        // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
+        // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
+        let home = cfg
+            .lingxi_home
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| cwd.clone());
+        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
+            cfg.api_key.clone(),
+            Some(cfg.api_base.clone()),
+            http.clone(),
+            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
+                as Arc<dyn platform_api::RuntimeSpawner>,
+            &home,
+        ))
+    } else {
+        None
+    };
 
     // Audit fix (#3): autocompaction parity with desktop. Build the real
     // CompactionOrchestrator (threshold 150_000 tokens — the M3 Anthropic prod
@@ -4642,6 +4796,10 @@ async fn build_mobile_inner_with_ask(
     .with_analytics_bus(analytics_bus)
     .with_cost_tracker(cost_tracker)
     .with_api_calls_counter(api_calls_recorded)
+    .with_new_diagnostics_source(lsp_diagnostics.diagnostics_source(
+        Some(std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone())),
+        None,
+    ))
     // Audit fix (#3): attach the compactor + the shared cache-safe slot so the
     // turn loop autocompacts before context-window overflow (desktop parity).
     .with_compaction(compactor)
@@ -4801,9 +4959,8 @@ async fn build_mobile_inner_with_ask(
     // profile-qualified default_model.  SessionState::empty starts model_profile
     // at None; this is a no-op when default_model is a bare id.
     if let Some(profile) = default_model_profile.as_deref() {
-        if let Err(e) = handle.switch_model(&default_model_id, Some(profile)).await {
-            tracing::warn!(error = %e, "failed to seed default model profile");
-        }
+        orch.seed_initial_model_profile(&default_model_id, profile)
+            .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
@@ -4993,6 +5150,8 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
+        lsp_registry: plugin_lsp_registry,
+        typescript_lsp_runtime_available: mobile_lsp_ready,
         mcp_reload_generations,
         mcp_oauth_authorization_url: mcp_auth_url,
         routable_listings: default_listings.clone(),
@@ -5166,6 +5325,23 @@ impl Drop for MobileEngineHandle {
                 profile.domain_events.unsubscribe(subscription);
             }
         }
+        // LSP children are connection-scoped. Drive their graceful shutdown
+        // while the handle-owned Tokio runtime is still alive; an OS helper
+        // thread keeps this safe even when the FFI object is released from a
+        // Tokio worker, where calling Runtime::block_on directly would panic.
+        let lsp_registry = self.inner.lsp_registry.clone();
+        let runtime_handle = self.runtime.handle().clone();
+        match std::thread::Builder::new()
+            .name("lingxi-mobile-lsp-shutdown".into())
+            .spawn(move || runtime_handle.block_on(lsp_registry.shutdown_all()))
+        {
+            Ok(join) => {
+                if join.join().is_err() {
+                    tracing::warn!("mobile LSP shutdown thread panicked");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "could not start mobile LSP shutdown thread"),
+        }
         // Drop the strong observer after unregistering its weak fanout entry.
         self.app_domain_observer.take();
     }
@@ -5329,6 +5505,34 @@ fn mobile_builtin_plugin_enabled(
     }
 }
 
+/// Read the user-tier global TypeScript LSP policy. Project/local settings are
+/// intentionally ignored so repository content cannot promote execution.
+fn mobile_typescript_lsp_mode(
+    settings_path: &std::path::Path,
+) -> Result<lsp::LspActivationMode, String> {
+    let raw = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(lsp::LspActivationMode::Auto)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let root: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| format!("invalid settings JSON: {error}"))?;
+    let Some(value) = root
+        .get("lsp")
+        .and_then(|value| value.get("typescript"))
+        .and_then(|value| value.get("mode"))
+    else {
+        return Ok(lsp::LspActivationMode::Auto);
+    };
+    let mode = value
+        .as_str()
+        .and_then(lsp::LspActivationMode::from_wire)
+        .ok_or_else(|| "settings lsp.typescript.mode must be auto, off, or on".to_string())?;
+    Ok(mode)
+}
+
 /// Persist one mobile builtin toggle without dropping unrelated settings.
 /// Write a sibling temp file and rename it so a process interruption cannot
 /// leave a truncated settings document.
@@ -5353,7 +5557,44 @@ fn persist_mobile_builtin_plugin_enabled(
         .as_object_mut()
         .ok_or_else(|| "settings enabledPlugins must be an object".to_string())?;
     enabled_plugins.insert(plugin_id.to_string(), serde_json::Value::Bool(enabled));
-    let bytes = serde_json::to_vec_pretty(&root)
+    persist_mobile_settings_root(settings_path, &root)
+}
+
+fn persist_mobile_typescript_lsp_mode(
+    settings_path: &std::path::Path,
+    mode: lsp::LspActivationMode,
+) -> Result<(), String> {
+    let mut root = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid settings JSON: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| "settings JSON root must be an object".to_string())?;
+    let lsp = object.entry("lsp").or_insert_with(|| serde_json::json!({}));
+    let lsp = lsp
+        .as_object_mut()
+        .ok_or_else(|| "settings lsp must be an object".to_string())?;
+    let typescript = lsp
+        .entry("typescript")
+        .or_insert_with(|| serde_json::json!({}));
+    let typescript = typescript
+        .as_object_mut()
+        .ok_or_else(|| "settings lsp.typescript must be an object".to_string())?;
+    typescript.insert(
+        "mode".to_string(),
+        serde_json::Value::String(mode.wire_str().to_string()),
+    );
+    persist_mobile_settings_root(settings_path, &root)
+}
+
+fn persist_mobile_settings_root(
+    settings_path: &std::path::Path,
+    root: &serde_json::Value,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(root)
         .map_err(|error| format!("serialize settings JSON: {error}"))?;
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -6122,6 +6363,22 @@ impl MobileEngineHandle {
             .await;
     }
 
+    async fn emit_typescript_lsp_mode(&self) {
+        let requested = self.inner.lsp_registry.activation_mode();
+        let effective = if self.inner.typescript_lsp_runtime_available {
+            requested
+        } else {
+            lsp::LspActivationMode::Off
+        };
+        self.event_sink
+            .emit(ClientEvent::TypescriptLspModeChanged {
+                requested: requested.wire_str().to_string(),
+                effective: effective.wire_str().to_string(),
+                available: self.inner.typescript_lsp_runtime_available,
+            })
+            .await;
+    }
+
     /// Return a credential-free view over this handle's validated cron store.
     pub async fn cron_store(&self) -> Arc<MobileCronStoreHandle> {
         Arc::new(MobileCronStoreHandle::new(
@@ -6401,24 +6658,23 @@ impl MobileEngineHandle {
                 };
                 self.restore_session_permission_mode(&target_permission_mode)
                     .await?;
-                if let Err(error) =
-                    handle
-                        .resume_session(
-                            protocol::SessionId::from_uuid(uuid),
-                            replayed.state.history.clone(),
-                            replayed.last_message_uuid.map(|id| id.to_string()),
-                            replayed.state.active_goal.clone().map(|goal| {
-                                platform_api::ActiveGoalSnapshot {
-                                    condition: goal.condition,
-                                    set_at: goal.set_at,
-                                    last_reason: goal.last_reason,
-                                    iterations: goal.iterations,
-                                    tokens_at_start: goal.tokens_at_start,
-                                }
-                            }),
-                            replayed.handle_runtime_snapshot(),
-                        )
-                        .await
+                if let Err(error) = handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        replayed.state.history.clone(),
+                        replayed.last_message_uuid.map(|id| id.to_string()),
+                        replayed.state.active_goal.clone().map(|goal| {
+                            platform_api::ActiveGoalSnapshot {
+                                condition: goal.condition,
+                                set_at: goal.set_at,
+                                last_reason: goal.last_reason,
+                                iterations: goal.iterations,
+                                tokens_at_start: goal.tokens_at_start,
+                            }
+                        }),
+                        replayed.handle_runtime_snapshot(),
+                    )
+                    .await
                 {
                     let _ = self
                         .restore_session_permission_mode(&previous_permission_mode)
@@ -8000,6 +8256,29 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            ClientCommand::SetTypescriptLspMode { mode } => {
+                let requested = lsp::LspActivationMode::from_wire(&mode).ok_or_else(|| {
+                    ClientError::Rejected {
+                        message: "TypeScript LSP mode must be auto, off, or on".to_string(),
+                    }
+                })?;
+                let _settings_guard = self.settings_write_lock.lock().await;
+                persist_mobile_typescript_lsp_mode(
+                    &self.lingxi_home.join("settings.json"),
+                    requested,
+                )
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("persist TypeScript LSP mode failed: {error}"),
+                })?;
+                let previous = self.inner.lsp_registry.activation_mode();
+                self.inner.lsp_registry.set_activation_mode(requested);
+                if previous != requested {
+                    self.inner.lsp_registry.shutdown_instances().await;
+                }
+                self.emit_typescript_lsp_mode().await;
+                Ok(())
+            }
+
             ClientCommand::GetConversationControls => {
                 self.emit_controls_snapshot().await;
                 Ok(())
@@ -8212,8 +8491,10 @@ impl MobileEngineHandle {
                     .local_apps_llm
                     .set_model(model_id.clone(), profile.clone());
                 let snapshot = handle.get_status_snapshot().await;
-                let selected =
-                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let selected = platform_api::qualified_model_ref(
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -9607,7 +9888,10 @@ impl MobileEngineHandle {
                 .await
                 .as_uuid()
                 .to_string(),
-            model: platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            model: platform_api::qualified_model_ref(
+                &snapshot.model,
+                snapshot.model_profile.as_deref(),
+            ),
             permission_mode: self
                 .inner
                 .orchestrator
@@ -9700,8 +9984,10 @@ impl MobileEngineHandle {
                     snapshot.model_profile.as_deref(),
                 );
                 let details = curated.iter().map(lower_model_details).collect();
-                let current =
-                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let current = platform_api::qualified_model_ref(
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 self.event_sink
                     .emit(ClientEvent::ModelList {
                         models,
@@ -11517,6 +11803,12 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps MCP registry was already attached");
     }
     if local_apps_host
+        .attach_lsp_registry(Arc::downgrade(&inner.lsp_registry))
+        .is_err()
+    {
+        tracing::warn!("local-apps LSP registry was already attached");
+    }
+    if local_apps_host
         .attach_agent_executor(inner.app_agent_executor.clone())
         .is_err()
     {
@@ -11619,6 +11911,7 @@ pub fn build_mobile_engine_inner(
         app_domain_observer,
     });
     handle.runtime.block_on(handle.emit_controls_snapshot());
+    handle.runtime.block_on(handle.emit_typescript_lsp_mode());
     Ok(handle)
 }
 
@@ -11633,10 +11926,10 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
-    use tokio::sync::Notify;
-    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
     use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
+    use tokio::sync::Notify;
+    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
 
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
@@ -12189,9 +12482,9 @@ mod tests {
                 "频率",
             ),
             (
-                Err(platform_api::HttpError::Timeout(std::time::Duration::from_secs(
-                    1,
-                ))),
+                Err(platform_api::HttpError::Timeout(
+                    std::time::Duration::from_secs(1),
+                )),
                 None,
                 "超时",
             ),
@@ -12287,7 +12580,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -12983,6 +13279,20 @@ mod tests {
                 .await
                 .contains(&plugin_id),
             "the compiled-in plugin must be Loaded after boot"
+        );
+        // TypeScript is host-global: the Local App plugin materialization above
+        // must not own this descriptor or unload it when the plugin is toggled.
+        let lsp_name = crate::mobile_lsp::GLOBAL_TYPESCRIPT_LSP_SERVER_NAME;
+        let lsp_config = rt
+            .lsp_registry
+            .get_config(lsp_name)
+            .await
+            .unwrap_or_else(|| {
+                panic!("{lsp_name} must register in the shared global mobile LSP registry")
+            });
+        assert_eq!(
+            lsp_config.command,
+            "/opt/lingxi/toolchains/typescript/7.0.2/tsc"
         );
 
         // Agents: count derived from the packer's OWN resolved inventory, so
@@ -14066,6 +14376,60 @@ mod tests {
     }
 
     #[test]
+    fn typescript_lsp_mode_defaults_to_auto_and_preserves_unrelated_settings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = tmp.path().join("settings.json");
+        assert_eq!(
+            super::mobile_typescript_lsp_mode(&settings).unwrap(),
+            lsp::LspActivationMode::Auto
+        );
+        std::fs::write(
+            &settings,
+            r#"{"theme":"dark","lsp":{"other":{"enabled":true}}}"#,
+        )
+        .unwrap();
+        super::persist_mobile_typescript_lsp_mode(&settings, lsp::LspActivationMode::On)
+            .expect("persist global LSP setting");
+        assert_eq!(
+            super::mobile_typescript_lsp_mode(&settings).unwrap(),
+            lsp::LspActivationMode::On
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["theme"], "dark");
+        assert_eq!(root["lsp"]["other"]["enabled"], true);
+        assert_eq!(root["lsp"]["typescript"]["mode"], "on");
+
+        std::fs::write(&settings, r#"{"lsp":{"typescript":{"mode":"maybe"}}}"#).unwrap();
+        assert!(super::mobile_typescript_lsp_mode(&settings).is_err());
+    }
+
+    #[test]
+    fn typescript_lsp_command_persists_requested_and_reports_degraded_effective_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::SetTypescriptLspMode {
+                    mode: "on".to_string(),
+                })
+                .await
+                .expect("valid mode should persist");
+            let events = listener.received.lock().await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::TypescriptLspModeChanged { requested, effective, available }
+                    if requested == "on" && effective == "off" && !available
+            )));
+        });
+        let settings = tmp.path().join(".lingxi/settings.json");
+        assert_eq!(
+            super::mobile_typescript_lsp_mode(&settings).unwrap(),
+            lsp::LspActivationMode::On
+        );
+    }
+
+    #[test]
     fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
@@ -14126,6 +14490,15 @@ mod tests {
                 super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
                 0,
                 "live FFI count source must agree with disabled listing"
+            );
+            assert!(
+                handle
+                    .inner
+                    .lsp_registry
+                    .get_config(crate::mobile_lsp::GLOBAL_TYPESCRIPT_LSP_SERVER_NAME)
+                    .await
+                    .is_some(),
+                "global TypeScript LSP must not follow the Local App plugin toggle"
             );
             let settings =
                 std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
@@ -14549,7 +14922,9 @@ mod tests {
             _tool: &str,
             _input: serde_json::Value,
         ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal("unused test tool call".into()))
+            Err(platform_api::McpError::Internal(
+                "unused test tool call".into(),
+            ))
         }
 
         async fn read_resource(
@@ -14581,7 +14956,9 @@ mod tests {
             _conn: &platform_api::McpRawConnection,
             _request: platform_api::ElicitRequestDto,
         ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal("unused test elicitation".into()))
+            Err(platform_api::McpError::Internal(
+                "unused test elicitation".into(),
+            ))
         }
 
         async fn disconnect(
@@ -15724,7 +16101,8 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let before: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let before: Arc<dyn platform_api::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             let before = before.get_status_snapshot().await;
 
             let result = handle

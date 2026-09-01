@@ -82,6 +82,13 @@
       "license": "PSF-2.0",
       "architecture": "arm64",
       "origin": "python3"
+    },
+    {
+      "name": "typescript-native",
+      "version": "7.0.2",
+      "license": "Apache-2.0",
+      "architecture": "aarch64",
+      "origin": "@typescript/typescript-linux-arm64"
     }
   ],
   "executable_allowlist": [
@@ -94,6 +101,12 @@
       "path": "/bin/sh",
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "kind": "interpreter"
+    },
+    {
+      "path": "/opt/lingxi/toolchains/typescript/7.0.2/tsc",
+      "sha256": "f86e8070c267b12d6c119bf567cb82d8b245e9d93da1864bc7c603cea10a8b2f",
+      "kind": "elf",
+      "size_bytes": 22872226
     },
     {
       "path": "/usr/bin/git",
@@ -133,6 +146,12 @@
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "kind": "regular-file",
       "size_bytes": 1
+    },
+    {
+      "path": "/opt/lingxi/toolchains/typescript/7.0.2/tsc",
+      "sha256": "f86e8070c267b12d6c119bf567cb82d8b245e9d93da1864bc7c603cea10a8b2f",
+      "kind": "regular-file",
+      "size_bytes": 22872226
     },
     {
       "path": "/usr/bin/git",

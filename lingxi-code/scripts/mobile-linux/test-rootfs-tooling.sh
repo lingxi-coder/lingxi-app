@@ -47,6 +47,23 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
 # moment the product moved to Alpine 3.24.1.
 _pins = json.loads(PINS_PATH.read_text(encoding="utf-8"))
 _alpine = _pins["alpine"]
+_typescript = _pins["typescript_native"]
+_typescript_package = _typescript["packages"]["aarch64"]
+(root / _typescript["install_root"].lstrip("/")).mkdir(parents=True, exist_ok=True)
+typescript_root = root / _typescript["install_root"].lstrip("/")
+write_elf(typescript_root / "tsc", b"typescript-native-test-fixture")
+(typescript_root / "package.json").write_text(
+    json.dumps(
+        {
+            "name": _typescript_package["name"],
+            "version": _typescript["version"],
+            "license": _typescript["license"],
+        }
+    ),
+    encoding="utf-8",
+)
+for filename in ("LICENSE", "NOTICE.txt", "lib.d.ts"):
+    (typescript_root / filename).write_text("fixture\n", encoding="utf-8")
 (root / "etc" / "apk" / "repositories").write_text(
     "\n".join(_alpine["repositories"]) + "\n", encoding="utf-8"
 )
@@ -68,7 +85,19 @@ _entries += [
 )
 PY
 
+export ROOTFS_TOOL_TESTING=1
+export ROOTFS_TOOL_TEST_TSC_SHA256
+ROOTFS_TOOL_TEST_TSC_SHA256="$(shasum -a 256 "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" | awk '{print $1}')"
+
 python3 "${tool}" verify-tree --root "${fixture_root}"
+
+cp "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" "${tmp_root}/tsc.good"
+printf 'tampered' >> "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc"
+if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
+  echo "expected verify-tree to reject native TypeScript executable drift" >&2
+  exit 1
+fi
+cp "${tmp_root}/tsc.good" "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc"
 
 cp "${fixture_root}/lib/apk/db/installed" "${tmp_root}/installed.good"
 # Bump the pinned Git version inside the fixture. Derived from the pins and the
@@ -178,7 +207,7 @@ if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
   exit 1
 fi
 rm -f "${fixture_root}/usr/bin/lx-chain" "${fixture_root}/tmp/payload"
-rm -rf "${fixture_root}/opt"
+rm -rf "${fixture_root}/opt/a"
 
 manifest_path="${tmp_root}/rootfs-manifest.json"
 lock_path="${tmp_root}/rootfs-build.lock.json"

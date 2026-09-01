@@ -13,10 +13,6 @@ use crate::sandbox_runner::SandboxRunner;
 use crate::session_cwd::SessionCwd;
 use crate::worktree_session::WorktreeSessionCell;
 use permission::PermissionMode;
-use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-use std::path::PathBuf;
-use std::sync::Arc;
-use telemetry::AnalyticsBus;
 use platform_api::agent_name_registry::AgentNameRegistry;
 use platform_api::budget::BudgetEnforcerHandle;
 use platform_api::camera::CameraControl;
@@ -38,6 +34,10 @@ use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::tts::TextToSpeech;
 use platform_api::voice::VoiceRecorder;
 use platform_api::worktree::WorktreeManager;
+use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
+use std::path::PathBuf;
+use std::sync::Arc;
+use telemetry::AnalyticsBus;
 
 /// A shared, live "current working directory" cell — the `getCwd()` /
 /// `setCwdState` analog (claude-code's single session-global `Pt.cwd`).
@@ -412,7 +412,12 @@ impl BuiltinToolContext {
             .sync_file_after_edit_in_workspace(path, text, &workspace_cwd)
             .await
         {
-            Ok(()) | Err(platform_api::LspError::Unavailable) => {}
+            Ok(()) => {
+                let _ = registry
+                    .settle_diagnostics_under_host_root(path, std::time::Duration::from_millis(500))
+                    .await;
+            }
+            Err(platform_api::LspError::Unavailable) => {}
             Err(error) => tracing::warn!(
                 target: "lingxi_lsp::file_sync",
                 path = %path.display(),
@@ -708,10 +713,10 @@ impl MobileShellToolCtx {
 mod tests {
     use super::*;
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
+    use platform_api::permission_gate::PermissionDecision;
     use serde_json::Value;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
-    use platform_api::permission_gate::PermissionDecision;
 
     struct LiveReadDenyGate;
 

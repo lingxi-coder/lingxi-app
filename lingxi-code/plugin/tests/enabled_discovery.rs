@@ -79,6 +79,76 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
 }
 
 #[tokio::test]
+async fn resolves_the_recorded_version_when_multiple_cache_versions_exist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_cached_plugin(root, "acme", "weather", "1.0.0");
+    write_cached_plugin(root, "acme", "weather", "2.0.0");
+
+    // The installed record is authoritative. Keeping both cache versions on
+    // disk makes a directory probe ambiguous; the record selects 2.0.0.
+    let installed = serde_json::json!({
+        "version": 2,
+        "plugins": {
+            "weather@acme": [{
+                "scope": "user",
+                "installPath": root.join("cache/acme/weather/2.0.0"),
+                "version": "2.0.0",
+                "installedAt": "2026-08-31T00:00:00.000Z",
+                "lastUpdated": "2026-08-31T00:00:00.000Z"
+            }]
+        }
+    });
+    fs::write(
+        root.join("installed_plugins.json"),
+        serde_json::to_string(&installed).unwrap(),
+    )
+    .unwrap();
+
+    let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
+    let discovered = plugin::discover_enabled_plugins(root, &enabled).await;
+
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(
+        discovered[0].2,
+        root.join("cache/acme/weather/2.0.0"),
+        "enabled discovery must use the installed record's exact version"
+    );
+}
+
+#[tokio::test]
+async fn an_authoritative_missing_record_does_not_probe_another_cache_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_cached_plugin(root, "acme", "weather", "1.0.0");
+    write_cached_plugin(root, "acme", "weather", "2.0.0");
+
+    let installed = serde_json::json!({
+        "version": 2,
+        "plugins": {
+            "weather@acme": [{
+                "scope": "user",
+                "installPath": root.join("cache/acme/weather/3.0.0"),
+                "version": "3.0.0"
+            }]
+        }
+    });
+    fs::write(
+        root.join("installed_plugins.json"),
+        serde_json::to_string(&installed).unwrap(),
+    )
+    .unwrap();
+
+    let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
+    assert!(
+        plugin::discover_enabled_plugins(root, &enabled)
+            .await
+            .is_empty(),
+        "a present but missing installed record must not silently select another version"
+    );
+}
+
+#[tokio::test]
 async fn flat_walk_of_a_real_plugins_dir_finds_nothing() {
     // The real ~/.lingxi/plugins holds cache/, npm-cache/, installed_plugins.json
     // — none with a direct .lingxi-plugin/plugin.json child. The legacy flat

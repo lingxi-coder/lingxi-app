@@ -81,6 +81,86 @@ impl ConversationOrchestrator {
         self.orphan_forced_decisions.lock().await.clear();
         self.prompt_runtime.reset_session_scoped().await;
     }
+
+    /// Apply a model selection with Claude Code's pre/post model-switch hook
+    /// ordering. The pre hook is only valid for user/requested sources; post is
+    /// best-effort because the model mutation has already happened.
+    async fn switch_model_with_hook_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &str,
+    ) -> Result<(), HandleError> {
+        // Unknown provenance must not become an accidental pre-hook bypass.
+        // Legacy/third-party handle callers are SDK callers unless they use one
+        // of the schema's explicit sources.
+        let source = match source {
+            "command" | "picker" | "sdk" | "auto" | "resume" => source,
+            _ => "sdk",
+        };
+        // Keep the hook decision and the state mutation atomic with respect to
+        // an in-flight turn. This prevents a turn from snapshotting the old
+        // model after a pre-hook allowed the switch but before the mutation.
+        let _turn_guard = self.turn_gate.lock().await;
+        let listings = self.api.list_model_listings();
+        let (target_model, target_profile) = normalize_session_model_ref(model, profile, &listings);
+        let (from_model, from_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        if from_model == target_model && from_profile == target_profile {
+            return Ok(());
+        }
+
+        if matches!(source, "command" | "picker" | "sdk") {
+            let aggregate = self
+                .run_pre_model_switch_hooks(
+                    &from_model,
+                    &target_model,
+                    Some(model),
+                    target_profile.as_deref(),
+                    source,
+                )
+                .await;
+            match aggregate.decision {
+                Some(hooks::HookDecision::Block) => {
+                    return Err(HandleError::ActionFailed(
+                        aggregate
+                            .reason
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or_else(|| "Model switch blocked by hook".to_string()),
+                    ));
+                }
+                Some(hooks::HookDecision::Ask) => {
+                    // OrchestratorHandle has no interactive confirmation
+                    // channel. Treat an unresolved ask as a safe refusal rather
+                    // than silently bypassing the hook's requested prompt.
+                    return Err(HandleError::ActionFailed(
+                        aggregate
+                            .reason
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or_else(|| "Model switch requires confirmation".to_string()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        {
+            let mut session = self.session.lock().await;
+            session.model = target_model.clone();
+            session.model_profile = target_profile.clone();
+        }
+        self.run_post_model_switch_hooks(
+            &from_model,
+            &target_model,
+            Some(model),
+            target_profile.as_deref(),
+            source,
+        )
+        .await;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -166,6 +246,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
         }
+        let (from_model, from_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        let requested_model = (!runtime.model.is_empty()).then(|| runtime.model.clone());
         self.reset_session_scoped_runtime().await;
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
@@ -266,6 +351,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // …and so does the cascade's tried-models list (see `clear_session`).
         self.model_runtime.refusal_tried_models.lock().await.clear();
         self.hooks.clear_session_hooks(old_session_id).await;
+        let (to_model, to_profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        if from_model != to_model || from_profile != to_profile {
+            self.run_post_model_switch_hooks(
+                &from_model,
+                &to_model,
+                requested_model.as_deref(),
+                to_profile.as_deref(),
+                "resume",
+            )
+            .await;
+        }
         self.sync_active_goal_stop_hook_for_current_state().await;
         if !runtime.deferred_tools.is_empty() {
             crate::resume::replay_deferred_tools_after_resume(self, runtime.deferred_tools)
@@ -678,12 +777,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
-        let listings = self.api.list_model_listings();
-        let (model, profile) = normalize_session_model_ref(model, profile, &listings);
-        let mut s = self.session.lock().await;
-        s.model = model;
-        s.model_profile = profile;
-        Ok(())
+        self.switch_model_with_hook_source(model, profile, "sdk")
+            .await
+    }
+
+    async fn switch_model_with_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        source: &str,
+    ) -> Result<(), HandleError> {
+        self.switch_model_with_hook_source(model, profile, source)
+            .await
     }
 
     async fn fast_mode(&self) -> bool {
@@ -1501,6 +1606,8 @@ fn event_str(et: &hooks::events::HookEventType) -> &'static str {
         E::SubagentStop => "SubagentStop",
         E::PreCompact => "PreCompact",
         E::PostCompact => "PostCompact",
+        E::PreModelSwitch => "PreModelSwitch",
+        E::PostModelSwitch => "PostModelSwitch",
         E::PermissionRequest => "PermissionRequest",
         E::PermissionDenied => "PermissionDenied",
         E::TeammateIdle => "TeammateIdle",
@@ -2092,6 +2199,9 @@ mod tests {
         orch.compaction_runtime
             .last_response_input_tokens
             .store(99, std::sync::atomic::Ordering::Relaxed);
+        orch.compaction_runtime
+            .last_response_output_tokens
+            .store(88, std::sync::atomic::Ordering::Relaxed);
 
         platform_api::OrchestratorHandle::resume_session(
             &orch,
@@ -2151,6 +2261,12 @@ mod tests {
         assert_eq!(
             orch.compaction_runtime
                 .last_response_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            orch.compaction_runtime
+                .last_response_output_tokens
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
         );

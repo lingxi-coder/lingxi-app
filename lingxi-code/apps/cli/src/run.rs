@@ -21,6 +21,9 @@ use crate::stream_json_input::{
 };
 use command_api::format_description_with_source;
 use permission;
+use platform_api::{
+    FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
+};
 use serde_json::{json, Value};
 use session::jsonl::loader::{
     list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
@@ -28,9 +31,6 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use platform_api::{
-    FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
-};
 
 fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static str {
     match err {
@@ -933,7 +933,10 @@ async fn dispatch_control_request(
                     return;
                 }
             };
-            match orchestrator.switch_model(&target, None).await {
+            match orchestrator
+                .switch_model_with_source(&target, None, "sdk")
+                .await
+            {
                 Ok(()) => writer.reply_success(request_id, None),
                 Err(e) => writer.reply_error(request_id, &e.to_string()),
             }
@@ -1471,12 +1474,12 @@ fn orphan_decision_from_payload(
                 .get("decisionClassification")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| match value {
-                    "user_temporary" => {
-                        Some(platform_api::permission_gate::ToolDecisionClassification::UserTemporary)
-                    }
-                    "user_permanent" => {
-                        Some(platform_api::permission_gate::ToolDecisionClassification::UserPermanent)
-                    }
+                    "user_temporary" => Some(
+                        platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                    ),
+                    "user_permanent" => Some(
+                        platform_api::permission_gate::ToolDecisionClassification::UserPermanent,
+                    ),
                     "user_reject" => {
                         Some(platform_api::permission_gate::ToolDecisionClassification::UserReject)
                     }
@@ -2427,7 +2430,8 @@ fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bo
     if request_model.eq_ignore_ascii_case("default") {
         return model_capabilities("claude-sonnet-5");
     }
-    let capabilities = platform_api::model_capabilities::initialization_capabilities_for(request_model);
+    let capabilities =
+        platform_api::model_capabilities::initialization_capabilities_for(request_model);
     (
         capabilities.supports_effort,
         capabilities.supported_effort_levels.to_vec(),
@@ -3239,7 +3243,9 @@ async fn mount_resumed_tui_inner(
     if let Some(state) = carried_state {
         let orch = &tui_build.runtime.orchestrator;
         if let Some((model, profile)) = state.model {
-            let _ = orch.switch_model(&model, profile.as_deref()).await;
+            let _ = orch
+                .switch_model_with_source(&model, profile.as_deref(), "resume")
+                .await;
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
         let _ = orch.set_plan_mode(state.plan_mode).await;

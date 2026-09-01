@@ -22,17 +22,17 @@ use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use async_trait::async_trait;
 use permission::PermissionMode;
-use protocol::{AgentId, ConversationMessage, MessageId};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tool_api::ToolRegistry;
 use platform_api::coordinator_mode::CoordinatorModeHandle;
 use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
 };
+use protocol::{AgentId, ConversationMessage, MessageId};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tool_api::ToolRegistry;
 
 tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
@@ -102,6 +102,16 @@ pub struct PoolSubagentSpawner {
     /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
     /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<std::sync::OnceLock<Arc<ToolRegistry>>>,
+    /// Creates one independent passive-diagnostics cursor per spawn. The cwd
+    /// lets a host scope the cursor to the child workspace (Local App builders
+    /// must never observe another app's diagnostics).
+    new_diagnostics_source_factory: Option<
+        Arc<
+            dyn Fn(Option<&std::path::Path>) -> Arc<dyn platform_api::NewDiagnosticsSource>
+                + Send
+                + Sync,
+        >,
+    >,
     /// The 6 built-in subagent definitions, keyed by `agent_type`. Built once
     /// in [`Self::new`] from [`builtin_agent_definitions`]. The spawn path
     /// resolves `subagent_type -> AgentDefinition` against this (overridden by
@@ -406,6 +416,7 @@ impl PoolSubagentSpawner {
             pool,
             api_client: None,
             tool_registry: Arc::new(std::sync::OnceLock::new()),
+            new_diagnostics_source_factory: None,
             builtins: Arc::new(builtins),
             persistent_agent_mcp_cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
@@ -441,6 +452,20 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_spawn_observer(mut self, observer: Arc<dyn SubagentSpawnObserver>) -> Self {
         self.spawn_observer = Some(observer);
+        self
+    }
+
+    /// Attach a factory for per-agent passive LSP diagnostic cursors.
+    #[must_use]
+    pub fn with_new_diagnostics_source_factory(
+        mut self,
+        factory: Arc<
+            dyn Fn(Option<&std::path::Path>) -> Arc<dyn platform_api::NewDiagnosticsSource>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        self.new_diagnostics_source_factory = Some(factory);
         self
     }
 
@@ -871,7 +896,10 @@ impl PoolSubagentSpawner {
     /// [`Self::skill_loader_handle`] to fill it later. Threaded onto every child
     /// via [`SubagentContext::skill_loader`].
     #[must_use]
-    pub fn with_skill_loader(self, loader: Arc<dyn platform_api::skill_loader::SkillLoader>) -> Self {
+    pub fn with_skill_loader(
+        self,
+        loader: Arc<dyn platform_api::skill_loader::SkillLoader>,
+    ) -> Self {
         let _ = self.skill_loader.set(loader);
         self
     }
@@ -1307,6 +1335,7 @@ impl PoolSubagentSpawner {
             // over the live registry per the resolved definition's policy.
             api_client: None,
             tool_invoker: None,
+            new_diagnostics_source: None,
             tool_schemas: vec![],
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
             schema: None,
@@ -1606,6 +1635,10 @@ impl PoolSubagentSpawner {
         // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
         // resolve this before rendering the mutable mobile workspace reminder.
         ctx.cwd = request.cwd.as_ref().map(std::path::PathBuf::from);
+        ctx.new_diagnostics_source = self
+            .new_diagnostics_source_factory
+            .as_ref()
+            .map(|factory| factory(ctx.cwd.as_deref()));
         ctx.mobile_runtime_environment_reminder = self
             .mobile_runtime_environment
             .as_ref()
@@ -2640,6 +2673,9 @@ pub(crate) fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
     use serde_json::Value;
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
@@ -2651,9 +2687,6 @@ mod tests {
     use tokio::task::JoinHandle;
     use tool_api::tool_trait::PromptOptions;
     use tool_api::Tool;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
     struct DummyInvoker;
 

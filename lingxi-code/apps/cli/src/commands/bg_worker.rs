@@ -223,9 +223,32 @@ async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
     let output_hub = attach_hub.clone();
     let mut output_task = tokio::spawn(async move {
         let mut filter = tui_core::background_detach::DetachRequestFilter::new(&detach_token);
+        let output_log_home = config_home.clone();
+        let output_log_relative = std::path::PathBuf::from("jobs")
+            .join(&job.short)
+            .join(crate::background_launch::OUTPUT_LOG_FILE);
+        let mut log_warning_emitted = false;
+        let mut append_log = |bytes: &[u8]| {
+            if bytes.is_empty() {
+                return;
+            }
+            if let Err(error) = platform_api::rooted_fs::append_file_bytes(
+                &output_log_home,
+                &output_log_relative,
+                bytes,
+            ) {
+                if !log_warning_emitted {
+                    tracing::warn!(
+                        "lingxi-cli __bg-run: could not persist terminal output log: {error}"
+                    );
+                    log_warning_emitted = true;
+                }
+            }
+        };
         while let Some(bytes) = stdout_rx.recv().await {
             let (output, detach_requests) = filter.push(&bytes);
             if !output.is_empty() {
+                append_log(&output);
                 output_hub.broadcast(&output);
             }
             for _ in 0..detach_requests {
@@ -234,6 +257,7 @@ async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
         }
         let tail = filter.finish();
         if !tail.is_empty() {
+            append_log(&tail);
             output_hub.broadcast(&tail);
         }
     });

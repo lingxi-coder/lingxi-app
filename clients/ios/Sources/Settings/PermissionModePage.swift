@@ -50,3 +50,42 @@ struct PermissionModePage: View {
         }
     }
 }
+
+struct TypeScriptLspModePage: View {
+    @Bindable var store: SettingsStore
+    let host: SettingsHost
+
+    private let options = [
+        RadioOption(value: "auto", label: "自动（推荐）", sub: "仅在受管 Local App 工作区启用。"),
+        RadioOption(value: "off", label: "关闭", sub: "不启动语言服务器，也不暴露 LSP 工具。"),
+        RadioOption(value: "on", label: "始终开启", sub: "也允许在普通 JavaScript / JSX 工作区使用。"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSection(
+                label: "TypeScript LSP",
+                footer: "使用内置固定版本 TypeScript 7；项目不能修改命令或路径。"
+            ) {
+                RadioList(
+                    options: options,
+                    value: Binding(
+                        get: { store.typescriptLspMode },
+                        set: { host.applyTypescriptLspMode($0) }
+                    )
+                )
+            }
+            if !store.typescriptLspAvailable && store.typescriptLspMode != "off" {
+                Text("当前设备的 TypeScript 运行时不可用；已安全降级为关闭。")
+                    .font(.system(size: 12)).foregroundColor(.secondary).padding(.horizontal, 4)
+            } else if store.effectiveTypescriptLspMode != store.typescriptLspMode {
+                Text("当前有效模式：\(store.effectiveTypescriptLspMode)")
+                    .font(.system(size: 12)).foregroundColor(.secondary).padding(.horizontal, 4)
+            }
+            if let error = store.typescriptLspError, !error.isEmpty {
+                Text(error)
+                    .font(.system(size: 12)).foregroundColor(.red).padding(.horizontal, 4)
+            }
+        }
+    }
+}

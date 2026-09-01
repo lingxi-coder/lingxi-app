@@ -680,6 +680,8 @@ impl CompactionRuntime {
     pub(crate) fn reset_token_accounting(&self) {
         self.last_response_input_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_response_output_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.output_token_pool
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.turn_start_output_baseline

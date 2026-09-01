@@ -437,6 +437,68 @@ impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
     }
 }
 
+struct TaggedDiagnosticsSource(usize);
+
+#[async_trait]
+impl platform_api::NewDiagnosticsSource for TaggedDiagnosticsSource {
+    async fn take_new_diagnostics_block(&self) -> Option<String> {
+        Some(format!("diagnostics-cursor-{}", self.0))
+    }
+}
+
+#[tokio::test]
+async fn build_context_creates_an_independent_diagnostics_source_per_teammate() {
+    let next_cursor = Arc::new(AtomicUsize::new(0));
+    let factory_counter = next_cursor.clone();
+    let handler =
+        model_test_handler(None).with_new_diagnostics_source_factory(Arc::new(move || {
+            let cursor = factory_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            Arc::new(TaggedDiagnosticsSource(cursor)) as Arc<dyn platform_api::NewDiagnosticsSource>
+        }));
+
+    let first_definition = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "first")
+        .await
+        .unwrap();
+    let second_definition = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "second")
+        .await
+        .unwrap();
+    let first = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "first",
+            "team",
+            "task one",
+            first_definition,
+        )
+        .await
+        .unwrap();
+    let second = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "second",
+            "team",
+            "task two",
+            second_definition,
+        )
+        .await
+        .unwrap();
+
+    let first_source = first.new_diagnostics_source.expect("first source");
+    let second_source = second.new_diagnostics_source.expect("second source");
+    assert!(!Arc::ptr_eq(&first_source, &second_source));
+    assert_eq!(
+        first_source.take_new_diagnostics_block().await.as_deref(),
+        Some("diagnostics-cursor-1")
+    );
+    assert_eq!(
+        second_source.take_new_diagnostics_block().await.as_deref(),
+        Some("diagnostics-cursor-2")
+    );
+    assert_eq!(next_cursor.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn build_context_renders_default_addendum_then_custom_prompt() {
     let handler = model_test_handler(None).with_system_prompt_renderer(Arc::new(

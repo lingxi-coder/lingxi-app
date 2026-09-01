@@ -17,17 +17,20 @@
 
 use crate::client::LspClient;
 use crate::connection::LspConnectionState;
-use crate::diagnostic_registry::LspDiagnosticRegistry;
+use crate::diagnostic_registry::{
+    DiagnosticSettleStatus, HostDiagnosticSnapshot, LspDiagnosticRegistry,
+};
 use crate::open_file_tracker::OpenFileTracker;
 use crate::passive_feedback::PassiveDiagnosticSubscriber;
+use crate::path_mapper::{DesktopLspPathMapper, LspDocumentPath, LspPathMapper};
+use platform_api::{LspError, LspServerConfig, LspTransport};
 use protocol::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{watch, RwLock};
-use platform_api::{LspError, LspServerConfig, LspTransport};
 
 /// Crash-recovery cap: a server whose start keeps failing is retried until
 /// its failure count EXCEEDS this bound, then every further request returns
@@ -35,13 +38,54 @@ use platform_api::{LspError, LspServerConfig, LspTransport};
 /// `t.maxRestarts ?? 3`; an explicit `maxRestarts` overrides this default.
 const DEFAULT_MAX_RESTARTS: u32 = 3;
 
+/// Host-wide policy controlling where registered language servers may run.
+///
+/// Desktop registries default to [`Self::On`] for backward compatibility.
+/// Mobile installs an `Auto` workspace classifier so a repo cannot promote
+/// itself into LSP execution through project settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LspActivationMode {
+    /// Allow only workspaces accepted by the host's trusted classifier.
+    Auto = 0,
+    /// Disable the tool and reject every start request.
+    Off = 1,
+    /// Allow every workspace handled by a registered server.
+    On = 2,
+}
+
+impl LspActivationMode {
+    /// Stable user-settings / client-protocol spelling.
+    #[must_use]
+    pub const fn wire_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// Parse the stable user-settings / client-protocol spelling.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
+}
+
+type WorkspaceActivationPredicate = dyn Fn(&Path) -> bool + Send + Sync;
+
 /// Per-host LSP registry.
 ///
 /// Holds the configured servers, their current state, and an in-memory
 /// cache that maps individual files to the server name responsible for
 /// them (so we don't re-walk the project root on every request).
 pub struct LspRegistry {
-    /// Server name → live state.
+    /// Workspace-scoped instance key → live state.
     servers: RwLock<HashMap<String, LspConnectionState>>,
     /// Side-channel cache of [`LspClient`] handles per server name.
     ///
@@ -50,7 +94,10 @@ pub struct LspRegistry {
     /// builtin LSP tool (`LSPTool`) can dispatch over the wire-locked
     /// `tool_operations` surface.
     clients: RwLock<HashMap<String, Arc<LspClient>>>,
-    /// File → server-name routing cache (populated by [`Self::ensure_server_for_file`]).
+    /// Registered server definitions keyed by manifest/server name.
+    registered_configs: RwLock<HashMap<String, LspServerConfig>>,
+    /// File → workspace-scoped server-instance key routing cache (populated by
+    /// [`Self::ensure_server_for_file`]).
     file_route_cache: RwLock<HashMap<PathBuf, String>>,
     /// Extension (lowercased, with leading dot) → server names in
     /// REGISTRATION order.
@@ -63,6 +110,7 @@ pub struct LspRegistry {
     ext_routes: RwLock<HashMap<String, Vec<String>>>,
     /// Underlying transport used to start / talk to servers.
     transport: Arc<dyn LspTransport>,
+    path_mapper: Arc<dyn LspPathMapper>,
     /// Plugin id → server names contributed by that plugin (used by
     /// `unregister_plugin`).
     plugin_servers: RwLock<HashMap<PluginId, Vec<String>>>,
@@ -72,7 +120,7 @@ pub struct LspRegistry {
     /// `<new-diagnostics>` reminder).
     diagnostics: Option<LspDiagnosticRegistry>,
     /// Live diagnostic subscribers, kept alive (drop aborts the task) keyed by
-    /// server name.
+    /// workspace-scoped server-instance key.
     subscribers: RwLock<HashMap<String, PassiveDiagnosticSubscriber>>,
     /// Manager-wide open-document/LRU/version state. The LSP tool must reuse
     /// this across calls; a per-call tracker would resend `didOpen` forever.
@@ -80,7 +128,12 @@ pub struct LspRegistry {
     /// Synchronous tool-availability bit: true once at least one plugin LSP
     /// config is registered.
     has_registered_servers: AtomicBool,
-    /// In-flight start claims, keyed by server name (2.1.207 P2-09).
+    /// Requested host policy. `Auto` delegates to
+    /// `workspace_activation_predicate`; `Off` is fail-closed.
+    activation_mode: AtomicU8,
+    workspace_activation_predicate: Arc<WorkspaceActivationPredicate>,
+    /// In-flight start claims, keyed by workspace-scoped server-instance key
+    /// (2.1.207 P2-09).
     ///
     /// claude-code's per-server start fn early-returns while the state is
     /// `running` or `starting` — on its single-threaded event loop the
@@ -161,20 +214,28 @@ impl Drop for StartClaimGuard {
 }
 
 impl LspRegistry {
+    async fn registered_config_snapshot(&self, name: &str) -> Option<LspServerConfig> {
+        self.registered_configs.read().await.get(name).cloned()
+    }
+
     /// Build an empty registry backed by `transport`.
     #[must_use]
     pub fn new(transport: Arc<dyn LspTransport>) -> Self {
         Self {
             servers: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
+            registered_configs: RwLock::new(HashMap::new()),
             file_route_cache: RwLock::new(HashMap::new()),
             ext_routes: RwLock::new(HashMap::new()),
             transport,
+            path_mapper: Arc::new(DesktopLspPathMapper),
             plugin_servers: RwLock::new(HashMap::new()),
             diagnostics: None,
             subscribers: RwLock::new(HashMap::new()),
             open_files: OpenFileTracker::new(),
             has_registered_servers: AtomicBool::new(false),
+            activation_mode: AtomicU8::new(LspActivationMode::On as u8),
+            workspace_activation_predicate: Arc::new(|_| true),
             starting: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -185,6 +246,49 @@ impl LspRegistry {
     pub fn with_diagnostics(mut self, diagnostics: LspDiagnosticRegistry) -> Self {
         self.diagnostics = Some(diagnostics);
         self
+    }
+
+    #[must_use]
+    pub fn with_path_mapper(mut self, path_mapper: Arc<dyn LspPathMapper>) -> Self {
+        self.path_mapper = path_mapper;
+        self
+    }
+
+    /// Configure the trusted host-workspace classifier used by `Auto` mode.
+    #[must_use]
+    pub fn with_workspace_activation_predicate(
+        mut self,
+        predicate: Arc<WorkspaceActivationPredicate>,
+    ) -> Self {
+        self.workspace_activation_predicate = predicate;
+        self
+    }
+
+    #[must_use]
+    /// Return the current requested host policy.
+    pub fn activation_mode(&self) -> LspActivationMode {
+        match self.activation_mode.load(Ordering::Acquire) {
+            0 => LspActivationMode::Auto,
+            1 => LspActivationMode::Off,
+            _ => LspActivationMode::On,
+        }
+    }
+
+    /// Update the requested policy. Callers tightening the policy should also
+    /// call [`Self::shutdown_instances`] so already-running children are
+    /// reclaimed immediately.
+    pub fn set_activation_mode(&self, mode: LspActivationMode) {
+        self.activation_mode.store(mode as u8, Ordering::Release);
+    }
+
+    #[must_use]
+    /// Whether the current policy allows this host workspace.
+    pub fn allows_workspace(&self, workspace_cwd: &Path) -> bool {
+        match self.activation_mode() {
+            LspActivationMode::Off => false,
+            LspActivationMode::On => true,
+            LspActivationMode::Auto => (self.workspace_activation_predicate)(workspace_cwd),
+        }
     }
 
     /// Shared document tracker used by every LSP tool call.
@@ -205,7 +309,9 @@ impl LspRegistry {
     /// and on surfaces that cannot launch plugin language servers.
     #[must_use]
     pub fn is_tool_available(&self) -> bool {
-        self.has_registered_servers() && self.transport.is_available()
+        self.activation_mode() != LspActivationMode::Off
+            && self.has_registered_servers()
+            && self.transport.is_available()
     }
 
     /// Cache an `Arc<LspClient>` for `name` (M4-07).
@@ -215,19 +321,69 @@ impl LspRegistry {
 
     /// Return the cached `Arc<LspClient>` for `name`, if any (M4-07).
     pub async fn get_client(&self, name: &str) -> Option<Arc<LspClient>> {
-        self.clients.read().await.get(name).cloned()
+        let clients = self.clients.read().await;
+        if let Some(client) = clients.get(name) {
+            return Some(client.clone());
+        }
+        let mut matches = clients
+            .iter()
+            .filter(|(key, _)| server_name_for_instance_key(key) == name)
+            .map(|(_, client)| client.clone());
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
     }
 
     /// Return the [`LspServerConfig`] for `name`, if any (M4-07).
     pub async fn get_config(&self, name: &str) -> Option<LspServerConfig> {
-        let servers = self.servers.read().await;
-        match servers.get(name)? {
-            LspConnectionState::Disconnected { config }
-            | LspConnectionState::Starting { config, .. }
-            | LspConnectionState::Initialized { config, .. }
-            | LspConnectionState::Failed { config, .. }
-            | LspConnectionState::Stopped { config } => Some(config.clone()),
+        {
+            let servers = self.servers.read().await;
+            if let Some(state) = servers.get(name) {
+                return Some(state.config().clone());
+            }
         }
+        if let Some(config) = self.registered_configs.read().await.get(name) {
+            return Some(config.clone());
+        }
+        let servers = self.servers.read().await;
+        let mut matches = servers
+            .iter()
+            .filter(|(key, _)| server_name_for_instance_key(key) == name)
+            .map(|(_, state)| state.config().clone());
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    /// Resolve the host/server identity for a document path.
+    pub fn document_path_for_host_path(
+        &self,
+        path: &Path,
+        workspace_cwd: &Path,
+    ) -> Result<LspDocumentPath, LspError> {
+        self.path_mapper.map_host_path(path, workspace_cwd)
+    }
+
+    /// Resolve a server-visible file URI back to a host path when possible.
+    pub fn host_path_for_server_uri(
+        &self,
+        uri: &lsp_types::Url,
+    ) -> Result<Option<PathBuf>, LspError> {
+        self.path_mapper.host_path_for_uri(uri)
+    }
+
+    /// Resolve a server-visible file URI back to a host file URI when possible.
+    pub fn host_uri_for_server_uri(
+        &self,
+        uri: &lsp_types::Url,
+    ) -> Result<Option<lsp_types::Url>, LspError> {
+        self.path_mapper.host_uri_for_server_uri(uri)
     }
 
     /// Test-only helper: register `config` (Disconnected state) and cache `client`.
@@ -239,6 +395,10 @@ impl LspRegistry {
         client: Arc<LspClient>,
     ) {
         self.record_routes(&config).await;
+        self.registered_configs
+            .write()
+            .await
+            .insert(config.name.clone(), config.clone());
         self.servers
             .write()
             .await
@@ -256,10 +416,10 @@ impl LspRegistry {
     /// [`Self::register_plugin_servers`].
     pub(crate) async fn register_config(&self, config: LspServerConfig) {
         self.record_routes(&config).await;
-        self.servers.write().await.insert(
-            config.name.clone(),
-            LspConnectionState::Disconnected { config },
-        );
+        self.registered_configs
+            .write()
+            .await
+            .insert(config.name.clone(), config);
         self.has_registered_servers.store(true, Ordering::Release);
     }
 
@@ -335,6 +495,9 @@ impl LspRegistry {
         path: &Path,
         workspace_cwd: &Path,
     ) -> Result<McpConnectionId, LspError> {
+        if !self.allows_workspace(workspace_cwd) {
+            return Err(LspError::Unavailable);
+        }
         let names = {
             let Some(ext) = file_extension(path) else {
                 return Err(LspError::Unavailable);
@@ -379,7 +542,15 @@ impl LspRegistry {
             Fail(LspError),
         }
 
-        self.record_dead_connection(&name).await;
+        let registered = self
+            .registered_config_snapshot(&name)
+            .await
+            .ok_or(LspError::Unavailable)?;
+        let workspace_root =
+            effective_workspace_root(&registered, workspace_cwd, &*self.path_mapper)?;
+        let instance_key = instance_key(&name, &workspace_root);
+
+        self.record_dead_connection(&instance_key).await;
 
         // Whether we already awaited an in-flight attempt: a waiter that then
         // observes `Failed` returns the recorded error instead of claiming an
@@ -390,54 +561,47 @@ impl LspRegistry {
         let (config, prior_failures) = loop {
             let claim = {
                 let mut servers = self.servers.write().await;
-                let Some(state) = servers.get(&name) else {
-                    return Err(LspError::Unavailable);
-                };
-                match state {
-                    LspConnectionState::Initialized { connection_id, .. } => {
+                match servers.get(&instance_key) {
+                    Some(LspConnectionState::Initialized { connection_id, .. }) => {
                         Claim::Reuse(*connection_id)
                     }
-                    LspConnectionState::Starting { .. } => {
+                    Some(LspConnectionState::Starting { .. }) => {
                         let rx = self
                             .starting
                             .lock()
                             .expect("lsp start-claim lock poisoned")
-                            .get(&name)
+                            .get(&instance_key)
                             .map(watch::Sender::subscribe);
                         if let Some(rx) = rx {
                             Claim::Wait(rx)
                         } else {
-                            // Stale `Starting` — the previous starting task
-                            // was cancelled mid-flight. Reclaim it.
+                            let Some(state) = servers.get(&instance_key) else {
+                                return Err(LspError::Unavailable);
+                            };
                             let config = state.config().clone();
                             let restarts = match state {
                                 LspConnectionState::Starting { restarts, .. } => *restarts,
                                 _ => 0,
                             };
-                            self.claim_start(&mut servers, &name, config.clone(), restarts);
+                            self.claim_start(&mut servers, &instance_key, config.clone(), restarts);
                             Claim::Start(Box::new(config), restarts)
                         }
                     }
-                    LspConnectionState::Disconnected { config }
-                    | LspConnectionState::Stopped { config } => {
+                    Some(LspConnectionState::Disconnected { config })
+                    | Some(LspConnectionState::Stopped { config }) => {
                         let config = config.clone();
-                        self.claim_start(&mut servers, &name, config.clone(), 0);
+                        self.claim_start(&mut servers, &instance_key, config.clone(), 0);
                         Claim::Start(Box::new(config), 0)
                     }
-                    LspConnectionState::Failed {
+                    Some(LspConnectionState::Failed {
                         config,
                         error,
                         restarts,
                         max_recovery_reported,
-                    } => {
+                    }) => {
                         if waited || (config.restart_on_crash == Some(false) && *restarts > 0) {
                             Claim::Fail(LspError::ServerError(error.clone()))
                         } else if *restarts > config.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS) {
-                            // claude-code: `if (state === "error" && restartCount
-                            // > maxRestarts)` — report ONCE (error log +
-                            // tengu_feature_bad lsp_server_start /
-                            // lsp_server_max_crash_recovery), record the cap
-                            // error as lastError, rethrow it thereafter.
                             if *max_recovery_reported {
                                 Claim::Fail(LspError::ServerError(error.clone()))
                             } else {
@@ -449,7 +613,7 @@ impl LspRegistry {
                                 );
                                 tracing::error!(target: "lingxi_lsp::registry", "{msg}");
                                 servers.insert(
-                                    name.clone(),
+                                    instance_key.clone(),
                                     LspConnectionState::Failed {
                                         config,
                                         error: msg.clone(),
@@ -461,9 +625,13 @@ impl LspRegistry {
                             }
                         } else {
                             let (config, restarts) = (config.clone(), *restarts);
-                            self.claim_start(&mut servers, &name, config.clone(), restarts);
+                            self.claim_start(&mut servers, &instance_key, config.clone(), restarts);
                             Claim::Start(Box::new(config), restarts)
                         }
+                    }
+                    None => {
+                        self.claim_start(&mut servers, &instance_key, registered.clone(), 0);
+                        Claim::Start(Box::new(registered.clone()), 0)
                     }
                 }
             };
@@ -475,7 +643,7 @@ impl LspRegistry {
                     self.file_route_cache
                         .write()
                         .await
-                        .insert(path.to_path_buf(), name);
+                        .insert(path.to_path_buf(), instance_key.clone());
                     return Ok(connection_id);
                 }
                 Claim::Fail(e) => return Err(e),
@@ -495,16 +663,21 @@ impl LspRegistry {
         // and an already-spawned child is not leaked.
         let mut claim_guard = StartClaimGuard {
             starting: Arc::clone(&self.starting),
-            name: name.clone(),
+            name: instance_key.clone(),
             transport: Arc::clone(&self.transport),
             owned_connection: None,
         };
-        tracing::debug!(target: "lingxi_lsp::registry", "Starting LSP server instance: {name}");
-        let startup_config = startup_config_for_workspace(&config, workspace_cwd);
+        tracing::debug!(
+            target: "lingxi_lsp::registry",
+            server = %name,
+            workspace_root = %workspace_root.display(),
+            "Starting LSP server instance"
+        );
+        let startup_config = startup_config_for_root(&config, &workspace_root);
         let started = async {
             let raw = self.transport.start_server(&startup_config).await?;
             claim_guard.own_connection(raw.connection_id);
-            let root_uri = workspace_root_uri(&startup_config, workspace_cwd);
+            let root_uri = workspace_root_uri(&workspace_root, &*self.path_mapper)?;
             let caps = self.transport.initialize(&raw, &root_uri).await?;
             // Bridge the transport's live connection into a registry-side
             // client over the SAME shared connection, so the LSP tool can
@@ -516,12 +689,25 @@ impl LspRegistry {
 
         match started {
             Ok((raw, caps, connection)) => {
+                // A live settings change may tighten the policy while the
+                // initialize handshake is in flight. Re-check before
+                // publishing the child so Off/Auto cannot be raced.
+                if !self.allows_workspace(workspace_cwd) {
+                    if let Some(connection_id) = claim_guard.owned_connection() {
+                        if self.transport.shutdown(connection_id).await.is_ok() {
+                            claim_guard.release_connection();
+                        }
+                    }
+                    self.servers.write().await.remove(&instance_key);
+                    drop(claim_guard);
+                    return Err(LspError::Unavailable);
+                }
                 // Publish state + client + subscriber together under the
                 // servers write lock; if `unregister_plugin` raced the start
                 // and already purged this server, do NOT resurrect it — stop
                 // the fresh child instead of leaking it.
                 let mut servers = self.servers.write().await;
-                if !servers.contains_key(&name) {
+                if !servers.contains_key(&instance_key) {
                     drop(servers);
                     if let Some(connection_id) = claim_guard.owned_connection() {
                         match self.transport.shutdown(connection_id).await {
@@ -537,9 +723,12 @@ impl LspRegistry {
                 }
                 let client = Arc::new(LspClient::with_shared(name.clone(), connection.clone()));
                 self.open_files
-                    .activate_server(&name, connection.clone())
+                    .activate_server(&instance_key, connection.clone())
                     .await;
-                self.clients.write().await.insert(name.clone(), client);
+                self.clients
+                    .write()
+                    .await
+                    .insert(instance_key.clone(), client);
                 // Start the passive diagnostics subscriber (kept alive in
                 // `subscribers`).
                 if config.diagnostics.unwrap_or(true) {
@@ -549,11 +738,14 @@ impl LspRegistry {
                             name.clone(),
                             diag.clone(),
                         );
-                        self.subscribers.write().await.insert(name.clone(), sub);
+                        self.subscribers
+                            .write()
+                            .await
+                            .insert(instance_key.clone(), sub);
                     }
                 }
                 servers.insert(
-                    name.clone(),
+                    instance_key.clone(),
                     LspConnectionState::Initialized {
                         config,
                         connection_id: raw.connection_id,
@@ -570,12 +762,14 @@ impl LspRegistry {
                 drop(claim_guard);
                 tracing::debug!(
                     target: "lingxi_lsp::registry",
-                    "LSP server instance started: {name}"
+                    server = %name,
+                    workspace_root = %workspace_root.display(),
+                    "LSP server instance started"
                 );
                 self.file_route_cache
                     .write()
                     .await
-                    .insert(path.to_path_buf(), name);
+                    .insert(path.to_path_buf(), instance_key);
                 Ok(raw.connection_id)
             }
             Err(e) => {
@@ -599,9 +793,9 @@ impl LspRegistry {
                 );
                 let mut servers = self.servers.write().await;
                 // Skip the write when the server was unregistered mid-start.
-                if servers.contains_key(&name) {
+                if servers.contains_key(&instance_key) {
                     servers.insert(
-                        name.clone(),
+                        instance_key,
                         LspConnectionState::Failed {
                             config,
                             error: e.to_string(),
@@ -658,6 +852,14 @@ impl LspRegistry {
         self.clients.write().await.remove(name);
         self.subscribers.write().await.remove(name);
         self.open_files.clear_server(name).await;
+        if let Err(cleanup_error) = self.transport.terminate(connection_id).await {
+            tracing::warn!(
+                target: "lingxi_lsp::registry",
+                server = %name,
+                %cleanup_error,
+                "failed to reap crashed LSP transport session"
+            );
+        }
     }
 
     /// Transition `name` to `Starting` and register the in-flight claim's
@@ -713,16 +915,59 @@ impl LspRegistry {
     ) -> Result<(String, Arc<LspClient>, LspServerConfig), LspError> {
         self.ensure_server_for_file_in_workspace(path, workspace_cwd)
             .await?;
-        let name = self
+        let instance_key = self
             .file_route_cache
             .read()
             .await
             .get(path)
             .cloned()
             .ok_or(LspError::Unavailable)?;
-        let client = self.get_client(&name).await.ok_or(LspError::Unavailable)?;
-        let config = self.get_config(&name).await.ok_or(LspError::Unavailable)?;
-        Ok((name, client, config))
+        let client = self
+            .clients
+            .read()
+            .await
+            .get(&instance_key)
+            .cloned()
+            .ok_or(LspError::Unavailable)?;
+        let config = if let Some(config) = {
+            let servers = self.servers.read().await;
+            servers
+                .get(&instance_key)
+                .map(|state| state.config().clone())
+        } {
+            config
+        } else {
+            self.registered_configs
+                .read()
+                .await
+                .get(server_name_for_instance_key(&instance_key))
+                .cloned()
+                .ok_or(LspError::Unavailable)?
+        };
+        Ok((
+            server_name_for_instance_key(&instance_key).to_string(),
+            client,
+            config,
+        ))
+    }
+
+    pub async fn latest_diagnostics_under_host_root(
+        &self,
+        host_root: &Path,
+    ) -> Vec<HostDiagnosticSnapshot> {
+        match &self.diagnostics {
+            Some(diagnostics) => diagnostics.diagnostics_under_host_root(host_root).await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn settle_diagnostics_under_host_root(
+        &self,
+        host_root: &Path,
+        timeout: Duration,
+    ) -> Option<DiagnosticSettleStatus> {
+        let diagnostics = self.diagnostics.as_ref()?;
+        Some(diagnostics.settle_under_host_root(host_root, timeout).await)
     }
 
     /// Push a successful file-tool edit into the matching language server.
@@ -751,22 +996,35 @@ impl LspRegistry {
         let (_, client, config) = self
             .ensure_client_for_file_in_workspace(path, workspace_cwd)
             .await?;
-        let uri = lsp_types::Url::from_file_path(path).map_err(|()| {
-            LspError::Transport(format!(
-                "cannot convert path to file URI: {}",
-                path.display()
-            ))
-        })?;
-        crate::tool_operations::sync_document_text(
+        let document = self.document_path_for_host_path(path, workspace_cwd)?;
+        let sync = crate::tool_operations::sync_document_text(
             &client,
             &self.open_files,
             &config,
-            path,
-            &uri,
+            &document,
             text,
         )
         .await
-        .map_err(|error| LspError::Transport(error.to_string()))
+        .map_err(|error| LspError::Transport(error.to_string()))?;
+        if let Some(diagnostics) = &self.diagnostics {
+            let synced_version = match sync {
+                crate::open_file_tracker::DocumentSync::Open { version, .. }
+                | crate::open_file_tracker::DocumentSync::Change { version } => Some(version),
+                crate::open_file_tracker::DocumentSync::Unchanged => {
+                    self.open_files.current_version(&document.uri).await
+                }
+            };
+            diagnostics
+                .record_document_sync(
+                    &document.host_path,
+                    &document.server_path,
+                    document.uri.clone(),
+                    synced_version,
+                    !matches!(sync, crate::open_file_tracker::DocumentSync::Unchanged),
+                )
+                .await;
+        }
+        Ok(())
     }
 
     /// Bulk-register server configurations contributed by `plugin_id`.
@@ -808,39 +1066,58 @@ impl LspRegistry {
             .remove(plugin_id)
             .unwrap_or_default();
         if !names.is_empty() {
+            self.registered_configs
+                .write()
+                .await
+                .retain(|server_name, _| !names.iter().any(|name| name == server_name));
+            let removed_names: std::collections::HashSet<String> = names.iter().cloned().collect();
             // Collect the live connections while removing the entries; a
             // server still `Starting` has no connection yet — its in-flight
             // starter observes the missing entry on completion and stops the
             // fresh child itself (see `ensure_server_for_file`).
             let mut live: Vec<(String, McpConnectionId)> = Vec::new();
+            let keys_to_remove = {
+                let servers = self.servers.read().await;
+                servers
+                    .keys()
+                    .filter(|key| removed_names.contains(server_name_for_instance_key(key)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
             {
                 let mut servers = self.servers.write().await;
                 let mut clients = self.clients.write().await;
                 let mut subs = self.subscribers.write().await;
-                for n in &names {
+                for key in &keys_to_remove {
                     if let Some(LspConnectionState::Initialized { connection_id, .. }) =
-                        servers.remove(n)
+                        servers.remove(key)
                     {
-                        live.push((n.clone(), connection_id));
+                        live.push((key.clone(), connection_id));
                     }
-                    clients.remove(n);
-                    subs.remove(n); // drop aborts the subscriber task
+                    clients.remove(key);
+                    subs.remove(key);
                 }
             }
-            for name in &names {
-                self.open_files.clear_server(name).await;
+            for key in &keys_to_remove {
+                self.open_files.clear_server(&key).await;
             }
+            // Keep in-flight start claims until their owning guards finish.
+            // The starter observes that its server entry was removed and
+            // shuts down the just-created child; if that shutdown future is
+            // cancelled, `StartClaimGuard::drop` terminates it before releasing
+            // the claim. Removing the sender here would advertise cleanup as
+            // complete while the process still exists.
             {
                 let mut routes = self.ext_routes.write().await;
                 for list in routes.values_mut() {
-                    list.retain(|n| !names.contains(n));
+                    list.retain(|n| !removed_names.contains(n));
                 }
                 routes.retain(|_, list| !list.is_empty());
             }
             self.file_route_cache
                 .write()
                 .await
-                .retain(|_, n| !names.contains(n));
+                .retain(|_, key| !removed_names.contains(server_name_for_instance_key(key)));
             for (n, connection_id) in live {
                 match self.transport.shutdown(connection_id).await {
                     Ok(()) => tracing::debug!(
@@ -853,10 +1130,151 @@ impl LspRegistry {
                     ),
                 }
             }
-            self.has_registered_servers
-                .store(!self.servers.read().await.is_empty(), Ordering::Release);
+            self.has_registered_servers.store(
+                !self.registered_configs.read().await.is_empty(),
+                Ordering::Release,
+            );
         }
         names
+    }
+
+    /// Shut down every live server instance for one host workspace while
+    /// preserving plugin registrations for other and future workspaces.
+    pub async fn shutdown_workspace(&self, host_root: &Path) -> Result<(), LspError> {
+        let workspace_root = self.path_mapper.workspace_root_for(host_root)?;
+        let keys_to_remove = {
+            let servers = self.servers.read().await;
+            servers
+                .keys()
+                .filter(|key| {
+                    workspace_root_for_instance_key(key) == Some(workspace_root.as_path())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if keys_to_remove.is_empty() {
+            return Ok(());
+        }
+
+        let keys = keys_to_remove
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut live = Vec::new();
+        {
+            let mut servers = self.servers.write().await;
+            let mut clients = self.clients.write().await;
+            let mut subscribers = self.subscribers.write().await;
+            for key in &keys_to_remove {
+                if let Some(LspConnectionState::Initialized { connection_id, .. }) =
+                    servers.remove(key)
+                {
+                    live.push((key.clone(), connection_id));
+                }
+                clients.remove(key);
+                subscribers.remove(key);
+            }
+        }
+        self.file_route_cache
+            .write()
+            .await
+            .retain(|_, key| !keys.contains(key));
+        for key in &keys_to_remove {
+            self.open_files.clear_server(key).await;
+        }
+
+        // Do not clear registered configs, plugin ownership or extension
+        // routes: a later session for this workspace must be able to start a
+        // clean replacement, and unrelated workspaces keep running.
+        for (name, connection_id) in live {
+            if let Err(error) = self.transport.shutdown(connection_id).await {
+                tracing::warn!(
+                    target: "lingxi_lsp::registry",
+                    server = %name,
+                    %error,
+                    "failed to shut down workspace LSP server"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Shut down every live child while preserving fixed plugin
+    /// registrations and extension routes. Used for live policy changes: a
+    /// later allowed request lazily starts a clean replacement.
+    pub async fn shutdown_instances(&self) {
+        let (live, server_names) = {
+            let mut servers = self.servers.write().await;
+            let mut live = Vec::new();
+            let mut names = Vec::new();
+            for (name, state) in servers.drain() {
+                names.push(name.clone());
+                if let LspConnectionState::Initialized { connection_id, .. } = state {
+                    live.push((name, connection_id));
+                }
+            }
+            (live, names)
+        };
+        self.clients.write().await.clear();
+        self.subscribers.write().await.clear();
+        self.file_route_cache.write().await.clear();
+        self.starting
+            .lock()
+            .expect("lsp start-claim lock poisoned")
+            .clear();
+        for name in server_names {
+            self.open_files.clear_server(&name).await;
+        }
+        for (name, connection_id) in live {
+            if let Err(error) = self.transport.shutdown(connection_id).await {
+                tracing::warn!(
+                    target: "lingxi_lsp::registry",
+                    server = %name,
+                    %error,
+                    "failed to shut down LSP server after activation-mode change"
+                );
+            }
+        }
+    }
+
+    /// Shut down every live LSP server instance and clear all registry state.
+    pub async fn shutdown_all(&self) {
+        let (live, server_names) = {
+            let mut servers = self.servers.write().await;
+            let mut live = Vec::new();
+            let mut server_names = Vec::new();
+            for (name, state) in servers.drain() {
+                server_names.push(name.clone());
+                if let LspConnectionState::Initialized { connection_id, .. } = state {
+                    live.push((name, connection_id));
+                }
+            }
+            (live, server_names)
+        };
+        self.clients.write().await.clear();
+        self.subscribers.write().await.clear();
+        self.file_route_cache.write().await.clear();
+        self.ext_routes.write().await.clear();
+        self.plugin_servers.write().await.clear();
+        self.registered_configs.write().await.clear();
+        self.starting
+            .lock()
+            .expect("lsp start-claim lock poisoned")
+            .clear();
+        for name in server_names {
+            let _ = self.open_files.clear_server(&name).await;
+        }
+        for (name, connection_id) in live {
+            if let Err(error) = self.transport.shutdown(connection_id).await {
+                tracing::warn!(
+                    target: "lingxi_lsp::registry",
+                    server = %name,
+                    %error,
+                    "failed to shut down LSP server during registry cleanup"
+                );
+            }
+        }
+        self.has_registered_servers.store(false, Ordering::Release);
     }
 }
 
@@ -865,10 +1283,10 @@ mod routing_tests {
     use super::*;
     use async_trait::async_trait;
     use jsonrpc::Connection;
+    use platform_api::{LspRawConnection, LspServerCapabilities};
     use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use platform_api::{LspRawConnection, LspServerCapabilities};
 
     fn caps() -> LspServerCapabilities {
         LspServerCapabilities {
@@ -1089,6 +1507,26 @@ mod routing_tests {
         }
     }
 
+    async fn has_state_for_server(
+        reg: &LspRegistry,
+        server_name: &str,
+        predicate: impl Fn(&LspConnectionState) -> bool,
+    ) -> bool {
+        reg.servers.read().await.iter().any(|(key, state)| {
+            server_name_for_instance_key(key) == server_name && predicate(state)
+        })
+    }
+
+    async fn instance_keys_for_server(reg: &LspRegistry, server_name: &str) -> Vec<String> {
+        reg.servers
+            .read()
+            .await
+            .keys()
+            .filter(|key| server_name_for_instance_key(key) == server_name)
+            .cloned()
+            .collect()
+    }
+
     #[tokio::test]
     async fn ensure_server_routes_starts_caches_and_is_idempotent() {
         let reg = LspRegistry::new(Arc::new(MockTransport::new()));
@@ -1107,10 +1545,12 @@ mod routing_tests {
             .await
             .expect("starts rust-analyzer");
         assert!(reg.get_client("rust-analyzer").await.is_some());
-        assert!(matches!(
-            reg.servers.read().await.get("rust-analyzer"),
-            Some(LspConnectionState::Initialized { .. })
-        ));
+        assert!(
+            has_state_for_server(&reg, "rust-analyzer", |state| {
+                matches!(state, LspConnectionState::Initialized { .. })
+            })
+            .await
+        );
 
         // A second call for another .rs file reuses the running server.
         let id2 = reg
@@ -1118,6 +1558,55 @@ mod routing_tests {
             .await
             .expect("reuses running server");
         assert_eq!(id, id2, "already-initialized server is reused");
+    }
+
+    #[tokio::test]
+    async fn activation_mode_off_is_fail_closed_and_hides_the_tool() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(rust_config()).await;
+        assert!(reg.is_tool_available(), "desktop-compatible default is on");
+
+        reg.set_activation_mode(LspActivationMode::Off);
+        assert!(!reg.is_tool_available());
+        assert!(matches!(
+            reg.ensure_server_for_file_in_workspace(Path::new("/p/src/main.rs"), Path::new("/p"))
+                .await,
+            Err(LspError::Unavailable)
+        ));
+        assert!(transport.started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn activation_mode_auto_uses_the_host_workspace_classifier() {
+        let transport = Arc::new(MockTransport::new());
+        let trusted = PathBuf::from("/data/apps/demo/workspace");
+        let predicate_root = trusted.clone();
+        let reg = LspRegistry::new(transport.clone()).with_workspace_activation_predicate(
+            Arc::new(move |workspace| workspace.starts_with(&predicate_root)),
+        );
+        reg.register_config(rust_config()).await;
+        reg.set_activation_mode(LspActivationMode::Auto);
+
+        assert!(matches!(
+            reg.ensure_server_for_file_in_workspace(
+                Path::new("/repo/src/main.rs"),
+                Path::new("/repo")
+            )
+            .await,
+            Err(LspError::Unavailable)
+        ));
+        assert!(transport.started.lock().unwrap().is_empty());
+
+        reg.ensure_server_for_file_in_workspace(&trusted.join("src/main.rs"), &trusted)
+            .await
+            .expect("trusted managed workspace starts the server");
+        assert_eq!(transport.started.lock().unwrap().len(), 1);
+
+        reg.set_activation_mode(LspActivationMode::Off);
+        reg.shutdown_instances().await;
+        assert_eq!(transport.shutdowns.lock().unwrap().len(), 1);
+        assert!(reg.has_registered_servers());
     }
 
     #[tokio::test]
@@ -1331,10 +1820,10 @@ mod routing_tests {
                 "attempt {attempt} surfaces the spawn error"
             );
             assert!(
-                matches!(
-                    reg.servers.read().await.get("rust-analyzer"),
-                    Some(LspConnectionState::Failed { .. })
-                ),
+                has_state_for_server(&reg, "rust-analyzer", |state| {
+                    matches!(state, LspConnectionState::Failed { .. })
+                })
+                .await,
                 "attempt {attempt} records the Failed state"
             );
             assert_eq!(
@@ -1383,11 +1872,16 @@ mod routing_tests {
             3,
             "initial start plus exactly two successful restarts"
         );
+        assert_eq!(
+            transport.terminated.lock().unwrap().len(),
+            2,
+            "each crashed transport session must be reaped before its replacement starts"
+        );
         assert!(
-            matches!(
-                reg.servers.read().await.get("rust-analyzer"),
-                Some(LspConnectionState::Initialized { restarts: 0, .. })
-            ),
+            has_state_for_server(&reg, "rust-analyzer", |state| {
+                matches!(state, LspConnectionState::Initialized { restarts: 0, .. })
+            })
+            .await,
             "successful startup must reset the restart counter"
         );
     }
@@ -1425,8 +1919,14 @@ mod routing_tests {
         let reg = Arc::new(LspRegistry::new(transport.clone()));
         let config = rust_config();
         reg.register_config(config.clone()).await;
+        let current_cwd = std::env::current_dir().expect("current dir");
+        let instance_key = instance_key(
+            "rust-analyzer",
+            &effective_workspace_root(&config, &current_cwd, &DesktopLspPathMapper)
+                .expect("workspace root"),
+        );
         reg.servers.write().await.insert(
-            "rust-analyzer".to_string(),
+            instance_key.clone(),
             LspConnectionState::Failed {
                 config,
                 error: "prior crash".into(),
@@ -1451,7 +1951,7 @@ mod routing_tests {
                         .starting
                         .lock()
                         .expect("lsp start-claim lock poisoned")
-                        .contains_key("rust-analyzer")
+                        .contains_key(&instance_key)
                 {
                     break;
                 }
@@ -1478,10 +1978,10 @@ mod routing_tests {
             "cancelled startup should discard the orphaned child exactly once"
         );
         assert!(
-            matches!(
-                reg.servers.read().await.get("rust-analyzer"),
-                Some(LspConnectionState::Initialized { restarts: 0, .. })
-            ),
+            has_state_for_server(&reg, "rust-analyzer", |state| {
+                matches!(state, LspConnectionState::Initialized { restarts: 0, .. })
+            })
+            .await,
             "successful recovery must reset the restart counter"
         );
     }
@@ -1515,7 +2015,8 @@ mod routing_tests {
             reg.starting
                 .lock()
                 .expect("lsp start-claim lock poisoned")
-                .contains_key("rust-analyzer"),
+                .keys()
+                .any(|key| server_name_for_instance_key(key) == "rust-analyzer"),
             "cleanup must retain the start claim while shutdown is still blocked"
         );
         task.abort();
@@ -1531,7 +2032,8 @@ mod routing_tests {
                         .starting
                         .lock()
                         .expect("lsp start-claim lock poisoned")
-                        .contains_key("rust-analyzer")
+                        .keys()
+                        .any(|key| server_name_for_instance_key(key) == "rust-analyzer")
                 {
                     break;
                 }
@@ -1611,6 +2113,115 @@ mod routing_tests {
             "the live child is shut down, not leaked"
         );
     }
+
+    #[tokio::test]
+    async fn distinct_workspaces_start_distinct_instances_for_one_server() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(rust_config()).await;
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+
+        reg.ensure_server_for_file_in_workspace(&workspace_a.join("src/main.rs"), &workspace_a)
+            .await
+            .expect("first workspace start");
+        reg.ensure_server_for_file_in_workspace(&workspace_b.join("src/main.rs"), &workspace_b)
+            .await
+            .expect("second workspace start");
+
+        assert_eq!(
+            transport.started.lock().unwrap().as_slice(),
+            &["rust-analyzer".to_string(), "rust-analyzer".to_string()],
+            "same manifest server should spawn once per workspace root"
+        );
+        assert_eq!(
+            *transport.initialized_roots.lock().unwrap(),
+            vec![
+                lsp_types::Url::from_file_path(&workspace_a)
+                    .expect("workspace a uri")
+                    .to_string(),
+                lsp_types::Url::from_file_path(&workspace_b)
+                    .expect("workspace b uri")
+                    .to_string(),
+            ],
+            "initialize must use the exact workspace root for each instance"
+        );
+        let instance_keys = instance_keys_for_server(&reg, "rust-analyzer").await;
+        assert_eq!(instance_keys.len(), 2, "two live instances must exist");
+        let routes = reg.file_route_cache.read().await;
+        assert_ne!(
+            routes.get(&workspace_a.join("src/main.rs")),
+            routes.get(&workspace_b.join("src/main.rs")),
+            "different workspaces must route to different instance keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_workspace_only_stops_that_workspace_and_keeps_registration() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(rust_config()).await;
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        let file_a = workspace_a.join("src/main.rs");
+        let file_b = workspace_b.join("src/main.rs");
+
+        reg.ensure_server_for_file_in_workspace(&file_a, &workspace_a)
+            .await
+            .expect("first workspace start");
+        reg.ensure_server_for_file_in_workspace(&file_b, &workspace_b)
+            .await
+            .expect("second workspace start");
+
+        reg.shutdown_workspace(&workspace_a)
+            .await
+            .expect("workspace shutdown");
+
+        assert_eq!(transport.shutdowns.lock().unwrap().len(), 1);
+        assert_eq!(reg.servers.read().await.len(), 1);
+        let routes = reg.file_route_cache.read().await;
+        assert!(!routes.contains_key(&file_a));
+        assert!(routes.contains_key(&file_b));
+        drop(routes);
+        assert!(reg.get_config("rust-analyzer").await.is_some());
+
+        reg.ensure_server_for_file_in_workspace(&file_a, &workspace_a)
+            .await
+            .expect("registration starts a clean replacement");
+        assert_eq!(transport.started.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn unregister_plugin_shuts_down_all_workspace_scoped_instances() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        let plugin = PluginId::new();
+        reg.register_plugin_servers(plugin, vec![rust_config()])
+            .await;
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+
+        reg.ensure_server_for_file_in_workspace(&workspace_a.join("src/main.rs"), &workspace_a)
+            .await
+            .expect("first workspace start");
+        reg.ensure_server_for_file_in_workspace(&workspace_b.join("src/main.rs"), &workspace_b)
+            .await
+            .expect("second workspace start");
+
+        assert_eq!(
+            reg.unregister_plugin(&plugin).await,
+            vec!["rust-analyzer".to_string()]
+        );
+        assert_eq!(
+            transport.shutdowns.lock().unwrap().len(),
+            2,
+            "plugin removal must stop every workspace-scoped instance"
+        );
+        assert!(reg.servers.read().await.is_empty());
+    }
 }
 
 /// The file's lowercased extension WITH a leading dot (e.g. `.rs`), matching
@@ -1621,37 +2232,55 @@ fn file_extension(path: &Path) -> Option<String> {
         .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
 }
 
-/// The `file://` URI used to initialize a server. An explicit
-/// `workspaceFolder` overrides the live session cwd; relative overrides are
-/// resolved against that cwd.
-fn workspace_root_uri(config: &LspServerConfig, workspace_cwd: &Path) -> String {
-    let root = config.workspace_folder.as_deref().map_or_else(
-        || workspace_cwd.to_path_buf(),
+const INSTANCE_KEY_SEPARATOR: char = '\u{1f}';
+
+fn effective_workspace_root(
+    config: &LspServerConfig,
+    workspace_cwd: &Path,
+    path_mapper: &dyn LspPathMapper,
+) -> Result<PathBuf, LspError> {
+    config.workspace_folder.as_deref().map_or_else(
+        || path_mapper.workspace_root_for(workspace_cwd),
         |workspace_folder| {
             let path = PathBuf::from(workspace_folder);
             if path.is_absolute() {
-                path
+                Ok(path)
             } else {
-                workspace_cwd.join(path)
+                Ok(workspace_cwd.join(path))
             }
         },
-    );
-    lsp_types::Url::from_file_path(&root).map_or_else(
-        |()| format!("file://{}", root.to_string_lossy()),
-        |uri| uri.to_string(),
     )
 }
 
-fn startup_config_for_workspace(config: &LspServerConfig, workspace_cwd: &Path) -> LspServerConfig {
+fn instance_key(name: &str, workspace_root: &Path) -> String {
+    format!(
+        "{name}{INSTANCE_KEY_SEPARATOR}{}",
+        workspace_root.to_string_lossy()
+    )
+}
+
+/// Extract the manifest/server name from a workspace-scoped instance key.
+fn server_name_for_instance_key(key: &str) -> &str {
+    key.split_once(INSTANCE_KEY_SEPARATOR)
+        .map_or(key, |(name, _)| name)
+}
+
+fn workspace_root_for_instance_key(key: &str) -> Option<&Path> {
+    key.split_once(INSTANCE_KEY_SEPARATOR)
+        .map(|(_, workspace_root)| Path::new(workspace_root))
+}
+
+fn workspace_root_uri(
+    workspace_root: &Path,
+    path_mapper: &dyn LspPathMapper,
+) -> Result<String, LspError> {
+    path_mapper
+        .uri_for_host_path(workspace_root)
+        .map(|uri| uri.to_string())
+}
+
+fn startup_config_for_root(config: &LspServerConfig, workspace_root: &Path) -> LspServerConfig {
     let mut startup = config.clone();
-    startup.workspace_folder = config.workspace_folder.as_deref().map(|workspace_folder| {
-        let path = PathBuf::from(workspace_folder);
-        let resolved = if path.is_absolute() {
-            path
-        } else {
-            workspace_cwd.join(path)
-        };
-        resolved.to_string_lossy().into_owned()
-    });
+    startup.workspace_folder = Some(workspace_root.to_string_lossy().into_owned());
     startup
 }

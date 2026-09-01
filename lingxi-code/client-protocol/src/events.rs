@@ -495,6 +495,15 @@ pub enum ClientEvent {
     Skills {
         skills: Vec<SkillDto>,
     },
+
+    /// Authoritative global TypeScript LSP policy. `effective` is `off` when
+    /// the pinned runtime is unavailable even if the persisted request is
+    /// `auto` or `on`.
+    TypescriptLspModeChanged {
+        requested: String,
+        effective: String,
+        available: bool,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

@@ -589,7 +589,7 @@ impl HookRegistry {
     ///   `notification_type`; `Setup`/`PreCompact`/`PostCompact` → `trigger`;
     /// - `Elicitation`/`ElicitationResult` → `mcp_server_name`; `ConfigChange`
     ///   → `source`; `InstructionsLoaded` → `load_reason`; `FileChanged` →
-    ///   `basename(file_path)`.
+    ///   `basename(file_path)`; model-switch events → `to_model`.
     ///
     /// `Setup` (trigger `init`/`maintenance`) and `PostCompact` (trigger
     /// `manual`/`auto`) both carry `trigger` on the port variant and derive
@@ -620,6 +620,9 @@ impl HookRegistry {
             HookEvent::PreCompact { reason, .. } => Some(reason.clone()),
             HookEvent::Setup { trigger } => Some(trigger.clone()),
             HookEvent::PostCompact { trigger, .. } => Some(trigger.clone()),
+            // claude `i = r.to_model` for both model-switch events.
+            HookEvent::PreModelSwitch { to_model, .. }
+            | HookEvent::PostModelSwitch { to_model, .. } => Some(to_model.clone()),
             // claude `i = r.mcp_server_name` for both elicitation events.
             HookEvent::Elicitation { server_name, .. }
             | HookEvent::ElicitationResult { server_name, .. } => Some(server_name.clone()),
@@ -1539,6 +1542,29 @@ mod match_event_matcher_tests {
         };
         assert_eq!(matched_names(&reg, &manual), vec!["on-manual"]);
         assert!(matched_names(&reg, &auto).is_empty());
+    }
+
+    #[test]
+    fn model_switch_matcher_filters_on_target_model() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "opus-only",
+            HookEventType::PreModelSwitch,
+            Some("claude-opus-4-6"),
+        ));
+        let event = |to_model: &str| HookEvent::PreModelSwitch {
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: to_model.into(),
+            requested_model: None,
+            source: "picker".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        assert_eq!(matched_names(&reg, &event("claude-opus-4-6")), vec!["opus-only"]);
+        assert!(matched_names(&reg, &event("claude-haiku-4-5")).is_empty());
     }
 
     #[test]

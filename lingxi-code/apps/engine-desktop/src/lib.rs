@@ -62,6 +62,7 @@ use orchestrator::{
     QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK,
 };
 use permission::gate::PermissionGate;
+use platform_api::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 use platform_posix::{
     secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixMcpTransport,
     PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
@@ -78,7 +79,6 @@ use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
-use platform_api::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
 struct DesktopWebSearchConfigProvider {
     lingxi_home: std::path::PathBuf,
@@ -4782,8 +4782,12 @@ fn merged_settings_revision(project_dir: &Path, env: &BTreeMap<String, String>) 
     project_dir.hash(&mut hasher);
     for path in [
         lingxi_core::settings::loader::user_settings_path(),
-        Some(lingxi_core::settings::loader::project_settings_path(project_dir)),
-        Some(lingxi_core::settings::loader::local_settings_path(project_dir)),
+        Some(lingxi_core::settings::loader::project_settings_path(
+            project_dir,
+        )),
+        Some(lingxi_core::settings::loader::local_settings_path(
+            project_dir,
+        )),
     ]
     .into_iter()
     .flatten()
@@ -6298,9 +6302,10 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
     // flag, and (for subscribers) a background profile+roles fetch overwrites
     // it with the full snapshot once the endpoints respond.
-    let subscription: platform_api::subscription::SharedSubscription = std::sync::Arc::new(
-        std::sync::RwLock::new(Some(platform_api::subscription::SubscriptionSnapshot::default())),
-    );
+    let subscription: platform_api::subscription::SharedSubscription =
+        std::sync::Arc::new(std::sync::RwLock::new(Some(
+            platform_api::subscription::SubscriptionSnapshot::default(),
+        )));
     // `mcp_oauth_storage` and `credentials` originate from the same shared
     // stack, so provider keys and MCP OAuth never split across backends.
     // (M13) Track WHERE the key came from — the auth resolver ranks an
@@ -6477,7 +6482,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> = http.clone();
+                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> =
+                                http.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
@@ -7659,6 +7665,13 @@ pub async fn build(
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
     // spawned `InProcessTeammate` so it drives the real multi-turn loop.
     let teammate_api = subagent_api.clone();
+    // The LSP registry is composed later with the rest of the tool substrate.
+    // Capture it through a set-once cell so both child factories can be wired
+    // here without moving that large composition block. No child can spawn
+    // before engine construction completes and the cell is filled below.
+    let lsp_diagnostics_cell =
+        Arc::new(OnceLock::<lsp::diagnostic_registry::LspDiagnosticRegistry>::new());
+    let teammate_session_cwd_cell = Arc::new(OnceLock::<Arc<SessionCwd>>::new());
     // The spawner cannot receive the tool registry / agent catalog here: both
     // are built below, and the registry construction forms a cycle through
     // `BuiltinToolContext` (which consumes `subagent_spawner`). So we grab clones
@@ -7733,6 +7746,21 @@ pub async fn build(
         .with_transcript_fs(
             Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>
         )
+        // Every subagent gets its own passive-diagnostics cursor. Sharing the
+        // main registry as a source would make diagnostics first-reader-wins
+        // across the main loop and concurrent children.
+        .with_new_diagnostics_source_factory(Arc::new({
+            let diagnostics = lsp_diagnostics_cell.clone();
+            move |child_cwd| {
+                diagnostics
+                    .get()
+                    .expect("LSP diagnostics registry is initialized before subagent spawn")
+                    .diagnostics_source(
+                        child_cwd.map(std::path::PathBuf::from),
+                        Some(std::time::Duration::from_millis(500)),
+                    )
+            }
+        }))
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
         // environment once (cwd/git/platform/shell/OS) via the orchestrator's own
@@ -8893,7 +8921,8 @@ pub async fn build(
         Arc::new(mode)
     };
     let _ = subagent_coordinator_mode_cell
-        .set(coordinator_mode.clone() as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
+        .set(coordinator_mode.clone()
+            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
 
     // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
     //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
@@ -8997,6 +9026,24 @@ pub async fn build(
     .with_permission_mode(cfg.permission_mode)
     .with_model_setting(model_setting_for_spawns.clone())
     .with_session_interactive(interactive_session)
+    .with_new_diagnostics_source_factory(Arc::new({
+        let diagnostics = lsp_diagnostics_cell.clone();
+        let session_cwd = teammate_session_cwd_cell.clone();
+        move || {
+            diagnostics
+                .get()
+                .expect("LSP diagnostics registry is initialized before teammate spawn")
+                .diagnostics_source(
+                    Some(
+                        session_cwd
+                            .get()
+                            .expect("session cwd is initialized before teammate spawn")
+                            .cwd(),
+                    ),
+                    Some(std::time::Duration::from_millis(500)),
+                )
+        }
+    }))
     .with_status_sink(teammate_status_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
@@ -9309,7 +9356,8 @@ pub async fn build(
     // unaffected — with no teammates/agents registered a send resolves to
     // `NotFound`, the same effective outcome as the prior `None`.
     let coordinator_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>> =
-        Some(coordinator.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
+        Some(coordinator.mailbox_router.clone()
+            as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
     // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
     // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
     // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
@@ -9474,6 +9522,10 @@ pub async fn build(
     // `publishDiagnostics` into it, and the orchestrator polls it each turn to
     // surface the `<new-diagnostics>` reminder to the model.
     let lsp_diagnostics = lsp::diagnostic_registry::LspDiagnosticRegistry::new();
+    assert!(
+        lsp_diagnostics_cell.set(lsp_diagnostics.clone()).is_ok(),
+        "LSP diagnostics registry must be initialized exactly once"
+    );
     let plugin_lsp_registry = Arc::new(
         lsp::LspRegistry::new(Arc::new(platform_posix::PosixLspTransport::new()))
             .with_diagnostics(lsp_diagnostics.clone()),
@@ -9563,7 +9615,8 @@ pub async fn build(
     // refinements — not needed to close the ExitWorktree-after-resume no-op.)
     let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
     if cfg.session_id_override.is_some() {
-        let restore_fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
+        let restore_fs: Arc<dyn platform_api::FileSystem> =
+            Arc::new(PosixFileSystem::new(cwd.clone()));
         if let Some(payload) = session::jsonl::loader::read_worktree_state(
             &main_transcript_path,
             restore_fs,
@@ -9714,9 +9767,8 @@ pub async fn build(
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer.clone()),
-        coordinator_mode: Some(
-            coordinator_mode.clone() as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>
-        ),
+        coordinator_mode: Some(coordinator_mode.clone()
+            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
@@ -9877,11 +9929,23 @@ pub async fn build(
     // `getSessionId()`, a per-process session value). Generated once here at build
     // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
     let skill_session_id = protocol::SessionId::new().to_string();
-    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> =
-        Arc::new(skill_loader::CommandRegistrySkillLoader::with_session_id(
+    let monitor_runtime = repo_root_reloader.clone();
+    let skill_invocation_observer: command_api::SkillInvocationObserver = Arc::new(move |skill| {
+        let monitor_runtime = monitor_runtime.clone();
+        Box::pin(async move {
+            let runtime = monitor_runtime.plugin_runtime.read().await.clone();
+            if let Some(runtime) = runtime {
+                let _ = runtime.manager.activate_skill_monitors(&skill).await;
+            }
+        })
+    });
+    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
+        skill_loader::CommandRegistrySkillLoader::with_session_id(
             shared_command_registry.clone(),
             skill_session_id.clone(),
-        ));
+        )
+        .with_invocation_observer(skill_invocation_observer.clone()),
+    );
     // G5: fill the subagent spawner's skill-loader cell with a
     // `platform_api::skill_loader::SkillLoader` over the SAME shared command registry,
     // so a child agent runner can preload its frontmatter `skills:` (claude
@@ -9941,18 +10005,19 @@ pub async fn build(
     // session `<uuid>.jsonl` the resume loader reads. Gated on
     // `session_persistence` (no writer ⇒ nothing to resume from), mirroring the
     // `main_jsonl_writer` wiring below.
-    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> =
-        if cfg.session_persistence {
-            Some(Arc::new(JsonlWorktreeStatePersister {
-                writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
-                    main_transcript_path.clone(),
-                    Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
-                )),
-                session_uuid: main_session_uuid.clone(),
-            }))
-        } else {
-            None
-        };
+    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> = if cfg
+        .session_persistence
+    {
+        Some(Arc::new(JsonlWorktreeStatePersister {
+            writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
+                main_transcript_path.clone(),
+                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
+            )),
+            session_uuid: main_session_uuid.clone(),
+        }))
+    } else {
+        None
+    };
     // Keep a slash-command façade over the SAME context + persister before the
     // tool registry consumes `tool_ctx`. The handler itself is registered only
     // in the desktop command registry below, leaving the locked upstream
@@ -10026,12 +10091,13 @@ pub async fn build(
                 .collect();
         let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
-        workflow_size_guideline_state = platform_api::session_flags::WorkflowSizeGuidelineState::new(
-            workflow_size_guideline.as_wire(),
-            managed_workflow,
-            default_workflow,
-        )
-        .expect("desktop workflowSizeGuideline must be valid");
+        workflow_size_guideline_state =
+            platform_api::session_flags::WorkflowSizeGuidelineState::new(
+                workflow_size_guideline.as_wire(),
+                managed_workflow,
+                default_workflow,
+            )
+            .expect("desktop workflowSizeGuideline must be valid");
         let (workflow_session_enabled, workflow_session_managed) =
             resolve_workflow_session_enabled(&cfg, &cwd, &managed_workflow_layers);
         // `disableWorkflows` is an ORG policy, so it is read from MANAGED
@@ -10313,16 +10379,15 @@ pub async fn build(
     // Capture the fully-wired restore inheritance before `tools` and `perms`
     // move into the orchestrator. The actual cold restore runs later, after the
     // live model/provider selection cell is published.
-    let parked_agent_restore_inheritance =
-        cfg.session_id_override
-            .is_some()
-            .then(|| platform_api::subagent_spawn::SubagentInheritance {
-                tool_invoker: Arc::new(
-                    tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-                        .with_gate(perms.clone()),
-                ),
-                budget: budget_enforcer.clone(),
-            });
+    let parked_agent_restore_inheritance = cfg.session_id_override.is_some().then(|| {
+        platform_api::subagent_spawn::SubagentInheritance {
+            tool_invoker: Arc::new(
+                tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+                    .with_gate(perms.clone()),
+            ),
+            budget: budget_enforcer.clone(),
+        }
+    });
 
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
@@ -10541,7 +10606,8 @@ pub async fn build(
         // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
         // (claude's tool-use-context `s` gate).
         .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
-            registry: task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            registry: task_registry.clone()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
             project_root: watch_cwd.clone(),
         }))
         // Finding #73: supply the V2 task list to the per-turn `task_reminder`
@@ -10802,9 +10868,8 @@ pub async fn build(
     // profile-qualified default_model.  SessionState::empty starts model_profile
     // at None; this is a no-op when default_model is a bare id.
     if let Some(profile) = default_model_profile.as_deref() {
-        if let Err(e) = handle.switch_model(&default_model_id, Some(profile)).await {
-            tracing::warn!(error = %e, "failed to seed default model profile");
-        }
+        orch.seed_initial_model_profile(&default_model_id, profile)
+            .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
@@ -11047,7 +11112,11 @@ pub async fn build(
             .with_agent_catalog(plugin_agent_catalog.clone())
             .with_plugin_configs(plugin_configs)
             .with_blocked_marketplaces(blocked_marketplaces)
-            .with_plugin_workflows(plugin_workflow_registry.clone()),
+            .with_plugin_workflows(plugin_workflow_registry.clone())
+            .with_project_dir(cwd_for_plugins.clone())
+            .with_task_registry(
+                task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            ),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
@@ -11306,6 +11375,7 @@ pub async fn build(
     let background_command_orch = orch.clone();
     let mcp_prompt_registry = mcp_registry.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_skill_invocation_observer(skill_invocation_observer)
         .with_skill_usage_home(cfg.lingxi_home.clone())
         .with_mcp_prompt_resolver(Arc::new(move |connection_id, prompt_name, arguments| {
             let registry = mcp_prompt_registry.clone();
@@ -11419,7 +11489,8 @@ pub async fn build(
     //       thread) would be pure overhead in the common no-hook case — gating
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
-    let watch_fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    let watch_fs: Arc<dyn platform_api::FileSystem> =
+        Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
@@ -12049,11 +12120,11 @@ mod tests {
         use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
         use async_trait::async_trait;
         use command_core::ConnectCredentialWriter;
-        use std::collections::HashMap;
-        use std::sync::Mutex as StdMutex;
         use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
 
         // In-memory secure store (the posix-minimal stub does not persist).
         #[derive(Default)]
@@ -13311,7 +13382,10 @@ mod tests {
             Err(platform_api::ProcessError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
+        async fn kill(
+            &self,
+            _handle: &platform_api::ProcessHandle,
+        ) -> Result<(), platform_api::ProcessError> {
             Ok(())
         }
 
@@ -15408,7 +15482,10 @@ mod tests {
         ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
-        async fn kill(&self, _task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+        async fn kill(
+            &self,
+            _task_id: &str,
+        ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             Ok(())
         }
     }
@@ -15637,8 +15714,9 @@ mod tests {
         // context (still wired for the tools that read it), plus the coordinator
         // wiring that splices the coordinator `SendMessage` in.
         let mut ctx = stub_tool_ctx();
-        ctx.mailbox_router =
-            Some(team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
+        ctx.mailbox_router = Some(
+            team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>
+        );
         let wiring = CoordinatorWiring {
             team: team.clone(),
             mode: Arc::new(coordinator::CoordinatorMode::new()),
@@ -17740,7 +17818,10 @@ mod tests {
             unreachable!("unused in reload test")
         }
 
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+        async fn disconnect(
+            &self,
+            _id: protocol::McpConnectionId,
+        ) -> Result<(), platform_api::McpError> {
             if self
                 .disconnect_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -17859,7 +17940,10 @@ mod tests {
             unreachable!("unused in concurrent refresh test")
         }
 
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+        async fn disconnect(
+            &self,
+            _id: protocol::McpConnectionId,
+        ) -> Result<(), platform_api::McpError> {
             Ok(())
         }
 

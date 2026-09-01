@@ -90,7 +90,7 @@ for component in components:
         print("each license component needs non-empty id and license", file=sys.stderr)
         sys.exit(1)
     component_ids.add(component["id"])
-missing_components = {"proot", "ish", "alpine-rootfs"} - component_ids
+missing_components = {"proot", "ish", "alpine-rootfs", "typescript-native"} - component_ids
 if missing_components:
     print(f"license inventory missing components: {sorted(missing_components)}", file=sys.stderr)
     sys.exit(1)

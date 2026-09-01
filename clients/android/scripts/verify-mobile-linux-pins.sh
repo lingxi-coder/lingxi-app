@@ -50,6 +50,18 @@ for relative_path, expected_hash in talloc["openminis_vendored_files"].items():
     if actual_hash != expected_hash:
         raise SystemExit(f"pinned talloc source SHA-256 mismatch: {relative_path}")
 
+repo_root = pins_path.parents[2]
+for patch in pins.get("patches", []):
+    path = patch.get("path")
+    expected = patch.get("sha256")
+    if not isinstance(path, str) or not isinstance(expected, str):
+        raise SystemExit("mobile-linux patch pins require path and sha256")
+    source = repo_root / path
+    if not source.is_file() or source.is_symlink():
+        raise SystemExit(f"pinned mobile-linux patch source missing or unsafe: {path}")
+    if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+        raise SystemExit(f"pinned mobile-linux patch source SHA-256 mismatch: {path}")
+
 for abi, item in pins["rootfs"]["archives"].items():
     if len(item["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in item["sha256"]):
         raise SystemExit(f"invalid rootfs SHA-256 for {abi}")

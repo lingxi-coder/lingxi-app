@@ -54,6 +54,34 @@ fn main() {
         .get("defaultEnabled")
         .and_then(serde_json::Value::as_bool)
         .expect("builtin Plugin manifest requires boolean defaultEnabled");
+    let lsp_servers = manifest
+        .get("lspServers")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let lsp_server_records = lsp_servers
+        .as_object()
+        .expect("builtin Plugin manifest lspServers must be an inline object");
+    for (name, value) in lsp_server_records {
+        let record = value
+            .as_object()
+            .unwrap_or_else(|| panic!("builtin Plugin LSP server {name:?} must be an object"));
+        assert!(
+            record
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|command| !command.trim().is_empty()),
+            "builtin Plugin LSP server {name:?} requires a non-empty command"
+        );
+        assert!(
+            record
+                .get("extensionToLanguage")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|extensions| !extensions.is_empty()),
+            "builtin Plugin LSP server {name:?} requires extensionToLanguage"
+        );
+    }
+    let lsp_servers_json = serde_json::to_string(&lsp_servers)
+        .expect("serialize builtin Plugin LSP server declarations");
     for (field, expected) in [
         ("name", "lingxi-local-app"),
         ("skills", "./skills/"),
@@ -120,6 +148,7 @@ fn main() {
          pub(crate) const COMPILED_PLUGIN_DESCRIPTION: &str = {:?};\n\
          pub(crate) const COMPILED_PLUGIN_AUTHOR: &str = {:?};\n\
          pub(crate) const COMPILED_PLUGIN_DEFAULT_ENABLED: bool = {:?};\n\
+         pub(crate) const COMPILED_PLUGIN_LSP_SERVERS_JSON: &str = {:?};\n\
          pub(crate) const COMPILED_PLUGIN_ARCHIVE_DIGEST: &str = {:?};\n\
          pub(crate) const COMPILED_PLUGIN_CATALOG_BYTES: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/lingxi-local-app-catalog.json\"));\n\
          pub(crate) const COMPILED_PLUGIN_INVENTORY: &[(&str, u64, &str)] = &[\n",
@@ -129,6 +158,7 @@ fn main() {
         required_string(&manifest, "description"),
         author,
         default_enabled,
+        lsp_servers_json,
         packed.archive_digest
     );
     for entry in &packed.inventory {

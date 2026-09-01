@@ -9,12 +9,12 @@
 use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
 use memory::snapshot::AgentMemorySnapshot;
+use platform_api::WorktreeHandle;
 use protocol::{AgentId, ConversationMessage, McpConnectionId, SessionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tool_api::content_replacement::ContentReplacementState;
-use platform_api::WorktreeHandle;
 
 /// All the state required to drive one subagent run.
 ///
@@ -153,6 +153,13 @@ pub struct SubagentContext {
     /// [`platform_api::subagent_spawn::SubagentInheritance`]. `None` means the agent
     /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
     pub tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
+    /// Per-agent passive LSP diagnostics cursor. Each spawned agent receives
+    /// an independent source so consuming a builder reminder cannot suppress
+    /// the same diagnostic for the main conversation or another agent.
+    ///
+    /// The runner polls this immediately after a `Write`/`Edit` tool result;
+    /// implementations may wait briefly for the matching LSP publication.
+    pub new_diagnostics_source: Option<Arc<dyn platform_api::NewDiagnosticsSource>>,
     /// Wire tool definitions (`{name, description, input_schema}`) advertised to
     /// the model on every round-trip of the multi-turn loop — the streaming
     /// analog of the orchestrator's own `tools` array. Built by the spawner via

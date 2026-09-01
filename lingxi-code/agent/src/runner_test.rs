@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use lingxi_core::token::Usage;
 use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -459,6 +459,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         model_profile: None,
         api_client: None,
         tool_invoker: None,
+        new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
         budget: None,
@@ -475,6 +476,57 @@ fn fresh_subagent_ctx() -> SubagentContext {
         max_input_bytes_per_turn: None,
         query_source_label: None,
     }
+}
+
+struct OneShotDiagnostics {
+    block: Mutex<Option<String>>,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl platform_api::NewDiagnosticsSource for OneShotDiagnostics {
+    async fn take_new_diagnostics_block(&self) -> Option<String> {
+        self.block.lock().unwrap().take()
+    }
+
+    async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn write_result_injects_independent_lsp_diagnostics_before_next_round_trip() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Write", Some("tool_use"))),
+        Ok(text_response("fixed", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    let diagnostics_closed = Arc::new(AtomicBool::new(false));
+    ctx.new_diagnostics_source = Some(Arc::new(OneShotDiagnostics {
+        block: Mutex::new(Some(
+            "<new-diagnostics>\napp/app.jsx: [Line 2:1] unknownName\n</new-diagnostics>".into(),
+        )),
+        closed: diagnostics_closed.clone(),
+    }));
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert!(api.last_messages().iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, is_meta: true, .. }
+        if content.iter().any(|block| matches!(block,
+            ContentBlock::Text { text, .. }
+                if text.contains("<system-reminder>\n<new-diagnostics>")
+                    && text.contains("unknownName")
+        )))
+    }));
+    assert!(
+        diagnostics_closed.load(Ordering::SeqCst),
+        "the agent terminal path must release its workspace diagnostics source"
+    );
 }
 
 /// Drain the `SubagentEvent` receiver into a `Vec`.
@@ -856,7 +908,10 @@ async fn run_subagent_emits_killed_on_user_interrupt_terminal() {
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
-    event_tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
     drop(event_tx);
 
     handle.await.unwrap();
@@ -1999,7 +2054,10 @@ async fn loop_user_interrupt_mid_flight_surfaces_killed() {
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
-    event_tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
 
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;

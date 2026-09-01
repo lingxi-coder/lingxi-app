@@ -479,6 +479,11 @@ pub struct InProcessTeammateHandler {
     /// Owning session mode for prompt/provider gates inside the independently
     /// spawned persistent runner. `None` preserves the legacy fallback.
     session_interactive: Option<bool>,
+    /// Creates one passive-LSP-diagnostics consumer per teammate. A factory is
+    /// required here: sharing one source would also share its dedup cursor, so
+    /// the first teammate to poll would consume diagnostics for every peer.
+    new_diagnostics_source_factory:
+        Option<Arc<dyn Fn() -> Arc<dyn platform_api::NewDiagnosticsSource> + Send + Sync>>,
     /// Live tool registry used to resolve the teammate's advertised tool
     /// SCHEMAS + dispatch allow-list per spawn (claude-code `assembleToolPool`),
     /// mirroring [`agent::PoolSubagentSpawner`]. A SET-ONCE cell (same
@@ -549,6 +554,7 @@ impl InProcessTeammateHandler {
             permission_mode: PermissionMode::Default,
             model_setting: None,
             session_interactive: None,
+            new_diagnostics_source_factory: None,
             tool_registry: Arc::new(OnceLock::new()),
             tool_wide_deny_names: Arc::new(OnceLock::new()),
             budget_enforcer: None,
@@ -659,6 +665,19 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_session_interactive(mut self, interactive: bool) -> Self {
         self.session_interactive = Some(interactive);
+        self
+    }
+
+    /// Attach a factory for independent passive LSP diagnostic cursors.
+    ///
+    /// Teammates share the parent workspace, so the host captures the live
+    /// session cwd in the factory rather than passing a per-agent worktree.
+    #[must_use]
+    pub fn with_new_diagnostics_source_factory(
+        mut self,
+        factory: Arc<dyn Fn() -> Arc<dyn platform_api::NewDiagnosticsSource> + Send + Sync>,
+    ) -> Self {
+        self.new_diagnostics_source_factory = Some(factory);
         self
     }
 
@@ -869,6 +888,13 @@ impl InProcessTeammateHandler {
             model_profile: None,
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
+            // Invoke the factory for every context. Cloning one source here
+            // would merge teammate cursors and make diagnostics first-reader
+            // wins across concurrent workers.
+            new_diagnostics_source: self
+                .new_diagnostics_source_factory
+                .as_ref()
+                .map(|factory| factory()),
             // Advertised tool schemas (claude-code `assembleToolPool`) — resolved
             // above from the live registry per the definition's policy.
             tool_schemas,

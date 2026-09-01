@@ -16,18 +16,21 @@
 
 use crate::client::LspClient;
 use crate::open_file_tracker::{DocumentSync, OpenFileTracker};
+use crate::path_mapper::LspDocumentPath;
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, DocumentSymbolParams, Position, ReferenceContext, ReferenceParams,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
     WorkspaceSymbolParams,
 };
+use platform_api::LspServerConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 use tokio::fs;
-use platform_api::LspServerConfig;
 
 /// Upper bound on LSP-eligible file size (10 MB). Matches claude-code's
 /// `MAX_LSP_FILE_SIZE_BYTES = 10_000_000` constant verbatim.
@@ -131,6 +134,37 @@ pub fn uri_from_path(path: &Path) -> Result<Url, LspOperationError> {
     })
 }
 
+#[doc(hidden)]
+pub trait LspDocumentArg {
+    fn as_document_path(&self) -> Result<Cow<'_, LspDocumentPath>, LspOperationError>;
+}
+
+impl LspDocumentArg for LspDocumentPath {
+    fn as_document_path(&self) -> Result<Cow<'_, LspDocumentPath>, LspOperationError> {
+        Ok(Cow::Borrowed(self))
+    }
+}
+
+impl LspDocumentArg for Path {
+    fn as_document_path(&self) -> Result<Cow<'_, LspDocumentPath>, LspOperationError> {
+        Ok(Cow::Owned(identity_document_path(self)?))
+    }
+}
+
+impl LspDocumentArg for PathBuf {
+    fn as_document_path(&self) -> Result<Cow<'_, LspDocumentPath>, LspOperationError> {
+        self.as_path().as_document_path()
+    }
+}
+
+fn identity_document_path(path: &Path) -> Result<LspDocumentPath, LspOperationError> {
+    Ok(LspDocumentPath {
+        host_path: path.to_path_buf(),
+        server_path: path.to_path_buf(),
+        uri: uri_from_path(path)?,
+    })
+}
+
 /// Look up the LSP `languageId` for `file_path` from `server_config`. Falls
 /// back to `"plaintext"` (claude-code default) when the extension is
 /// unknown.
@@ -153,12 +187,11 @@ async fn ensure_did_open(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
-    uri: &Url,
+    document: &LspDocumentPath,
 ) -> Result<(), LspOperationError> {
-    let meta = fs::metadata(file_path)
-        .await
-        .map_err(|e| LspOperationError::Io(format!("stat {}: {}", file_path.display(), e)))?;
+    let meta = fs::metadata(&document.host_path).await.map_err(|e| {
+        LspOperationError::Io(format!("stat {}: {}", document.host_path.display(), e))
+    })?;
     let size = meta.len();
     if size > MAX_LSP_FILE_SIZE_BYTES {
         return Err(LspOperationError::FileTooLarge {
@@ -166,11 +199,13 @@ async fn ensure_did_open(
             limit: MAX_LSP_FILE_SIZE_BYTES,
         });
     }
-    let bytes = fs::read(file_path)
-        .await
-        .map_err(|e| LspOperationError::Io(format!("read {}: {}", file_path.display(), e)))?;
+    let bytes = fs::read(&document.host_path).await.map_err(|e| {
+        LspOperationError::Io(format!("read {}: {}", document.host_path.display(), e))
+    })?;
     let text = String::from_utf8(bytes).map_err(|e| LspOperationError::NotUtf8(e.to_string()))?;
-    sync_document_text(client, tracker, config, file_path, uri, &text).await
+    sync_document_text(client, tracker, config, document, &text)
+        .await
+        .map(|_| ())
 }
 
 /// Synchronize already-available UTF-8 text with one LSP server.
@@ -182,11 +217,10 @@ pub(crate) async fn sync_document_text(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
-    uri: &Url,
+    document: &LspDocumentPath,
     text: &str,
-) -> Result<(), LspOperationError> {
-    let language_id = language_id_for(config, file_path);
+) -> Result<DocumentSync, LspOperationError> {
+    let language_id = language_id_for(config, &document.server_path);
     let _sync_guard = tracker.lock_sync().await;
     let connection = client.connection();
     tracker
@@ -199,14 +233,17 @@ pub(crate) async fn sync_document_text(
         return Err(LspOperationError::Lsp(platform_api::LspError::Unavailable));
     }
 
-    match tracker.plan_sync(client.name(), uri.clone(), text).await {
+    let sync = tracker
+        .plan_sync(client.name(), document.uri.clone(), text)
+        .await;
+    match &sync {
         DocumentSync::Open { version, evicted } => {
             client
                 .notify(
                     "textDocument/didOpen",
                     json!({
                         "textDocument": {
-                            "uri": uri,
+                            "uri": document.uri,
                             "languageId": language_id,
                             "version": version,
                             "text": text,
@@ -240,7 +277,7 @@ pub(crate) async fn sync_document_text(
                 .notify(
                     "textDocument/didChange",
                     json!({
-                        "textDocument": { "uri": uri, "version": version },
+                        "textDocument": { "uri": document.uri, "version": version },
                         "contentChanges": [{ "text": text }],
                     }),
                 )
@@ -248,13 +285,13 @@ pub(crate) async fn sync_document_text(
             client
                 .notify(
                     "textDocument/didSave",
-                    json!({ "textDocument": { "uri": uri } }),
+                    json!({ "textDocument": { "uri": document.uri } }),
                 )
                 .await?;
         }
         DocumentSync::Unchanged => {}
     }
-    Ok(())
+    Ok(sync)
 }
 
 /// `textDocument/hover` at a 1-based position.
@@ -262,17 +299,18 @@ pub(crate) async fn sync_document_text(
 /// # Errors
 /// Position validation, I/O on the source file, file-size cap, UTF-8
 /// decode, and JSON-RPC transport / server errors can all surface here.
-pub async fn hover(
+pub async fn hover<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = TextDocumentPositionParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
@@ -289,17 +327,18 @@ pub async fn hover(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn go_to_definition(
+pub async fn go_to_definition<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = TextDocumentPositionParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
@@ -319,18 +358,19 @@ pub async fn go_to_definition(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn find_references(
+pub async fn find_references<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
     include_declaration: bool,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = ReferenceParams {
         text_document_position: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -354,17 +394,18 @@ pub async fn find_references(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn completion(
+pub async fn completion<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = TextDocumentPositionParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
@@ -382,14 +423,15 @@ pub async fn completion(
 /// # Errors
 /// Same set as [`hover`] minus the position-validation case (this
 /// operation does not consume a position).
-pub async fn document_symbol(
+pub async fn document_symbol<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
 ) -> Result<LspOperationResult, LspOperationError> {
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let document = document.as_document_path()?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         work_done_progress_params: WorkDoneProgressParams::default(),
@@ -433,17 +475,18 @@ pub async fn workspace_symbol(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn go_to_implementation(
+pub async fn go_to_implementation<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = TextDocumentPositionParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
         position,
@@ -462,17 +505,18 @@ pub async fn go_to_implementation(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn prepare_call_hierarchy(
+pub async fn prepare_call_hierarchy<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
+    let document = document.as_document_path()?;
     let position = position_from_one_based(line, character)?;
-    let uri = uri_from_path(file_path)?;
-    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let uri = document.uri.clone();
+    ensure_did_open(client, tracker, config, document.as_ref()).await?;
     let params = CallHierarchyPrepareParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -495,16 +539,16 @@ pub async fn prepare_call_hierarchy(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn incoming_calls(
+pub async fn incoming_calls<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
     let prepare =
-        prepare_call_hierarchy(client, tracker, config, file_path, line, character).await?;
+        prepare_call_hierarchy(client, tracker, config, document, line, character).await?;
     let items: Vec<CallHierarchyItem> =
         serde_json::from_value(prepare.raw.clone()).unwrap_or_default();
     let Some(item) = items.into_iter().next() else {
@@ -534,16 +578,16 @@ pub async fn incoming_calls(
 ///
 /// # Errors
 /// Same set as [`hover`].
-pub async fn outgoing_calls(
+pub async fn outgoing_calls<D: LspDocumentArg + ?Sized>(
     client: &LspClient,
     tracker: &OpenFileTracker,
     config: &LspServerConfig,
-    file_path: &Path,
+    document: &D,
     line: u32,
     character: u32,
 ) -> Result<LspOperationResult, LspOperationError> {
     let prepare =
-        prepare_call_hierarchy(client, tracker, config, file_path, line, character).await?;
+        prepare_call_hierarchy(client, tracker, config, document, line, character).await?;
     let items: Vec<CallHierarchyItem> =
         serde_json::from_value(prepare.raw.clone()).unwrap_or_default();
     let Some(item) = items.into_iter().next() else {

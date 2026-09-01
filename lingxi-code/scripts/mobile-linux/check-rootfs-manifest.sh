@@ -143,7 +143,7 @@ for package in packages:
 
 # `openssh-client` was never a real Alpine package (the client split ships as
 # `openssh-client-default`), so this set could not have matched a real rootfs.
-required_packages = {"apk-tools", "busybox", *_pins["runtime_packages"]}
+required_packages = {"apk-tools", "busybox", "typescript-native", *_pins["runtime_packages"]}
 missing_packages = required_packages - package_names
 if missing_packages:
     print(f"fixed toolset packages missing: {sorted(missing_packages)}", file=sys.stderr)
@@ -156,6 +156,7 @@ if forbidden_packages:
     sys.exit(1)
 package_versions = {package["name"]: package["version"] for package in packages}
 fixed_versions = dict(_pins["runtime_packages"])
+fixed_versions["typescript-native"] = _pins["typescript_native"]["version"]
 version_drift = {
     name: {"expected": expected, "actual": package_versions.get(name)}
     for name, expected in fixed_versions.items()

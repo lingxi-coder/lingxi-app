@@ -592,6 +592,9 @@ impl TaskRegistryHandle for TaskRegistry {
                 crate::output_manager::OutputError::AlreadyExists(p) => {
                     TaskRegistryError::Internal(format!("spool already allocated: {p}"))
                 }
+                crate::output_manager::OutputError::SwapRefused(reason) => {
+                    TaskRegistryError::Internal(reason)
+                }
             })?;
         // Agent-specific fields (TS `getTaskOutputData` `local_agent` branch,
         // `TaskOutputTool.tsx:91-106`): carry the agent's `error` + `prompt`

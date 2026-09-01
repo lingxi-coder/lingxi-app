@@ -7,7 +7,7 @@ enum SettingsPage: Hashable {
     case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
     case voice, linuxRuntime, knowledge, memory, workflows
-    case appearance, language, notifications, input, appIntegration, privacy, permissionMode
+    case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
     case localAppPlugin
     case mcpList, mcpEdit(String)
@@ -45,6 +45,7 @@ struct SettingsHost: View {
     /// Promote the runtime's PTY surface to the app-owned full-screen route.
     var openTerminal: () -> Void = {}
     var onPermissionModeChanged: (String) async throws -> Void = { _ in }
+    var onTypescriptLspModeChanged: (String) async throws -> Void = { _ in }
     let onClose: () -> Void
 
     /// Settings deep links and in-sheet navigation share the app-owned typed
@@ -78,6 +79,25 @@ struct SettingsHost: View {
         }
     }
 
+    func applyTypescriptLspMode(_ mode: String) {
+        let previous = store.typescriptLspMode
+        let previousEffective = store.effectiveTypescriptLspMode
+        let previousAvailable = store.typescriptLspAvailable
+        guard store.setTypescriptLspMode(mode) else { return }
+        Task { @MainActor in
+            do {
+                try await onTypescriptLspModeChanged(mode)
+            } catch {
+                store.restoreTypescriptLspMode(
+                    previous,
+                    effectiveMode: previousEffective,
+                    available: previousAvailable,
+                    error: error.localizedDescription
+                )
+            }
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $navigation.settingsPath) {
             navigationPage(for: .main)
@@ -106,6 +126,10 @@ struct SettingsHost: View {
             store.permissionMode = convo.requestedPermissionMode
             store.effectivePermissionMode = convo.effectivePermissionMode
             store.permissionModeError = nil
+            store.typescriptLspMode = convo.requestedTypescriptLspMode
+            store.effectiveTypescriptLspMode = convo.effectiveTypescriptLspMode
+            store.typescriptLspAvailable = convo.typescriptLspAvailable
+            store.typescriptLspError = nil
             Task { await localAppsStore.refreshBuiltinPluginStatus() }
         }
         .onChange(of: convo.requestedPermissionMode) { _, mode in
@@ -113,6 +137,15 @@ struct SettingsHost: View {
         }
         .onChange(of: convo.effectivePermissionMode) { _, mode in
             store.effectivePermissionMode = mode
+        }
+        .onChange(of: convo.requestedTypescriptLspMode) { _, mode in
+            store.typescriptLspMode = mode
+        }
+        .onChange(of: convo.effectiveTypescriptLspMode) { _, mode in
+            store.effectiveTypescriptLspMode = mode
+        }
+        .onChange(of: convo.typescriptLspAvailable) { _, available in
+            store.typescriptLspAvailable = available
         }
         .onChange(of: convo.mcpServers) { _, servers in
             syncMcpServers(servers)
@@ -322,6 +355,7 @@ struct SettingsHost: View {
         case .appIntegration: return String(localized: "settings_app_integration")
         case .privacy: return String(localized: "settings_data_privacy")
         case .permissionMode: return "权限模式"
+        case .typescriptLsp: return "TypeScript LSP"
         case .skills: return "Skills"
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
         case .localAppPlugin: return String(localized: "local_apps_plugin_title")

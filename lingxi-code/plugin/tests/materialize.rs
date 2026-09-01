@@ -16,17 +16,22 @@ use hooks::HookRegistry;
 use lsp::LspRegistry;
 use mcp::{McpConnectionState, McpRegistry, McpServerRole};
 use outputstyles::OutputStyleRegistry;
-use plugin::{PluginManager, StrictPluginOnlyPolicy};
-use protocol::McpConnectionId;
-use secret::CredentialManager;
-use skill_api::SkillRegistry;
-use tokio::sync::RwLock;
-use tool_api::ToolRegistry;
+use platform_api::task_registry::{
+    MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
+    TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch,
+};
 use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use plugin::{PluginManager, StrictPluginOnlyPolicy};
+use protocol::McpConnectionId;
+use secret::CredentialManager;
+use skill_api::SkillRegistry;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::RwLock;
+use tool_api::ToolRegistry;
 
 use platform_posix::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
@@ -53,6 +58,62 @@ fn write_fixture_plugin(root: &Path, name: &str) {
         r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
     )
     .unwrap();
+}
+
+#[derive(Default)]
+struct RecordingTaskRegistry {
+    monitors: StdMutex<Vec<MonitorRegistration>>,
+    killed: StdMutex<Vec<String>>,
+}
+
+#[async_trait]
+impl TaskRegistryHandle for RecordingTaskRegistry {
+    async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+        unreachable!("not used by plugin monitor tests")
+    }
+
+    async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+        Ok(None)
+    }
+
+    async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        Ok(Vec::new())
+    }
+
+    async fn update(
+        &self,
+        _id: &str,
+        _patch: TaskUpdatePatch,
+    ) -> Result<TaskRecord, TaskRegistryError> {
+        unreachable!("not used by plugin monitor tests")
+    }
+
+    async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
+        unreachable!("not used by plugin monitor tests")
+    }
+
+    async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+        self.killed.lock().expect("kill lock").push(id.to_string());
+        Err(TaskRegistryError::NotFound(id.to_string()))
+    }
+
+    async fn spawn_monitor(
+        &self,
+        registration: MonitorRegistration,
+    ) -> Result<String, TaskRegistryError> {
+        let mut monitors = self.monitors.lock().expect("monitor lock");
+        let id = format!("monitor-{}", monitors.len() + 1);
+        monitors.push(registration);
+        Ok(id)
+    }
+
+    async fn output(
+        &self,
+        _id: &str,
+        _offset: Option<u64>,
+    ) -> Result<TaskOutputChunk, TaskRegistryError> {
+        unreachable!("not used by plugin monitor tests")
+    }
 }
 
 #[tokio::test]
@@ -1450,11 +1511,98 @@ async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
     );
 }
 
+fn write_monitor_plugin(root: &Path, dir_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        r#"{"name":"monitor-plugin","version":"1.0.0","monitors":[{"name":"always","command":"echo ${LINGXI_PLUGIN_ROOT}","description":"watch now"},{"name":"deploy","command":"echo deploy","description":"watch deploy","when":"on-skill-invoke:deploy"}]}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn enable_arms_plugin_monitors_through_the_shared_task_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_monitor_plugin(tmp.path(), "monitor");
+    let task_registry = Arc::new(RecordingTaskRegistry::default());
+    let (manager, _commands) = make_manager_with_task_registry(
+        tmp.path(),
+        &tmp.path().join("secrets"),
+        Some(task_registry.clone() as Arc<dyn TaskRegistryHandle>),
+    )
+    .await;
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+    manager
+        .enable(&id, manifest, dir.clone())
+        .await
+        .expect("enable");
+
+    {
+        let monitors = task_registry.monitors.lock().expect("monitor lock");
+        assert_eq!(monitors.len(), 1, "only the always monitor arms at enable");
+        assert_eq!(monitors[0].description, "watch now");
+        assert_eq!(
+            monitors[0].command,
+            format!(
+                "export CLAUDE_PLUGIN_ROOT='{}' LINGXI_PLUGIN_ROOT='{}' CLAUDE_PROJECT_DIR='{}' LINGXI_PROJECT_DIR='{}'; echo ${{LINGXI_PLUGIN_ROOT}}",
+                dir.display(),
+                dir.display(),
+                tmp.path().display(),
+                tmp.path().display(),
+            ),
+            "plugin variables are shell-quoted without rewriting plugin syntax"
+        );
+        assert_eq!(
+            monitors[0].cwd.as_deref(),
+            Some(tmp.path().to_string_lossy().as_ref())
+        );
+        assert!(monitors[0].persistent);
+        assert_eq!(monitors[0].timeout_ms, 0);
+    }
+
+    assert!(
+        manager.activate_skill_monitors("other").await.is_empty(),
+        "a different skill must not arm an on-skill-invoke monitor"
+    );
+    assert_eq!(
+        manager
+            .activate_skill_monitors("monitor-plugin:deploy")
+            .await,
+        vec!["monitor-2".to_string()]
+    );
+    assert!(
+        manager.activate_skill_monitors("deploy").await.is_empty(),
+        "the armed-monitor key prevents duplicate activation"
+    );
+    assert_eq!(
+        task_registry.monitors.lock().expect("monitor lock").len(),
+        2
+    );
+
+    manager.disable(&id).await.expect("disable");
+    assert!(
+        task_registry.killed.lock().expect("kill lock").is_empty(),
+        "disable retains running monitors; session teardown owns their cleanup"
+    );
+}
+
 /// Build a `PluginManager` rooted at `install_dir`, returning it + the live
 /// command registry to assert against.
 async fn make_manager(
     install_dir: &Path,
     secrets_dir: &Path,
+) -> (PluginManager, Arc<RwLock<CommandRegistry>>) {
+    make_manager_with_task_registry(install_dir, secrets_dir, None).await
+}
+
+async fn make_manager_with_task_registry(
+    install_dir: &Path,
+    secrets_dir: &Path,
+    task_registry: Option<Arc<dyn TaskRegistryHandle>>,
 ) -> (PluginManager, Arc<RwLock<CommandRegistry>>) {
     let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
     let storage = PlainTextSecureStorage::new(secrets_dir.to_path_buf())
@@ -1480,6 +1628,12 @@ async fn make_manager(
         Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
         Arc::new(RwLock::new(ToolRegistry::new())),
     );
+    let manager = manager.with_project_dir(install_dir.to_path_buf());
+    let manager = if let Some(registry) = task_registry {
+        manager.with_task_registry(registry)
+    } else {
+        manager
+    };
     (manager, command_registry)
 }
 

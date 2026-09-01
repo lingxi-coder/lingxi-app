@@ -22,7 +22,7 @@
 //!
 //! ## Event-name coverage
 //!
-//! [`parse_event_type`] recognizes all 30 of claude-code's `HOOK_EVENTS`
+//! [`parse_event_type`] recognizes all 33 of claude-code's `HOOK_EVENTS`
 //! (`entrypoints/sdk/coreTypes.ts:25-53`); each maps to a
 //! [`HookEventType`] variant.
 //!
@@ -572,9 +572,9 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
 /// Map a settings hook event-name string to its [`HookEventType`] variant.
 ///
 /// The recognized names are claude-code's `HOOK_EVENTS`
-/// (`entrypoints/sdk/coreTypes.ts:25-53`). Every one of those 30 event names
+/// (`entrypoints/sdk/coreTypes.ts:25-53`). Every one of those 33 event names
 /// has a corresponding `HookEvent`/`HookEventType` variant in
-/// [`crate::events`], so all 30 are recognized here. Unrecognized names
+/// [`crate::events`], so all 33 are recognized here. Unrecognized names
 /// (including event names with no variant yet, and arbitrary typos) return
 /// `None` and are silently skipped by the caller.
 fn parse_event_type(name: &str) -> Option<HookEventType> {
@@ -592,6 +592,8 @@ fn parse_event_type(name: &str) -> Option<HookEventType> {
         "SubagentStop" => Some(HookEventType::SubagentStop),
         "PreCompact" => Some(HookEventType::PreCompact),
         "PostCompact" => Some(HookEventType::PostCompact),
+        "PreModelSwitch" => Some(HookEventType::PreModelSwitch),
+        "PostModelSwitch" => Some(HookEventType::PostModelSwitch),
         "PermissionRequest" => Some(HookEventType::PermissionRequest),
         "PermissionDenied" => Some(HookEventType::PermissionDenied),
         "Setup" => Some(HookEventType::Setup),
@@ -716,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn all_31_event_names_parse_to_their_variant() {
+    fn all_33_event_names_parse_to_their_variant() {
         // Mirrors claude-code HOOK_EVENTS (entrypoints/sdk/coreTypes.ts:25-53).
         // Each (settings name -> expected HookEventType) must round-trip.
         let cases: &[(&str, HookEventType)] = &[
@@ -733,6 +735,8 @@ mod tests {
             ("SubagentStop", HookEventType::SubagentStop),
             ("PreCompact", HookEventType::PreCompact),
             ("PostCompact", HookEventType::PostCompact),
+            ("PreModelSwitch", HookEventType::PreModelSwitch),
+            ("PostModelSwitch", HookEventType::PostModelSwitch),
             ("PermissionRequest", HookEventType::PermissionRequest),
             ("PermissionDenied", HookEventType::PermissionDenied),
             ("Setup", HookEventType::Setup),
@@ -754,8 +758,8 @@ mod tests {
         ];
         assert_eq!(
             cases.len(),
-            31,
-            "claude-code 2.1.220 HOOK_EVENTS has 31 names"
+            33,
+            "claude-code 2.1.251 HOOK_EVENTS has 33 names"
         );
         for (name, expected) in cases {
             let raw = one_command(name);

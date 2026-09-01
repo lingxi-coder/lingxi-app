@@ -1,11 +1,13 @@
 //! `PluginManager` — drives the lifecycle state machine and materialises
-//! plugin components into the eight engine registries (tools, hooks, MCP,
-//! agent, skill, command, output-style, LSP).
+//! plugin components into the engine registries (tools, hooks, MCP, agent,
+//! skill, command, output-style, LSP), plus the shared Monitor task registry.
 //!
 //! `enable` materialises commands, hooks, agents (frontmatter-gated),
-//! skills, output-styles, LSP servers, and MCP servers (live-connected
+//! skills, output-styles, LSP servers, MCP servers (live-connected
 //! through the same `McpRegistry::connect_all` path as normal configured
-//! `.mcp.json` servers). `disable` symmetrically removes them.
+//! `.mcp.json` servers), and `always` plugin monitors (through
+//! `TaskRegistryHandle::spawn_monitor`). `disable` symmetrically removes
+//! registry entries while retaining already-running monitors until session end.
 //!
 //! `install`'s local-path arm discovers + enables a pre-fetched plugin dir in
 //! place — the only arm anything outside this crate's own tests calls. The
@@ -41,6 +43,8 @@ use hooks::{HookDefinition, HookExecutor, HookRegistry};
 use lsp::LspRegistry;
 use mcp::{McpRegistry, McpServerConfig};
 use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
+use platform_api::task_registry::{MonitorRegistration, TaskRegistryHandle};
+use platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
 use protocol::PluginId;
 use secret::CredentialManager;
 use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
@@ -48,10 +52,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tool_api::ToolRegistry;
-use platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
 
 /// Failure modes for [`PluginManager`] operations.
 #[derive(Debug, Clone, Error)]
@@ -148,6 +150,19 @@ pub struct PluginManager {
     /// [`Self::plugin_themes`], so [`Self::unload_plugin`] can remove exactly
     /// those entries (mirrors [`Self::plugin_workflow_names`]).
     plugin_theme_slugs: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Optional live task registry used to arm plugin-declared persistent
+    /// monitors. The host owns the concrete registry; this crate only submits
+    /// MonitorRegistration values through the existing task substrate.
+    task_registry: Option<Arc<dyn TaskRegistryHandle>>,
+    /// Session working directory used for monitor execution and project-dir
+    /// compatibility variables. It must not be inferred from process-global
+    /// cwd because a host can run multiple sessions in one process.
+    project_dir: PathBuf,
+    /// Task ids keyed by the stable installed-plugin identity and monitor name.
+    /// This survives a mid-session reload so an always monitor is not started
+    /// twice. Existing monitors intentionally remain alive across disable; the
+    /// task registry tears them down with the session.
+    plugin_monitor_tasks: Mutex<HashMap<String, String>>,
 }
 
 impl PluginManager {
@@ -192,6 +207,9 @@ impl PluginManager {
             plugin_workflow_names: RwLock::new(HashMap::new()),
             plugin_themes: Arc::new(PluginThemeRegistry::new()),
             plugin_theme_slugs: RwLock::new(HashMap::new()),
+            task_registry: None,
+            project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            plugin_monitor_tasks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -276,6 +294,51 @@ impl PluginManager {
     {
         self.blocked_marketplaces = RwLock::new(blocked.into_iter().map(Into::into).collect());
         self
+    }
+
+    /// Share the host's live task registry with the plugin lifecycle. Plugin
+    /// monitors use the same MonitorRegistration -> spawn_monitor path as the
+    /// model-facing Monitor tool; no plugin-specific runner is created.
+    #[must_use]
+    pub fn with_task_registry(mut self, registry: Arc<dyn TaskRegistryHandle>) -> Self {
+        self.task_registry = Some(registry);
+        self
+    }
+
+    /// Set the owning session's project directory for plugin monitors.
+    #[must_use]
+    pub fn with_project_dir(mut self, project_dir: PathBuf) -> Self {
+        self.project_dir = project_dir;
+        self
+    }
+
+    /// Arm on-skill-invoke monitors for all currently loaded plugins. Always
+    /// monitors are armed during enable. The returned ids are the real
+    /// task-registry ids created for this invocation; already-armed monitors
+    /// are omitted.
+    pub async fn activate_skill_monitors(&self, skill: &str) -> Vec<String> {
+        let loaded = self
+            .plugins
+            .read()
+            .await
+            .values()
+            .filter_map(|state| match state {
+                PluginState::Loaded {
+                    manifest,
+                    install_dir,
+                    ..
+                } => Some((manifest.clone(), install_dir.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut task_ids = Vec::new();
+        for (manifest, install_dir) in loaded {
+            task_ids.extend(
+                self.arm_plugin_monitors(&manifest, &install_dir, Some(skill))
+                    .await,
+            );
+        }
+        task_ids
     }
 
     /// Replace the persisted plugin config map used by future loads/reloads.
@@ -1213,7 +1276,89 @@ impl PluginManager {
                 .insert(manifest.id, slugs);
         }
 
+        // Monitors share the production task substrate. A missing task
+        // capability is a host configuration boundary, not a plugin load
+        // failure: the remaining component registries stay usable. Always
+        // monitors are armed only after all plugin components were materialized;
+        // on-skill-invoke monitors wait for activate_skill_monitors.
+        let _ = self.arm_plugin_monitors(manifest, install_dir, None).await;
+
         Ok(())
+    }
+
+    /// Submit the selected plugin monitors to the shared task registry. This is
+    /// deliberately best-effort, matching other optional plugin capabilities:
+    /// a host without a real monitor implementation logs a diagnostic and still
+    /// loads commands/hooks/etc. The skill argument selects only monitors whose
+    /// trigger is on-skill-invoke:<skill>; None selects always.
+    async fn arm_plugin_monitors(
+        &self,
+        manifest: &PluginManifest,
+        install_dir: &Path,
+        skill: Option<&str>,
+    ) -> Vec<String> {
+        let Some(registry) = self.task_registry.as_ref() else {
+            if !manifest.components.monitors.is_empty() {
+                tracing::debug!(
+                    plugin = %manifest.name,
+                    "plugin monitors skipped: task registry is not configured"
+                );
+            }
+            return Vec::new();
+        };
+
+        let installed_identity = installed_plugin_identity(manifest, install_dir);
+        let mut armed = self.plugin_monitor_tasks.lock().await;
+        let mut task_ids = Vec::new();
+        for monitor in &manifest.components.monitors {
+            let should_arm = match (&monitor.when, skill) {
+                (crate::manifest::MonitorTrigger::Always, None) => true,
+                (crate::manifest::MonitorTrigger::OnSkillInvoke(expected), Some(actual)) => {
+                    expected == actual || actual.rsplit(':').next() == Some(expected.as_str())
+                }
+                _ => false,
+            };
+            if !should_arm {
+                continue;
+            }
+
+            let key = format!("{installed_identity}:{}", monitor.name);
+            if armed.contains_key(&key) {
+                continue;
+            }
+            if user_config::references_user_config(&monitor.command) {
+                tracing::warn!(
+                    "{}",
+                    user_config::monitor_reference_rejection(&monitor.name)
+                );
+                continue;
+            }
+
+            let registration = MonitorRegistration {
+                command: monitor_command_with_env(&monitor.command, install_dir, &self.project_dir),
+                description: monitor.description.clone(),
+                timeout_ms: 0,
+                persistent: true,
+                cwd: Some(self.project_dir.to_string_lossy().into_owned()),
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            };
+            match registry.spawn_monitor(registration).await {
+                Ok(task_id) => {
+                    armed.insert(key, task_id.clone());
+                    task_ids.push(task_id);
+                }
+                Err(error) => tracing::warn!(
+                    plugin = %manifest.name,
+                    monitor = %monitor.name,
+                    error = %error,
+                    "plugin monitor could not be armed"
+                ),
+            }
+        }
+        task_ids
     }
 
     /// Symmetric unload — clean up the exact registries we touched.
@@ -1437,6 +1582,22 @@ fn substitute_lsp_config(
     cfg.env
         .entry("LINGXI_PROJECT_DIR".to_string())
         .or_insert_with(|| project_dir);
+}
+
+/// Prefix a monitor command with shell-quoted compatibility variables. Keeping
+/// the plugin-authored command intact lets the shell perform normal variable
+/// expansion without splicing path bytes into executable syntax.
+fn monitor_command_with_env(command: &str, install_dir: &Path, project_dir: &Path) -> String {
+    let plugin_root = shell_single_quote(&install_dir.to_string_lossy());
+    let project_dir = shell_single_quote(&project_dir.to_string_lossy());
+    format!(
+        "export CLAUDE_PLUGIN_ROOT={plugin_root} LINGXI_PLUGIN_ROOT={plugin_root} \
+CLAUDE_PROJECT_DIR={project_dir} LINGXI_PROJECT_DIR={project_dir}; {command}"
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Apply a plugin's resolved `userConfig` (`ctx`, keyed by bare field name) to
@@ -1714,6 +1875,11 @@ mod unload_tests {
     use hooks::HookRegistry;
     use lsp::LspRegistry;
     use outputstyles::OutputStyleRegistry;
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+        McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
     use platform_posix::{
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixRuntime,
@@ -1724,11 +1890,6 @@ mod unload_tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tool_api::ToolRegistry;
-    use platform_api::{
-        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-        McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-    };
 
     fn write_minimal_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
         let plugin_dir = root.join(dir_name);

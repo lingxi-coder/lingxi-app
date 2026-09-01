@@ -141,7 +141,11 @@ impl BuiltinCommandHandler for ModelHandler {
         // id (offered by multiple providers) routes deterministically.
         let listings = self.handle.list_model_listings().await;
         let (model, profile) = platform_api::parse_model_ref(trimmed, &listings);
-        match self.handle.switch_model(&model, profile.as_deref()).await {
+        match self
+            .handle
+            .switch_model_with_source(&model, profile.as_deref(), "command")
+            .await
+        {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
                 CommandResult::Done {

@@ -24,6 +24,11 @@ pub const MAX_TASK_OUTPUT_BYTES_DISPLAY: &str = "5GB";
 pub struct TaskOutputManager {
     output_dir: PathBuf,
     fs: Arc<dyn FileSystem>,
+    /// Identity of the output directory observed by this manager. The
+    /// platform rooted operations still perform handle-relative I/O; this
+    /// lightweight pin catches a directory that was moved and replaced
+    /// between calls before a new rooted handle is opened.
+    root_pin: Mutex<OutputRootState>,
     /// Per-spool bytes-written counter + capped flag, keyed by spool path.
     /// Backs the write-side 5GB disk cap ([`MAX_TASK_OUTPUT_BYTES`]): once a
     /// spool crosses the cap its entry is marked capped and further appends are
@@ -55,6 +60,17 @@ pub enum OutputError {
     /// instead of silently truncating output a worker already appended.
     #[error("spool already allocated: {0}")]
     AlreadyExists(String),
+    /// The output directory no longer names the directory owned by this
+    /// manager, or an unsafe symlink was introduced. The recovery guidance is
+    /// intentionally explicit about removing the link itself, never its target.
+    #[error("{0}")]
+    SwapRefused(String),
+}
+
+#[derive(Debug, Default)]
+struct OutputRootState {
+    initialized: bool,
+    identity: Option<platform_api::rooted_fs::RootIdentity>,
 }
 
 /// Read options for [`TaskOutputManager::read`].
@@ -84,6 +100,7 @@ impl TaskOutputManager {
         Self {
             output_dir,
             fs,
+            root_pin: Mutex::new(OutputRootState::default()),
             caps: Mutex::new(HashMap::new()),
         }
     }
@@ -112,6 +129,55 @@ impl TaskOutputManager {
         Ok(path)
     }
 
+    fn relative_path_for(&self, output_file: &Path) -> Result<PathBuf, OutputError> {
+        let relative = output_file
+            .strip_prefix(&self.output_dir)
+            .map_err(|_| OutputError::PathEscape(output_file.display().to_string()))?
+            .to_path_buf();
+        platform_api::rooted_fs::validate_relative_path(&relative)
+            .map_err(|_| OutputError::PathEscape(relative.display().to_string()))?;
+        Ok(relative)
+    }
+
+    fn swap_refused(&self, reason: &str) -> OutputError {
+        OutputError::SwapRefused(format!(
+            "task output swap refused ({reason}): {}. To recover: restart the application with its temporary-directory setting pointed at a fresh directory; or, if {} is a stray directory or a symbolic link that should not be there, remove that entry itself (not what it points to) and restart.",
+            self.output_dir.display(),
+            self.output_dir.display(),
+        ))
+    }
+
+    async fn check_output_root(
+        &self,
+    ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, OutputError> {
+        let mut state = self.root_pin.lock().await;
+        let current = match self.fs.root_identity_no_follow(&self.output_dir).await {
+            Ok(identity) => identity,
+            Err(error) if state.initialized => {
+                return Err(self.swap_refused(&format!("directory identity check failed: {error}")))
+            }
+            Err(error) => return Err(self.map_rooted_error(error)),
+        };
+        if state.initialized {
+            if state.identity != current {
+                return Err(self.swap_refused("directory identity changed"));
+            }
+        } else {
+            state.initialized = true;
+            state.identity = current;
+        }
+        Ok(state.identity)
+    }
+
+    fn map_rooted_error(&self, error: platform_api::FsError) -> OutputError {
+        match error {
+            platform_api::FsError::OutsideWorkspace(_) => {
+                self.swap_refused("a parent or final path component is unsafe")
+            }
+            other => OutputError::Io(other.to_string()),
+        }
+    }
+
     /// Allocate a fresh spool file inside `output_dir`. Refuse any `..` or
     /// absolute leak (D8).
     ///
@@ -125,13 +191,18 @@ impl TaskOutputManager {
     ///   the symlink-follow write vector (T18).
     pub async fn allocate(&self, task_id: &str) -> Result<PathBuf, OutputError> {
         let path = self.path_for(task_id)?;
-        let path_str = path.to_str().expect("utf-8 output path");
+        let relative = self.relative_path_for(&path)?;
+        let root_identity = self.check_output_root().await?;
         self.fs
-            .create_new_file(path_str)
+            .create_new_file_rooted_no_follow_pinned(
+                &self.output_dir,
+                &relative,
+                root_identity.as_ref(),
+            )
             .await
             .map_err(|e| match e {
                 platform_api::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
-                other => OutputError::Io(other.to_string()),
+                other => self.map_rooted_error(other),
             })?;
         Ok(path)
     }
@@ -148,6 +219,8 @@ impl TaskOutputManager {
     /// [`FileSystem::append_file_no_follow`] so a symlink planted at the spool
     /// path from inside the sandbox cannot redirect it (T18).
     pub async fn append(&self, output_file: &Path, content: &str) -> Result<(), OutputError> {
+        let relative = self.relative_path_for(output_file)?;
+        let root_identity = self.check_output_root().await?;
         // Determine what to write under the cap, holding the per-path state lock
         // only across the cheap bookkeeping (not the await on the fs write).
         let to_write = {
@@ -169,11 +242,15 @@ impl TaskOutputManager {
             }
         };
         if let Some(body) = to_write {
-            let path_str = output_file.to_str().expect("utf-8 output path");
             self.fs
-                .append_file_no_follow(path_str, &body)
+                .append_file_rooted_no_follow_pinned(
+                    &self.output_dir,
+                    &relative,
+                    &body,
+                    root_identity.as_ref(),
+                )
                 .await
-                .map_err(|e| OutputError::Io(e.to_string()))?;
+                .map_err(|e| self.map_rooted_error(e))?;
         }
         Ok(())
     }
@@ -201,12 +278,16 @@ impl TaskOutputManager {
         output_file: &Path,
         opts: OutputOptions,
     ) -> Result<TaskOutput, OutputError> {
+        let relative = self.relative_path_for(output_file)?;
+        let root_identity = self.check_output_root().await?;
         let fc = self
             .fs
-            .read_file(
-                output_file.to_str().expect("utf-8 output path"),
+            .read_file_rooted_no_follow_window_pinned(
+                &self.output_dir,
+                &relative,
                 opts.offset,
                 opts.limit,
+                root_identity.as_ref(),
             )
             .await
             .map_err(|e| OutputError::Io(e.to_string()))?;
@@ -250,6 +331,17 @@ mod tests {
     }
     #[async_trait]
     impl FileSystem for ExclusiveFs {
+        async fn root_identity_no_follow(
+            &self,
+            root: &Path,
+        ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
+            if root.exists() {
+                platform_api::rooted_fs::root_identity(root).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+
         async fn read_file(
             &self,
             path: &str,
@@ -439,5 +531,38 @@ mod tests {
             "cap constant is 5GB"
         );
         assert_eq!(MAX_TASK_OUTPUT_BYTES_DISPLAY, "5GB");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_root_swap_is_refused_with_recovery_guidance() {
+        let parent = tempfile::tempdir().unwrap();
+        let output_dir = parent.path().join("tasks");
+        std::fs::create_dir(&output_dir).unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let fs = ExclusiveFs::new();
+        let manager = TaskOutputManager::new(output_dir.clone(), fs.clone());
+
+        // The first operation pins the real task-output directory identity.
+        manager.allocate("bpin0001").await.unwrap();
+        std::fs::rename(&output_dir, parent.path().join("tasks-moved")).unwrap();
+        std::os::unix::fs::symlink(victim.path(), &output_dir).unwrap();
+
+        let error = manager
+            .allocate("bpin0002")
+            .await
+            .expect_err("a moved/symlinked task directory must fail closed");
+        let OutputError::SwapRefused(message) = error else {
+            panic!("expected SwapRefused, got {error:?}");
+        };
+        assert!(message.contains("task output swap refused"));
+        assert!(message.contains("fresh directory"));
+        assert!(message.contains("remove that entry itself"));
+        assert!(!victim.path().join("bpin0002.output").exists());
+        assert!(!fs
+            .files
+            .lock()
+            .await
+            .contains_key(&output_dir.join("bpin0002.output").display().to_string()));
     }
 }

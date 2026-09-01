@@ -37,6 +37,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use lsp::registry::LspRegistry;
 use lsp::tool_operations as ops;
+use lsp::Url;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -282,6 +283,36 @@ fn uri_to_file_path(uri: &str) -> String {
         file_path = file_path[1..].to_string();
     }
     percent_decode(&file_path).unwrap_or(file_path)
+}
+
+fn rewrite_server_uris_to_host(
+    value: &mut Value,
+    registry: &LspRegistry,
+) -> Result<(), platform_api::LspError> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                rewrite_server_uris_to_host(item, registry)?;
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if matches!(key.as_str(), "uri" | "targetUri") {
+                    if let Some(raw_uri) = child.as_str() {
+                        if let Ok(parsed) = Url::parse(raw_uri) {
+                            if let Some(host_uri) = registry.host_uri_for_server_uri(&parsed)? {
+                                *child = Value::String(host_uri.to_string());
+                            }
+                        }
+                    }
+                } else {
+                    rewrite_server_uris_to_host(child, registry)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `toLocation(item).uri` for a `Location` (`uri`) or `LocationLink`
@@ -1298,6 +1329,17 @@ impl Tool for LSPTool {
         let path = expanded.as_path();
         // `getCwd()` for the gitignore filter (`LSPTool.ts:226`) — live cwd.
         let cwd = live_cwd;
+        let document = match registry.document_path_for_host_path(path, &cwd) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    format!("Error performing {operation}: {error}"),
+                    None,
+                ));
+            }
+        };
 
         // Resolve (and start, if needed) the server responsible for this file —
         // claude-code routes by filePath, never a model-supplied server name.
@@ -1349,25 +1391,28 @@ impl Tool for LSPTool {
         // two-step prepare-then-calls round-trip inside their `ops::` impl.
         let res = match operation.as_str() {
             "goToDefinition" => {
-                ops::go_to_definition(&client, &tracker, &config, path, line, character).await
+                ops::go_to_definition(&client, &tracker, &config, &document, line, character).await
             }
             "findReferences" => {
-                ops::find_references(&client, &tracker, &config, path, line, character, true).await
+                ops::find_references(&client, &tracker, &config, &document, line, character, true)
+                    .await
             }
-            "hover" => ops::hover(&client, &tracker, &config, path, line, character).await,
-            "documentSymbol" => ops::document_symbol(&client, &tracker, &config, path).await,
+            "hover" => ops::hover(&client, &tracker, &config, &document, line, character).await,
+            "documentSymbol" => ops::document_symbol(&client, &tracker, &config, &document).await,
             "workspaceSymbol" => ops::workspace_symbol(&client, query).await,
             "goToImplementation" => {
-                ops::go_to_implementation(&client, &tracker, &config, path, line, character).await
+                ops::go_to_implementation(&client, &tracker, &config, &document, line, character)
+                    .await
             }
             "prepareCallHierarchy" => {
-                ops::prepare_call_hierarchy(&client, &tracker, &config, path, line, character).await
+                ops::prepare_call_hierarchy(&client, &tracker, &config, &document, line, character)
+                    .await
             }
             "incomingCalls" => {
-                ops::incoming_calls(&client, &tracker, &config, path, line, character).await
+                ops::incoming_calls(&client, &tracker, &config, &document, line, character).await
             }
             "outgoingCalls" => {
-                ops::outgoing_calls(&client, &tracker, &config, path, line, character).await
+                ops::outgoing_calls(&client, &tracker, &config, &document, line, character).await
             }
             _ => unreachable!("validated above"),
         };
@@ -1389,7 +1434,11 @@ impl Tool for LSPTool {
                 .await;
                 // `LSPTool.ts:336-374` — drop gitignored files from
                 // location-bearing array results before returning.
-                let filtered = filter_gitignored_results(&operation, r.raw, &cwd);
+                let mut normalized = r.raw;
+                // URI projection is best-effort: an unmappable guest URI is
+                // still a valid LSP result and must not fail the tool call.
+                let _ = rewrite_server_uris_to_host(&mut normalized, registry.as_ref());
+                let filtered = filter_gitignored_results(&operation, normalized, &cwd);
                 // `LSPTool.ts:376-389` — format the FILTERED result into the
                 // brief human-readable string TS gives the model, plus the
                 // `resultCount`/`fileCount` summary. `model_content` is what the
@@ -1480,6 +1529,10 @@ fn lsp_tool_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use jsonrpc::Connection;
+    use protocol::McpConnectionId;
+    use serde_json::Value;
 
     #[test]
     fn lsp_name_locked() {
@@ -1628,6 +1681,133 @@ mod tests {
 
     fn file_uri(p: &std::path::Path) -> String {
         format!("file://{}", p.to_string_lossy())
+    }
+
+    #[derive(Debug)]
+    struct TestPathMapper;
+
+    struct DummyTransport;
+
+    #[async_trait]
+    impl platform_api::LspTransport for DummyTransport {
+        async fn start_server(
+            &self,
+            _config: &platform_api::LspServerConfig,
+        ) -> Result<platform_api::LspRawConnection, platform_api::LspError> {
+            Err(platform_api::LspError::Unavailable)
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &platform_api::LspRawConnection,
+            _root_uri: &str,
+        ) -> Result<platform_api::LspServerCapabilities, platform_api::LspError> {
+            Err(platform_api::LspError::Unavailable)
+        }
+
+        async fn connection(
+            &self,
+            _conn_id: McpConnectionId,
+        ) -> Result<Arc<Connection>, platform_api::LspError> {
+            Err(platform_api::LspError::Unavailable)
+        }
+
+        async fn request(
+            &self,
+            _connection: &platform_api::LspRawConnection,
+            _method: &str,
+            _params: Value,
+        ) -> Result<Value, platform_api::LspError> {
+            Err(platform_api::LspError::Unavailable)
+        }
+
+        async fn notify(
+            &self,
+            _connection: &platform_api::LspRawConnection,
+            _method: &str,
+            _params: Value,
+        ) -> Result<(), platform_api::LspError> {
+            Err(platform_api::LspError::Unavailable)
+        }
+
+        async fn shutdown(
+            &self,
+            _connection_id: McpConnectionId,
+        ) -> Result<(), platform_api::LspError> {
+            Ok(())
+        }
+
+        async fn terminate(
+            &self,
+            _connection_id: McpConnectionId,
+        ) -> Result<(), platform_api::LspError> {
+            Ok(())
+        }
+
+        async fn is_alive(&self, _connection_id: McpConnectionId) -> bool {
+            false
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    impl lsp::LspPathMapper for TestPathMapper {
+        fn map_host_path(
+            &self,
+            path: &Path,
+            _workspace_cwd: &Path,
+        ) -> Result<lsp::LspDocumentPath, platform_api::LspError> {
+            let uri = self.uri_for_host_path(path)?;
+            Ok(lsp::LspDocumentPath {
+                host_path: path.to_path_buf(),
+                server_path: path.to_path_buf(),
+                uri,
+            })
+        }
+
+        fn workspace_root_for(
+            &self,
+            workspace_cwd: &Path,
+        ) -> Result<PathBuf, platform_api::LspError> {
+            Ok(workspace_cwd.to_path_buf())
+        }
+
+        fn uri_for_host_path(&self, path: &Path) -> Result<Url, platform_api::LspError> {
+            Url::from_file_path(path).map_err(|()| {
+                platform_api::LspError::Transport(format!(
+                    "cannot convert path to file URI: {}",
+                    path.display()
+                ))
+            })
+        }
+
+        fn host_path_for_uri(&self, uri: &Url) -> Result<Option<PathBuf>, platform_api::LspError> {
+            let Ok(path) = uri.to_file_path() else {
+                return Ok(None);
+            };
+            Ok(Some(PathBuf::from(
+                path.to_string_lossy().replace("/guest/", "/host/"),
+            )))
+        }
+    }
+
+    #[test]
+    fn rewrite_server_uris_maps_guest_paths_back_to_host() {
+        let registry =
+            LspRegistry::new(Arc::new(DummyTransport)).with_path_mapper(Arc::new(TestPathMapper));
+        let mut raw = json!({
+            "uri": "file:///guest/app/main.jsx",
+            "targetUri": "file:///guest/app/impl.jsx",
+            "nested": { "uri": "file:///guest/lib/util.js" }
+        });
+
+        rewrite_server_uris_to_host(&mut raw, &registry).expect("rewrite");
+
+        assert_eq!(raw["uri"], "file:///host/app/main.jsx");
+        assert_eq!(raw["targetUri"], "file:///host/app/impl.jsx");
+        assert_eq!(raw["nested"]["uri"], "file:///host/lib/util.js");
     }
 
     #[test]

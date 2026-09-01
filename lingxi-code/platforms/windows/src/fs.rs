@@ -10,9 +10,11 @@
 use async_trait::async_trait;
 use fs2::FileExt;
 use futures_core::stream::Stream;
+use platform_api::{
+    FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError,
+};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use platform_api::{FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError};
 
 /// Concrete [`FileSystem`] backed by `tokio::fs`.
 ///
@@ -98,6 +100,13 @@ async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, F
 
 #[async_trait]
 impl FileSystem for WindowsFileSystem {
+    async fn root_identity_no_follow(
+        &self,
+        root: &Path,
+    ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
+        platform_api::rooted_fs::root_identity(root).map(Some)
+    }
+
     fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
         Some(FileSystemCacheIdentity::new(
             "windows",
@@ -138,6 +147,42 @@ impl FileSystem for WindowsFileSystem {
             .map_err(|e| FsError::Io(e.to_string()))
     }
 
+    async fn create_new_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        platform_api::rooted_fs::create_new_file(root, relative)
+    }
+
+    async fn create_new_file_rooted_no_follow_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        platform_api::rooted_fs::create_new_file_pinned(root, relative, expected)
+    }
+
+    async fn append_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        platform_api::rooted_fs::append_file(root, relative, content)
+    }
+
+    async fn append_file_rooted_no_follow_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
+    }
+
     async fn read_file_rooted_no_follow(
         &self,
         root: &Path,
@@ -149,6 +194,29 @@ impl FileSystem for WindowsFileSystem {
             content,
             truncated: false,
         })
+    }
+
+    async fn read_file_rooted_no_follow_window(
+        &self,
+        root: &Path,
+        relative: &Path,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<FileContent, FsError> {
+        let content = platform_api::rooted_fs::read_to_string(root, relative)?;
+        Ok(platform_api::apply_line_window(content, offset, limit))
+    }
+
+    async fn read_file_rooted_no_follow_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+    ) -> Result<FileContent, FsError> {
+        let content = platform_api::rooted_fs::read_to_string_pinned(root, relative, expected)?;
+        Ok(platform_api::apply_line_window(content, offset, limit))
     }
 
     async fn write_file_rooted_atomic(

@@ -235,6 +235,11 @@ impl OpenFileTracker {
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.open.is_empty()
     }
+
+    /// Latest synced document version for `uri`, if one was ever assigned.
+    pub async fn current_version(&self, uri: &Url) -> Option<i32> {
+        self.inner.read().await.versions.get(uri).copied()
+    }
 }
 
 fn next_version(versions: &mut HashMap<Url, i32>, uri: &Url) -> i32 {

@@ -16,6 +16,7 @@
 #   LINGXI_PACKAGES         space-separated `name=version` list
 #   LINGXI_ROOTFS_SHA256    expected minirootfs digest (empty to trust the CDN's)
 #   LINGXI_PNPM_VERSION/URL/SHA512  pinned pnpm CLI package metadata
+#   LINGXI_TYPESCRIPT_*     pinned native TypeScript package metadata
 #
 # Outputs (under /out/<arch>/):
 #   rootfs.tar.gz       installed rootfs, ready for fakefsify
@@ -32,6 +33,13 @@ EXPECTED_ROOTFS_SHA="${LINGXI_ROOTFS_SHA256:-}"
 PNPM_VERSION="${LINGXI_PNPM_VERSION:?LINGXI_PNPM_VERSION required}"
 PNPM_URL="${LINGXI_PNPM_URL:?LINGXI_PNPM_URL required}"
 PNPM_SHA512="${LINGXI_PNPM_SHA512:?LINGXI_PNPM_SHA512 required}"
+TYPESCRIPT_VERSION="${LINGXI_TYPESCRIPT_VERSION:?LINGXI_TYPESCRIPT_VERSION required}"
+TYPESCRIPT_INSTALL_ROOT="${LINGXI_TYPESCRIPT_INSTALL_ROOT:?LINGXI_TYPESCRIPT_INSTALL_ROOT required}"
+TYPESCRIPT_LICENSE="${LINGXI_TYPESCRIPT_LICENSE:?LINGXI_TYPESCRIPT_LICENSE required}"
+TYPESCRIPT_PACKAGE_NAME="${LINGXI_TYPESCRIPT_PACKAGE_NAME:?LINGXI_TYPESCRIPT_PACKAGE_NAME required}"
+TYPESCRIPT_URL="${LINGXI_TYPESCRIPT_URL:?LINGXI_TYPESCRIPT_URL required}"
+TYPESCRIPT_SHA512="${LINGXI_TYPESCRIPT_SHA512:?LINGXI_TYPESCRIPT_SHA512 required}"
+TYPESCRIPT_TSC_SHA256="${LINGXI_TYPESCRIPT_TSC_SHA256:?LINGXI_TYPESCRIPT_TSC_SHA256 required}"
 PINS_JSON=/pins.json
 CDN=https://dl-cdn.alpinelinux.org/alpine
 
@@ -241,6 +249,69 @@ rm -f "${PNPM_TARBALL}"
   echo "[rootfs:${ARCH}] pinned pnpm installation produced no usr/bin/pnpm" >&2
   exit 1
 }
+
+case "${TYPESCRIPT_INSTALL_ROOT}" in
+  /opt/lingxi/toolchains/typescript/${TYPESCRIPT_VERSION}) ;;
+  *)
+    echo "[rootfs:${ARCH}] unsafe TypeScript install root: ${TYPESCRIPT_INSTALL_ROOT}" >&2
+    exit 1
+    ;;
+esac
+
+echo "[rootfs:${ARCH}] installing pinned native TypeScript ${TYPESCRIPT_VERSION}"
+TYPESCRIPT_TARBALL="${OUT}/typescript-native-${TYPESCRIPT_VERSION}.tgz"
+TYPESCRIPT_STAGE="${OUT}/typescript-native-stage"
+curl -sSfL -o "${TYPESCRIPT_TARBALL}" "${TYPESCRIPT_URL}"
+actual_typescript_sha512="$(sha512sum "${TYPESCRIPT_TARBALL}" | awk '{print $1}')"
+expected_typescript_sha512="$(printf '%s' "${TYPESCRIPT_SHA512}" | base64 -d | od -An -tx1 | tr -d ' \n')"
+if [ "$(printf '%s' "${actual_typescript_sha512}" | tr '[:lower:]' '[:upper:]')" != \
+     "$(printf '%s' "${expected_typescript_sha512}" | tr '[:lower:]' '[:upper:]')" ]; then
+  echo "[rootfs:${ARCH}] native TypeScript tarball SHA-512 mismatch" >&2
+  exit 1
+fi
+rm -rf "${TYPESCRIPT_STAGE}" "${TARGET}${TYPESCRIPT_INSTALL_ROOT}"
+mkdir -p "${TYPESCRIPT_STAGE}" "${TARGET}${TYPESCRIPT_INSTALL_ROOT}"
+tar -xzf "${TYPESCRIPT_TARBALL}" -C "${TYPESCRIPT_STAGE}" --strip-components=1
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "${TYPESCRIPT_STAGE}/package.json")" = "${TYPESCRIPT_PACKAGE_NAME}"
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${TYPESCRIPT_STAGE}/package.json")" = "${TYPESCRIPT_VERSION}"
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["license"])' "${TYPESCRIPT_STAGE}/package.json")" = "${TYPESCRIPT_LICENSE}"
+cp -a "${TYPESCRIPT_STAGE}/lib/." "${TARGET}${TYPESCRIPT_INSTALL_ROOT}/"
+cp "${TYPESCRIPT_STAGE}/LICENSE" "${TYPESCRIPT_STAGE}/NOTICE.txt" \
+   "${TYPESCRIPT_STAGE}/README.md" "${TYPESCRIPT_STAGE}/package.json" \
+   "${TARGET}${TYPESCRIPT_INSTALL_ROOT}/"
+chmod 0755 "${TARGET}${TYPESCRIPT_INSTALL_ROOT}/tsc"
+actual_tsc_sha256="$(sha256sum "${TARGET}${TYPESCRIPT_INSTALL_ROOT}/tsc" | awk '{print $1}')"
+if [ "${actual_tsc_sha256}" != "${TYPESCRIPT_TSC_SHA256}" ]; then
+  echo "[rootfs:${ARCH}] native TypeScript tsc SHA-256 mismatch" >&2
+  exit 1
+fi
+
+typescript_version_output="$(chroot "${TARGET}" "${TYPESCRIPT_INSTALL_ROOT}/tsc" --version)"
+if [ "${typescript_version_output}" != "Version ${TYPESCRIPT_VERSION}" ]; then
+  echo "[rootfs:${ARCH}] native TypeScript version probe failed: ${typescript_version_output}" >&2
+  exit 1
+fi
+
+python3 - <<'PY' | chroot "${TARGET}" "${TYPESCRIPT_INSTALL_ROOT}/tsc" --lsp --stdio > "${OUT}/typescript-lsp-initialize.out" 2> "${OUT}/typescript-lsp-initialize.err"
+import json
+import sys
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"processId": None, "rootUri": "file:///tmp", "capabilities": {}}},
+    {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None},
+    {"jsonrpc": "2.0", "method": "exit", "params": None},
+]
+for message in messages:
+    payload = json.dumps(message, separators=(",", ":")).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+PY
+grep -q '"capabilities"' "${OUT}/typescript-lsp-initialize.out" || {
+  echo "[rootfs:${ARCH}] native TypeScript LSP initialize failed" >&2
+  cat "${OUT}/typescript-lsp-initialize.err" >&2
+  exit 1
+}
+rm -rf "${TYPESCRIPT_TARBALL}" "${TYPESCRIPT_STAGE}"
 
 echo "[rootfs:${ARCH}] emitting closure manifest"
 python3 - "${PINS_JSON}" "${ARCH}" "${OUT}/closure.json" <<'PY'

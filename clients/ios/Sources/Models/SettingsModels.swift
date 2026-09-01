@@ -307,6 +307,10 @@ final class SettingsStore {
     var permissionMode = "auto"
     var effectivePermissionMode = "auto"
     var permissionModeError: String?
+    var typescriptLspMode = "auto"
+    var effectiveTypescriptLspMode = "auto"
+    var typescriptLspAvailable = true
+    var typescriptLspError: String?
 
     @discardableResult
     func setPermissionMode(_ mode: String) -> Bool {
@@ -320,6 +324,26 @@ final class SettingsStore {
         permissionMode = mode
         effectivePermissionMode = effectiveMode ?? mode
         permissionModeError = error
+    }
+
+    @discardableResult
+    func setTypescriptLspMode(_ mode: String) -> Bool {
+        guard ["auto", "off", "on"].contains(mode) else { return false }
+        typescriptLspMode = mode
+        typescriptLspError = nil
+        return true
+    }
+
+    func restoreTypescriptLspMode(
+        _ mode: String,
+        effectiveMode: String,
+        available: Bool,
+        error: String? = nil
+    ) {
+        typescriptLspMode = mode
+        effectiveTypescriptLspMode = effectiveMode
+        typescriptLspAvailable = available
+        typescriptLspError = error
     }
 
     // MARK: store access by kind

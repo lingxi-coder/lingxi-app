@@ -101,6 +101,8 @@ hook_event_name_marker!(HookEventNamePostToolUseFailure, "PostToolUseFailure");
 hook_event_name_marker!(HookEventNameSessionEnd, "SessionEnd");
 hook_event_name_marker!(HookEventNamePreCompact, "PreCompact");
 hook_event_name_marker!(HookEventNamePostCompact, "PostCompact");
+hook_event_name_marker!(HookEventNamePreModelSwitch, "PreModelSwitch");
+hook_event_name_marker!(HookEventNamePostModelSwitch, "PostModelSwitch");
 hook_event_name_marker!(HookEventNameNotification, "Notification");
 hook_event_name_marker!(HookEventNamePermissionRequest, "PermissionRequest");
 hook_event_name_marker!(HookEventNamePermissionDenied, "PermissionDenied");
@@ -648,6 +650,68 @@ pub struct PostCompactPayload {
     pub effort: Option<EffortLevel>,
     pub trigger: String,
     pub compact_summary: String,
+}
+
+/// Wire-format `PreModelSwitch` payload (Claude Code 2.1.251
+/// `PreModelSwitchHookInputSchema`). Cache metadata fields are required by the
+/// upstream schema, while `requested_model` is required-but-nullable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PreModelSwitchPayload {
+    pub hook_event_name: HookEventNamePreModelSwitch,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    pub from_model: String,
+    pub to_model: String,
+    pub requested_model: Option<String>,
+    pub source: String,
+    pub context_tokens: u64,
+    pub prompt_cache_warm: bool,
+    pub cache_ttl: String,
+    pub estimated_cache_write_usd: f64,
+    pub pricing: String,
+}
+
+/// Wire-format `PostModelSwitch` payload (Claude Code 2.1.251
+/// `PostModelSwitchHookInputSchema`). Cache metadata fields are required by the
+/// upstream schema, while `requested_model` is required-but-nullable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PostModelSwitchPayload {
+    pub hook_event_name: HookEventNamePostModelSwitch,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    pub from_model: String,
+    pub to_model: String,
+    pub requested_model: Option<String>,
+    pub source: String,
+    pub context_tokens: u64,
+    pub prompt_cache_warm: bool,
+    pub cache_ttl: String,
+    pub estimated_cache_write_usd: f64,
+    pub pricing: String,
 }
 
 /// Wire-format `Notification` payload (1:1 with `coreSchemas.ts:473-482`
@@ -1590,7 +1654,8 @@ fn validate_permission_request_decision(
 
 /// Parse a hook's JSON reply into a [`HookResponse`].
 ///
-/// `expected_event` is `"PreToolUse"` or `"PostToolUse"` — validates the
+/// `expected_event` is a supported hook event name (including
+/// `"PreModelSwitch"`/`"PostModelSwitch"`) — validates the
 /// nested `hookSpecificOutput.hookEventName` per `hooks.ts:585` and rejects
 /// known output fields whose JSON types do not match the hook schema.
 pub fn parse_response(
@@ -1847,7 +1912,8 @@ pub fn parse_response(
         }
         // `hookSpecificOutput.permissionDecision` switch (claude-code `azn`'s
         // SECOND switch, BIN off ~205721920:
-        // `if(e.hookSpecificOutput?.hookEventName==="PreToolUse"
+        // `if(e.hookSpecificOutput?.hookEventName==="PreToolUse" ||
+        // e.hookSpecificOutput?.hookEventName==="PreModelSwitch"
         //   && e.hookSpecificOutput.permissionDecision)switch(...){
         //     case"allow":u.permissionBehavior="allow";break;
         //     case"deny":u.permissionBehavior="deny",…;break;
@@ -1855,7 +1921,8 @@ pub fn parse_response(
         //     case"defer":u.permissionBehavior="defer";break;
         //     default:throw Error("Unknown hook permissionDecision type: …")}`).
         // THREE parity rules captured here:
-        //   (R-O2b) GATED to `hookEventName === "PreToolUse"` — for any other
+        //   (R-O2b) GATED to `hookEventName === "PreToolUse"` or
+        //           `"PreModelSwitch"` — for any other
         //           event the binary never enters this switch.
         //   (R-D2)  UNCONDITIONAL reassignment — `permissionBehavior` is set
         //           outright (no `if (decision != Block)` guard), so a hsOut
@@ -1866,8 +1933,10 @@ pub fn parse_response(
         //   (R-O2c) `default: throw` — an unrecognised value rejects the whole
         //           hook output (returns `UnknownPermissionDecision`).
         // `allow`→`Approve` (skips the prompt), `deny`→`Block`, `ask`→`Ask`
-        // (R-D3, forces the interactive prompt), `defer`→`Defer`.
-        if expected_event == "PreToolUse" {
+        // (R-D3, forces the interactive prompt), and `defer`→`Defer` only for
+        // PreToolUse. PreModelSwitch intentionally has no `defer` response in
+        // the upstream schema.
+        if matches!(expected_event, "PreToolUse" | "PreModelSwitch") {
             match hs.get("permissionDecision").and_then(Value::as_str) {
                 // The binary guards the switch on `&& e.hookSpecificOutput
                 // .permissionDecision` (truthy) — a missing key OR an empty
@@ -1876,7 +1945,9 @@ pub fn parse_response(
                 Some("allow") => resp.decision = Some(HookDecision::Approve),
                 Some("deny") => resp.decision = Some(HookDecision::Block),
                 Some("ask") => resp.decision = Some(HookDecision::Ask),
-                Some("defer") => resp.decision = Some(HookDecision::Defer),
+                Some("defer") if expected_event == "PreToolUse" => {
+                    resp.decision = Some(HookDecision::Defer)
+                }
                 Some(other) => {
                     return Err(HookResponseParseError::UnknownPermissionDecision {
                         value: other.to_string(),

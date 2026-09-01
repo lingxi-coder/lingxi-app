@@ -28,10 +28,10 @@ use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use command_api::RegistrySlashDispatcher;
 use engine_desktop::{build, DesktopConfig};
 use orchestrator::ConversationOrchestrator;
+use platform_api::{AuthHandle, OrchestratorHandle, OutputStream};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use platform_api::{AuthHandle, OutputStream};
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
@@ -114,6 +114,9 @@ pub struct Runtime {
     /// picker can resolve a bare USER-provider model id to its own group +
     /// availability gate. Empty keeps the historical Built-in fallback.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// Provenance of the model selected by the desktop composition root for
+    /// the initial/default `/model` row.
+    pub model_provenance: platform_api::ModelProvenance,
     /// (Plan 3c C1) Shared engine credential store, projected straight from
     /// [`engine_desktop::DesktopRuntime::credentials`]. The TUI mount threads a
     /// clone into `tui::session::Runtime::with_provider_key_store` so the
@@ -122,6 +125,8 @@ pub struct Runtime {
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned `/web` test-search requests.
     pub http: std::sync::Arc<dyn platform_api::HttpTransport>,
+    /// Shared analytics bus projected from the desktop runtime.
+    pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
     /// Structured-output capture slot, projected from
     /// [`engine_desktop::DesktopRuntime::structured_output_slot`]. `Some` only
     /// under `--json-schema`; the print path reads it after each turn to validate
@@ -164,6 +169,9 @@ pub struct Runtime {
     /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
     /// connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
+    /// Provider-neutral local IDE lifecycle handle projected from the desktop
+    /// composition root. It owns lockfile discovery and local auth state.
+    pub ide_handle: std::sync::Arc<dyn platform_api::IdeHandle>,
     /// The ENFORCING permission gate (`engine_desktop::DesktopRuntime::
     /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
     /// permission-mode cycling via `set_permission_mode`.
@@ -234,6 +242,10 @@ pub struct TuiBuild {
     /// Merged `settings.emojiCompletionEnabled`; absent resolves to `true` at
     /// the composition root and is applied to the mounted composer.
     pub emoji_completion_enabled: bool,
+    /// Merged `settings.viewMode`; only `"focus"` currently alters the TUI
+    /// boot state, but unknown values are preserved so the composition root can
+    /// keep the settings reader aligned with the schema.
+    pub startup_view_mode: Option<String>,
     /// Parsed `--settings` layer retained for TUI-owned command surfaces.
     pub flag_settings: Option<lingxi_core::settings::SettingsJson>,
     /// Exact user/project/local source gates for status-line provenance.
@@ -586,6 +598,12 @@ fn load_settings_emoji_completion_enabled(
 ) -> Option<bool> {
     load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.emoji_completion_enabled)
+}
+
+/// Load the merged `settings.viewMode`, honoring the same `--setting-sources`
+/// scope as the rest of the interactive UI settings.
+fn load_settings_view_mode(include_user: bool, include_project: bool) -> Option<String> {
+    load_scoped_settings(include_user, include_project).and_then(|eff| eff.settings.view_mode)
 }
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
@@ -1129,7 +1147,9 @@ pub async fn build_runtime(
     permission_mode: permission::PermissionMode,
 ) -> Result<Runtime, InitError> {
     let cfg = resolve_desktop_config(argv, permission_mode);
-    build_runtime_from_config(cfg, output).await
+    let runtime = build_runtime_from_config(cfg, output).await?;
+    auto_connect_ide_if_requested(argv, &runtime).await;
+    Ok(runtime)
 }
 
 /// Shared engine assembly: build the runtime from an already-resolved
@@ -1174,8 +1194,10 @@ pub async fn build_runtime_from_config(
         provider_availability: rt.provider_availability,
         provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,
+        model_provenance: rt.model_provenance,
         provider_key_store: rt.credentials,
         http: rt.http,
+        analytics_bus: rt.analytics_bus,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
         shell_expansion: rt.shell_expansion,
@@ -1184,7 +1206,24 @@ pub async fn build_runtime_from_config(
         // P1-08 runtime `/add-dir` live-effect handles.
         session_cwd: rt.session_cwd,
         mcp_registry: rt.mcp_registry,
+        ide_handle: rt.ide_handle,
     })
+}
+
+/// Apply the boot-time `--ide` policy to an already-built runtime.
+///
+/// Some callers must inject a permission gate before composing the runtime and
+/// therefore cannot use [`build_runtime`]. Keeping this policy in one helper
+/// ensures those paths still auto-connect exactly one valid local endpoint,
+/// while zero/multiple endpoints remain a no-op.
+pub(crate) async fn auto_connect_ide_if_requested(argv: &Argv, runtime: &Runtime) {
+    if !argv.ide {
+        return;
+    }
+    match runtime.orchestrator.ide_auto_connect_if_single().await {
+        Ok(true) | Ok(false) => {}
+        Err(error) => eprintln!("Warning: could not connect to local IDE: {error}"),
+    }
 }
 
 /// TUI variant of [`build_runtime`]. (M6-03)
@@ -1281,6 +1320,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
 
     let flag_settings = cfg.flag_settings.clone();
     let mut runtime = build_runtime_from_config(cfg, bridge).await?;
+    auto_connect_ide_if_requested(argv, &runtime).await;
     let workflow_events = runtime.workflow_events.take();
     crate::startup_trace::mark("tui_runtime_build_end");
     // (companyAnnouncements) Read the merged array honoring `--setting-sources`;
@@ -1293,6 +1333,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
     let company_announcements = load_settings_company_announcements(incl_user, incl_project);
     let emoji_completion_enabled =
         load_settings_emoji_completion_enabled(incl_user, incl_project).unwrap_or(true);
+    let startup_view_mode = load_settings_view_mode(incl_user, incl_project);
     Ok(TuiBuild {
         runtime,
         initial_permission_mode: permission_mode,
@@ -1309,6 +1350,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         permission_paths,
         company_announcements,
         emoji_completion_enabled,
+        startup_view_mode,
         flag_settings,
         status_line_source_scope: status_line_source_flags(argv.setting_sources.as_deref()),
     })

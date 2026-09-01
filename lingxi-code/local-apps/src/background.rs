@@ -5,10 +5,10 @@ use crate::manifest::AppLayout;
 use crate::runtime_v2::{
     BackgroundJournalEntry, BackgroundTaskRecord, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use platform_api::FsError;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const TASKS_FILE: &str = "background-tasks.json";
 const JOURNAL_FILE: &str = "background-journal.json";

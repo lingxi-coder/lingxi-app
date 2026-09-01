@@ -548,7 +548,9 @@ impl Tool for FileEditTool {
         // the edit itself; no later pathname reopen can cross a symlink swap.
         let initial_snapshot = match edit_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => None,
+            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
+                None
+            }
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_read").await;
                 return Err(edit_resolution_error(file_path, error));

@@ -78,6 +78,18 @@ class LocalAppsContractTest {
     }
 
     @Test
+    fun `missing managed MCP inventory falls back to needs-setup and disabled`() {
+        val managed = LocalAppsUiState(
+            apps = state().apps,
+            distributionMode = LocalAppRuntimeMode.StaticExport,
+        ).managedMcp("a")
+
+        assertEquals(LocalAppManagedMcpStatus.NeedsSetup, managed.status)
+        assertEquals(false, managed.enabled)
+        assertEquals("a", managed.appId)
+    }
+
+    @Test
     fun `previewUrl follows the runtime loopback url`() {
         val running = LocalAppRuntime(state = LocalAppRuntimeState.Running, url = "http://127.0.0.1:3100")
         val gated = state().copy(

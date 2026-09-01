@@ -95,7 +95,6 @@ const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
     "ExecuteAppBridgeRequest",
     "ResolveAppUiRequest",
     "ResolveAppCapabilityRequest",
-    "ResolveAppRuntimeProfileSelection",
     "ResolveAppProfileProposal",
     "ResetAppPermissions",
     "ListAppSessions",

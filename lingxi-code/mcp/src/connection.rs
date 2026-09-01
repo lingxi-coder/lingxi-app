@@ -4,14 +4,14 @@
 //! (`registry.rs`) drives transitions between the variants below using
 //! the platform-supplied [`platform_api::McpTransport`].
 
-use protocol::McpConnectionId;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::time::SystemTime;
 use platform_api::{
     McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
 };
+use protocol::McpConnectionId;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 /// Stable source identity and cache provenance attached to a configured MCP
 /// server.  This is deliberately MCP-local metadata: it never consults or

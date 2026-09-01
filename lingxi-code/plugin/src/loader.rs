@@ -92,11 +92,13 @@ mod tests {
     use crate::source::PluginSource;
     use crate::trust::PluginTrustLevel;
     use async_trait::async_trait;
+    use platform_api::{
+        Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+    };
     use protocol::{PluginId, SecureStorageData};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::SystemTime;
-    use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
 
     #[derive(Default)]
     struct MemStorage {
@@ -212,6 +214,7 @@ mod tests {
             user_config: Some(UserConfigSchema { fields: map }),
             channels: Vec::new(),
             settings: HashMap::new(),
+            settings_declared: false,
             keywords: Vec::new(),
             license: None,
             repository: None,

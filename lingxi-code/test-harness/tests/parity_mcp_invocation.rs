@@ -24,11 +24,11 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
 use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
-use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
 
 // ============================================================================
 // Helpers

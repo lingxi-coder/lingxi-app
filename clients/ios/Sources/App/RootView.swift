@@ -277,12 +277,37 @@ struct RootView: View {
             ? ""
             : preferences.draft(projectID: projectID)
         _draft = State(initialValue: initialDraft)
+        let voiceReadinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_VOICE_CONFIGURATION_REQUIRED"] == "1" {
+                voiceReadinessOverride = {
+                    VoiceConfigurationReadiness(
+                        speechConfigured: false,
+                        ttsConfigured: false,
+                        speechReady: false,
+                        ttsReady: false,
+                        issues: [
+                            VoiceConfigurationIssue(
+                                component: .speech,
+                                kind: .unconfigured,
+                                message: String(localized: "voice_setup_required_default")
+                            ),
+                        ]
+                    )
+                }
+            } else {
+                voiceReadinessOverride = nil
+            }
+        #else
+            voiceReadinessOverride = nil
+        #endif
         _voiceInteraction = State(
             initialValue: VoiceInteractionController(
                 voiceCapture: VoiceCapture(),
                 capability: voiceCapability,
                 speechPlayer: SystemVoiceSpeechPlayer(),
-                bargeInRecognizer: VoiceBargeInRecognizer()
+                bargeInRecognizer: VoiceBargeInRecognizer(),
+                readinessOverride: voiceReadinessOverride
             )
         )
         appSandboxRoot = root
@@ -311,8 +336,8 @@ struct RootView: View {
         @Bindable var navigation = navigation
         return ZStack {
             // Sidebar + chat. In compact width this collapses to a stack whose
-            // root is the sidebar, which is what gives the chat a system back
-            // button and a back-swipe for free.
+            // root is the sidebar: the system back button/back-swipe opens it,
+            // while Drawer closes it through the preferred-column binding.
             NavigationSplitView(
                 columnVisibility: $navigation.columnVisibility,
                 preferredCompactColumn: $navigation.compactColumn
@@ -765,6 +790,7 @@ struct RootView: View {
             openSettings: { navigation.showSettings() },
             openTerminal: openCurrentWorkspaceTerminal,
             openApps: { appID in navigation.openLocalApps(appID: appID) },
+            closeSidebar: { navigation.closeSidebar() },
             createApp: createLocalAppFromDrawer,
             onSelectProject: { switchProject(to: $0) },
             onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
@@ -859,6 +885,7 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
+                activeConversationID: activeSession,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -895,6 +922,7 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
+                activeConversationID: activeSession,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -1045,6 +1073,43 @@ struct RootView: View {
             }
             localAppsStore.configure { command in
                 try await current.submitEngineCommand(command)
+            }
+            localAppsStore.configureManagedMcpCommands { command in
+                let pluginCommand: PluginCommandDto
+                switch command {
+                case let .startAuthoring(appID, userGoal):
+                    pluginCommand = .startLocalAppMcpAuthoring(
+                        appId: appID,
+                        userGoal: userGoal
+                    )
+                case let .setEnabled(appID, enabled, expectedRevision):
+                    pluginCommand = .setLocalAppMcpEnabled(
+                        appId: appID,
+                        enabled: enabled,
+                        expectedRevision: expectedRevision
+                    )
+                case let .setToolEnabled(appID, toolName, enabled, expectedRevision):
+                    pluginCommand = .setLocalAppMcpToolEnabled(
+                        appId: appID,
+                        toolName: toolName,
+                        enabled: enabled,
+                        expectedRevision: expectedRevision
+                    )
+                case let .setConversationPinned(conversationID, appID, pinned):
+                    pluginCommand = .setLocalAppMcpConversationPinned(
+                        conversationId: conversationID,
+                        appId: appID,
+                        pinned: pinned
+                    )
+                }
+                do {
+                    try await current.submitEngineCommand(
+                        .pluginCommand(command: pluginCommand)
+                    )
+                    return true
+                } catch {
+                    return false
+                }
             }
             providerRepository.configure(
                 submitCommand: { command in try await current.submitEngineCommand(command) },

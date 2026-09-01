@@ -57,7 +57,7 @@ pub mod web;
 
 use std::io::Stdout;
 
-use ratatui::backend::CrosstermBackend;
+pub use ratatui::backend::CrosstermBackend;
 pub use terminal::TerminalSession;
 pub use tui_core::message::RenderedMessage;
 pub use tui_core::orchestrator_bridge::TurnEvent;

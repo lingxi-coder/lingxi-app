@@ -8,8 +8,8 @@
 
 use crate::output::OutputSink;
 use async_trait::async_trait;
-use std::sync::Arc;
 use platform_api::{CostSnapshot, OutputStream};
+use std::sync::Arc;
 
 /// Concrete adapter — owns an `Arc<dyn OutputSink>` and projects every
 /// `OutputStream` method through it.

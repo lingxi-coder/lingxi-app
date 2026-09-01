@@ -4,6 +4,7 @@ use crate::purposes::QuerySource;
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use base64::Engine as _;
 use hooks::SsrfGuard;
+use platform_api::{HttpError, HttpTransport};
 use protocol::{
     is_nested_media_value, ContentBlock, ConversationMessage, DocumentSource, HttpMethod,
     HttpRequest, ImageSource, MediaAnalysis, MediaObservation, MessageId, MessageRole,
@@ -16,7 +17,6 @@ use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinSet;
-use platform_api::{HttpError, HttpTransport};
 use url::Url;
 
 /// Version of the delegate prompt and persisted analysis schema.
@@ -1370,6 +1370,7 @@ struct DelegateObservation {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::http::SseStream;
     use protocol::{HttpResponse, ToolUseId};
     use std::collections::{HashMap, VecDeque};
     use std::future::pending;
@@ -1380,7 +1381,6 @@ mod tests {
     };
     use tokio::sync::{oneshot, Notify};
     use tokio::time::{timeout, Duration};
-    use platform_api::http::SseStream;
 
     struct FakeSideQueryClient {
         responses: Mutex<Vec<Result<SideQueryResponse, SideQueryError>>>,

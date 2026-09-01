@@ -25,8 +25,8 @@ use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
 use crate::oauth::anthropic::profile::{
     fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
 };
-use std::sync::Arc;
 use platform_api::HttpTransport;
+use std::sync::Arc;
 
 /// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
 /// Presence of this scope is what distinguishes a real Claude.ai login token

@@ -24,6 +24,9 @@ async function waitFor(webContents, expression, timeout = 8000) {
     active: document.activeElement?.outerHTML?.slice(0, 240) ?? null,
     dialog: Boolean(document.querySelector('[role="dialog"]')),
     labels: [...document.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')),
+    resizeHandle: document.querySelector('[aria-label="Resize sidebar"]')?.getBoundingClientRect().toJSON() ?? null,
+    sidebar: document.querySelector('[aria-label="Resize sidebar"]')?.closest('aside')?.getBoundingClientRect().toJSON() ?? null,
+    resizing: document.querySelector('[aria-label="Resize sidebar"]')?.closest('aside')?.getAttribute('data-resizing') ?? null,
   })`);
   throw new Error(`timed out waiting for: ${expression}; state=${JSON.stringify(state)}`);
 }
@@ -71,7 +74,30 @@ async function main() {
       activeIsSidebar: document.activeElement?.classList.contains('sidebar-primary-action') === true,
     })`);
 
-    process.stdout.write(`${JSON.stringify({ beforeTab, afterTab, afterDismiss })}\n`);
+    const resizeGeometry = await webContents.executeJavaScript(`(() => {
+      const handle = document.querySelector('[aria-label="Resize sidebar"]');
+      const sidebar = handle?.closest('aside');
+      const handleRect = handle?.getBoundingClientRect();
+      return {
+        before: sidebar?.getBoundingClientRect().width ?? null,
+        handleX: handleRect ? handleRect.x + handleRect.width / 2 : null,
+        handleY: handleRect ? handleRect.y + Math.min(180, handleRect.height / 2) : null,
+      };
+    })()`);
+    if (resizeGeometry.handleX === null || resizeGeometry.handleY === null) {
+      throw new Error(`sidebar resize handle has no geometry: ${JSON.stringify(resizeGeometry)}`);
+    }
+    webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(resizeGeometry.handleX), y: Math.round(resizeGeometry.handleY) });
+    await delay(50);
+    webContents.sendInputEvent({ type: 'mouseDown', x: Math.round(resizeGeometry.handleX), y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
+    await delay(50);
+    webContents.sendInputEvent({ type: 'mouseMove', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left' });
+    await waitFor(webContents, `Math.round(document.querySelector('[aria-label="Resize sidebar"]')?.closest('aside')?.getBoundingClientRect().width ?? 0) === 360`);
+    webContents.sendInputEvent({ type: 'mouseUp', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
+    await delay(50);
+    const afterResize = await webContents.executeJavaScript(`Math.round(document.querySelector('[aria-label="Resize sidebar"]').closest('aside').getBoundingClientRect().width)`);
+
+    process.stdout.write(`${JSON.stringify({ beforeTab, afterTab, afterDismiss, resize: { before: Math.round(resizeGeometry.before), after: afterResize } })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

@@ -2,6 +2,234 @@
 
 use super::*;
 
+fn is_cross_device(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(17) | Some(18))
+}
+
+fn superseded_sidecar_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("session sidecar path is not UTF-8"))?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    for attempt in 0..1000_u32 {
+        let suffix = if attempt == 0 {
+            format!(".superseded-{millis}")
+        } else {
+            format!(".superseded-{millis}-{attempt}")
+        };
+        let candidate = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(format!("{name}{suffix}"));
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            std::fs::rename(path, &candidate)?;
+            return Ok(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a superseded session sidecar name",
+    ))
+}
+
+fn copy_session_sidecar(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700))?;
+    }
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_session_sidecar(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(source_path, target_path)?;
+        } else {
+            return Err(std::io::Error::other("unsupported session sidecar entry"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum SidecarCopyError {
+    Copy(std::io::Error),
+    Cleanup(std::io::Error),
+}
+
+/// Run the cross-device copy and source cleanup as two distinct phases.  A
+/// successful copy is already a complete, authoritative destination; failure
+/// while removing the old source must therefore leave that destination in
+/// place rather than entering the copy-failure rollback path.
+fn copy_then_cleanup_with<C, R>(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    copy: C,
+    remove_source: R,
+) -> Result<(), SidecarCopyError>
+where
+    C: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    R: FnOnce(&std::path::Path) -> std::io::Result<()>,
+{
+    copy(source, target).map_err(SidecarCopyError::Copy)?;
+    remove_source(source).map_err(SidecarCopyError::Cleanup)
+}
+
+/// Validate a path below its rooted projects directory without following a
+/// symlinked component. The sidecar paths are derived from the config home,
+/// but the filesystem can be changed independently between `/cd` requests;
+/// inspect every existing component before any quarantine or move operation.
+fn sidecar_path_is_rooted(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    let Ok(root_metadata) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return false;
+    }
+    let Ok(relative) = candidate.strip_prefix(root) else {
+        return false;
+    };
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return false,
+        };
+        if metadata.file_type().is_symlink() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Move the complete per-session sidecar directory best-effort.  The current
+/// runtime primarily stores `tool-results` here, but Claude keeps all
+/// session-scoped artifacts under this directory; moving the directory as a
+/// unit avoids stranding future attachment/state files after `/cd`.
+fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path::Path) {
+    if source == target {
+        return;
+    }
+
+    // Both paths are `<projects>/<sanitized-cwd>/<session-id>`. Keep the
+    // source and destination under the same rooted projects directory and
+    // inspect the source entry itself with `symlink_metadata`: `Path::is_dir`
+    // follows a symlink and could otherwise move/quarantine an arbitrary tree.
+    let Some(source_root) = source.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    let Some(target_root) = target.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    if source_root != target_root
+        || !sidecar_path_is_rooted(source_root, source)
+        || !sidecar_path_is_rooted(source_root, target)
+    {
+        return;
+    }
+    let Ok(source_metadata) = std::fs::symlink_metadata(source) else {
+        return;
+    };
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return;
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                source = %source.display(),
+                target = %target.display(),
+                %error,
+                "failed to create session sidecar relocation parent"
+            );
+            return;
+        }
+    }
+
+    // Re-check after creating missing destination parents. This closes the
+    // ordinary check-then-create window without ever following a newly
+    // introduced symlink in the rooted path.
+    if !sidecar_path_is_rooted(source_root, source) || !sidecar_path_is_rooted(source_root, target)
+    {
+        return;
+    }
+
+    let superseded = if std::fs::symlink_metadata(target).is_ok() {
+        match superseded_sidecar_path(target) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!(
+                    source = %source.display(),
+                    target = %target.display(),
+                    %error,
+                    "failed to quarantine occupied session sidecar"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let move_result = match std::fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device(&error) => {
+            // A config directory can span mounts (notably desktop app
+            // containers), so copy into the empty destination and remove the
+            // source only after every regular child copied successfully.  Once
+            // the copy succeeds, cleanup is best-effort and MUST NOT delete
+            // the complete destination if source removal reports an error.
+            match copy_then_cleanup_with(
+                source,
+                target,
+                copy_session_sidecar,
+                |path: &std::path::Path| std::fs::remove_dir_all(path),
+            ) {
+                Ok(()) => Ok(()),
+                Err(SidecarCopyError::Copy(error)) => Err(error),
+                Err(SidecarCopyError::Cleanup(error)) => {
+                    tracing::warn!(
+                        source = %source.display(),
+                        target = %target.display(),
+                        %error,
+                        "session sidecar copied but source cleanup failed; keeping destination"
+                    );
+                    Ok(())
+                }
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = move_result {
+        let _ = std::fs::remove_dir_all(target);
+        if let Some(superseded) = superseded.as_ref() {
+            let _ = std::fs::rename(superseded, target);
+        }
+        tracing::warn!(
+            source = %source.display(),
+            target = %target.display(),
+            %error,
+            "failed to move session sidecar"
+        );
+    }
+}
+
 impl ConversationOrchestrator {
     /// Seed a provider profile for the model already selected at construction.
     /// This is initialization, not a model switch, so it deliberately does not
@@ -110,6 +338,54 @@ impl ConversationOrchestrator {
         self.current_cwd
             .lock()
             .map_or_else(|_| self.cwd.clone(), |g| g.clone())
+    }
+
+    /// Persist a session-cwd move before directing future transcript appends
+    /// into the cwd's project directory. The writer rehomes an existing
+    /// transcript before appending the relocation marker; the complete
+    /// per-session sidecar directory follows best-effort after that transaction.
+    /// This is intentionally a no-op when session persistence is disabled (or
+    /// the config home was not wired), preserving the in-memory/library setup.
+    /// On successful persistence returns the writer's published transcript
+    /// path, so a background owner can refresh its durable launch identity
+    /// only after the transcript move has completed.
+    pub async fn retarget_transcript_for_cwd(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return Ok(None);
+        };
+        let Some(config_home) = self.config_home.as_ref() else {
+            return Ok(None);
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let cwd = cwd.to_string_lossy().into_owned();
+        let target = session::jsonl::path::session_path(config_home, &cwd, &session_id);
+        let previous = writer.active_path();
+        writer
+            .retarget_with_relocation(target.clone(), &session_id, &cwd)
+            .await
+            .map_err(|error| format!("retarget transcript for cwd {cwd}: {error}"))?;
+
+        // Hook/MCP output files and other session-scoped artifacts live beside
+        // the transcript under `<session-id>/`. Keep the whole sidecar
+        // directory with the rehomed transcript when the project directory
+        // changes. This is deliberately best-effort: the transcript move is
+        // the transactional operation; a sidecar move failure is logged but
+        // must not strand the conversation in a half-accepted `/cd`.
+        if previous != target {
+            let old_sidecar = previous
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(&session_id);
+            let new_sidecar = target
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(&session_id);
+            move_session_sidecar_best_effort(&old_sidecar, &new_sidecar);
+        }
+        Ok(Some(writer.active_path()))
     }
 
     /// Deterministically derive this session's transcript path from the resolved
@@ -1977,5 +2253,169 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     #[must_use]
     pub fn permission_mode(&self) -> Option<String> {
         self.perms.permission_mode()
+    }
+}
+
+#[cfg(test)]
+mod session_sidecar_tests {
+    use super::{copy_then_cleanup_with, move_session_sidecar_best_effort, SidecarCopyError};
+
+    #[test]
+    fn occupied_sidecar_destination_is_quarantined_while_source_moves_as_a_unit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_project = temp.path().join("old-project");
+        let new_project = temp.path().join("new-project");
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let source = old_project.join(session_id);
+        let target = new_project.join(session_id);
+        std::fs::create_dir_all(source.join("tool-results")).expect("source sidecar");
+        std::fs::create_dir_all(&target).expect("occupied target sidecar");
+        std::fs::write(source.join("session-state.json"), "current").expect("source state");
+        std::fs::write(source.join("tool-results").join("result.txt"), "result")
+            .expect("source result");
+        std::fs::write(target.join("stale.json"), "stale").expect("stale state");
+
+        move_session_sidecar_best_effort(&source, &target);
+
+        assert!(!source.exists(), "the complete source sidecar is rehomed");
+        assert_eq!(
+            std::fs::read_to_string(target.join("session-state.json")).expect("moved state"),
+            "current"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("tool-results").join("result.txt"))
+                .expect("moved result"),
+            "result"
+        );
+        assert!(
+            !target.join("stale.json").exists(),
+            "an occupied destination must not be merged over the moved sidecar"
+        );
+        let quarantined = std::fs::read_dir(&new_project)
+            .expect("new project")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with(&format!("{session_id}.superseded-")));
+        assert!(
+            quarantined.is_some(),
+            "stale destination is retained for recovery"
+        );
+        let stale_path = new_project.join(quarantined.expect("quarantined path"));
+        assert_eq!(
+            std::fs::read_to_string(stale_path.join("stale.json")).expect("quarantined state"),
+            "stale"
+        );
+    }
+
+    #[test]
+    fn copied_sidecar_survives_injected_source_cleanup_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&source).expect("source");
+
+        let result = copy_then_cleanup_with(
+            &source,
+            &target,
+            |_source, target| {
+                std::fs::create_dir_all(target)?;
+                std::fs::write(target.join("complete.txt"), "authoritative")
+            },
+            |_source| Err(std::io::Error::other("injected cleanup failure")),
+        );
+
+        assert!(matches!(result, Err(SidecarCopyError::Cleanup(_))));
+        assert_eq!(
+            std::fs::read_to_string(target.join("complete.txt")).expect("keep copied target"),
+            "authoritative",
+            "cleanup failure must not delete a complete destination copy"
+        );
+        assert!(source.exists(), "source debris remains recoverable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_symlink_is_rejected_before_target_quarantine() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let projects = temp.path().join("projects");
+        let old_project = projects.join("old-project");
+        let new_project = projects.join("new-project");
+        let session_id = "22222222-3333-4444-8555-666666666666";
+        let source = old_project.join(session_id);
+        let real_source = temp.path().join("outside-source");
+        let target = new_project.join(session_id);
+        std::fs::create_dir_all(&real_source).expect("real source");
+        std::fs::write(real_source.join("current.txt"), "current").expect("source data");
+        std::fs::create_dir_all(&target).expect("occupied target");
+        std::fs::write(target.join("stale.txt"), "stale").expect("target data");
+        std::fs::create_dir_all(&old_project).expect("old project");
+        symlink(&real_source, &source).expect("source symlink");
+
+        move_session_sidecar_best_effort(&source, &target);
+
+        assert!(
+            std::fs::symlink_metadata(&source)
+                .expect("source entry")
+                .file_type()
+                .is_symlink(),
+            "the source symlink must not be followed or moved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("stale.txt")).expect("target remains"),
+            "stale"
+        );
+        assert!(
+            !new_project
+                .read_dir()
+                .expect("new project")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{session_id}.superseded-"))),
+            "an unsafe source must not quarantine the target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_sidecar_parent_is_rejected_before_target_quarantine() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let projects = temp.path().join("projects");
+        let old_project = projects.join("old-project");
+        let new_project = projects.join("new-project");
+        let outside = temp.path().join("outside");
+        let session_id = "33333333-4444-4555-8666-777777777777";
+        let source = old_project.join(session_id);
+        let target = new_project.join(session_id);
+        std::fs::create_dir_all(outside.join(session_id)).expect("outside source");
+        std::fs::write(outside.join(session_id).join("current.txt"), "current")
+            .expect("source data");
+        std::fs::create_dir_all(&projects).expect("projects");
+        std::fs::create_dir_all(&target).expect("occupied target");
+        std::fs::write(target.join("stale.txt"), "stale").expect("target data");
+        symlink(&outside, &old_project).expect("old project symlink");
+
+        move_session_sidecar_best_effort(&source, &target);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("stale.txt")).expect("target remains"),
+            "stale"
+        );
+        assert!(
+            !new_project
+                .read_dir()
+                .expect("new project")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{session_id}.superseded-"))),
+            "a symlinked parent must not quarantine the target"
+        );
     }
 }

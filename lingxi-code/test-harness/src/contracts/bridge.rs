@@ -14,9 +14,9 @@
 //! * `disconnect` on a synthesised connection handle does not panic — it
 //!   must return `Ok` (idempotent), `Err(Closed)`, or `Err(Unsupported)`.
 
+use platform_api::bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 use std::time::Duration;
 use tokio::time::timeout;
-use platform_api::bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 

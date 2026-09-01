@@ -25,8 +25,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use platform_api::subagent_spawn::SubagentSpawnRequest;
+use serde::{Deserialize, Serialize};
 
 /// Maximum on-disk size of a row. A row is a few KB; anything approaching this
 /// is not a row we wrote, so it is rejected unread.

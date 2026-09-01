@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
 use platform_api::FileSystem;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::jsonl::re_append::iso_now;

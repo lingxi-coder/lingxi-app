@@ -38,11 +38,11 @@
 //!   (no equivalent telemetry event exists today).
 
 use once_cell::sync::Lazy;
+use platform_api::http::HttpTransport;
 use protocol::{HttpMethod, HttpRequest};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use platform_api::http::HttpTransport;
 
 /// Timeout for the domain blocklist preflight check (10 seconds).
 /// Mirrors `utils.ts:119` `DOMAIN_CHECK_TIMEOUT_MS`.
@@ -309,9 +309,9 @@ pub async fn check_domain_blocklist_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::http::HttpError;
     use std::sync::Arc;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-    use platform_api::http::HttpError;
 
     fn sync_resp(status: u16, body: &str) -> ScriptedResponse {
         ScriptedResponse::Sync(protocol::HttpResponse {

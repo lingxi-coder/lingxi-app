@@ -23,6 +23,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
+use platform_api::task_registry::MonitorRegistration;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -30,7 +31,6 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
-use platform_api::task_registry::MonitorRegistration;
 
 /// Binary `IA` — the tool name.
 pub const MONITOR_TOOL_NAME: &str = "Monitor";
@@ -384,13 +384,13 @@ impl Tool for MonitorTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use std::sync::{Arc, Mutex};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     #[derive(Default)]
     struct RecordingRegistry {

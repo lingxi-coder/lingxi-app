@@ -5,6 +5,7 @@
 //! exposes only the Anthropic API key; OAuth access/refresh tokens land in a
 //! follow-up task.
 
+use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 use protocol::{Secret, SecureStorageData, SecureStorageMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
-use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 
 use crate::kinds::SecretKind;
 
@@ -804,9 +804,9 @@ impl CredentialManager {
 mod oauth_tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::SecureStorageBackend;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use platform_api::SecureStorageBackend;
 
     /// In-memory `(service, account) -> data` store for credential tests.
     #[derive(Default)]

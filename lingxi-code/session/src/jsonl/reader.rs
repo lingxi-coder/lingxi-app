@@ -5,12 +5,12 @@
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
 use crate::jsonl::schema::JsonlMessage;
+use platform_api::{FileSystem, FsError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use platform_api::{FileSystem, FsError};
 
 /// A line whose outer `type` admits it into the conversation chain — 1:1 with
 /// `claude-code/src/utils/sessionStorage.ts:139` `isTranscriptMessage`. These

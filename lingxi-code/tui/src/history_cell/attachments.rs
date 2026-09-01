@@ -16,6 +16,7 @@
 use std::path::Path;
 
 use tui_core::message::Attachment;
+use tui_core::render::osc8::file_link;
 use tui_core::render::StyledLine;
 use tui_core::theme::Theme;
 
@@ -64,6 +65,60 @@ pub(crate) fn attachment_lines(attachment: &Attachment, theme: &Theme) -> Vec<St
     colored_lines(&text, theme.dim)
 }
 
+/// Return the filesystem path displayed by an attachment summary. MCP resource
+/// and skill attachments intentionally have no file target.
+fn attachment_path(attachment: &Attachment) -> Option<&str> {
+    match attachment {
+        Attachment::Directory { display_path }
+        | Attachment::File { display_path, .. }
+        | Attachment::CompactFileReference { display_path }
+        | Attachment::PdfReference { display_path, .. }
+        | Attachment::SelectedLines { display_path, .. }
+        | Attachment::NestedMemory { display_path } => Some(display_path),
+        Attachment::PlanFileReference { plan_file_path } => Some(plan_file_path),
+        Attachment::McpResource { .. } | Attachment::InvokedSkills { .. } => None,
+    }
+}
+
+/// Replace the displayed attachment path with its OSC 8 file hyperlink while
+/// preserving the span's dim styling and all surrounding summary text.
+fn wrap_attachment_path(lines: &mut [StyledLine], path: &str, hyperlink_cwd: Option<&Path>) {
+    if path.is_empty() {
+        return;
+    }
+    let linked = if let Some(cwd) = hyperlink_cwd.filter(|_| !Path::new(path).is_absolute()) {
+        let resolved = cwd.join(path);
+        let resolved = resolved.to_string_lossy();
+        file_link(&resolved)
+    } else {
+        file_link(path)
+    };
+    for line in lines {
+        for span in &mut line.spans {
+            if let Some(start) = span.text.find(path) {
+                let end = start + path.len();
+                span.text.replace_range(start..end, &linked);
+                return;
+            }
+        }
+    }
+}
+
+fn attachment_lines_for_scrollback(
+    attachment: &Attachment,
+    theme: &Theme,
+    hyperlinks_enabled: bool,
+    hyperlink_cwd: Option<&Path>,
+) -> Vec<StyledLine> {
+    let mut lines = attachment_lines(attachment, theme);
+    if hyperlinks_enabled {
+        if let Some(path) = attachment_path(attachment) {
+            wrap_attachment_path(&mut lines, path, hyperlink_cwd);
+        }
+    }
+    lines
+}
+
 /// MCP resource/polling update lines: `resource updated: {server}/{target}`
 /// per update (an empty update list renders nothing).
 pub(crate) fn resource_update_lines(
@@ -110,6 +165,17 @@ impl AttachmentCell {
 impl StyledCell for AttachmentCell {
     fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
         attachment_lines(&self.attachment, theme)
+    }
+
+    fn styled_lines_for_scrollback(
+        &self,
+        _width: usize,
+        theme: &Theme,
+        _verbose: bool,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
+    ) -> Vec<StyledLine> {
+        attachment_lines_for_scrollback(&self.attachment, theme, hyperlinks_enabled, hyperlink_cwd)
     }
 }
 

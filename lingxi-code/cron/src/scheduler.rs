@@ -6,6 +6,8 @@
 
 use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
+use platform_api::task_registry::TaskRegistryHandle;
+use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
@@ -13,8 +15,6 @@ use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
 
 /// The session-scoped portion of a cron job. These records never touch the
 /// project tasks file; they live for exactly as long as the scheduler attached
@@ -1435,6 +1435,8 @@ mod scheduler_tick_tests {
     use super::{CronScheduler, SessionCronTask};
     use async_trait::async_trait;
     use futures::Stream;
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use platform_api::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
     use std::collections::HashMap;
     use std::future::Future;
     use std::path::{Path, PathBuf};
@@ -1446,8 +1448,6 @@ mod scheduler_tick_tests {
     use tasks::registry::TaskRegistry;
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
     use tasks::{TaskSpawnInput, TaskType};
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
-    use platform_api::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
 
     const NOW: u64 = 1_700_000_000;
     const TASKS_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";

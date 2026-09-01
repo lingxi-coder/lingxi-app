@@ -77,10 +77,14 @@ pub fn is_bash_provider_shell(command: &str) -> bool {
 /// `<temp>/lingxi-task-output/<task_id>.out`. The directory is created on
 /// first use by [`super::runner`].
 #[must_use]
+pub(crate) fn task_output_dir() -> PathBuf {
+    std::env::temp_dir().join("lingxi-task-output")
+}
+
+/// Stable path for one task output file.
+#[must_use]
 pub fn task_output_path(task_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("lingxi-task-output")
-        .join(format!("{task_id}.out"))
+    task_output_dir().join(format!("{task_id}.out"))
 }
 
 /// Wrap a user command for the bash-tool spawn so we can track cwd

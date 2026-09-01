@@ -9,13 +9,13 @@ use ::url::form_urlencoded;
 use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use crate::oauth::anthropic::pkce::{generate_pkce, generate_state_token};
 use crate::oauth::anthropic::refresh::{AuthState, RefreshDriver};
+use platform_api::{Clock, HttpTransport};
 use protocol::{HttpMethod, HttpRequest, Secret};
 use secret::CredentialManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use platform_api::{Clock, HttpTransport};
 
 /// Timeout for the token-exchange POST.
 ///

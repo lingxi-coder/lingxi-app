@@ -17,11 +17,11 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
+use platform_api::mcp::McpError;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use platform_api::mcp::McpError;
 
 /// Literal `Accept` header value for Streamable HTTP. Matches claude-code's
 /// `MCP_STREAMABLE_HTTP_ACCEPT` const (`client.ts:471`) byte-for-byte.

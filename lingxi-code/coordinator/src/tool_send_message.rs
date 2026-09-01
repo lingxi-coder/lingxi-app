@@ -47,13 +47,13 @@ use protocol::AgentId;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use platform_api::team_spawn::TeamSpawnSeam;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
-use platform_api::team_spawn::TeamSpawnSeam;
 
 use crate::mailbox::{MailboxError, MessageSender, TeammateMessage};
 use crate::team_registry::TeamRegistry;
@@ -291,8 +291,9 @@ impl SendMessageTool {
             .ok_or_else(|| ToolError::InvalidInput("SendMessage: no such live session".into()))?;
         let from_name = self.sender_name(ctx).await;
         let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
-        let message =
-            platform_api::live_sessions::outbound_peer_message(&from_name, &from_sid, content, summary);
+        let message = platform_api::live_sessions::outbound_peer_message(
+            &from_name, &from_sid, content, summary,
+        );
         let socket = peer
             .messaging_socket_path
             .as_deref()
@@ -1417,7 +1418,10 @@ mod tests {
             ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
                 Ok(String::new())
             }
-            async fn kill(&self, task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+            async fn kill(
+                &self,
+                task_id: &str,
+            ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
                 self.killed.store(true, Ordering::SeqCst);
                 *self.killed_task.lock().unwrap() = Some(task_id.to_string());
                 Ok(())

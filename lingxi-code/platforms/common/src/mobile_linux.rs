@@ -3,13 +3,6 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
-use std::io::Read;
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use thiserror::Error;
 use platform_api::{
     BackendPlanHandle, LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError,
     MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus,
@@ -17,6 +10,13 @@ use platform_api::{
     ProcessStreamSink, RootfsState, RootfsStatus, Sandbox, SandboxBackend, SandboxCapability,
     SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use thiserror::Error;
 
 // Derived from the single guest-path atlas — see
 // `platform_api::mobile_linux::guest_paths` for why this is no longer a local

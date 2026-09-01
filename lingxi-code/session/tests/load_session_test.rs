@@ -13,12 +13,12 @@
 //! The strict error variants are RETAINED on `LoaderError` (other code matches
 //! their `Display`) but are no longer produced from this path.
 
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
 use session::jsonl::{load_session, project_dir_name, LoaderError};
 use std::sync::Arc;
 use tempfile::TempDir;
-use platform_api::FileSystem;
 use uuid::Uuid;
 
 async fn setup_cwd() -> (

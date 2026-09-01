@@ -23,6 +23,8 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::budget::BudgetError;
+use platform_api::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
@@ -32,8 +34,6 @@ use telemetry::tengu::agent::{
 };
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
-use platform_api::budget::BudgetError;
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -122,7 +122,9 @@ const EXAMPLE_MIGRATION_REVIEW_PROMPT: &str = "Review migration 0042_user_schema
 ///
 /// `t` (`allowedAgentTypes`, the `att()` wildcard-rule allowlist) has no port
 /// seam, so `o(...)` is the JS `?? !0` default — always true.
-fn general_purpose_is_available(agents: &[platform_api::subagent_spawn::SubagentListingEntry]) -> bool {
+fn general_purpose_is_available(
+    agents: &[platform_api::subagent_spawn::SubagentListingEntry],
+) -> bool {
     let target = normalize_agent_type(GENERAL_PURPOSE_AGENT_TYPE);
     let matches = agents
         .iter()
@@ -792,17 +794,18 @@ impl AgentTool {
         // description carries only the static pointer line. A LEGACY inline body is
         // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
         // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
-        let agent_list_section = if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
-            "Available agent types are listed in <system-reminder> messages in the conversation."
+        let agent_list_section =
+            if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
+                "Available agent types are listed in <system-reminder> messages in the conversation."
                 .to_string()
-        } else {
-            let agent_lines = agents
-                .iter()
-                .map(Self::format_agent_line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("Available agent types and the tools they have access to:\n{agent_lines}")
-        };
+            } else {
+                let agent_lines = agents
+                    .iter()
+                    .map(Self::format_agent_line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Available agent types and the tools they have access to:\n{agent_lines}")
+            };
 
         // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): on the `pro`
         // plan, discourage spawning. Read from the process-global subscription
@@ -2737,7 +2740,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match &agent_worktree {
             Some(handle) => {
-                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle).await
+                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle)
+                    .await
             }
             None => None,
         };
@@ -2792,7 +2796,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // reportable matched) prepend a warning block. The sanitized
                 // blocks feed BOTH the result `content` array and the model-facing
                 // string, and a `tengu_subagent_output_flagged` event is emitted.
-                let sanitized = platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                let sanitized =
+                    platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
                     Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
                 }

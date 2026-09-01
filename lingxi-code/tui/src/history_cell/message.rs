@@ -10,6 +10,7 @@
 
 use tui_core::message::AdvisorKind;
 use tui_core::render::markdown::{render_with_width, MarkdownTheme};
+use tui_core::render::osc8::{hyperlink, wrap_urls};
 use tui_core::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
 
@@ -91,6 +92,274 @@ pub(crate) fn assistant_lines(body: &str, width: usize, theme: &Theme) -> Vec<St
         });
     }
     out
+}
+
+#[derive(Debug, Clone)]
+struct MarkdownLinkTarget {
+    label: String,
+    destination: String,
+}
+
+/// Find inline markdown links in the assistant source. The neutral markdown
+/// renderer intentionally drops destination metadata after applying link
+/// styling, so native scrollback recovers the small amount of metadata needed
+/// for OSC 8 without changing the backend-neutral `StyledSpan` contract.
+fn markdown_link_targets(body: &str) -> Vec<MarkdownLinkTarget> {
+    let bytes = body.as_bytes();
+    let mut targets = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        if bytes[cursor] != b'[' || (cursor > 0 && bytes[cursor - 1] == b'!') {
+            cursor += 1;
+            continue;
+        }
+        let Some(label_end) = matching_delimiter(bytes, cursor + 1, b'[', b']') else {
+            cursor += 1;
+            continue;
+        };
+        let mut destination_start = label_end + 1;
+        while destination_start < bytes.len() && bytes[destination_start].is_ascii_whitespace() {
+            destination_start += 1;
+        }
+        if destination_start >= bytes.len() || bytes[destination_start] != b'(' {
+            cursor = label_end + 1;
+            continue;
+        }
+        let Some(destination_end) = matching_delimiter(bytes, destination_start + 1, b'(', b')')
+        else {
+            cursor = destination_start + 1;
+            continue;
+        };
+        let label = markdown_link_label(&body[cursor + 1..label_end]);
+        let destination = markdown_destination(&body[destination_start + 1..destination_end]);
+        if !label.is_empty()
+            && !destination.is_empty()
+            && !destination.to_ascii_lowercase().starts_with("mailto:")
+        {
+            targets.push(MarkdownLinkTarget { label, destination });
+        }
+        cursor = destination_end + 1;
+    }
+    targets
+}
+
+/// Find the closing delimiter matching the opener immediately before `start`.
+/// Escaped delimiters are content, while nested pairs are balanced so links
+/// whose labels or destinations contain punctuation remain recoverable.
+fn matching_delimiter(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = cursor.saturating_add(2),
+            byte if byte == open => {
+                depth += 1;
+                cursor += 1;
+            }
+            byte if byte == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor);
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+/// Keep the destination portion of an inline link, dropping an optional
+/// angle-bracket wrapper and markdown title. The title is not part of the OSC
+/// target.
+fn markdown_destination(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('<') {
+        return rest
+            .find('>')
+            .map_or_else(String::new, |end| rest[..end].to_string());
+    }
+    trimmed
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Convert a markdown link label to the text emitted by the renderer for
+/// common inline emphasis/code markers. Underscores within words are content,
+/// not emphasis delimiters.
+fn markdown_link_label(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut label = String::with_capacity(raw.len());
+    let mut cursor = 0;
+    while cursor < chars.len() {
+        match chars[cursor] {
+            '\\' if cursor + 1 < chars.len() => {
+                label.push(chars[cursor + 1]);
+                cursor += 2;
+            }
+            '*' | '`' => cursor += 1,
+            '_' if cursor == 0
+                || cursor + 1 == chars.len()
+                || !chars[cursor - 1].is_alphanumeric()
+                || !chars[cursor + 1].is_alphanumeric() =>
+            {
+                cursor += 1;
+            }
+            ch => {
+                label.push(ch);
+                cursor += 1;
+            }
+        }
+    }
+    label
+}
+
+#[derive(Clone, Copy)]
+struct VisibleCharPosition {
+    span: usize,
+    start: usize,
+    end: usize,
+}
+
+/// Build visible character positions while skipping OSC 8 controls already
+/// inserted into a line. Positions let a label span multiple markdown-style
+/// spans (for example `**docs** and *guide*`) without flattening their styles.
+fn visible_char_map(line: &StyledLine) -> (String, Vec<VisibleCharPosition>) {
+    let mut visible = String::new();
+    let mut positions = Vec::new();
+    for (span, styled) in line.spans.iter().enumerate() {
+        let bytes = styled.text.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'\x1b' && bytes.get(cursor + 1) == Some(&b']') {
+                if let Some(end) = styled.text[cursor + 2..].find('\x07') {
+                    cursor += end + 3;
+                    continue;
+                }
+            }
+            let Some(ch) = styled.text[cursor..].chars().next() else {
+                break;
+            };
+            let end = cursor + ch.len_utf8();
+            visible.push(ch);
+            positions.push(VisibleCharPosition {
+                span,
+                start: cursor,
+                end,
+            });
+            cursor = end;
+        }
+    }
+    (visible, positions)
+}
+
+/// Whether a visible match is already surrounded by an OSC 8 pair. This
+/// keeps repeated labels from being wrapped twice when a line has multiple
+/// links with the same display text.
+fn already_osc8_wrapped(
+    line: &StyledLine,
+    first: VisibleCharPosition,
+    last: VisibleCharPosition,
+) -> bool {
+    let before = line.spans[..=first.span]
+        .iter()
+        .enumerate()
+        .any(|(span, text)| {
+            if span == first.span {
+                text.text[..first.start].contains("\x1b]8;;")
+            } else {
+                text.text.contains("\x1b]8;;")
+            }
+        });
+    let after = line.spans[last.span..]
+        .iter()
+        .enumerate()
+        .any(|(offset, text)| {
+            let span = last.span + offset;
+            if span == last.span {
+                text.text[last.end..].contains("\x1b]8;;")
+            } else {
+                text.text.contains("\x1b]8;;")
+            }
+        });
+    before && after
+}
+
+/// Wrap one rendered markdown label, preserving any style span boundaries.
+fn wrap_markdown_label(line: &mut StyledLine, label: &str, destination: &str) -> bool {
+    let (visible, positions) = visible_char_map(line);
+    if label.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(relative_start) = visible[search_from..].find(label) {
+        let start = search_from + relative_start;
+        let end = start + label.len();
+        let first_char = visible[..start].chars().count();
+        let last_char = visible[..end].chars().count().saturating_sub(1);
+        let Some(&first) = positions.get(first_char) else {
+            return false;
+        };
+        let Some(&last) = positions.get(last_char) else {
+            return false;
+        };
+        if !already_osc8_wrapped(line, first, last) {
+            let open = format!("\x1b]8;;{destination}\x07");
+            let close = "\x1b]8;;\x07";
+            if first.span == last.span {
+                line.spans[first.span]
+                    .text
+                    .replace_range(first.start..last.end, &hyperlink(label, destination));
+            } else {
+                line.spans[first.span].text.insert_str(first.start, &open);
+                line.spans[last.span].text.insert_str(last.end, close);
+            }
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn wrap_markdown_labels(lines: &mut [StyledLine], targets: &[MarkdownLinkTarget]) {
+    for target in targets {
+        for line in lines.iter_mut() {
+            if wrap_markdown_label(line, &target.label, &target.destination) {
+                break;
+            }
+        }
+    }
+}
+
+/// Add OSC 8 wrappers to markdown link labels and visible HTTP(S) URLs in
+/// assistant output. This runs only for native scrollback; the cell-grid path
+/// continues to receive the ordinary styled lines without raw escapes.
+fn assistant_lines_for_scrollback(
+    body: &str,
+    width: usize,
+    theme: &Theme,
+    hyperlinks_enabled: bool,
+) -> Vec<StyledLine> {
+    let mut lines = assistant_lines(body, width, theme);
+    if hyperlinks_enabled {
+        wrap_markdown_labels(&mut lines, &markdown_link_targets(body));
+        for line in &mut lines {
+            for span in &mut line.spans {
+                // A newly wrapped label may itself display a URL. Avoid
+                // wrapping the URL embedded in its OSC 8 target a second time.
+                if !span.text.contains('\x1b') {
+                    span.text = wrap_urls(&span.text);
+                }
+            }
+        }
+    }
+    lines
 }
 
 /// A user prompt echoed into scrollback, one plain line per body line.
@@ -285,6 +554,22 @@ impl StyledCell for AssistantTextCell {
             return Vec::new();
         }
         assistant_lines(&self.body, width, theme)
+    }
+
+    fn styled_lines_for_scrollback(
+        &self,
+        width: usize,
+        theme: &Theme,
+        _verbose: bool,
+        hyperlinks_enabled: bool,
+        _hyperlink_cwd: Option<&std::path::Path>,
+    ) -> Vec<StyledLine> {
+        // Keep the empty streaming placeholder invisible in native scrollback,
+        // just as in the normal cell-grid renderer.
+        if self.body.is_empty() {
+            return Vec::new();
+        }
+        assistant_lines_for_scrollback(&self.body, width, theme, hyperlinks_enabled)
     }
 }
 
@@ -536,6 +821,34 @@ mod tests {
             lines[1..].iter().all(|l| l.starts_with(CONT_INDENT)),
             "continuation indent: {lines:?}"
         );
+    }
+
+    #[test]
+    fn assistant_scrollback_links_labeled_markdown_without_changing_buffer_lines() {
+        let cell = AssistantTextCell::new("See [docs](https://x.io/docs).".to_string());
+        let normal = cell.display_lines(80, &Theme::dark(), RenderMode::default());
+        let scrollback = cell.styled_lines_for_scrollback(80, &Theme::dark(), false, true, None);
+        let normal_text: String = normal.iter().map(ToString::to_string).collect();
+        let scrollback_text: String = scrollback.iter().map(StyledLine::plain_text).collect();
+        assert_eq!(normal_text, "⏺ See docs.");
+        assert!(scrollback_text.contains(&hyperlink("docs", "https://x.io/docs")));
+        assert!(!normal_text.contains("\x1b]8;;") && !normal_text.contains("https://x.io/docs"));
+    }
+
+    #[test]
+    fn assistant_scrollback_links_nested_emphasis_labels_across_spans() {
+        let cell =
+            AssistantTextCell::new("See [**docs** and *guide*](https://x.io/docs).".to_string());
+        let lines = cell.styled_lines_for_scrollback(80, &Theme::dark(), false, true, None);
+        let text: String = lines.iter().map(StyledLine::plain_text).collect();
+        let open = "\x1b]8;;https://x.io/docs\x07";
+        assert_eq!(text.matches(open).count(), 1);
+        assert_eq!(text.matches("\x1b]8;;\x07").count(), 1);
+        let open_at = text.find(open).expect("link opener");
+        let close_at = text.find("\x1b]8;;\x07").expect("link closer");
+        assert!(open_at < close_at);
+        assert!(text[open_at..close_at].contains("docs"));
+        assert!(text[open_at..close_at].contains("guide"));
     }
 
     #[test]

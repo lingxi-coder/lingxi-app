@@ -741,6 +741,11 @@ function validateManagedMcpServer(v: unknown): void {
       'serverName',
       'appId',
       'appName',
+      'enabled',
+      'status',
+      'settingsRevision',
+      'enabledTools',
+      'pinnedToCurrentConversation',
       'buildId',
       'catalogSha256',
       'toolSurfaceSha256',
@@ -750,13 +755,19 @@ function validateManagedMcpServer(v: unknown): void {
       'mcpVerification',
       'uiVerification',
     ],
-    ['tools'],
+    ['tools', 'widget'],
     'managed MCP server',
   );
   assert.ok(
-    isString(o['serverName']) &&
+      isString(o['serverName']) &&
       isString(o['appId']) &&
       isString(o['appName']) &&
+      isBool(o['enabled']) &&
+      ['disabled', 'needs_setup', 'authoring', 'enabled', 'needs_revalidation', 'error'].includes(String(o['status'])) &&
+      isNumber(o['settingsRevision']) &&
+      Array.isArray(o['enabledTools']) &&
+      (o['enabledTools'] as unknown[]).every(isString) &&
+      isBool(o['pinnedToCurrentConversation']) &&
       isString(o['buildId']) &&
       isString(o['catalogSha256']) &&
       isString(o['toolSurfaceSha256']) &&
@@ -766,6 +777,15 @@ function validateManagedMcpServer(v: unknown): void {
   validateAppWorkflowState(o['publicationState']);
   validateVerificationSummary(o['mcpVerification']);
   validateVerificationSummary(o['uiVerification']);
+  if ('widget' in o && o['widget'] !== null) {
+    const widget = rec(o['widget']);
+    exactObjectKeys(widget, ['resourceUri', 'mimeType', 'resourceSha256'], [], 'managed MCP widget');
+    assert.ok(
+      isString(widget['resourceUri']) &&
+        isString(widget['mimeType']) &&
+        isString(widget['resourceSha256']),
+    );
+  }
   if ('tools' in o) {
     assert.ok(Array.isArray(o['tools']));
     for (const tool of o['tools'] as unknown[]) validateMcpToolSurface(tool);
@@ -1492,16 +1512,6 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['request_id']));
       validateAppAuthorizationDecision(o['decision']);
       break;
-    case 'resolve_app_runtime_profile_selection':
-      assert.ok(isString(o['request_id']));
-      if ('selected_family' in o && o['selected_family'] !== undefined) {
-        assert.ok(
-          ['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(
-            o['selected_family'] as string,
-          ),
-        );
-      }
-      break;
     case 'resolve_app_dependency_change_confirmation':
       assert.ok(isString(o['request_id']) && isBool(o['approved']));
       break;
@@ -1569,6 +1579,35 @@ function validateCommand(name: string, v: unknown): void {
             keys,
             'type',
             `snapshot ${name}: get_managed_mcp_inventory must carry no fields, got {${keys}}`,
+          );
+          break;
+        case 'start_local_app_mcp_authoring':
+          assert.equal(keys, 'app_id,type,user_goal');
+          assert.ok(isString(cmd['app_id']) && isString(cmd['user_goal']));
+          break;
+        case 'set_local_app_mcp_enabled':
+          assert.equal(keys, 'app_id,enabled,expected_revision,type');
+          assert.ok(
+            isString(cmd['app_id']) &&
+              isBool(cmd['enabled']) &&
+              isNumber(cmd['expected_revision']),
+          );
+          break;
+        case 'set_local_app_mcp_tool_enabled':
+          assert.equal(keys, 'app_id,enabled,expected_revision,tool_name,type');
+          assert.ok(
+            isString(cmd['app_id']) &&
+              isBool(cmd['enabled']) &&
+              isNumber(cmd['expected_revision']) &&
+              isString(cmd['tool_name']),
+          );
+          break;
+        case 'set_local_app_mcp_conversation_pinned':
+          assert.equal(keys, 'app_id,conversation_id,pinned,type');
+          assert.ok(
+            isString(cmd['app_id']) &&
+              isString(cmd['conversation_id']) &&
+              isBool(cmd['pinned']),
           );
           break;
         default:

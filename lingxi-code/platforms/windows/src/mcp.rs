@@ -1,21 +1,27 @@
 //! MCP transport — Windows.
 //!
-//! Mirrors `platform_posix::mcp` exactly — see M2-02d Task 7. Supports
-//! the `Stdio`, `Sse`, and `Http` variants in M2. The `WebSocket` variant's
-//! low-level `connect_ws` helper is re-exported by M2-02c, but
-//! `WindowsMcpTransport::connect` does NOT yet route `WebSocket` specs — that
-//! arm currently falls through to `McpError::UnsupportedTransport` and will
-//! be wired in a follow-up. Other variants (`InProcess`, `SseIde`,
-//! `SdkControl`) return `McpError::UnsupportedTransport`.
+//! Mirrors the POSIX remote-transport boundary: stdio process ownership stays
+//! here, while HTTP/SSE/IDE JSON-RPC state is held by the shared
+//! [`platform_common::RemoteMcpTransport`]. `SseIde` and `WsIde` therefore use
+//! the same loopback auth-header and path handling as POSIX without importing
+//! any provider credential or cloud-auth machinery.
 //!
 //! M2-02c also lands `spawn_stdio` (mirrors the POSIX implementation, NDJSON
 //! framing + 64 MB stderr ring) plus a re-export of the shared WebSocket
 //! connector at `platform_windows::mcp::connect_ws`.
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use jsonrpc::Connection;
+use platform_api::{
+    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
+    McpNegotiatedProtocol, McpNotificationStream, McpPromptDto, McpProtocolEra, McpRawConnection,
+    McpResourceContentDto, McpResourceContentsRich, McpResourceDto, McpResourceTemplateDto,
+    McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+    ServerCapabilitiesDto,
+};
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
-use platform_common::{connect_http, connect_sse};
+use platform_common::RemoteMcpTransport;
 use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -24,40 +30,31 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
-use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
 
 /// Per-connection state held by `WindowsMcpTransport`.
 ///
-/// Mirrors `platform_posix::mcp::PosixMcpConnection`. Different
-/// transports keep slightly different ownership: `Stdio` owns the spawned
-/// child so `disconnect` can kill it; SSE / HTTP just own the JSON-RPC
-/// `Connection` (the underlying `reqwest` tasks live inside the
-/// connection's broker).
+/// Remote connections are owned by [`RemoteMcpTransport`] so both Windows and
+/// POSIX share identical JSON-RPC cleanup. This map only contains stdio
+/// children, whose process lifecycle is Windows-specific.
 pub(crate) enum WindowsMcpConnection {
     /// `Stdio` connection — owns the child process.
     Stdio {
         /// Owned child process; killed on `disconnect`.
         child: Child,
     },
-    /// `Sse` connection — owns the JSON-RPC connection over the HTTP+SSE pair.
-    Sse,
-    /// `Http` connection — owns the JSON-RPC connection over Streamable HTTP.
-    Http,
 }
 
 /// Windows MCP transport.
 ///
-/// Supports the `Stdio`, `Sse`, and `Http` variants in M2. Other transports
-/// (`WebSocket`, `InProcess`, `SseIde`, `SdkControl`) return
-/// `McpError::UnsupportedTransport`. Most request methods are intentionally
-/// stubbed pending full `JSON-RPC` framing in M2 phase 3.
+/// Supports stdio plus shared remote `Sse`, `Http`, `SseIde`, and `WsIde`
+/// transports. Generic `WebSocket`, `InProcess`, and `SdkControl` specs remain
+/// unsupported, matching the POSIX transport contract. Remote connection
+/// cleanup is delegated to the shared transport so disconnecting an IDE
+/// endpoint closes its broker and removes its connection id.
 #[derive(Default)]
 pub struct WindowsMcpTransport {
     connections: Mutex<HashMap<McpConnectionId, WindowsMcpConnection>>,
+    remote: Arc<RemoteMcpTransport>,
 }
 
 impl WindowsMcpTransport {
@@ -73,6 +70,33 @@ impl WindowsMcpTransport {
         // when the connection id misses the map.
         if let Ok(mut guard) = self.connections.lock() {
             guard.insert(id, conn);
+        }
+    }
+
+    fn is_remote_connection(&self, id: McpConnectionId) -> bool {
+        self.remote.connection_for(id).is_some()
+    }
+}
+
+/// Best-effort synchronous cleanup for a connection whose combined handshake
+/// future was cancelled. Remote brokers have their own equivalent guard;
+/// this one covers the Windows-owned stdio child map.
+struct ConnectionCleanupGuard<'a> {
+    transport: &'a WindowsMcpTransport,
+    id: McpConnectionId,
+    armed: bool,
+}
+
+impl ConnectionCleanupGuard<'_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConnectionCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.transport.disconnect_sync(self.id);
         }
     }
 }
@@ -96,32 +120,92 @@ impl McpTransport for WindowsMcpTransport {
                     .map_err(|e| McpError::Connection(e.to_string()))?;
                 self.insert(id, WindowsMcpConnection::Stdio { child });
             }
-            McpTransportSpec::Sse { url, headers, .. } => {
-                // Delegate to the shared connector. The OAuth + headers_helper
-                // arms are out of scope for M2-02d's dispatch task; the
-                // transport currently passes only the static `headers` map
-                // and no auth token. OAuth integration lands in M2-06.
-                let _conn = connect_sse(url, None, headers)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, WindowsMcpConnection::Sse);
-            }
-            McpTransportSpec::Http { url, headers, .. } => {
-                // See `Sse` arm — OAuth + per-request headers_helper deferred.
-                let _conn = connect_http(url, None, headers, None)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, WindowsMcpConnection::Http);
-            }
+            McpTransportSpec::Sse { .. }
+            | McpTransportSpec::Http { .. }
+            | McpTransportSpec::SseIde { .. }
+            | McpTransportSpec::WsIde { .. } => return self.remote.connect(spec).await,
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
         }
         Ok(McpRawConnection { connection_id: id })
     }
 
-    async fn initialize(
+    async fn connect_and_initialize(
         &self,
-        _conn: &McpRawConnection,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+        spec: &McpTransportSpec,
+        options: McpConnectOptions,
+    ) -> Result<McpConnectResult, McpError> {
+        // Keep remote transports on the shared modern-negotiation path. This
+        // is what POSIX does and is important for IDE servers that advertise
+        // the modern result envelope or skills extension.
+        if matches!(
+            spec,
+            McpTransportSpec::Sse { .. }
+                | McpTransportSpec::Http { .. }
+                | McpTransportSpec::SseIde { .. }
+                | McpTransportSpec::WsIde { .. }
+        ) {
+            return self.remote.connect_and_initialize(spec, options).await;
+        }
+
+        // Stdio remains a Windows-owned transport. Preserve the trait's
+        // deadline and cancellation semantics even though its current
+        // initialize implementation is a platform stub.
+        let deadline = tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(options.deadline_ms))
+            .ok_or_else(|| McpError::Connection("MCP connection deadline overflow".into()))?;
+        let connection = tokio::time::timeout_at(deadline, self.connect(spec))
+            .await
+            .map_err(|_| McpError::Connection("MCP connection deadline exceeded".into()))??;
+        let cleanup = ConnectionCleanupGuard {
+            transport: self,
+            id: connection.connection_id,
+            armed: true,
+        };
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+            remaining,
+            self.initialize(&connection),
+        ))
+        .catch_unwind()
+        .await;
+        let capabilities = match result {
+            Ok(Ok(Ok(capabilities))) => capabilities,
+            Ok(Ok(Err(error))) => {
+                if self.disconnect(connection.connection_id).await.is_ok() {
+                    cleanup.disarm();
+                }
+                return Err(error);
+            }
+            Ok(Err(_)) => {
+                if self.disconnect(connection.connection_id).await.is_ok() {
+                    cleanup.disarm();
+                }
+                return Err(McpError::Connection(
+                    "MCP connection deadline exceeded".into(),
+                ));
+            }
+            Err(payload) => {
+                let _ = self.disconnect(connection.connection_id).await;
+                std::panic::resume_unwind(payload);
+            }
+        };
+        cleanup.disarm();
+        Ok(McpConnectResult {
+            connection,
+            capabilities,
+            negotiated: McpNegotiatedProtocol {
+                era: McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+        })
+    }
+
+    async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.initialize(conn).await;
+        }
         // M2.03 stub — full `JSON-RPC` initialize lands in M2 phase 3.
         Ok(ServerCapabilitiesDto {
             tools: true,
@@ -134,7 +218,10 @@ impl McpTransport for WindowsMcpTransport {
         })
     }
 
-    async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+    async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.list_tools(conn).await;
+        }
         Err(McpError::Internal(
             "windows mcp list_tools delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
@@ -142,21 +229,40 @@ impl McpTransport for WindowsMcpTransport {
 
     async fn list_resources(
         &self,
-        _conn: &McpRawConnection,
+        conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.list_resources(conn).await;
+        }
         Ok(Vec::new())
     }
 
-    async fn list_prompts(&self, _conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+    async fn list_resource_templates(
+        &self,
+        conn: &McpRawConnection,
+    ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.list_resource_templates(conn).await;
+        }
+        Ok(Vec::new())
+    }
+
+    async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.list_prompts(conn).await;
+        }
         Ok(Vec::new())
     }
 
     async fn call_tool(
         &self,
-        _conn: &McpRawConnection,
-        _tool: &str,
-        _input: Value,
+        conn: &McpRawConnection,
+        tool: &str,
+        input: Value,
     ) -> Result<McpToolResultDto, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.call_tool(conn, tool, input).await;
+        }
         Err(McpError::Internal(
             "windows mcp call_tool delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
@@ -164,37 +270,71 @@ impl McpTransport for WindowsMcpTransport {
 
     async fn read_resource(
         &self,
-        _conn: &McpRawConnection,
-        _uri: &str,
+        conn: &McpRawConnection,
+        uri: &str,
     ) -> Result<McpResourceContentDto, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.read_resource(conn, uri).await;
+        }
         Err(McpError::Internal(
             "windows mcp read_resource delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
-    async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+    async fn read_resource_rich(
+        &self,
+        conn: &McpRawConnection,
+        uri: &str,
+        output_dir: &std::path::Path,
+    ) -> Result<Vec<McpResourceContentsRich>, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.read_resource_rich(conn, uri, output_dir).await;
+        }
+        let single = self.read_resource(conn, uri).await?;
+        Ok(vec![McpResourceContentsRich {
+            uri: single.uri,
+            mime_type: single.mime_type,
+            meta: single.meta,
+            text: Some(single.content),
+            blob_saved_to: None,
+        }])
+    }
+
+    async fn ping(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
+        if self.is_remote_connection(conn_id) {
+            return self.remote.ping(conn_id).await;
+        }
         Ok(())
     }
 
     async fn notifications(
         &self,
-        _conn: &McpRawConnection,
+        conn: &McpRawConnection,
     ) -> Result<McpNotificationStream, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.notifications(conn).await;
+        }
         use futures::stream::empty;
         Ok(Box::pin(empty()))
     }
 
     async fn handle_elicitation(
         &self,
-        _conn: &McpRawConnection,
-        _req: ElicitRequestDto,
+        conn: &McpRawConnection,
+        req: ElicitRequestDto,
     ) -> Result<ElicitResultDto, McpError> {
+        if self.is_remote_connection(conn.connection_id) {
+            return self.remote.handle_elicitation(conn, req).await;
+        }
         Err(McpError::Internal(
             "windows mcp elicitation delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
     async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
+        if self.is_remote_connection(conn_id) {
+            return self.remote.disconnect(conn_id).await;
+        }
         let entry = self
             .connections
             .lock()
@@ -203,9 +343,22 @@ impl McpTransport for WindowsMcpTransport {
         if let Some(WindowsMcpConnection::Stdio { mut child }) = entry {
             let _ = child.kill().await;
         }
-        // For Sse / Http there is no owned child; dropping the entry tears
-        // down the JSON-RPC connection (and its background tasks) naturally.
         Ok(())
+    }
+
+    fn disconnect_sync(&self, conn_id: McpConnectionId) {
+        if self.is_remote_connection(conn_id) {
+            self.remote.disconnect_sync(conn_id);
+            return;
+        }
+        let entry = self
+            .connections
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&conn_id));
+        if let Some(WindowsMcpConnection::Stdio { mut child }) = entry {
+            let _ = child.start_kill();
+        }
     }
 
     fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -213,7 +366,21 @@ impl McpTransport for WindowsMcpTransport {
             McpTransportKind::Stdio,
             McpTransportKind::Sse,
             McpTransportKind::Http,
+            McpTransportKind::SseIde,
+            McpTransportKind::WsIde,
         ]
+    }
+}
+
+/// Bridge remote connections into `McpRegistry`'s live `McpClient` path.
+///
+/// The remote connection map is owned by the shared transport, so Windows and
+/// POSIX expose the same `Arc<jsonrpc::Connection>` without duplicating wire
+/// or credential handling. Windows-owned stdio remains a process-only stub
+/// until its platform-specific child connection lifecycle is upgraded.
+impl mcp::RawConnectionProvider for WindowsMcpTransport {
+    fn connection_for(&self, id: McpConnectionId) -> Option<Arc<Connection>> {
+        self.remote.connection_for(id)
     }
 }
 

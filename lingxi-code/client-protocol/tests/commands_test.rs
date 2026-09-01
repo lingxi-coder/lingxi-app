@@ -104,6 +104,34 @@ fn plugin_command_phase8_operations_round_trip_nested_under_command() {
             },
         },
         ClientCommand::PluginCommand {
+            command: PluginCommandDto::StartLocalAppMcpAuthoring {
+                app_id: "habits-1a2b".to_string(),
+                user_goal: "Let the model save and summarize my habit data.".to_string(),
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::SetLocalAppMcpEnabled {
+                app_id: "habits-1a2b".to_string(),
+                enabled: true,
+                expected_revision: 4,
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::SetLocalAppMcpToolEnabled {
+                app_id: "habits-1a2b".to_string(),
+                tool_name: "save_habit".to_string(),
+                enabled: false,
+                expected_revision: 5,
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::SetLocalAppMcpConversationPinned {
+                conversation_id: "conv-0001".to_string(),
+                app_id: "habits-1a2b".to_string(),
+                pinned: true,
+            },
+        },
+        ClientCommand::PluginCommand {
             command: PluginCommandDto::GetManagedMcpInventory,
         },
     ];
@@ -112,6 +140,10 @@ fn plugin_command_phase8_operations_round_trip_nested_under_command() {
         "get_inventory",
         "resolve_create_confirmation",
         "resolve_mcp_proposal_approval",
+        "start_local_app_mcp_authoring",
+        "set_local_app_mcp_enabled",
+        "set_local_app_mcp_tool_enabled",
+        "set_local_app_mcp_conversation_pinned",
         "get_managed_mcp_inventory",
     ];
 

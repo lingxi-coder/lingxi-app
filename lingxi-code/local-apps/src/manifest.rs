@@ -6,16 +6,17 @@
 
 use crate::error::AppError;
 use crate::ids;
+use crate::mcp_settings::MCP_SETTINGS_FILE;
 use crate::permissions::AppCapability;
 use crate::runtime_v2::RUNTIME_API_MAJOR;
 use crate::types::{AppRuntimeProfile, APPS_SCHEMA_VERSION};
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
-use platform_api::FsError;
 
 /// Manifest filename under `workspace/.lingxi`.
 pub const APP_MANIFEST_FILE: &str = "app.manifest.json";
@@ -46,7 +47,9 @@ pub const GENERATION_JOBS_FILE: &str = "generation-jobs.json";
 pub const MAILBOX_FILE: &str = "mailbox.json";
 /// Host-owned MCP catalog root under one app's private data directory.
 pub const MCP_DIR: &str = "mcp";
+/// Directory containing immutable MCP catalogs under `mcp/`.
 pub const MCP_CATALOGS_DIR: &str = "catalogs";
+/// Durable MCP authoring journal under `mcp/`.
 pub const MCP_AUTHORING_JOURNAL_FILE: &str = "authoring-journal.json";
 
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
@@ -182,10 +185,16 @@ impl DeviceContext {
     /// names a real platform would be a guess, and an absent context already
     /// carries exactly that meaning.
     #[must_use]
-    pub fn from_host_environment(environment: &platform_api::MobileHostEnvironment) -> Option<Self> {
+    pub fn from_host_environment(
+        environment: &platform_api::MobileHostEnvironment,
+    ) -> Option<Self> {
         let (os, form_factor) = match (environment.host_os, environment.device_class) {
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone) => ("ios", "iphone"),
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet) => ("ios", "ipad"),
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone) => {
+                ("ios", "iphone")
+            }
+            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet) => {
+                ("ios", "ipad")
+            }
             (platform_api::MobileHostOs::Android, platform_api::MobileDeviceClass::Phone) => {
                 ("android", "phone")
             }
@@ -425,24 +434,21 @@ pub enum AppPublicationState {
     PublishedVerified,
 }
 
-/// Derive publication state from the active build/catalog pair.
+/// Derive publication state from the active build and UI verification only.
 pub fn derive_publication_state(
-    manifest: &AppManifest,
+    _manifest: &AppManifest,
     active_build_id: Option<&str>,
     ui_verified: bool,
 ) -> Result<AppPublicationState, AppError> {
-    match (active_build_id, manifest.active_mcp_catalog.as_ref()) {
-        (None, None) => Ok(AppPublicationState::Draft),
-        (Some(build_id), Some(catalog)) if build_id == catalog.build_id => {
+    match active_build_id {
+        None => Ok(AppPublicationState::Draft),
+        Some(_) => {
             if ui_verified {
                 Ok(AppPublicationState::PublishedVerified)
             } else {
                 Ok(AppPublicationState::PublishedUnverified)
             }
         }
-        _ => Err(AppError::InvalidRequest(
-            "active_state_corrupt: active build and MCP catalog must be paired".into(),
-        )),
     }
 }
 
@@ -951,6 +957,12 @@ impl AppLayout {
             .join(MCP_AUTHORING_JOURNAL_FILE)
     }
 
+    /// Root-relative host-owned MCP settings.
+    #[must_use]
+    pub fn mcp_settings_rel(&self) -> PathBuf {
+        self.app_dir_rel().join(MCP_DIR).join(MCP_SETTINGS_FILE)
+    }
+
     /// Root-relative host-owned Agent session catalog.
     #[must_use]
     pub fn agent_sessions_rel(&self) -> PathBuf {
@@ -1392,11 +1404,17 @@ mod tests {
         // `Device class: phone` is the ONLY class an iPhone reports, and it
         // must not reach the manifest verbatim.
         assert_eq!(
-            derive(platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone),
+            derive(
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Phone
+            ),
             Some(("ios".into(), "iphone".into()))
         );
         assert_eq!(
-            derive(platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet),
+            derive(
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Tablet
+            ),
             Some(("ios".into(), "ipad".into()))
         );
         assert_eq!(
@@ -1422,8 +1440,14 @@ mod tests {
         );
         // Every pair the derivation can produce must survive validation.
         for (host_os, device_class) in [
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone),
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet),
+            (
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Phone,
+            ),
+            (
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Tablet,
+            ),
             (
                 platform_api::MobileHostOs::Android,
                 platform_api::MobileDeviceClass::Phone,
@@ -1633,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_publication_pair_invariants_fail_closed() {
+    fn active_mcp_catalog_still_requires_scaffold_identity() {
         let mut shell = AppManifest::for_new_app("schema-v3", "Schema");
         shell.active_mcp_catalog = Some(AppMcpCatalogRef {
             build_id: "build".into(),
@@ -1669,11 +1693,19 @@ mod tests {
     }
 
     #[test]
-    fn publication_state_is_derived_and_unpaired_active_fails_closed() {
+    fn publication_state_only_depends_on_active_build_and_ui_verification() {
         let mut manifest = AppManifest::for_new_app("state-app", "State");
         assert_eq!(
             derive_publication_state(&manifest, None, false).unwrap(),
             AppPublicationState::Draft
+        );
+        assert_eq!(
+            derive_publication_state(&manifest, Some("build-1"), false).unwrap(),
+            AppPublicationState::PublishedUnverified
+        );
+        assert_eq!(
+            derive_publication_state(&manifest, Some("build-1"), true).unwrap(),
+            AppPublicationState::PublishedVerified
         );
         manifest.active_mcp_catalog = Some(AppMcpCatalogRef {
             build_id: "build-1".into(),
@@ -1687,8 +1719,11 @@ mod tests {
             mcp_verification_sha256: "0".repeat(64),
         });
         assert!(derive_publication_state(&manifest, Some("build-1"), false).is_ok());
-        assert!(derive_publication_state(&manifest, Some("build-2"), false).is_err());
-        assert!(derive_publication_state(&manifest, None, false).is_err());
+        assert!(derive_publication_state(&manifest, Some("build-2"), false).is_ok());
+        assert_eq!(
+            derive_publication_state(&manifest, None, false).unwrap(),
+            AppPublicationState::Draft
+        );
     }
 
     #[test]

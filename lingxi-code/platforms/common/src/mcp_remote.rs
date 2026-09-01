@@ -8,17 +8,18 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
+use platform_api::{
+    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpIconDto,
+    McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+    McpToolAnnotationsDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+    McpTransportSpec, ServerCapabilitiesDto,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
-    McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
 
 /// Legacy MCP protocol revision used when modern negotiation is unavailable.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -289,6 +290,24 @@ impl McpTransport for RemoteMcpTransport {
             McpTransportSpec::Sse { url, headers, .. } => crate::connect_sse(url, None, headers)
                 .await
                 .map_err(McpError::from)?,
+            McpTransportSpec::SseIde {
+                url, auth_token, ..
+            } => {
+                let headers = platform_api::McpHeaders::default();
+                crate::connect_sse(url, auth_token.as_deref(), &headers)
+                    .await
+                    .map_err(McpError::from)?
+            }
+            McpTransportSpec::WsIde {
+                url, auth_token, ..
+            } => {
+                let url = url
+                    .parse::<url::Url>()
+                    .map_err(|error| McpError::Connection(error.to_string()))?;
+                crate::mcp_ws::connect_ws_optional(url, auth_token.as_deref())
+                    .await
+                    .map_err(|error| McpError::Connection(error.to_string()))?
+            }
             McpTransportSpec::Http { url, headers, .. } => {
                 crate::connect_http(url, None, headers, Some(Duration::from_secs(60)))
                     .await
@@ -401,7 +420,9 @@ impl McpTransport for RemoteMcpTransport {
             .map(|resource| McpResourceDto {
                 uri: resource.uri,
                 name: resource.name,
+                description: resource.description,
                 mime_type: resource.mime_type,
+                meta: resource.meta,
             })
             .collect())
     }
@@ -423,6 +444,8 @@ impl McpTransport for RemoteMcpTransport {
                 name: template.name,
                 description: template.description,
                 mime_type: template.mime_type,
+                annotations: template.annotations,
+                meta: template.meta,
             })
             .collect())
     }
@@ -517,6 +540,8 @@ impl McpTransport for RemoteMcpTransport {
         Ok(McpResourceContentDto {
             uri: first.uri.unwrap_or_else(|| uri.to_string()),
             content: first.text.or(first.blob).unwrap_or_default(),
+            mime_type: first.mime_type,
+            meta: first.meta,
         })
     }
 
@@ -581,7 +606,12 @@ impl McpTransport for RemoteMcpTransport {
     }
 
     fn supported_transports(&self) -> Vec<McpTransportKind> {
-        vec![McpTransportKind::Sse, McpTransportKind::Http]
+        vec![
+            McpTransportKind::Sse,
+            McpTransportKind::Http,
+            McpTransportKind::SseIde,
+            McpTransportKind::WsIde,
+        ]
     }
 }
 
@@ -638,6 +668,7 @@ pub fn modern_request_requires_meta(method: &str) -> bool {
         method,
         "tools/list"
             | "tools/call"
+            | "subscriptions/listen"
             | "resources/list"
             | "resources/templates/list"
             | "resources/read"
@@ -681,13 +712,68 @@ pub fn directory_read_capability(capabilities: Option<&Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_probe_timeout_ms;
+    use super::{bounded_probe_timeout_ms, RawResourceTemplate, RawTool};
 
     #[test]
     fn caller_probe_timeout_is_clamped_to_shared_remote_cap() {
         assert_eq!(bounded_probe_timeout_ms(None), 5_000);
         assert_eq!(bounded_probe_timeout_ms(Some(1_000)), 1_000);
         assert_eq!(bounded_probe_timeout_ms(Some(50_000)), 5_000);
+    }
+
+    #[test]
+    fn tool_retrieval_hints_survive_remote_transport_decode() {
+        let raw: RawTool = serde_json::from_value(serde_json::json!({
+            "name": "search",
+            "description": "Search records",
+            "inputSchema": { "type": "object" },
+            "annotations": { "readOnlyHint": true, "vendor/riskTier": "reviewed" },
+            "icons": [{ "src": "https://example.invalid/icon.svg", "vendor/accent": "blue" }],
+            "_meta": {
+                "anthropic/searchHint": "records lookup",
+                "anthropic/alwaysLoad": true,
+                "vendor/opaque": { "keep": [1, 2, 3] }
+            }
+        }))
+        .expect("decode raw tool");
+
+        let dto = raw.into_dto();
+        assert_eq!(dto.search_hint.as_deref(), Some("records lookup"));
+        assert_eq!(dto.always_load, Some(true));
+        assert_eq!(
+            dto.annotations
+                .as_ref()
+                .and_then(|annotations| annotations.extra.get("vendor/riskTier")),
+            Some(&serde_json::json!("reviewed"))
+        );
+        assert_eq!(
+            dto.icons[0].extra.get("vendor/accent"),
+            Some(&serde_json::json!("blue"))
+        );
+        assert_eq!(
+            dto.meta,
+            Some(serde_json::json!({
+                "anthropic/searchHint": "records lookup",
+                "anthropic/alwaysLoad": true,
+                "vendor/opaque": { "keep": [1, 2, 3] }
+            }))
+        );
+    }
+
+    #[test]
+    fn resource_template_metadata_survives_remote_transport_decode() {
+        let raw: RawResourceTemplate = serde_json::from_value(serde_json::json!({
+            "uriTemplate": "file:///{path}",
+            "name": "file",
+            "description": "Workspace file",
+            "mimeType": "text/plain",
+            "annotations": { "audience": ["assistant"], "vendor/rank": 7 },
+            "_meta": { "vendor/template": "opaque" }
+        }))
+        .expect("decode resource template");
+
+        assert_eq!(raw.annotations.as_ref().unwrap()["vendor/rank"], 7);
+        assert_eq!(raw.meta.as_ref().unwrap()["vendor/template"], "opaque");
     }
 }
 
@@ -768,27 +854,48 @@ struct RawTool {
     description: String,
     #[serde(rename = "inputSchema", default)]
     input_schema: Value,
+    #[serde(rename = "outputSchema", default)]
+    output_schema: Option<Value>,
+    #[serde(default)]
+    annotations: Option<McpToolAnnotationsDto>,
+    #[serde(default)]
+    icons: Vec<McpIconDto>,
     #[serde(default, rename = "_meta")]
-    meta: RawToolMeta,
-}
-
-#[derive(Deserialize, Default)]
-struct RawToolMeta {
-    #[serde(default, rename = "anthropic/requiresUserInteraction")]
-    requires_user_interaction: bool,
+    meta: Option<Value>,
 }
 
 impl RawTool {
     fn into_dto(self) -> McpToolDto {
+        let search_hint = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/searchHint"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let always_load = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/alwaysLoad"))
+            .and_then(Value::as_bool);
+        let requires_user_interaction = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         McpToolDto {
             server_name: String::new(),
             tool_name: self.name.clone(),
             description: self.description,
             input_schema: self.input_schema,
+            output_schema: self.output_schema,
+            annotations: self.annotations,
+            icons: self.icons,
+            meta: self.meta,
             full_name: format!("mcp____{}", self.name),
-            search_hint: None,
-            always_load: None,
-            requires_user_interaction: self.meta.requires_user_interaction,
+            search_hint,
+            always_load,
+            requires_user_interaction,
         }
     }
 }
@@ -816,8 +923,12 @@ struct RawResource {
     uri: String,
     #[serde(default)]
     name: String,
-    #[serde(rename = "mimeType")]
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -835,6 +946,10 @@ struct RawResourceTemplate {
     description: Option<String>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
+    #[serde(default)]
+    annotations: Option<Value>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -848,6 +963,10 @@ struct RawResourceContent {
     uri: Option<String>,
     text: Option<String>,
     blob: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]

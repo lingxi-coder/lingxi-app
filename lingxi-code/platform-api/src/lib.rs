@@ -15,8 +15,8 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-251_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.251`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-252_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.252`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
 ///
 /// Raised 2.1.241 → 2.1.245 on 2026-08-25, once the main query-loop identity
@@ -57,6 +57,7 @@ pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod haptics;
 pub mod http;
+pub mod ide;
 mod live_session_words;
 pub mod live_sessions;
 pub mod location;
@@ -134,6 +135,7 @@ pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
+pub use ide::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport};
 pub use location::{LocationError, LocationFix, LocationProvider};
 pub use lsp::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
@@ -167,20 +169,20 @@ pub use orchestrator::{
     DeferredToolReplay, DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary,
     ForkOutcome, GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo, McpActionState,
     McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
-    ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier, ModelUsageRow,
-    OrchestratorHandle, OutputEvent, OutputStream, PermissionControlState,
-    PermissionModeAvailability, PlanSnapshot, RateLimitSnapshot, ReasoningBudgetRange,
-    ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot,
-    TurnOutcome,
+    ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
+    ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
+    PermissionControlState, PermissionModeAvailability, PlanSnapshot, PromptSnapshot,
+    PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec,
+    ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest,
+    ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{
     AutoModePrompt, PermissionDecision, PermissionGate, PermissionRequestSource,
 };
 pub use platform::Platform;
 pub use process::{
-    ForegroundOutcome, HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle,
-    ProcessOutput, ProcessRunner, ProcessStreamSink,
+    ForegroundOutcome, ForegroundRunResult, HookOutputObserver, HookRunOutcome, ProcessError,
+    ProcessHandle, ProcessOutput, ProcessOutputFile, ProcessRunner, ProcessStreamSink,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,

@@ -21,6 +21,7 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{state_from_messages, ConversationOrchestrator, OrchestratorConfig};
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use protocol::ConversationMessage;
 use serde_json::Value;
@@ -30,7 +31,6 @@ use session::jsonl::writer::JsonlWriter;
 use session::jsonl::JsonlMessage;
 use std::sync::Arc;
 use tempfile::tempdir;
-use platform_api::FileSystem;
 
 /// The (kind, text) shape used to compare hot vs cold history — message ids
 /// differ across a persist/reload cycle (assistant turns are persisted
@@ -63,8 +63,24 @@ fn inner_text(line: &JsonlMessage) -> String {
     }
 }
 
-#[tokio::test]
-async fn cold_resume_reconstructs_post_compact_state() {
+#[test]
+fn cold_resume_reconstructs_post_compact_state() {
+    std::thread::Builder::new()
+        .name("compact-persistence".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("compact persistence runtime")
+                .block_on(cold_resume_reconstructs_post_compact_state_inner());
+        })
+        .expect("spawn compact persistence test thread")
+        .join()
+        .expect("compact persistence test thread");
+}
+
+async fn cold_resume_reconstructs_post_compact_state_inner() {
     let dir = tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));

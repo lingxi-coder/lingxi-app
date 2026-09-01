@@ -339,10 +339,10 @@ pub const fn default_recurring_max_age() -> Duration {
 mod tests {
     use super::*;
     use futures::Stream;
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Mutex as TokioMutex;
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
 
     // ---- Minimal in-memory FileSystem (only read/write/delete are exercised) ----
     struct MemFs {

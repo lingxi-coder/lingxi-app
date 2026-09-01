@@ -1,12 +1,12 @@
-//! Parity: lock the 108 builtin slash-command names plus the per-command
+//! Parity: lock the 86 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 108
-//! - Core name count = 18
+//! - Total name count = 86
+//! - Core name count = 19
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
@@ -21,12 +21,12 @@ use command_core::{
     register_core_batch_4, register_core_batch_5, register_core_batch_8,
 };
 use orchestrator::test_support::MockOrchestratorHandle;
+use platform_api::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
-use platform_api::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
 
 struct MockAuth {
     result: StdMutex<Result<LoginInfo, AuthError>>,
@@ -139,6 +139,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "autocompact",
     "background",
     "branch",
+    "brief",
     "btw",
     "cd",
     "clear",
@@ -154,12 +155,14 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "effort",
     "exit",
     "export",
+    "fast",
     "files",
     "focus",
     "fork",
     "goal",
     "help",
     "hooks",
+    "ide",
     "init",
     "init-verifiers",
     "insights",
@@ -172,9 +175,11 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "permissions",
     "plan",
     "plugin",
+    "powerup",
     "privacy-settings",
     "recap",
     "release-notes",
+    "reload-plugins",
     "reload-skills",
     "rename",
     "resume",
@@ -199,8 +204,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
 
 fn fixture() -> ParityFile {
     // Fixture filename retained as `parity_slash_commands_102` for git-history
-    // continuity; the counts inside reflect the 99-name lock per the
-    // 2026-05-28 addendum.
+    // continuity; the counts inside reflect the current 86-name lock.
     load_fixture("parity_slash_commands_102")
 }
 
@@ -211,9 +215,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 108);
-    assert_eq!(f.commands.len(), 108);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
+    assert_eq!(f.meta.total_count_lock, 86);
+    assert_eq!(f.commands.len(), 86);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -322,7 +326,7 @@ fn core_command_description_matches_fixture() {
 }
 
 // ============================================================================
-// T3 — M5-14: `implemented` field coverage (18 implemented / 81 unimplemented)
+// T3 — M5-14: `implemented` field coverage (67 implemented / 19 unimplemented)
 // ============================================================================
 
 #[test]
@@ -368,7 +372,11 @@ fn target_status_matrix_fields_are_populated() {
             );
         }
         if c.requires_tui {
-            assert_eq!(c.claude_type, "local-jsx", "/{} requires_tui drift", c.name);
+            assert!(
+                matches!(c.claude_type.as_str(), "local-jsx" | "local"),
+                "/{} requires_tui must be a local command",
+                c.name
+            );
         }
         assert_eq!(
             c.is_core,
@@ -395,9 +403,40 @@ fn implemented_set_matches_target_implemented_names() {
 }
 
 #[test]
+fn reload_plugins_tracks_the_live_interactive_refresh_path() {
+    let row = fixture_v2()
+        .commands
+        .into_iter()
+        .find(|command| command.name == "reload-plugins")
+        .expect("reload-plugins row");
+    assert!(row.implemented);
+    assert_eq!(row.target_status, "implemented");
+    assert_eq!(row.rust_status, "interactive_only");
+    assert!(row.requires_tui);
+    assert!(row
+        .defer_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("PluginRuntime")));
+}
+
+#[test]
+fn fast_tracks_the_live_tui_cli_mode_path() {
+    let row = fixture_v2()
+        .commands
+        .into_iter()
+        .find(|command| command.name == "fast")
+        .expect("fast row");
+    assert!(row.implemented);
+    assert_eq!(row.claude_type, "remote-or-host");
+    assert_eq!(row.rust_status, "implemented_handle_bound");
+    assert_eq!(row.target_status, "implemented");
+    assert!(!row.requires_tui);
+}
+
+#[test]
 fn correct_by_design_and_host_bound_sets_remain_explicit() {
-    // 22 since SLASH-06 — see the note on `CORRECT_BY_DESIGN_STUBS`.
-    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
+    // Three faithful stubs remain after the 2.1.252 stale-name audit.
+    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 3);
     assert!(
         HOST_BOUND_DEFERRED_GAPS.is_empty(),
         "/btw now has a handle-bound command and reopenable TUI panel"
@@ -409,6 +448,13 @@ async fn target_implemented_commands_do_not_return_m5_stub() {
     let reg = fully_wired_registry();
 
     for name in TARGET_IMPLEMENTED {
+        // These commands are installed by the interactive composition root:
+        // `/reload-plugins` needs the retained PluginRuntime refresh callback,
+        // while `/fast` crosses the TUI→ChatWidget→CLI mode callback. The
+        // headless registry intentionally has no corresponding handlers.
+        if matches!(*name, "reload-plugins" | "fast") {
+            continue;
+        }
         let h = reg
             .get_handler(name)
             .unwrap_or_else(|| panic!("/{name} handler missing"));

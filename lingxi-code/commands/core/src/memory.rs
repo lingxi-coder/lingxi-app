@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::OrchestratorHandle;
 
 /// `/memory` handler — opens the user's memory file in `$EDITOR`.
 ///

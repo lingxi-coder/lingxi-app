@@ -62,11 +62,11 @@ impl TaskNotificationProvider for RegistryTaskNotifications {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskUpdatePatch,
     };
+    use std::sync::Mutex;
 
     /// A `TaskRegistryHandle` whose only meaningful method is the
     /// notification drain — every other method is unreachable in these tests.

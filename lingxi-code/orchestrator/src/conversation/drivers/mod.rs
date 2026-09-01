@@ -115,6 +115,7 @@ struct PumpedStreamingIteration<'a> {
     exec: crate::streaming_executor::StreamingToolExecutor<'a>,
     model: String,
     model_profile: Option<String>,
+    wire_tools: Vec<serde_json::Value>,
     assistant_id: MessageId,
     partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause>,
     partial_finalize_notice_id: Option<MessageId>,
@@ -142,6 +143,12 @@ struct FinalizedStreamingIteration {
 impl StreamingTurnDriver<'_> {
     async fn collect_turn_reminders(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
         let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
+
+        // `/brief` (2.1.252): consume the one-shot model-facing reminder
+        // queued by the interactive toggle before this turn is snapshotted.
+        if let Some(reminder) = orch.brief_mode_reminder_message() {
+            turn_reminders.push(reminder);
+        }
 
         // OUTSTYLE.3 (streaming twin): per-turn, transient output-style
         // reminder. Appended to THIS turn's OUTGOING snapshot only — never to
@@ -444,6 +451,11 @@ impl StreamingTurnDriver<'_> {
         snapshot.extend(turn_reminders.iter().cloned());
 
         let wire_tools = orch.build_wire_tools().await;
+        // Carved-slate records the first eligible static prompt before opening
+        // the stream. A resumed session with no valid attachment intentionally
+        // stays live and does not create a replacement snapshot.
+        orch.record_prompt_snapshot_if_needed(system_prompt.as_deref(), &wire_tools)
+            .await;
         let deferred_reminder = orch.deferred_tools_reminder_message();
         if let Some(reminder) = deferred_reminder.clone() {
             orch.prepend_transient_leading_context(&mut snapshot, reminder);
@@ -1259,6 +1271,7 @@ impl StreamingTurnDriver<'_> {
             exec,
             model,
             model_profile,
+            wire_tools,
             assistant_id,
             partial_finalize,
             partial_finalize_notice_id,
@@ -1283,6 +1296,7 @@ impl StreamingTurnDriver<'_> {
             mut exec,
             model,
             model_profile,
+            wire_tools,
             assistant_id,
             partial_finalize,
             mut partial_finalize_notice_id,
@@ -1293,6 +1307,14 @@ impl StreamingTurnDriver<'_> {
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
         } = pumped_iteration;
+
+        // Inline tool descriptions are committed only after a complete,
+        // non-API-error response. Partial finalization is an error surface and
+        // must not advance the persisted snapshot.
+        if partial_finalize.is_none() {
+            orch.record_inline_prompt_tools_after_success(&wire_tools)
+                .await;
+        }
 
         // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
         loop_state.global_turn_tokens = loop_state

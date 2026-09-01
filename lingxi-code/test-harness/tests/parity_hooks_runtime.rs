@@ -1,10 +1,10 @@
 //! Parity: M5-06 hooks executor 4-arm matrix.
 //!
 //! Locks the behaviour of each executor arm (Builtin / Http / Command / Agent)
-//! under `PreToolUse` + `PostToolUse` events. Known deferred gap: the Command arm
-//! is stubbed (stdin payload support deferred from M5-06); the test locks the
-//! documented stub behaviour (`HookOutcome::Error` + stderr containing the
-//! deferred-gap message).
+//! under `PreToolUse` + `PostToolUse` events. The Command arm is exercised with
+//! its ProcessRunner + Sandbox seams so the serialized hook envelope and the
+//! successful output path stay covered; a separate test keeps the structured
+//! error for an executor that has no platform runner.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 5.
 
@@ -13,11 +13,16 @@ use hooks::{
     BuiltinHookHandler, HookContext, HookDefinition, HookEvent, HookEventType, HookExecutor,
     HookExecutorImpl, HookOutcome, HookRegistry, HookResult, HookSource,
 };
+use platform_api::{
+    ProcessCommand, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, Sandbox,
+    SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
+    SandboxedCommand, SandboxedTag,
+};
 use protocol::{HookId, HttpResponse, SessionId, ToolUseId};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner, ScriptedResponse};
 use tokio::sync::RwLock;
 
@@ -335,11 +340,170 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
 }
 
 // ============================================================================
-// T5 — Command arm: deferred stub returns Error with documented message
+// T5 — Command arm: ProcessRunner + Sandbox path
+// ============================================================================
+
+/// Deterministic ProcessRunner for the command-hook parity test. The hook
+/// executor receives only a SandboxedCommand; recording its inner stdin proves
+/// the sandbox boundary was crossed before the process runner was called.
+struct RecordingProcessRunner {
+    output: Mutex<Option<ProcessOutput>>,
+    stdin: Mutex<Option<String>>,
+}
+
+impl RecordingProcessRunner {
+    fn new(output: ProcessOutput) -> Arc<Self> {
+        Arc::new(Self {
+            output: Mutex::new(Some(output)),
+            stdin: Mutex::new(None),
+        })
+    }
+}
+
+#[async_trait]
+impl ProcessRunner for RecordingProcessRunner {
+    async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        *self.stdin.lock().expect("stdin mutex") = command.inner().stdin.clone();
+        self.output
+            .lock()
+            .expect("output mutex")
+            .take()
+            .ok_or_else(|| ProcessError::Io("recording runner called twice".into()))
+    }
+
+    async fn spawn_background(
+        &self,
+        _command: &SandboxedCommand,
+    ) -> Result<ProcessHandle, ProcessError> {
+        Err(ProcessError::Unsupported)
+    }
+
+    async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+/// A no-isolation sandbox used only to exercise the public minting seam in the
+/// harness. Production hooks receive a platform implementation here.
+struct RecordingSandbox;
+
+#[async_trait]
+impl Sandbox for RecordingSandbox {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn backend(&self) -> SandboxBackend {
+        SandboxBackend::None
+    }
+
+    fn prepare(
+        &self,
+        command: ProcessCommand,
+        _policy: &SandboxPolicy,
+    ) -> Result<SandboxedCommand, SandboxError> {
+        Ok(SandboxedCommand::__new_sandboxed(
+            command,
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "test".into(),
+            },
+        ))
+    }
+
+    fn bypass_with_audit(&self, command: ProcessCommand, reason: &str) -> SandboxedCommand {
+        SandboxedCommand::__new_sandboxed(
+            command,
+            SandboxedTag::BypassAuditedWithReason {
+                reason: reason.into(),
+            },
+        )
+    }
+
+    async fn probe_capability(&self) -> SandboxCapability {
+        SandboxCapability {
+            available: true,
+            reason: None,
+            features: SandboxFeatures::default(),
+        }
+    }
+}
+
+fn command_hook_definition() -> HookDefinition {
+    HookDefinition {
+        id: HookId::new(),
+        name: "command-hook".into(),
+        events: vec![HookEventType::PreToolUse],
+        if_condition: None,
+        executor: HookExecutor::Command {
+            command: "hook.sh".into(),
+            args: vec!["--check".into()],
+            env: HashMap::new(),
+            cwd: None,
+            shell: None,
+        },
+        source: HookSource::User,
+        blocking: true,
+        timeout: None,
+        priority: 0,
+        once: false,
+        status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
+    }
+}
+
+#[tokio::test]
+async fn command_arm_with_runner_executes_and_receives_hook_envelope() {
+    let reg = Arc::new(RwLock::new(HookRegistry::new()));
+    reg.write().await.register(command_hook_definition());
+
+    let runner = RecordingProcessRunner::new(ProcessOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
+    });
+    let exec = HookExecutorImpl::new(
+        reg,
+        Arc::new(MockHttpTransport::new()),
+        Arc::new(MockRuntimeSpawner::default()),
+    )
+    .with_process_runner(runner.clone(), Arc::new(RecordingSandbox));
+
+    let aggregate = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
+    assert!(aggregate.decision.is_none(), "exit 0 must not block");
+    let result = &aggregate.all_results[0].1;
+    assert!(matches!(result.outcome, HookOutcome::Success));
+    assert_eq!(result.exit_code, Some(0));
+
+    let stdin = runner
+        .stdin
+        .lock()
+        .expect("stdin mutex")
+        .clone()
+        .expect("command hook stdin");
+    assert!(
+        stdin.contains(r#""hook_event_name":"PreToolUse"#),
+        "hook envelope must identify PreToolUse: {stdin:?}"
+    );
+    assert!(stdin.contains(r#""tool_name":"Bash"#));
+    assert!(
+        stdin.ends_with('\n'),
+        "command hook payload needs trailing newline"
+    );
+}
+
+// ============================================================================
+// T5 — Command arm: missing runner returns structured fallback error
 // ============================================================================
 
 #[tokio::test]
-async fn command_arm_deferred_stub_returns_error() {
+async fn command_arm_without_runner_returns_structured_error() {
     let reg = Arc::new(RwLock::new(HookRegistry::new()));
     reg.write().await.register(HookDefinition {
         id: HookId::new(),
@@ -369,9 +533,9 @@ async fn command_arm_deferred_stub_returns_error() {
     let exec = HookExecutorImpl::new(reg, http, runtime);
 
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
-    // The Command arm requires a process runner; this executor is built
-    // without one (no `.with_process_runner(..)`), so it returns the documented
-    // "not wired" Error. (Message reworded "not yet wired" → "not wired" on main.)
+    // The production Command arm is wired when both platform seams are
+    // attached. Without them it intentionally returns the structured fallback
+    // error instead of attempting an unsandboxed process spawn.
     let stderr: String = agg
         .all_results
         .iter()

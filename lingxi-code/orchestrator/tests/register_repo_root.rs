@@ -3,11 +3,11 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use std::sync::Arc;
-use tool_api::{SessionCwd, ToolRegistry};
 use platform_api::{
     RegisterRepoRootRequest, RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader,
 };
+use std::sync::Arc;
+use tool_api::{SessionCwd, ToolRegistry};
 
 struct RecordingReloader {
     cwd: Arc<SessionCwd>,

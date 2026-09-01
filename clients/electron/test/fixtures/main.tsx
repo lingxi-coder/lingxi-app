@@ -6,6 +6,7 @@ import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
 import { PermissionPrompt } from '../../src/renderer/components/PermissionPrompt';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import '../../src/renderer/global.css';
 
 const projectPath = '/tmp/prompt-focus-project';
 const request: PermissionRequest = {

@@ -41,8 +41,7 @@ use std::path::{Path, PathBuf};
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
     AppCreateModeDto, AudioResultDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
-    PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto,
-    SettingsDestinationDto,
+    PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -75,14 +74,13 @@ use client_protocol::local_apps::{
     AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeRecoveryStateDto,
     AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppSessionKindDto, AppSessionRowDto,
     AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, DeviceContextDto,
-    PluginCommandDto,
     LocalAppCreateConfirmationRequestDto, LocalAppGateStatusDto,
     LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto, LocalAppMcpToolDiffDto,
     LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto, LocalAppPluginComponentCountsDto,
     LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto, LocalAppReceiptStatusDto,
     LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
-    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, PluginActivationStateDto,
-    PluginStatusDto,
+    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
+    McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -970,6 +968,11 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         server_name: "local_app_habits-1a2b".to_string(),
                         app_id: "habits-1a2b".to_string(),
                         app_name: "Habits".to_string(),
+                        enabled: true,
+                        status: ManagedLocalAppMcpStatusDto::Enabled,
+                        settings_revision: 6,
+                        enabled_tools: vec!["save_habit".to_string()],
+                        pinned_to_current_conversation: true,
                         build_id: "build-0001".to_string(),
                         catalog_sha256: "6".repeat(64),
                         tool_surface_sha256: "7".repeat(64),
@@ -986,6 +989,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                             summary: "UI verification runner is unavailable.".to_string(),
                             code: Some("verification_unavailable".to_string()),
                         },
+                        widget: Some(canonical_local_app_widget()),
                         tools: vec![canonical_local_app_tool("save_habit")],
                     }],
                 },
@@ -1384,13 +1388,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            "command/resolve_app_runtime_profile_selection.json",
-            ClientCommand::ResolveAppRuntimeProfileSelection {
-                request_id: "runtime-00000001".to_string(),
-                selected_family: Some(AppRuntimeProfileDto::ReactDom),
-            },
-        ),
-        (
             "command/resolve_app_dependency_change_confirmation.json",
             ClientCommand::ResolveAppDependencyChangeConfirmation {
                 request_id: "dependency-00000001".to_string(),
@@ -1527,6 +1524,46 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 command: PluginCommandDto::ResolveMcpProposalApproval {
                     request_id: "proposal-0001".to_string(),
                     approved: false,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_start_local_app_mcp_authoring.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::StartLocalAppMcpAuthoring {
+                    app_id: "habits-1a2b".to_string(),
+                    user_goal: "Let the model save and summarize my habit data.".to_string(),
+                },
+            },
+        ),
+        (
+            "command/plugin_command_set_local_app_mcp_enabled.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::SetLocalAppMcpEnabled {
+                    app_id: "habits-1a2b".to_string(),
+                    enabled: true,
+                    expected_revision: 4,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_set_local_app_mcp_tool_enabled.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::SetLocalAppMcpToolEnabled {
+                    app_id: "habits-1a2b".to_string(),
+                    tool_name: "save_habit".to_string(),
+                    enabled: false,
+                    expected_revision: 5,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_set_local_app_mcp_conversation_pinned.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::SetLocalAppMcpConversationPinned {
+                    conversation_id: "conv-0001".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    pinned: true,
                 },
             },
         ),
@@ -2163,6 +2200,16 @@ fn canonical_local_app_receipt() -> LocalAppReceiptStatusDto {
         expires_at_ms: 1_750_000_030_000,
         consumed: false,
         superseded: false,
+    }
+}
+
+fn canonical_local_app_widget() -> McpAppWidgetDto {
+    McpAppWidgetDto {
+        resource_uri:
+            "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html"
+                .to_string(),
+        mime_type: "text/html;profile=mcp-app".to_string(),
+        resource_sha256: "8".repeat(64),
     }
 }
 

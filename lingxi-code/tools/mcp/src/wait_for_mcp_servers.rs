@@ -433,7 +433,10 @@ mod tests {
     /// on the NORMALIZED name (oracle `au`).
     #[test]
     fn unknown_bucket_compares_normalized_names() {
-        let states = vec![("my.server".to_string(), platform_api::McpActionState::Connected)];
+        let states = vec![(
+            "my.server".to_string(),
+            platform_api::McpActionState::Connected,
+        )];
         let b = bucket(&states, &["my_server".into(), "nope".into()]);
         assert_eq!(b.connected, vec!["my.server".to_string()]);
         assert_eq!(

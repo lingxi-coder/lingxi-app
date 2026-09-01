@@ -48,12 +48,35 @@ use platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
 use protocol::PluginId;
 use secret::CredentialManager;
 use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use telemetry::tengu::plugin as plugin_telemetry;
+use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tool_api::ToolRegistry;
+
+#[cfg(test)]
+#[derive(Default)]
+struct MonitorLifecycleTestHooks {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    enable_reached: tokio::sync::Notify,
+    enable_release: tokio::sync::Notify,
+}
+
+/// Identity of one armed plugin monitor.
+///
+/// The oracle keys monitors by stable installed identity + monitor name. That
+/// key survives reloads and disables for the lifetime of the session, so a
+/// refreshed plugin does not restart an already-armed process or lose its
+/// deduplication state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PluginMonitorKey {
+    installed_identity: String,
+    monitor_name: String,
+}
 
 /// Failure modes for [`PluginManager`] operations.
 #[derive(Debug, Clone, Error)]
@@ -110,6 +133,15 @@ pub struct PluginManager {
     /// Managed marketplace names blocked from add/install/enable. Later
     /// composition-root refreshes replace this set in place.
     blocked_marketplaces: RwLock<HashSet<String>>,
+    /// Managed `enabledPlugins` names (name-part only) used to recover the
+    /// oracle's org-policy provenance on session-enable telemetry.
+    managed_plugin_names: RwLock<HashSet<String>>,
+    analytics_bus: Arc<AnalyticsBus>,
+    safe_mode: bool,
+    /// Per-session collision keys prevent a reload loop from reporting the
+    /// same resolved component collision repeatedly.
+    reported_collision_events: Mutex<HashSet<String>>,
+    reported_folder_shadow_events: Mutex<HashSet<String>>,
 
     // The 8 registries we materialize into:
     command_registry: Arc<RwLock<CommandRegistry>>,
@@ -154,15 +186,22 @@ pub struct PluginManager {
     /// monitors. The host owns the concrete registry; this crate only submits
     /// MonitorRegistration values through the existing task substrate.
     task_registry: Option<Arc<dyn TaskRegistryHandle>>,
+    /// Serializes monitor snapshotting/arming with plugin enable/disable state
+    /// transitions. The lock keeps a loaded snapshot live until its selected
+    /// monitors are submitted, while stable monitor keys preserve session
+    /// lifetime deduplication across reloads.
+    monitor_lifecycle: Mutex<()>,
+    #[cfg(test)]
+    /// Deterministic pause used by the in-crate lifecycle race regression.
+    monitor_test_hooks: Mutex<Option<Arc<MonitorLifecycleTestHooks>>>,
     /// Session working directory used for monitor execution and project-dir
     /// compatibility variables. It must not be inferred from process-global
     /// cwd because a host can run multiple sessions in one process.
     project_dir: PathBuf,
     /// Task ids keyed by the stable installed-plugin identity and monitor name.
-    /// This survives a mid-session reload so an always monitor is not started
-    /// twice. Existing monitors intentionally remain alive across disable; the
-    /// task registry tears them down with the session.
-    plugin_monitor_tasks: Mutex<HashMap<String, String>>,
+    /// This survives reload and disable for the session, matching the oracle's
+    /// monitor lifetime and deduplication rules.
+    plugin_monitor_tasks: Mutex<HashMap<PluginMonitorKey, String>>,
 }
 
 impl PluginManager {
@@ -193,6 +232,11 @@ impl PluginManager {
             credentials,
             plugin_configs: RwLock::new(HashMap::new()),
             blocked_marketplaces: RwLock::new(HashSet::new()),
+            managed_plugin_names: RwLock::new(HashSet::new()),
+            analytics_bus: Arc::new(AnalyticsBus::with_default_sink()),
+            safe_mode: false,
+            reported_collision_events: Mutex::new(HashSet::new()),
+            reported_folder_shadow_events: Mutex::new(HashSet::new()),
             command_registry,
             skill_registry,
             hook_registry,
@@ -208,6 +252,9 @@ impl PluginManager {
             plugin_themes: Arc::new(PluginThemeRegistry::new()),
             plugin_theme_slugs: RwLock::new(HashMap::new()),
             task_registry: None,
+            monitor_lifecycle: Mutex::new(()),
+            #[cfg(test)]
+            monitor_test_hooks: Mutex::new(None),
             project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             plugin_monitor_tasks: Mutex::new(HashMap::new()),
         }
@@ -217,6 +264,13 @@ impl PluginManager {
     #[must_use]
     pub fn with_agent_catalog(mut self, catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>) -> Self {
         self.agent_catalog = Some(catalog);
+        self
+    }
+
+    /// Share the host's live analytics bus with plugin lifecycle telemetry.
+    #[must_use]
+    pub fn with_analytics_bus(mut self, bus: Arc<AnalyticsBus>) -> Self {
+        self.analytics_bus = bus;
         self
     }
 
@@ -296,6 +350,24 @@ impl PluginManager {
         self
     }
 
+    /// Seed the managed plugin-name set used for org-policy telemetry.
+    #[must_use]
+    pub fn with_managed_plugin_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.managed_plugin_names = RwLock::new(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Stamp whether this session is running under safe mode.
+    #[must_use]
+    pub fn with_safe_mode(mut self, safe_mode: bool) -> Self {
+        self.safe_mode = safe_mode;
+        self
+    }
+
     /// Share the host's live task registry with the plugin lifecycle. Plugin
     /// monitors use the same MonitorRegistration -> spawn_monitor path as the
     /// model-facing Monitor tool; no plugin-specific runner is created.
@@ -317,6 +389,10 @@ impl PluginManager {
     /// task-registry ids created for this invocation; already-armed monitors
     /// are omitted.
     pub async fn activate_skill_monitors(&self, skill: &str) -> Vec<String> {
+        // Snapshot and arming must share the same lifecycle boundary as
+        // `enable`. This keeps the manifest/install directory pair live until
+        // its selected monitors have either been deduplicated or submitted.
+        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
         let loaded = self
             .plugins
             .read()
@@ -331,6 +407,11 @@ impl PluginManager {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        #[cfg(test)]
+        if let Some(hooks) = self.monitor_test_hooks.lock().await.clone() {
+            hooks.reached.notify_one();
+            hooks.release.notified().await;
+        }
         let mut task_ids = Vec::new();
         for (manifest, install_dir) in loaded {
             task_ids.extend(
@@ -353,6 +434,15 @@ impl PluginManager {
         S: Into<String>,
     {
         *self.blocked_marketplaces.write().await = blocked.into_iter().map(Into::into).collect();
+    }
+
+    /// Replace the managed plugin-name set used by future telemetry emits.
+    pub async fn replace_managed_plugin_names<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.managed_plugin_names.write().await = names.into_iter().map(Into::into).collect();
     }
 
     /// Install a plugin from `source`.
@@ -447,6 +537,18 @@ impl PluginManager {
                 )));
             }
         }
+        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
+        #[cfg(test)]
+        if let Some(hooks) = self.monitor_test_hooks.lock().await.clone() {
+            hooks.enable_reached.notify_one();
+            hooks.enable_release.notified().await;
+        }
+        if !self
+            .resolve_loaded_name_collision(id, &manifest, &install_dir)
+            .await?
+        {
+            return Ok(());
+        }
         self.load_plugin(&manifest, &install_dir).await?;
         self.plugins.write().await.insert(
             *id,
@@ -457,6 +559,182 @@ impl PluginManager {
             },
         );
         Ok(())
+    }
+
+    /// Resolve a direct `enable` against plugins already materialized by this
+    /// manager. Discovery performs the same operation for startup batches;
+    /// this second narrow gate covers local callers that hand a manifest to
+    /// `enable` directly and keeps registration order from changing the live
+    /// winner.
+    async fn resolve_loaded_name_collision(
+        &self,
+        id: &PluginId,
+        manifest: &PluginManifest,
+        install_dir: &Path,
+    ) -> Result<bool, PluginManagerError> {
+        let existing = self
+            .plugins
+            .read()
+            .await
+            .iter()
+            .filter_map(|(existing_id, state)| match state {
+                PluginState::Loaded {
+                    manifest: existing_manifest,
+                    install_dir,
+                    ..
+                } if existing_id != id => {
+                    Some((*existing_id, existing_manifest.clone(), install_dir.clone()))
+                }
+                _ => None,
+            })
+            .filter(|(_, existing_manifest, _)| {
+                existing_manifest.name.eq_ignore_ascii_case(&manifest.name)
+            })
+            .collect::<Vec<_>>();
+        if existing.is_empty() {
+            return Ok(true);
+        }
+
+        let mut candidates = Vec::with_capacity(existing.len() + 1);
+        candidates.push((*id, manifest.clone(), install_dir.to_path_buf()));
+        candidates.extend(existing.iter().cloned());
+        let winner_index = (0..candidates.len())
+            .min_by(|left, right| {
+                let left_desc = crate::discovery::plugin_source_descriptor(
+                    &candidates[*left].1,
+                    &candidates[*left].2,
+                );
+                let right_desc = crate::discovery::plugin_source_descriptor(
+                    &candidates[*right].1,
+                    &candidates[*right].2,
+                );
+                right_desc
+                    .rank
+                    .cmp(&left_desc.rank)
+                    .then_with(|| left_desc.token.cmp(&right_desc.token))
+                    .then_with(|| candidates[*left].2.cmp(&candidates[*right].2))
+            })
+            .expect("collision candidates are non-empty");
+
+        let descriptors = candidates
+            .iter()
+            .map(|(_, candidate, path)| crate::discovery::plugin_source_descriptor(candidate, path))
+            .collect::<Vec<_>>();
+        if descriptors
+            .iter()
+            .map(|descriptor| descriptor.token.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            < 2
+        {
+            // Two versions from the same source are a supported reload/list
+            // scenario rather than a cross-source shadow. Preserve the
+            // existing monitor/materialization behavior for that case.
+            return Ok(true);
+        }
+        let mut inventories = Vec::with_capacity(candidates.len());
+        for (_, candidate, path) in &candidates {
+            inventories
+                .push(crate::discovery::plugin_component_inventory_for_path(candidate, path).await);
+        }
+        let mut item_sources: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (index, inventory) in inventories.iter().enumerate() {
+            for (kind, names) in inventory {
+                for name in names {
+                    item_sources
+                        .entry((kind.clone(), name.clone()))
+                        .or_default()
+                        .push(index);
+                }
+            }
+        }
+        let mut collision_events = Vec::new();
+        let mut shadow_events = Vec::new();
+        for ((kind, name), positions) in item_sources {
+            let mut unique = BTreeMap::<String, usize>::new();
+            for position in positions {
+                unique
+                    .entry(descriptors[position].token.clone())
+                    .or_insert(position);
+            }
+            if unique.len() < 2 {
+                continue;
+            }
+            let sources = unique
+                .values()
+                .map(|position| descriptors[*position].clone())
+                .collect::<Vec<_>>();
+            let component_winner = sources
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    right
+                        .rank
+                        .cmp(&left.rank)
+                        .then_with(|| left.token.cmp(&right.token))
+                })
+                .map(|(position, _)| *unique.values().nth(position).unwrap())
+                .expect("non-empty source set");
+            let source_key = sources
+                .iter()
+                .map(|source| source.token.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            collision_events.push((
+                format!("{kind}\0{name}\0{source_key}"),
+                kind.clone(),
+                name,
+                sources,
+                component_winner,
+            ));
+            for position in unique.values().copied() {
+                if position != component_winner {
+                    shadow_events.push((
+                        format!("{kind}\0{}", descriptors[position].token),
+                        kind.clone(),
+                        position,
+                    ));
+                }
+            }
+        }
+
+        for (key, kind, name, sources, component_winner) in collision_events {
+            let should_emit = self.reported_collision_events.lock().await.insert(key);
+            if should_emit {
+                crate::discovery::emit_name_collision_event(
+                    Some(&self.analytics_bus),
+                    &kind,
+                    &name,
+                    &sources,
+                    Some(&descriptors[component_winner]),
+                )
+                .await;
+            }
+        }
+        for (key, kind, position) in shadow_events {
+            let should_emit = self.reported_folder_shadow_events.lock().await.insert(key);
+            if should_emit {
+                crate::discovery::emit_folder_shadowed_event(
+                    Some(&self.analytics_bus),
+                    &kind,
+                    &candidates[position].1,
+                    &candidates[position].2,
+                )
+                .await;
+            }
+        }
+
+        // Keep one stable winner. If the incoming candidate loses, its
+        // components are never materialized. If it wins, remove all previous
+        // same-name registrations before loading the replacement.
+        if winner_index != 0 {
+            return Ok(false);
+        }
+        for (existing_id, _, _) in existing {
+            self.unload_plugin(&existing_id).await?;
+            self.plugins.write().await.remove(&existing_id);
+        }
+        Ok(true)
     }
 
     /// Register an engine-compiled-in plugin whose `(id, manifest,
@@ -558,6 +836,12 @@ impl PluginManager {
     /// Transition `id` from `Loaded` to `Disabled` and remove every
     /// registry entry the plugin contributed.
     pub async fn disable(&self, id: &PluginId) -> Result<(), PluginManagerError> {
+        // Snapshot, unload, and the final state transition share the same
+        // lifecycle boundary as `enable` and skill activation. A concurrent
+        // activation therefore either completes before disable starts (and
+        // remains a session-owned monitor) or observes the Disabled state and
+        // cannot arm a new monitor.
+        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
         let state = self.plugins.read().await.get(id).cloned();
         if let Some((manifest, install_dir)) = match state {
             Some(PluginState::Loaded {
@@ -859,6 +1143,7 @@ impl PluginManager {
         //     that cannot be read or parsed is skipped (TS filters nulls).
         let plugin_name = &manifest.name;
         let mut skills: Vec<skill_api::Skill> = Vec::new();
+        let mut bare_skill_names = Vec::new();
         {
             let mut sources = Vec::new();
             for sp in &manifest.components.skills {
@@ -897,6 +1182,7 @@ impl PluginManager {
                 ) else {
                     continue;
                 };
+                bare_skill_names.push(skill.name.clone());
                 skill.name = format!("{plugin_name}:{}", skill.name);
                 skill.plugin_id = Some(manifest.id);
 
@@ -1016,6 +1302,14 @@ impl PluginManager {
                 } else {
                     install_dir.join(&wp.path)
                 };
+                // Keep the registry on one filesystem identity. In
+                // particular, macOS temp directories may be addressed via
+                // both `/var` and `/private/var`; storing the canonical path
+                // prevents later policy and equality checks from disagreeing
+                // about the same verified script.
+                let Ok(abs) = tokio::fs::canonicalize(&abs).await else {
+                    continue;
+                };
                 // Oracle `ZI(c,o,um)`: regular file (or a symlink resolving to
                 // one — `tokio::fs::metadata` follows links, matching `_()`'s
                 // `isFile()||isSymbolicLink()` readdir filter) AND at most
@@ -1120,6 +1414,7 @@ impl PluginManager {
                 }
                 let mut scoped = cfg.clone();
                 scoped.name = scoped_name;
+                stamp_plugin_mcp_metadata(&mut scoped);
                 // Substitute `${user_config.KEY}` references (command / args
                 // / env, and remote url / headers) with the resolved values
                 // — the primary consumption path for a plugin's userConfig.
@@ -1237,6 +1532,7 @@ impl PluginManager {
                     &subst_ctx,
                     install_dir,
                     plugin_data_dir.as_deref(),
+                    &self.project_dir,
                 );
                 scoped
             })
@@ -1282,6 +1578,8 @@ impl PluginManager {
         // monitors are armed only after all plugin components were materialized;
         // on-skill-invoke monitors wait for activate_skill_monitors.
         let _ = self.arm_plugin_monitors(manifest, install_dir, None).await;
+        self.emit_enabled_for_session(manifest, install_dir, &bare_skill_names)
+            .await;
 
         Ok(())
     }
@@ -1322,7 +1620,10 @@ impl PluginManager {
                 continue;
             }
 
-            let key = format!("{installed_identity}:{}", monitor.name);
+            let key = PluginMonitorKey {
+                installed_identity: installed_identity.clone(),
+                monitor_name: monitor.name.clone(),
+            };
             if armed.contains_key(&key) {
                 continue;
             }
@@ -1537,12 +1838,12 @@ fn substitute_lsp_config(
     ctx: &Map<String, Value>,
     install_dir: &Path,
     plugin_data_dir: Option<&Path>,
+    project_dir: &Path,
 ) {
     let plugin_root = install_dir.to_string_lossy().into_owned();
     let plugin_data = plugin_data_dir
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_dir = project_dir.to_string_lossy().into_owned();
     let expand = |value: &str| {
         let value = value
@@ -1689,6 +1990,10 @@ fn extract_frontmatter(raw: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+fn stamp_plugin_mcp_metadata(config: &mut McpServerConfig) {
+    config.metadata.agent_source = Some(mcp::McpAgentSource::Plugin);
+}
+
 /// Installed plugin identity used for `pluginConfigs` and plugin-secret
 /// namespaces: `name@marketplace` for cache-installed plugins, else bare
 /// `manifest.name`.
@@ -1709,6 +2014,236 @@ fn cache_marketplace_name(install_dir: &Path) -> Option<String> {
     (cache_dir.file_name()?.to_str()? == "cache")
         .then(|| marketplace_dir.file_name()?.to_str().map(ToOwned::to_owned))
         .flatten()
+}
+
+fn plugin_hash(value: &str) -> String {
+    crate::plugin_source_sha256(value.as_bytes())[..16].to_string()
+}
+
+fn payload_metadata<T: serde::Serialize>(payload: &T) -> LogEventMetadata {
+    let Ok(Value::Object(fields)) = serde_json::to_value(payload) else {
+        return LogEventMetadata::new();
+    };
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let value = match value {
+                Value::Bool(value) => AnalyticsValue::Bool(value),
+                Value::Number(value) => {
+                    if let Some(value) = value.as_i64() {
+                        AnalyticsValue::Int(value)
+                    } else if let Some(value) = value.as_f64() {
+                        AnalyticsValue::Float(value)
+                    } else {
+                        return None;
+                    }
+                }
+                Value::String(value) => AnalyticsValue::String(value),
+                Value::Null => AnalyticsValue::None,
+                Value::Array(_) | Value::Object(_) => return None,
+            };
+            Some((key, value))
+        })
+        .collect()
+}
+
+fn plugin_identity_hash(plugin_name: &str, marketplace_name: Option<&str>) -> String {
+    plugin_hash(&format!(
+        "{plugin_name}@{}",
+        marketplace_name.unwrap_or_default()
+    ))
+}
+
+fn is_official_marketplace_name(name: Option<&str>) -> bool {
+    matches!(
+        name.map(|name| name.to_ascii_lowercase()),
+        Some(name)
+            if name == "official"
+                || name == "anthropic"
+                || name == "claude-official"
+                || name == "claude-plugins-official"
+    )
+}
+
+fn plugin_event_scope(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    managed_plugin_names: &HashSet<String>,
+) -> &'static str {
+    let marketplace_name = cache_marketplace_name(install_dir);
+    match &manifest.source {
+        PluginSource::BuiltIn => "default-bundle",
+        _ if is_official_marketplace_name(marketplace_name.as_deref()) => "official",
+        _ if managed_plugin_names.contains(&manifest.name) => "org",
+        _ => "user-local",
+    }
+}
+
+fn installation_preference(manifest: &PluginManifest) -> Option<&str> {
+    manifest
+        .metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("installationPreference"))
+        .and_then(Value::as_str)
+}
+
+fn is_seed_path(path: &Path) -> bool {
+    let value = std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR")
+        .or_else(|| std::env::var_os("LINGXI_PLUGIN_SEED_DIR"));
+    value
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|seed| !seed.as_os_str().is_empty())
+                .any(|seed| {
+                    let Ok(seed) = std::fs::canonicalize(seed) else {
+                        return false;
+                    };
+                    let Ok(path) = std::fs::canonicalize(path) else {
+                        return false;
+                    };
+                    path.starts_with(seed)
+                })
+        })
+        .unwrap_or(false)
+}
+
+fn plugin_enabled_via(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    managed_plugin_names: &HashSet<String>,
+) -> plugin_telemetry::EnabledVia {
+    match &manifest.source {
+        PluginSource::BuiltIn => plugin_telemetry::EnabledVia::DefaultEnable,
+        _ if managed_plugin_names.contains(&manifest.name) => {
+            plugin_telemetry::EnabledVia::OrgPolicy
+        }
+        _ if matches!(
+            installation_preference(manifest),
+            Some("required" | "auto_install")
+        ) =>
+        {
+            plugin_telemetry::EnabledVia::AdminInstall
+        }
+        _ if is_seed_path(install_dir) => plugin_telemetry::EnabledVia::SeedMount,
+        _ => plugin_telemetry::EnabledVia::UserInstall,
+    }
+}
+
+fn should_emit_skill_hashes(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    managed_plugin_names: &HashSet<String>,
+) -> bool {
+    !matches!(
+        plugin_event_scope(manifest, install_dir, managed_plugin_names),
+        "default-bundle" | "official"
+    )
+}
+
+fn plugin_name_redacted(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    managed_plugin_names: &HashSet<String>,
+) -> Verified {
+    Verified::assert_safe(
+        match plugin_event_scope(manifest, install_dir, managed_plugin_names) {
+            "default-bundle" | "official" => manifest.name.clone(),
+            _ => "third-party".to_string(),
+        },
+    )
+}
+
+fn joined_skill_hash(names: &[String]) -> Option<Verified> {
+    let mut names = names.to_vec();
+    names.sort();
+    (!names.is_empty()).then(|| Verified::assert_safe(plugin_hash(&names.join(","))))
+}
+
+fn marketplace_name_redacted(marketplace_name: Option<&str>, plugin_scope: &str) -> Verified {
+    Verified::assert_safe(match (plugin_scope, marketplace_name) {
+        ("default-bundle" | "official", Some(name)) => name.to_string(),
+        _ => "third-party".to_string(),
+    })
+}
+
+fn manifest_metadata_string(manifest: &PluginManifest, key: &str) -> Option<Verified> {
+    manifest
+        .metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(key))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| Verified::assert_safe(value.to_string()))
+}
+
+impl PluginManager {
+    async fn emit_enabled_for_session(
+        &self,
+        manifest: &PluginManifest,
+        install_dir: &Path,
+        bare_skill_names: &[String],
+    ) {
+        let marketplace_name = cache_marketplace_name(install_dir);
+        let managed_plugin_names = self.managed_plugin_names.read().await.clone();
+        let plugin_scope = plugin_event_scope(manifest, install_dir, &managed_plugin_names);
+        let emit_skill_hashes =
+            should_emit_skill_hashes(manifest, install_dir, &managed_plugin_names);
+        let payload = plugin_telemetry::PluginEnabledForSessionPayload {
+            proto_plugin_name: PiiTagged::assert_pii_tagged_column(manifest.name.clone()),
+            proto_marketplace_name: marketplace_name
+                .clone()
+                .map(PiiTagged::assert_pii_tagged_column),
+            plugin_id_hash: Verified::assert_safe(plugin_identity_hash(
+                &manifest.name,
+                marketplace_name.as_deref(),
+            )),
+            plugin_scope: Verified::assert_safe(plugin_scope.to_string()),
+            plugin_name_redacted: plugin_name_redacted(
+                manifest,
+                install_dir,
+                &managed_plugin_names,
+            ),
+            marketplace_name_redacted: marketplace_name_redacted(
+                marketplace_name.as_deref(),
+                plugin_scope,
+            ),
+            is_official_plugin: matches!(plugin_scope, "default-bundle" | "official"),
+            server_plugin_id: manifest_metadata_string(manifest, "serverPluginId"),
+            enabled_via: plugin_enabled_via(manifest, install_dir, &managed_plugin_names),
+            installation_preference: manifest_metadata_string(manifest, "installationPreference"),
+            skill_path_count: manifest.components.declared_skill_path_count,
+            command_path_count: manifest.components.declared_command_path_count,
+            agent_path_count: manifest.components.declared_agent_path_count,
+            has_mcp: !manifest.components.skip_mcp_discovery
+                && manifest.components.mcp_servers_declared,
+            host_owned_mcp: manifest.components.skip_mcp_discovery,
+            has_lsp: manifest.components.lsp_servers_declared,
+            has_hooks: manifest.components.hooks_declared,
+            has_settings: manifest.settings_declared,
+            sessions_since_last_use: None,
+            days_since_last_use: None,
+            safe_mode: self.safe_mode.then_some(true),
+            settings_keys: manifest.settings_declared.then(|| {
+                let mut keys: Vec<&str> = manifest.settings.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                Verified::assert_safe(keys.join(","))
+            }),
+            version: (!manifest.version.is_empty())
+                .then(|| Verified::assert_safe(manifest.version.clone())),
+            skill_name_hash_count: emit_skill_hashes.then_some(bare_skill_names.len() as u32),
+            skill_name_hashes: emit_skill_hashes
+                .then(|| joined_skill_hash(bare_skill_names))
+                .flatten(),
+        };
+        self.analytics_bus
+            .log_event(
+                plugin_telemetry::ENABLED_FOR_SESSION,
+                payload_metadata(&payload),
+            )
+            .await;
+    }
 }
 
 async fn ensure_plugin_data_dir(
@@ -1899,6 +2434,35 @@ mod unload_tests {
             format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn stamp_plugin_mcp_metadata_marks_plugin_source_and_preserves_other_metadata() {
+        let mut cfg = McpServerConfig {
+            name: "plugin:demo:srv".into(),
+            spec: McpTransportSpec::Stdio {
+                command: "echo".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            scope: mcp::ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+            metadata: mcp::McpServerMetadata {
+                transport: Some("sdk".into()),
+                ..mcp::McpServerMetadata::default()
+            },
+        };
+
+        stamp_plugin_mcp_metadata(&mut cfg);
+
+        assert_eq!(cfg.metadata.transport.as_deref(), Some("sdk"));
+        assert_eq!(cfg.metadata.agent_source, Some(mcp::McpAgentSource::Plugin));
     }
 
     struct FailOnceDisconnectTransport {
@@ -2194,6 +2758,762 @@ mod unload_tests {
         assert!(
             manager.loaded_plugin_ids().await.is_empty(),
             "Disabled plugins must no longer participate in reload convergence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    use crate::PluginComponents;
+    use command_api::CommandRegistry;
+    use hooks::HookRegistry;
+    use lsp::LspRegistry;
+    use outputstyles::OutputStyleRegistry;
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixMcpTransport, PosixRuntime,
+    };
+    use skill_api::SkillRegistry;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use telemetry::{AnalyticsValue, InMemorySink};
+    use tool_api::ToolRegistry;
+
+    static SEED_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn string_field<'a>(metadata: &'a telemetry::LogEventMetadata, key: &str) -> &'a str {
+        match metadata.get(key) {
+            Some(AnalyticsValue::String(value)) => value.as_str(),
+            other => panic!("missing string field {key}: {other:?}"),
+        }
+    }
+
+    fn int_field(metadata: &telemetry::LogEventMetadata, key: &str) -> i64 {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Int(value)) => *value,
+            other => panic!("missing int field {key}: {other:?}"),
+        }
+    }
+
+    fn bool_field(metadata: &telemetry::LogEventMetadata, key: &str) -> bool {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Bool(value)) => *value,
+            other => panic!("missing bool field {key}: {other:?}"),
+        }
+    }
+
+    struct SeedEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl SeedEnvGuard {
+        fn set(seed: &Path) -> Self {
+            let guard = SEED_ENV_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = std::env::var_os("LINGXI_PLUGIN_SEED_DIR");
+            std::env::set_var("LINGXI_PLUGIN_SEED_DIR", seed);
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for SeedEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var("LINGXI_PLUGIN_SEED_DIR", previous);
+            } else {
+                std::env::remove_var("LINGXI_PLUGIN_SEED_DIR");
+            }
+        }
+    }
+
+    async fn manager(root: &Path, analytics_bus: Arc<AnalyticsBus>) -> PluginManager {
+        manager_with_options(root, analytics_bus, HashSet::new(), false).await
+    }
+
+    async fn manager_with_options(
+        root: &Path,
+        analytics_bus: Arc<AnalyticsBus>,
+        managed_plugin_names: HashSet<String>,
+        safe_mode: bool,
+    ) -> PluginManager {
+        let storage = PlainTextSecureStorage::new(root.join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        PluginManager::new(
+            root.to_path_buf(),
+            Arc::new(PosixFileSystem::new(root.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_analytics_bus(analytics_bus)
+        .with_managed_plugin_names(managed_plugin_names)
+        .with_safe_mode(safe_mode)
+    }
+
+    fn write_plugin(root: &Path, dir_name: &str, plugin_name: &str) -> PathBuf {
+        write_plugin_manifest(
+            root,
+            dir_name,
+            &serde_json::json!({"name":plugin_name,"version":"1.0.0"}),
+        )
+    }
+
+    fn write_plugin_manifest(root: &Path, dir_name: &str, manifest: &serde_json::Value) -> PathBuf {
+        let plugin_dir = root.join(dir_name);
+        fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        fs::create_dir_all(plugin_dir.join("commands")).unwrap();
+        fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            serde_json::to_vec(manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(plugin_dir.join("commands").join("ping.md"), "# ping").unwrap();
+        plugin_dir
+    }
+
+    #[tokio::test]
+    async fn local_path_install_emits_enabled_for_session_to_analytics_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = write_plugin(tmp.path(), "local-plugin", "demo");
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let manager = manager(tmp.path(), bus).await;
+
+        let id = manager
+            .install(PluginSource::LocalPath {
+                path: plugin_dir.clone(),
+            })
+            .await
+            .expect("local install succeeds");
+
+        assert!(manager.loaded_plugin_ids().await.contains(&id));
+        let events = sink.events().await;
+        let enabled = events
+            .iter()
+            .find(|event| event.name == plugin_telemetry::ENABLED_FOR_SESSION)
+            .expect("enabled event");
+        assert_eq!(
+            string_field(&enabled.metadata, "enabled_via"),
+            "user-install"
+        );
+        assert_eq!(
+            string_field(&enabled.metadata, "plugin_scope"),
+            "user-local"
+        );
+        assert_eq!(
+            string_field(&enabled.metadata, "_PROTO_plugin_name"),
+            "demo"
+        );
+        assert_eq!(
+            string_field(&enabled.metadata, "plugin_name_redacted"),
+            "third-party"
+        );
+        assert_eq!(int_field(&enabled.metadata, "skill_name_hash_count"), 0);
+        assert!(!enabled.metadata.contains_key("sessions_since_last_use"));
+        assert!(!enabled.metadata.contains_key("days_since_last_use"));
+        assert!(!enabled.metadata.contains_key("safe_mode"));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.name != plugin_telemetry::INSTALLED),
+            "dead manager install path must not emit tengu_plugin_installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_registration_emits_default_enable_enabled_for_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = write_plugin(tmp.path(), "builtin-plugin", "builtin-demo");
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let manager = manager(tmp.path(), bus).await;
+
+        let id = PluginId::new();
+        let manifest = PluginManifest {
+            id,
+            name: "builtin-demo".to_string(),
+            display_name: None,
+            default_enabled: true,
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            author: None,
+            author_email: None,
+            author_url: None,
+            homepage: None,
+            source: PluginSource::LocalPath {
+                path: install_dir.clone(),
+            },
+            components: PluginComponents::default(),
+            trust_level: crate::trust::default_trust_for_source(&PluginSource::LocalPath {
+                path: install_dir.clone(),
+            }),
+            depends_on: Vec::new(),
+            dependencies: Vec::new(),
+            user_config: None,
+            channels: Vec::new(),
+            settings: HashMap::new(),
+            settings_declared: false,
+            keywords: Vec::new(),
+            license: None,
+            repository: None,
+            metadata: None,
+        };
+
+        manager
+            .register_verified_builtin(&id, manifest, install_dir)
+            .await
+            .expect("builtin registration succeeds");
+
+        let events = sink.events().await;
+        let enabled = events
+            .iter()
+            .find(|event| event.name == plugin_telemetry::ENABLED_FOR_SESSION)
+            .expect("enabled event");
+        assert_eq!(
+            string_field(&enabled.metadata, "enabled_via"),
+            "default-enable"
+        );
+        assert_eq!(
+            string_field(&enabled.metadata, "plugin_scope"),
+            "default-bundle"
+        );
+        assert_eq!(
+            string_field(&enabled.metadata, "plugin_name_redacted"),
+            "builtin-demo"
+        );
+        assert!(
+            !enabled.metadata.contains_key("skill_name_hash_count"),
+            "builtin arm must omit skill hash fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_path_emits_seed_mount_enabled_via() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed_root = tmp.path().join("seed-root");
+        let plugin_dir = write_plugin(&seed_root, "cache/acme/demo/1.0.0", "demo");
+        let _seed_guard = SeedEnvGuard::set(&seed_root);
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let manager = manager(tmp.path(), bus).await;
+
+        manager
+            .install(PluginSource::LocalPath {
+                path: plugin_dir.clone(),
+            })
+            .await
+            .expect("seed install succeeds");
+
+        let events = sink.events().await;
+        let enabled = events
+            .iter()
+            .find(|event| event.name == plugin_telemetry::ENABLED_FOR_SESSION)
+            .expect("enabled event");
+        assert_eq!(string_field(&enabled.metadata, "enabled_via"), "seed-mount");
+        assert_eq!(
+            string_field(&enabled.metadata, "plugin_scope"),
+            "user-local"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_name_and_installation_preference_drive_org_and_admin_enabled_via() {
+        let tmp = tempfile::tempdir().unwrap();
+        let org_plugin = write_plugin_manifest(
+            tmp.path(),
+            "org-plugin",
+            &serde_json::json!({
+                "name":"demo",
+                "version":"1.0.0",
+                "metadata":{"installationPreference":"required","serverPluginId":"srv-demo"}
+            }),
+        );
+        let admin_plugin = write_plugin_manifest(
+            tmp.path(),
+            "admin-plugin",
+            &serde_json::json!({
+                "name":"admin-demo",
+                "version":"1.0.0",
+                "metadata":{"installationPreference":"auto_install","serverPluginId":"srv-admin"}
+            }),
+        );
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let manager =
+            manager_with_options(tmp.path(), bus, HashSet::from(["demo".to_string()]), true).await;
+
+        manager
+            .install(PluginSource::LocalPath { path: org_plugin })
+            .await
+            .expect("org install succeeds");
+        manager
+            .install(PluginSource::LocalPath { path: admin_plugin })
+            .await
+            .expect("admin install succeeds");
+
+        let events = sink.events().await;
+        let enabled: Vec<_> = events
+            .iter()
+            .filter(|event| event.name == plugin_telemetry::ENABLED_FOR_SESSION)
+            .collect();
+        let org = enabled
+            .iter()
+            .find(|event| string_field(&event.metadata, "_PROTO_plugin_name") == "demo")
+            .expect("org event");
+        assert_eq!(string_field(&org.metadata, "enabled_via"), "org-policy");
+        assert_eq!(string_field(&org.metadata, "plugin_scope"), "org");
+        assert_eq!(string_field(&org.metadata, "server_plugin_id"), "srv-demo");
+        assert_eq!(
+            string_field(&org.metadata, "installation_preference"),
+            "required"
+        );
+        assert!(bool_field(&org.metadata, "safe_mode"));
+
+        let admin = enabled
+            .iter()
+            .find(|event| string_field(&event.metadata, "_PROTO_plugin_name") == "admin-demo")
+            .expect("admin event");
+        assert_eq!(
+            string_field(&admin.metadata, "enabled_via"),
+            "admin-install"
+        );
+        assert_eq!(string_field(&admin.metadata, "plugin_scope"), "user-local");
+        assert_eq!(
+            string_field(&admin.metadata, "server_plugin_id"),
+            "srv-admin"
+        );
+        assert_eq!(
+            string_field(&admin.metadata, "installation_preference"),
+            "auto_install"
+        );
+        assert!(bool_field(&admin.metadata, "safe_mode"));
+    }
+
+    #[tokio::test]
+    async fn declared_empty_fields_emit_presence_while_absent_fields_omit_optionals() {
+        let _env_guard = crate::discovery::skip_mcp_test_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let empty_declared = write_plugin_manifest(
+            tmp.path(),
+            "declared-empty",
+            &serde_json::json!({
+                "name":"declared-empty",
+                "version":"1.0.0",
+                "skills": [],
+                "commands": [],
+                "agents": [],
+                "mcpServers": {},
+                "lspServers": {},
+                "hooks": [],
+                "settings": {}
+            }),
+        );
+        let absent = write_plugin_manifest(
+            tmp.path(),
+            "absent-fields",
+            &serde_json::json!({"name":"absent-fields"}),
+        );
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let manager = manager(tmp.path(), bus).await;
+
+        manager
+            .install(PluginSource::LocalPath {
+                path: empty_declared,
+            })
+            .await
+            .expect("declared-empty install succeeds");
+        manager
+            .install(PluginSource::LocalPath { path: absent })
+            .await
+            .expect("absent install succeeds");
+
+        let events = sink.events().await;
+        let enabled: Vec<_> = events
+            .iter()
+            .filter(|event| event.name == plugin_telemetry::ENABLED_FOR_SESSION)
+            .collect();
+        let declared = enabled
+            .iter()
+            .find(|event| string_field(&event.metadata, "_PROTO_plugin_name") == "declared-empty")
+            .expect("declared-empty event");
+        assert_eq!(int_field(&declared.metadata, "skill_path_count"), 0);
+        assert_eq!(int_field(&declared.metadata, "command_path_count"), 0);
+        assert_eq!(int_field(&declared.metadata, "agent_path_count"), 0);
+        assert!(bool_field(&declared.metadata, "has_mcp"));
+        assert!(bool_field(&declared.metadata, "has_lsp"));
+        assert!(bool_field(&declared.metadata, "has_hooks"));
+        assert!(bool_field(&declared.metadata, "has_settings"));
+        assert_eq!(string_field(&declared.metadata, "settings_keys"), "");
+        assert_eq!(string_field(&declared.metadata, "version"), "1.0.0");
+
+        let absent = enabled
+            .iter()
+            .find(|event| string_field(&event.metadata, "_PROTO_plugin_name") == "absent-fields")
+            .expect("absent event");
+        assert!(!bool_field(&absent.metadata, "has_mcp"));
+        assert!(!bool_field(&absent.metadata, "has_lsp"));
+        assert!(!bool_field(&absent.metadata, "has_hooks"));
+        assert!(!bool_field(&absent.metadata, "has_settings"));
+        assert!(!absent.metadata.contains_key("settings_keys"));
+        assert!(!absent.metadata.contains_key("version"));
+    }
+}
+
+#[cfg(test)]
+mod monitor_lifecycle_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use command_api::CommandRegistry;
+    use hooks::HookRegistry;
+    use lsp::LspRegistry;
+    use outputstyles::OutputStyleRegistry;
+    use platform_api::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixMcpTransport, PosixRuntime,
+    };
+    use skill_api::SkillRegistry;
+    use std::fs;
+    use std::sync::Mutex as StdMutex;
+    use tokio::time::{timeout, Duration};
+    use tool_api::ToolRegistry;
+
+    #[derive(Default)]
+    struct MonitorRegistry {
+        monitors: StdMutex<Vec<MonitorRegistration>>,
+        killed: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for MonitorRegistry {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by plugin monitor lifecycle tests")
+        }
+
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(Vec::new())
+        }
+
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by plugin monitor lifecycle tests")
+        }
+
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by plugin monitor lifecycle tests")
+        }
+
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.killed.lock().expect("kill lock").push(id.to_string());
+            Ok(TaskRecord::default())
+        }
+
+        async fn spawn_monitor(
+            &self,
+            registration: MonitorRegistration,
+        ) -> Result<String, TaskRegistryError> {
+            let mut monitors = self.monitors.lock().expect("monitor lock");
+            let id = format!("monitor-{}", monitors.len() + 1);
+            monitors.push(registration);
+            Ok(id)
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unreachable!("not used by plugin monitor lifecycle tests")
+        }
+    }
+
+    fn write_monitor_plugin_variant(
+        root: &Path,
+        dir_name: &str,
+        version: &str,
+        always_name: &str,
+        always_command: &str,
+        skill_name: &str,
+        skill_command: &str,
+        skill: &str,
+    ) {
+        let plugin_dir = root.join(dir_name);
+        fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(
+                r#"{{"name":"monitor-plugin","version":"{version}","monitors":[{{"name":"{always_name}","command":"{always_command}","description":"watch now"}},{{"name":"{skill_name}","command":"{skill_command}","description":"watch deploy","when":"on-skill-invoke:{skill}"}}]}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_monitor_plugin(root: &Path, dir_name: &str, version: &str) {
+        write_monitor_plugin_variant(
+            root,
+            dir_name,
+            version,
+            "always",
+            "echo always",
+            "deploy",
+            "echo deploy",
+            "deploy",
+        );
+    }
+
+    async fn monitor_manager(root: &Path, registry: Arc<MonitorRegistry>) -> PluginManager {
+        let storage = PlainTextSecureStorage::new(root.join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        PluginManager::new(
+            root.to_path_buf(),
+            Arc::new(PosixFileSystem::new(root.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_task_registry(registry)
+    }
+
+    #[tokio::test]
+    async fn reload_retains_armed_monitors_and_stable_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_monitor_plugin(tmp.path(), "monitor-v1", "1.0.0");
+        write_monitor_plugin(tmp.path(), "monitor-v2", "2.0.0");
+        let registry = Arc::new(MonitorRegistry::default());
+        let manager = monitor_manager(tmp.path(), registry.clone()).await;
+        let discovered = crate::discover_installed_plugins(tmp.path()).await;
+        let (id_v1, manifest_v1, dir_v1) = discovered
+            .iter()
+            .find(|(_, manifest, _)| manifest.version == "1.0.0")
+            .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+            .expect("v1 plugin discovered");
+        let (id_v2, manifest_v2, dir_v2) = discovered
+            .iter()
+            .find(|(_, manifest, _)| manifest.version == "2.0.0")
+            .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+            .expect("v2 plugin discovered");
+
+        manager
+            .enable(&id_v1, manifest_v1, dir_v1)
+            .await
+            .expect("enable v1");
+        assert_eq!(
+            manager.activate_skill_monitors("deploy").await.len(),
+            1,
+            "the on-skill monitor arms once"
+        );
+        assert_eq!(
+            registry.monitors.lock().expect("monitor lock").len(),
+            2,
+            "always + on-skill monitors are registered"
+        );
+
+        manager.disable(&id_v1).await.expect("disable v1");
+        manager
+            .enable(&id_v2, manifest_v2, dir_v2)
+            .await
+            .expect("enable v2");
+        assert!(
+            manager.activate_skill_monitors("deploy").await.is_empty(),
+            "stable monitor keys dedupe the reload"
+        );
+        assert_eq!(
+            registry.monitors.lock().expect("monitor lock").len(),
+            2,
+            "reload does not restart session-owned monitors"
+        );
+        assert!(
+            registry.killed.lock().expect("kill lock").is_empty(),
+            "disable/reload retain monitors for the session"
+        );
+        let monitors = registry.monitors.lock().expect("monitor lock");
+        assert!(
+            monitors
+                .iter()
+                .all(|monitor| monitor.command.contains("monitor-v1")),
+            "the retained monitor command remains bound to its original payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_and_disable_share_the_monitor_lifecycle_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_monitor_plugin(tmp.path(), "monitor", "1.0.0");
+        let registry = Arc::new(MonitorRegistry::default());
+        let manager = Arc::new(monitor_manager(tmp.path(), registry.clone()).await);
+        let (id, manifest, dir) = crate::discover_installed_plugins(tmp.path())
+            .await
+            .into_iter()
+            .next()
+            .expect("plugin discovered");
+        manager
+            .enable(&id, manifest, dir)
+            .await
+            .expect("enable plugin");
+
+        let hooks = Arc::new(MonitorLifecycleTestHooks::default());
+        *manager.monitor_test_hooks.lock().await = Some(hooks.clone());
+        let activation = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.activate_skill_monitors("deploy").await })
+        };
+        hooks.reached.notified().await;
+
+        let mut disable = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.disable(&id).await })
+        };
+        assert!(
+            timeout(Duration::from_millis(50), &mut disable)
+                .await
+                .is_err(),
+            "disable waits for the in-flight activation snapshot"
+        );
+        hooks.release.notify_one();
+        assert_eq!(
+            activation.await.expect("activation task"),
+            vec!["monitor-2".to_string()]
+        );
+        disable
+            .await
+            .expect("disable task join")
+            .expect("disable plugin");
+
+        *manager.monitor_test_hooks.lock().await = None;
+        assert!(
+            manager.activate_skill_monitors("deploy").await.is_empty(),
+            "disabled plugins cannot arm new monitors"
+        );
+        assert_eq!(
+            registry.monitors.lock().expect("monitor lock").len(),
+            2,
+            "already-armed monitors remain for the session"
+        );
+        assert!(
+            registry.killed.lock().expect("kill lock").is_empty(),
+            "disable does not kill session-owned monitors"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_and_disable_share_the_monitor_lifecycle_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_monitor_plugin(tmp.path(), "monitor-v1", "1.0.0");
+        write_monitor_plugin(tmp.path(), "monitor-v2", "2.0.0");
+        let registry = Arc::new(MonitorRegistry::default());
+        let manager = Arc::new(monitor_manager(tmp.path(), registry.clone()).await);
+        let discovered = crate::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest_v1, dir_v1) = discovered
+            .iter()
+            .find(|(_, manifest, _)| manifest.version == "1.0.0")
+            .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+            .expect("v1 plugin discovered");
+        let (_, mut manifest_v2, dir_v2) = discovered
+            .iter()
+            .find(|(_, manifest, _)| manifest.version == "2.0.0")
+            .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+            .expect("v2 plugin discovered");
+        manifest_v2.id = id;
+        manager
+            .enable(&id, manifest_v1, dir_v1)
+            .await
+            .expect("enable v1");
+
+        let hooks = Arc::new(MonitorLifecycleTestHooks::default());
+        *manager.monitor_test_hooks.lock().await = Some(hooks.clone());
+        let enable = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.enable(&id, manifest_v2, dir_v2).await })
+        };
+        hooks.enable_reached.notified().await;
+        let mut disable = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.disable(&id).await })
+        };
+        assert!(
+            timeout(Duration::from_millis(50), &mut disable)
+                .await
+                .is_err(),
+            "disable waits for component materialization to finish"
+        );
+        hooks.enable_release.notify_one();
+        enable.await.expect("enable task join").expect("enable v2");
+        disable
+            .await
+            .expect("disable task join")
+            .expect("disable v2");
+        assert!(
+            manager.loaded_plugin_ids().await.is_empty(),
+            "the final disabled state is not visible as loaded"
+        );
+        assert_eq!(
+            registry.monitors.lock().expect("monitor lock").len(),
+            1,
+            "the replacement enable did not restart the retained monitor"
+        );
+        assert!(
+            registry.killed.lock().expect("kill lock").is_empty(),
+            "enable/disable lifecycle does not kill session-owned monitors"
         );
     }
 }

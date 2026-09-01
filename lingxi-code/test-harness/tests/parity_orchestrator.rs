@@ -161,15 +161,16 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         1,
         "exactly one API call for single-turn scenario"
     );
-    // R-P1: every outgoing API call now LEADS with the additional-context
+    // R-P1: every outgoing API call LEADS with the additional-context
     // `<system-reminder>` meta (claudeMd/gitStatus/currentDate — currentDate is
     // unconditional, so the meta is always present), so the API receives that
-    // meta PLUS the user message(s) before the assistant is appended.
+    // meta and TRAILS with the transient total-tokens reminder around the
+    // user message(s), before the assistant is appended.
     let user_msgs_before_assistant = s.expected_session_messages.unwrap_or(2) - 1;
     assert_eq!(
         captured[0].len(),
-        user_msgs_before_assistant + 1,
-        "API receives the leading additional-context meta + user messages (before assistant appended)"
+        user_msgs_before_assistant + 2,
+        "API receives additional-context + user messages + total-tokens reminder"
     );
 
     assert_eq!(s.expected_outcome.as_deref(), Some("EndTurn"));
@@ -309,9 +310,9 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 async fn parity_cost_after_one_turn() {
     use cost::pricing::PricingCatalog;
     use cost::CostTracker;
+    use platform_api::OrchestratorHandle;
     use protocol::SessionId;
     use tokio::sync::mpsc;
-    use platform_api::OrchestratorHandle;
 
     let response = llm_client::LlmResponse {
         id: "msg_mock".into(),
@@ -379,8 +380,8 @@ async fn parity_cost_after_one_turn() {
 #[tokio::test]
 async fn parity_force_compact_50_messages() {
     use compaction::CompactionOrchestrator;
-    use protocol::{ConversationMessage, MessageId};
     use platform_api::OrchestratorHandle;
+    use protocol::{ConversationMessage, MessageId};
 
     // Drive the assertion from the fixture so the scenario fields are
     // load-bearing (matches the cost_after_one_turn convention).

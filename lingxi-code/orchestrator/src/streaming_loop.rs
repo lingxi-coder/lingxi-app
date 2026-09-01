@@ -14,11 +14,11 @@ use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
+use platform_api::OutputStream;
 use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use platform_api::OutputStream;
 
 /// One tool dispatch request observed during the stream. Carries the
 /// id/name/input the orchestrator must invoke. The dispatch itself is

@@ -69,10 +69,10 @@ use std::sync::Arc;
 
 use futures_core::Stream;
 use hooks::file_changed_firer::{FileChangedFire, FileChangedFirer};
+use platform_api::{FileEvent, FileEventKind, FileSystem};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use platform_api::{FileEvent, FileEventKind, FileSystem};
 
 /// Map an in-tree [`FileEventKind`] onto the chokidar event-name string
 /// claude-code fires (`fileChangedWatcher.ts:75-77`).
@@ -586,7 +586,10 @@ mod tests {
         async fn truncate(&self, _p: &str, _l: u64) -> Result<(), platform_api::FsError> {
             Ok(())
         }
-        async fn file_mtime(&self, _p: &str) -> Result<std::time::SystemTime, platform_api::FsError> {
+        async fn file_mtime(
+            &self,
+            _p: &str,
+        ) -> Result<std::time::SystemTime, platform_api::FsError> {
             Ok(std::time::SystemTime::UNIX_EPOCH)
         }
         async fn file_size(&self, _p: &str) -> Result<u64, platform_api::FsError> {

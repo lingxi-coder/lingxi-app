@@ -165,6 +165,17 @@ final class LocalAppsStoreTests: XCTestCase {
         """
         try catalog.write(to: catalogURL, atomically: true, encoding: .utf8)
 
+        let settingsURL = root
+            .appendingPathComponent("apps/\(appID)/mcp/settings.json")
+        let settings = """
+        {
+          "enabled": true,
+          "revision": 7,
+          "enabledTools": ["read_value"]
+        }
+        """
+        try settings.write(to: settingsURL, atomically: true, encoding: .utf8)
+
         let reader = LocalAppManagedMcpInventoryReader(appSandboxRoot: root.path)
         let inventory = reader.read(
             serverName: "local_app_tracker",
@@ -184,11 +195,39 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertEqual(inventory?.buildID, "build-42")
         XCTAssertEqual(inventory?.toolCount, 1)
         XCTAssertEqual(inventory?.authoringRevision, 7)
+        XCTAssertEqual(inventory?.enabled, true)
+        XCTAssertEqual(inventory?.status, .enabled)
+        XCTAssertEqual(inventory?.settingsRevision, 7)
         XCTAssertEqual(inventory?.publicationState, .publishedVerified)
         XCTAssertEqual(inventory?.uiVerification.status, .passed)
         XCTAssertEqual(inventory?.mcpVerification.status, .passed)
         XCTAssertEqual(inventory?.mcpVerification.code, verificationDigest)
+        XCTAssertEqual(inventory?.enabledTools, Set(["read_value"]))
         XCTAssertEqual(inventory?.tools.first?.name, "read_value")
+    }
+
+    func testManagedMcpInventoryFallsBackToDefaultOffNeedsSetupState() {
+        let store = LocalAppsStore()
+        #if canImport(engine_mobileFFI)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(
+                    id: "tracker",
+                    name: "Tracker",
+                    brief: "Summarize local state",
+                    workflowState: .publishedVerified
+                )
+            ]))
+        #endif
+
+        let inventory = store.managedMcpInventory(appID: "tracker", appSandboxRoot: "/nonexistent")
+
+        XCTAssertEqual(inventory.serverName, "local_app_tracker")
+        XCTAssertFalse(inventory.enabled)
+        XCTAssertEqual(inventory.status, .needsSetup)
+        XCTAssertEqual(inventory.settingsRevision, 0)
+        XCTAssertTrue(inventory.enabledTools.isEmpty)
+        XCTAssertTrue(inventory.tools.isEmpty)
+        XCTAssertEqual(inventory.publicationState, .publishedVerified)
     }
 
     func testManagedInventoryRestrictionsStayReadOnly() {
@@ -200,6 +239,10 @@ final class LocalAppsStoreTests: XCTestCase {
             catalogDigest: String(repeating: "a", count: 64),
             toolSurfaceDigest: String(repeating: "b", count: 64),
             authoringRevision: 7,
+            enabled: true,
+            status: .enabled,
+            settingsRevision: 9,
+            pinnedToCurrentConversation: false,
             publicationState: .publishedVerified,
             mcpVerification: LocalAppVerificationSummary(
                 status: .passed,
@@ -211,6 +254,8 @@ final class LocalAppsStoreTests: XCTestCase {
                 summary: "UI verification passed",
                 code: nil
             ),
+            enabledTools: [],
+            widget: nil,
             tools: []
         )
 

@@ -14,6 +14,7 @@
 //! wiring below that floor would prove nothing — the driver would return
 //! `Skipped` whether or not it was reached).
 
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::JsonlMessage;
@@ -22,7 +23,6 @@ use session::jsonl::MIN_COMPACT_FILE_BYTES;
 use session::TRANSCRIPT_LOCAL_GC_ENV;
 use std::sync::Arc;
 use tempfile::TempDir;
-use platform_api::FileSystem;
 
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 

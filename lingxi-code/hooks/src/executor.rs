@@ -23,21 +23,20 @@ use crate::hook_payload::{
     HookEventNameElicitationResult, HookEventNameFileChanged, HookEventNameInstructionsLoaded,
     HookEventNameMessageDisplay, HookEventNameNotification, HookEventNamePermissionDenied,
     HookEventNamePermissionRequest, HookEventNamePost, HookEventNamePostCompact,
-    HookEventNamePostModelSwitch,
-    HookEventNamePostToolBatch, HookEventNamePostToolUseFailure, HookEventNamePre,
-    HookEventNamePreCompact, HookEventNamePreModelSwitch, HookEventNameSessionEnd,
-    HookEventNameSessionStart,
-    HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
-    HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
-    HookEventNameTeammateIdle, HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit,
-    HookEventNameWorktreeCreate, HookEventNameWorktreeRemove, InstructionsLoadedPayload,
-    MessageDisplayPayload, NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload,
-    PostCompactPayload, PostModelSwitchPayload, PostToolBatchPayload, PostToolUseFailurePayload,
-    PostToolUsePayload, PreCompactPayload, PreModelSwitchPayload, PreToolUsePayload,
-    SessionEndPayload, SessionStartPayload, SetupPayload,
-    StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
-    TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload, UserPromptExpansionPayload,
-    UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
+    HookEventNamePostModelSwitch, HookEventNamePostToolBatch, HookEventNamePostToolUseFailure,
+    HookEventNamePre, HookEventNamePreCompact, HookEventNamePreModelSwitch,
+    HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
+    HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
+    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameTeammateIdle,
+    HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
+    HookEventNameWorktreeRemove, InstructionsLoadedPayload, MessageDisplayPayload,
+    NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
+    PostModelSwitchPayload, PostToolBatchPayload, PostToolUseFailurePayload, PostToolUsePayload,
+    PreCompactPayload, PreModelSwitchPayload, PreToolUsePayload, SessionEndPayload,
+    SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload, SubagentStartPayload,
+    SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload,
+    UserPromptExpansionPayload, UserPromptSubmitPayload, WorktreeCreatePayload,
+    WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor, HttpHookPolicy};
 use crate::prompt_executor::{
@@ -50,17 +49,17 @@ use crate::response::{
 };
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
+use platform_api::subagent_spawn::SubagentSpawner;
+use platform_api::{
+    HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner,
+    Sandbox,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use platform_api::subagent_spawn::SubagentSpawner;
-use platform_api::{
-    HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner,
-    Sandbox,
-};
 
 /// Default HTTP hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
@@ -1653,13 +1652,14 @@ impl Dispatcher {
                                 progress_id.map(str::to_owned),
                             );
                             let work: HookWork = Box::pin(async move {
-                                let out =
-                                    output_rx.await.unwrap_or_else(|_| platform_api::ProcessOutput {
+                                let out = output_rx.await.unwrap_or_else(|_| {
+                                    platform_api::ProcessOutput {
                                         stdout: String::new(),
                                         stderr: "async hook output channel closed".to_string(),
                                         exit_code: -1,
                                         timed_out: true,
-                                    });
+                                    }
+                                });
                                 map_command_output(&hook_owned, Ok(out), expected_event).0
                             });
                             // Bound the registration by the SAME async timeout the
@@ -1905,7 +1905,9 @@ impl HookExecutorImpl {
             // PostModelSwitch cannot gate a switch that has already happened;
             // retain its response in `all_results` but keep the aggregate
             // decision channel empty for best-effort callers.
-            let decision = (hook_event != "PostModelSwitch").then_some(resp.decision).flatten();
+            let decision = (hook_event != "PostModelSwitch")
+                .then_some(resp.decision)
+                .flatten();
             if decision.is_some() && !already_blocked {
                 agg.decision = decision;
                 agg.hook_source = Some(hook.source);
@@ -3785,13 +3787,13 @@ mod attachment_wiring_tests {
     use crate::definition::{HookDefinition, HookSource};
     use crate::events::HookEventType;
     use crate::registry::HookRegistry;
-    use protocol::{HookId, ToolUseId};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
     use platform_api::{
         ProcessHandle, ProcessOutput, RuntimeError, SandboxBackend, SandboxCapability,
         SandboxPolicy, SandboxedCommand, SandboxedTag,
     };
+    use protocol::{HookId, ToolUseId};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct RecordingSink {
@@ -3885,7 +3887,10 @@ mod attachment_wiring_tests {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(
+            &self,
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
             Ok(())
         }
     }

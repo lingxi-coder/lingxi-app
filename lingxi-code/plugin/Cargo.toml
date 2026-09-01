@@ -45,13 +45,13 @@ tempfile = "3"
 # syntaxHighlighting.hljsLanguages `remote`/`integrity` shape validation
 # (already a transitive dependency via `mcp`, so this adds no new build).
 regex = "1"
+telemetry = { path = "../telemetry" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "fs", "macros", "rt", "rt-multi-thread"] }
 tempfile = "3"
 platform-posix = { path = "../platforms/posix" }
 tool-api = { path = "../tool-api", features = ["test-support"] }
-telemetry = { path = "../telemetry" }
 # Exercise the production MCP tool rebuild path from plugin materialization
 # tests (load → scope → connect/cache → registered-tool refresh).
 tool-mcp = { path = "../tools/mcp" }
@@ -61,6 +61,7 @@ git2 = { path = "../../third_party/git2-rs/git2", default-features = false, feat
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 futures-util.workspace = true
+tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [lints]
 workspace = true

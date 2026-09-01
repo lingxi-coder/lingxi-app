@@ -5,12 +5,14 @@ import UniformTypeIdentifiers
 /// highest-frequency workspace action (Terminal) lives in the header so it is
 /// always reachable without scrolling past the session list.
 ///
-/// Dismissal belongs to the split view, not to this view: in compact width the
-/// system back button and back-swipe pop it, and every navigation callback
-/// already resets the column through `AppNavigationModel`. That is why there is
-/// no close button and no scrim here.
+/// The split view owns presentation state. In compact width its sidebar is the
+/// root of the collapsed navigation stack, so the system back gesture can open
+/// it but cannot move forward to detail again. The toolbar close action updates
+/// `preferredCompactColumn` through `AppNavigationModel`; regular-width layouts
+/// keep the system-managed persistent sidebar without an extra close control.
 struct Drawer: View {
     @Environment(\.theme) private var t
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Bindable var projectStore: ProjectStore
     @Bindable var localAppsStore: LocalAppsStore
     /// The conversation scope the chat surface currently runs in. When it is
@@ -23,10 +25,11 @@ struct Drawer: View {
     let openSettings: () -> Void
     let openTerminal: () -> Void
     let openApps: (String?) -> Void
+    let closeSidebar: () -> Void
     /// Creates an app and hands the conversation over to it. Separate from
-    /// `openApps` because the create affordances must create, not browse; the
-    /// drawer has no self-dismiss path, so this closure is also what collapses
-    /// the sidebar (see the type comment above).
+    /// `openApps` because the create affordances must create, not browse; this
+    /// action also collapses the sidebar immediately instead of waiting for the
+    /// asynchronous create landing.
     let createApp: () -> Void
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
@@ -56,6 +59,7 @@ struct Drawer: View {
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
         openApps: @escaping (String?) -> Void,
+        closeSidebar: @escaping () -> Void,
         createApp: @escaping () -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
@@ -71,6 +75,7 @@ struct Drawer: View {
         self.openSettings = openSettings
         self.openTerminal = openTerminal
         self.openApps = openApps
+        self.closeSidebar = closeSidebar
         self.createApp = createApp
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
@@ -128,6 +133,17 @@ struct Drawer: View {
             // Titles the compact back button that returns to this column.
             .navigationTitle(String(localized: "app_name"))
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if horizontalSizeClass == .compact {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(action: closeSidebar) {
+                            Label("drawer_close_sidebar_a11y", systemImage: "xmark")
+                                .labelStyle(.iconOnly)
+                        }
+                        .accessibilityIdentifier("drawer.close")
+                    }
+                }
+            }
             .navigationSplitViewColumnWidth(min: 300, ideal: 330, max: 420)
         .alert(String(localized: "drawer_new_local_project"), isPresented: $showCreateAlert) {
             TextField("drawer_project_name_placeholder", text: $createProjectName)

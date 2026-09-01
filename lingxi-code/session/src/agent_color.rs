@@ -18,10 +18,10 @@
 //! `serde_json::to_string` line terminated with a single `\n`, written through
 //! the [`FileSystem`] trait (parent dir created on first write).
 
+use platform_api::{FileSystem, FsError};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
-use platform_api::{FileSystem, FsError};
 
 /// Build the byte-locked `agent-color` JSONL entry value for `session_id` /
 /// `color`. Pure (no I/O) so the wire shape is unit-testable in isolation —

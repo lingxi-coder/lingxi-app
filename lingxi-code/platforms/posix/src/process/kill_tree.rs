@@ -14,8 +14,8 @@
 
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
-use std::time::Duration;
 use platform_api::ProcessError;
+use std::time::Duration;
 
 /// Default grace period between SIGTERM and the SIGKILL escalation.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);

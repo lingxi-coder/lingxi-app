@@ -593,7 +593,14 @@ mod tests {
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
 
     struct ScriptedExitGate {
-        seen: Arc<StdMutex<Vec<(String, platform_api::permission_gate::PermissionCheckContext)>>>,
+        seen: Arc<
+            StdMutex<
+                Vec<(
+                    String,
+                    platform_api::permission_gate::PermissionCheckContext,
+                )>,
+            >,
+        >,
         outcome: platform_api::permission_gate::PermissionOutcome,
     }
 

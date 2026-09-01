@@ -232,8 +232,8 @@ impl Tool for PowerShellTool {
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use platform_api::sandbox::ProcessCommand as SbxCommand;
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         let cmd_str = input
             .get("command")
@@ -438,10 +438,10 @@ impl Tool for PowerShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::process::ProcessOutput;
     use std::ffi::OsString;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use platform_api::process::ProcessOutput;
 
     // PATH is process-global, and several tests install different temporary
     // `pwsh` binaries. Serialize those overrides and restore them on every exit

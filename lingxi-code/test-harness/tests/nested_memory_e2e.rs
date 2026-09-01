@@ -21,6 +21,7 @@ use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{HttpRequest, HttpResponse};
 use serde_json::json;
 use std::pin::Pin;
@@ -31,7 +32,6 @@ use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
 use tool_api::test_support::{fresh_ctx, fresh_tx};
 use tool_api::tool_trait::Tool;
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct UnusedHttp;
 #[async_trait]
@@ -39,7 +39,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

@@ -8,10 +8,10 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::task_registry::{TaskRegistryHandle, WorkflowRecord};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use platform_api::task_registry::{TaskRegistryHandle, WorkflowRecord};
 
 const DESCRIPTION: &str = "Browse running, paused, and completed workflows";
 const TITLE: &str = "Dynamic workflows";

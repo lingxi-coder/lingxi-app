@@ -4,10 +4,10 @@
 use crate::jsonl::{read_recover, StorageError};
 use crate::metadata::SessionMetadata;
 use crate::transcript::TranscriptEntry;
+use platform_api::FileSystem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use platform_api::FileSystem;
 
 /// Owns the on-disk layout for one base directory of sessions.
 pub struct SessionStorage {

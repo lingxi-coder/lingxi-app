@@ -35,9 +35,6 @@ pub use process::AndroidMinijailProcessRunner;
 pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
-use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
-use std::path::PathBuf;
-use std::sync::Arc;
 use platform_api::{
     AndroidUiAutomation, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
     DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
@@ -46,6 +43,9 @@ use platform_api::{
     SecureStorage, SharingService, SpeechToText, TextToSpeech, UnavailableMobileLinuxRuntime,
     VoiceRecorder, WorktreeManager,
 };
+use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Construction inputs for [`AndroidPlatform`].
 ///

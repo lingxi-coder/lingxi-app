@@ -1,9 +1,9 @@
 //! `command-core` (M8-P9) — the cross-platform builtin slash-command handlers
-//! (the 18 "core" commands) plus the registration entry points the composition
+//! (the 19 "core" commands) plus the registration entry points the composition
 //! roots call. Built on the `command-api` runtime.
 //!
 //! After [`register_all_builtin_commands`] runs, the registry holds the locked
-//! 108-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
+//! 86-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
 //! then overwrite the implemented entries with their real handle/auth-bound
 //! handlers (batch 8 = `autocompact`/`fork`/`goal`/`recap`/`reload-skills`/
 //! `skill-doctor`/`stop`). See spec §19.
@@ -13,6 +13,7 @@
 pub mod agents;
 pub mod auto_mode_setup;
 pub mod autocompact;
+pub mod brief;
 pub mod bundled;
 pub mod cd;
 pub mod clear;
@@ -32,6 +33,7 @@ pub mod fork;
 pub mod goal;
 pub mod help;
 pub mod hooks;
+pub mod ide;
 pub mod init;
 pub mod init_verifiers;
 pub mod insights;
@@ -43,6 +45,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod permissions;
+pub mod powerup;
 pub mod recap;
 pub mod register;
 pub mod release_notes;
@@ -68,6 +71,7 @@ mod core_placeholders;
 pub use agents::AgentsHandler;
 pub use auto_mode_setup::{ApplyRunner, AutoModeSetupHandler, ProposeRunner};
 pub use autocompact::AutocompactHandler;
+pub use brief::BriefHandler;
 pub use bundled::register_bundled_skills;
 pub use clear::ClearHandler;
 pub use commit::CommitHandler;
@@ -88,6 +92,7 @@ pub use fork::{ForkBackgroundHandler, ForkHandler};
 pub use goal::GoalHandler;
 pub use help::HelpHandler;
 pub use hooks::HooksHandler;
+pub use ide::IdeHandler;
 pub use init::InitHandler;
 pub use init_verifiers::InitVerifiersHandler;
 pub use insights::InsightsHandler;
@@ -99,6 +104,7 @@ pub use mcp::McpHandler;
 pub use memory::MemoryHandler;
 pub use model::ModelHandler;
 pub use permissions::PermissionsHandler;
+pub use powerup::{PowerupHandler, PowerupLesson, POWERUPS_UNLOCKED_KEY, POWERUP_LESSONS};
 pub use recap::RecapHandler;
 pub use release_notes::ReleaseNotesHandler;
 pub use reload_skills::ReloadSkillsHandler;

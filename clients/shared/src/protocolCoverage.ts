@@ -80,7 +80,6 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   execute_app_bridge_request: true,
   resolve_app_ui_request: true,
   resolve_app_capability_request: true,
-  resolve_app_runtime_profile_selection: true,
   resolve_app_dependency_change_confirmation: true,
   resolve_app_profile_proposal: true,
   plugin_command: true,

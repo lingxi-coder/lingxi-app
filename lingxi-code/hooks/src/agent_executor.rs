@@ -224,12 +224,12 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
-    use protocol::HookId;
-    use serde_json::json;
-    use std::sync::Mutex;
     use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
     use platform_api::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
     use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use protocol::HookId;
+    use serde_json::json;
+    use std::sync::Mutex;
 
     struct InertInvoker;
     #[async_trait]

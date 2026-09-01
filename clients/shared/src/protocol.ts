@@ -297,11 +297,6 @@ export type ClientCommand =
       decision: AppAuthorizationDecisionDto;
     }
   | {
-      type: 'resolve_app_runtime_profile_selection';
-      request_id: string;
-      selected_family?: AppRuntimeProfileDto;
-    }
-  | {
       type: 'resolve_app_dependency_change_confirmation';
       request_id: string;
       approved: boolean;

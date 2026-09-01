@@ -17,10 +17,12 @@
 //! stays flat. `+` is outside the allowlist so the mapping is injective.
 
 use async_trait::async_trait;
+use platform_api::{
+    WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
-use platform_api::{WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// Maximum allowed total length of a worktree slug.
 ///
@@ -610,9 +612,9 @@ mod slug_tests {
 #[cfg(test)]
 mod create_tests {
     use super::*;
+    use platform_api::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
-    use platform_api::WorktreeManager;
 
     /// Initialize a fresh git repo with one commit so worktree commands have
     /// something to branch from.
@@ -872,9 +874,9 @@ Removing worktrees/topic+area: gitdir file points to non-existent location
 #[cfg(test)]
 mod change_summary_tests {
     use super::*;
+    use platform_api::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
-    use platform_api::WorktreeManager;
 
     #[test]
     fn count_porcelain_clean_is_zero() {

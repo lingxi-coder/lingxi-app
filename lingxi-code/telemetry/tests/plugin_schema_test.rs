@@ -4,8 +4,8 @@ use telemetry::tengu::plugin::{
 };
 
 #[test]
-fn all_14_plugin_event_names_are_locked() {
-    assert_eq!(plugin::NAMES.len(), 14);
+fn all_24_plugin_event_names_are_locked() {
+    assert_eq!(plugin::NAMES.len(), 24);
     for n in plugin::NAMES {
         assert!(n.starts_with("tengu_plugin_"), "{n} must be tengu_plugin_*");
     }
@@ -26,6 +26,16 @@ fn all_14_plugin_event_names_are_locked() {
     assert_eq!(plugin::UPDATED_CLI, "tengu_plugin_updated_cli");
     assert_eq!(plugin::COMMAND_FAILED, "tengu_plugin_command_failed");
     assert_eq!(plugin::REMOTE_FETCH, "tengu_plugin_remote_fetch");
+    assert_eq!(plugin::INSTALL_COMMAND, "tengu_plugin_install_command");
+    assert_eq!(plugin::UNINSTALL_COMMAND, "tengu_plugin_uninstall_command");
+    assert_eq!(plugin::ENABLE_COMMAND, "tengu_plugin_enable_command");
+    assert_eq!(plugin::DISABLE_COMMAND, "tengu_plugin_disable_command");
+    assert_eq!(plugin::UPDATE_COMMAND, "tengu_plugin_update_command");
+    assert_eq!(plugin::LIST_COMMAND, "tengu_plugin_list_command");
+    assert_eq!(plugin::DETAILS_COMMAND, "tengu_plugin_details_command");
+    assert_eq!(plugin::PRUNE_COMMAND, "tengu_plugin_prune_command");
+    assert_eq!(plugin::PRUNE_CLI, "tengu_plugin_prune_cli");
+    assert_eq!(plugin::STATE_FILE_ERROR, "tengu_plugin_state_file_error");
 }
 
 #[test]
@@ -77,9 +87,9 @@ fn sample_enabled_for_session() -> PluginEnabledForSessionPayload {
         has_lsp: false,
         has_hooks: true,
         has_settings: false,
-        sessions_since_last_use: 3,
-        days_since_last_use: 1,
-        safe_mode: false,
+        sessions_since_last_use: Some(3),
+        days_since_last_use: Some(1),
+        safe_mode: Some(true),
         settings_keys: None,
         version: Some(Verified::assert_safe("1.2.3".to_string())),
         skill_name_hash_count: Some(2),
@@ -222,19 +232,13 @@ fn a_plugin_with_no_skills_still_reports_a_zero_hash_count() {
 /// Modelling them `Option` + `skip_serializing_if` dropped the keys exactly
 /// where the oracle emits `0`.
 #[test]
-fn last_use_counters_are_emitted_even_when_zero() {
+fn last_use_counters_are_omitted_when_absent() {
     let mut payload = sample_enabled_for_session();
-    payload.sessions_since_last_use = 0;
-    payload.days_since_last_use = 0;
+    payload.sessions_since_last_use = None;
+    payload.days_since_last_use = None;
+    payload.safe_mode = None;
     let json = serde_json::to_value(&payload).unwrap();
-    assert_eq!(
-        json["sessions_since_last_use"],
-        serde_json::json!(0),
-        "must be present as 0, not omitted"
-    );
-    assert_eq!(
-        json["days_since_last_use"],
-        serde_json::json!(0),
-        "must be present as 0, not omitted"
-    );
+    assert!(json.get("sessions_since_last_use").is_none());
+    assert!(json.get("days_since_last_use").is_none());
+    assert!(json.get("safe_mode").is_none());
 }

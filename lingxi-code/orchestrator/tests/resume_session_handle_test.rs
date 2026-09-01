@@ -10,9 +10,9 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use platform_api::OrchestratorHandle;
 use protocol::{ConversationMessage, MessageId, SessionId};
 use std::sync::Arc;
-use platform_api::OrchestratorHandle;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(vec![]));

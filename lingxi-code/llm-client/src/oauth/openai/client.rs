@@ -6,12 +6,12 @@
 use crate::oauth::openai::config::OpenAiOAuthConfig;
 use crate::oauth::openai::pkce::{generate_pkce, generate_state_token};
 use crate::oauth::openai::refresh::{AuthState, RefreshDriver};
+use platform_api::{Clock, HttpTransport};
 use protocol::{HttpMethod, HttpRequest, Secret};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use platform_api::{Clock, HttpTransport};
 
 /// Timeout for the token-exchange POST.
 ///

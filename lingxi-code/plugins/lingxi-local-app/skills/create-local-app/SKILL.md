@@ -50,8 +50,10 @@ shape yet. Settling what the app IS is your work in that conversation:
 4. After the conversational confirmation, call the unified
    `lingxi-local-app:local-app-build` create branch for this shell app. That
    Host-owned path re-reads the template catalog, stages the create candidate,
-   runs the initial MCP authoring pass, shows one trusted native create
-   confirmation, and only then calls `LocalAppScaffold`. Never call a
+   shows one trusted native create confirmation, and only then calls
+   `LocalAppScaffold`. App creation never runs MCP authoring: the app-owned MCP
+   remains unconfigured and disabled until the user explicitly starts MCP setup
+   from that app's settings. Never call a
    standalone runtime-profile selector or pass a model-authored
    surface/profile override. Do not supply `args.runtime_profile` as an authority; the host reads the materialized manifest and overwrites it:
 

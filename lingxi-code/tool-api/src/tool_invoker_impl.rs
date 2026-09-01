@@ -8,10 +8,10 @@
 
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::sync::Arc;
 use platform_api::permission_gate::PermissionGate;
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use serde_json::Value;
+use std::sync::Arc;
 
 /// Turn fork-time frozen command denies into the `disallowed_tools` permission
 /// layer the fold understands (claude `freezeCommandDenies` → the
@@ -327,14 +327,16 @@ impl ToolInvoker for RegistryToolInvoker {
                     .await
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?;
                 match resolution {
-                    platform_api::permission_gate::PermissionResolution::Deny { reason, .. } => {
+                    platform_api::permission_gate::PermissionResolution::Deny {
+                        reason, ..
+                    } => {
                         return Err(ToolInvokerError::Internal(reason));
                     }
                     platform_api::permission_gate::PermissionResolution::Allow { .. }
                     | platform_api::permission_gate::PermissionResolution::Ask
-                    | platform_api::permission_gate::PermissionResolution::AskWithContext { .. } => {
-                        gate.ask_via_transport(name, &input, &check_ctx).await
-                    }
+                    | platform_api::permission_gate::PermissionResolution::AskWithContext {
+                        ..
+                    } => gate.ask_via_transport(name, &input, &check_ctx).await,
                 }
             } else {
                 gate.check_with_context_or_abort(name, &input, &check_ctx)
@@ -342,7 +344,9 @@ impl ToolInvoker for RegistryToolInvoker {
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?
             };
             match outcome {
-                platform_api::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
+                platform_api::permission_gate::PermissionOutcome::Allow {
+                    updated_input, ..
+                } => {
                     if let Some(u) = updated_input {
                         input = u;
                     }
@@ -943,7 +947,9 @@ mod tests {
     }
 
     // ──── enforcement 3b: permission gate before dispatch ──────────────
-    use platform_api::permission_gate::{PermissionDecision as GateDecision, PermissionGate as Gate};
+    use platform_api::permission_gate::{
+        PermissionDecision as GateDecision, PermissionGate as Gate,
+    };
 
     /// Gate that returns a fixed decision and records each tool name it sees.
     struct FixedGate {
@@ -964,7 +970,8 @@ mod tests {
             agent_name: None,
             team_name: None,
             is_async: false,
-            is_non_interactive_session: platform_api::session_flags::effective_non_interactive_session(),
+            is_non_interactive_session:
+                platform_api::session_flags::effective_non_interactive_session(),
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,

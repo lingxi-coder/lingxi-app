@@ -31,17 +31,16 @@ if (context.app_id !== input.app_id || context.operation !== input.operation) th
 if (typeof context.workflow_run_id !== 'string' || context.workflow_run_id.length === 0) throw new Error(`${WORKFLOW_ID}: HOST_CONTEXT_MISSING_RUN: workflow_run_id is Host-bound`);
 const persisted = input.operation !== 'create';
 if (persisted && (!context.runtime_profile || context.dependency_snapshot?.verified !== true)) throw new Error(`${WORKFLOW_ID}: PERSISTED_PROFILE_REQUIRED: update/verify require Host-persisted profile and dependency snapshot`);
-if (input.operation === 'create' && (typeof context.invocation_capability !== 'string' || !/^mcpv_[A-Za-z0-9]{32}$/.test(context.invocation_capability))) throw new Error(`${WORKFLOW_ID}: HOST_INVOCATION_CAPABILITY_REQUIRED: create must carry a Host-minted MCP authoring capability`);
 const catalog = context.template_catalog;
 if (!catalog || typeof catalog.catalog_digest !== 'string' || !Array.isArray(catalog.available_template_ids)) throw new Error(`${WORKFLOW_ID}: VERIFIED_CATALOG_REQUIRED: Host must inject catalog identity`);
 const profile = () => context.runtime_profile;
 if (persisted && !['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(profile()?.family)) throw new Error(`${WORKFLOW_ID}: PERSISTED_PROFILE_INVALID: Host runtime profile family is missing or unsupported`);
 if (persisted && quality === 'fast' && profile().family !== 'react_dom') throw new Error(`${WORKFLOW_ID}: CANVAS_FAST_REJECTED: canvas profiles require balanced or thorough quality`);
 let selectedTemplateId = '';
-const canvas = () => selectedTemplateId !== 'react-dom-r1' && (selectedTemplateId.length > 0 || profile()?.surface === 'canvas' || (profile()?.family && profile().family !== 'react_dom'));
+const canvas = () => !selectedTemplateId.startsWith('react-dom-') && (selectedTemplateId.length > 0 || profile()?.surface === 'canvas' || (profile()?.family && profile().family !== 'react_dom'));
 const repairBudget = quality === 'thorough' ? 2 : 1;
 const specialistFor = () => {
-  const family = profile()?.family || (selectedTemplateId === 'react-dom-r1' ? 'react_dom' : selectedTemplateId === 'canvas-2d-r1' ? 'canvas_2d' : selectedTemplateId === 'three-3d-r1' ? 'three_3d' : selectedTemplateId === 'phaser-2d-r1' ? 'phaser_2d' : selectedTemplateId === 'babylon-3d-r1' ? 'babylon_3d' : 'react_dom');
+  const family = profile()?.family || (selectedTemplateId.startsWith('react-dom-') ? 'react_dom' : selectedTemplateId.startsWith('canvas-2d-') ? 'canvas_2d' : selectedTemplateId.startsWith('three-3d-') ? 'three_3d' : selectedTemplateId.startsWith('phaser-2d-') ? 'phaser_2d' : selectedTemplateId.startsWith('babylon-3d-') ? 'babylon_3d' : 'react_dom');
   return { react_dom: '$ionic-react-local-app', canvas_2d: '$canvas-2d-local-app', three_3d: '$threejs-local-app', phaser_2d: '$phaser-2d-local-app', babylon_3d: '$babylon-3d-local-app' }[family] || '$ionic-react-local-app';
 };
 
@@ -52,8 +51,8 @@ const requireObject = (value, stage) => {
 const selectionSchema = { type: 'object', properties: { catalog_digest: { type: 'string', minLength: 1 }, template_id: { type: 'string', minLength: 1 }, reason: { type: 'string', minLength: 1 }, rejected: { type: 'array', items: { type: 'object', properties: { template_id: { type: 'string', minLength: 1 }, reason: { type: 'string', minLength: 1 } }, required: ['template_id', 'reason'], additionalProperties: false } }, validated_selection_handle: { type: 'string', pattern: '^vsel_[A-Za-z0-9]{32}$' } }, required: ['catalog_digest', 'template_id', 'reason', 'rejected', 'validated_selection_handle'], additionalProperties: false };
 const designSchema = { type: 'object', properties: { runtime_family: { type: 'string' }, acceptance_checks: { type: 'array' }, summary: { type: 'string' } }, required: ['runtime_family', 'acceptance_checks', 'summary'] };
 const createStageSchema = { type: 'object', properties: { ok: { type: 'boolean' }, dependency_input_sha256: { type: 'string' }, summary: { type: 'string' } }, required: ['ok', 'summary'], additionalProperties: false };
+const createApprovalSchema = { type: 'object', properties: { approved: { type: 'boolean' }, receipt_id: { type: 'string', minLength: 1 }, status: { type: 'string', const: 'create_approved_no_mcp' } }, required: ['approved', 'receipt_id', 'status'], additionalProperties: false };
 const buildSchema = { type: 'object', properties: { ok: { type: 'boolean' }, preview_url: { type: 'string' }, summary: { type: 'string' } }, required: ['ok', 'preview_url', 'summary'] };
-const promoteSchema = { type: 'object', properties: { ok: { type: 'boolean' }, verification_sha256: { type: 'string' }, catalog_sha256: { type: 'string' }, publication_state: { type: 'string' }, summary: { type: 'string' } }, required: ['ok', 'publication_state', 'summary'], additionalProperties: false };
 const findingSchema = { type: 'object', properties: { kind: { type: 'string', enum: FINDING_KINDS }, severity: { type: 'string', const: 'blocking' }, evidence: { type: 'string', minLength: 1 } }, required: ['kind', 'severity', 'evidence'], additionalProperties: false };
 const reportSchema = { type: 'object', properties: { ok: { type: 'boolean' }, findings: { type: 'array', items: findingSchema }, checked_matrix: { type: 'array' }, browser_available: { type: 'boolean' }, webview_checked: { type: 'boolean' }, degraded_verification: { type: 'boolean' }, data_roundtrip: { type: 'object' }, render_check: { type: 'object' }, motion_check: { type: 'object' }, summary: { type: 'string' } }, required: ['ok', 'findings', 'checked_matrix', 'browser_available', 'webview_checked', 'degraded_verification', 'data_roundtrip', 'render_check', 'motion_check', 'summary'] };
 const normalizeFinding = (value, kind = 'acceptance') => {
@@ -87,7 +86,7 @@ if (input.operation === 'create') {
   if (selection.catalog_digest !== catalog.catalog_digest || !catalog.available_template_ids.includes(selection.template_id)) throw new Error(`${WORKFLOW_ID}: selector returned a stale or unavailable template`);
   if (typeof selection.validated_selection_handle !== 'string' || !selection.validated_selection_handle.startsWith('vsel_')) throw new Error(`${WORKFLOW_ID}: selector did not return a Host-issued validated_selection_handle`);
   selectedTemplateId = selection.template_id;
-  if (quality === 'fast' && selection.template_id !== 'react-dom-r1') throw new Error(`${WORKFLOW_ID}: CANVAS_FAST_REJECTED: selector chose a canvas profile for fast quality`);
+  if (quality === 'fast' && !selection.template_id.startsWith('react-dom-')) throw new Error(`${WORKFLOW_ID}: CANVAS_FAST_REJECTED: selector chose a canvas profile for fast quality`);
   if (quality !== 'fast') designSpec = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection for app ${input.app_id}, workflow_run_id ${context.workflow_run_id}, handle ${selection.validated_selection_handle}; produce the platform-aware design spec for the resolved profile. ${HOST_CHROME_CONTRACT}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
 }
 
@@ -98,26 +97,9 @@ if (input.operation === 'create') {
   if (!handle) throw new Error(`${WORKFLOW_ID}: CREATE_HANDLE_REQUIRED`);
   const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, and the structured design_spec ${JSON.stringify(designSpec)} when present. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
   if (staged.ok !== true) throw new Error(`${WORKFLOW_ID}: create staging did not succeed`);
-  createApproval = requireObject(await workflow('lingxi-local-app:local-app-mcp-authoring', {
-    app_id: input.app_id,
-    user_goal: input.spec || input.revision_prompt || 'Initial Local App MCP surface',
-    host_context: {
-      source: 'verified_host',
-      operation: 'initial',
-      app_id: input.app_id,
-      workflow_run_id: context.workflow_run_id,
-      invocation_capability: context.invocation_capability,
-      template_catalog: context.template_catalog,
-      expected_writable_collections: context.expected_writable_collections || [],
-      dependency_snapshot: { verified: false },
-      active_catalog: null
-    }
-  }), 'nested-mcp-authoring');
-  if (createApproval.status === 'mcp_authoring_required') {
-    return { ok: true, workflow_id: WORKFLOW_ID, operation: input.operation, app_id: input.app_id, quality_level: quality, agent_calls: calls, repair_rounds: 0, status: createApproval.status, candidate_preserved: true, summary: createApproval.reason || 'Initial MCP authoring did not yield a bounded publishable tool surface.' };
-  }
-  if (createApproval.status !== 'create_approved' || !createApproval.approval?.receipt_id) throw new Error(`${WORKFLOW_ID}: create approval did not yield a unified scaffold receipt`);
-  build = await run(`Read LocalAppGet for app ${input.app_id} so the Host-confirmed current name and brief are the only values that reach the create transaction. Then call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.approval.receipt_id}, and that exact Host-confirmed name/brief. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_CREATE_BUILD_DENIES, label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
+  createApproval = await run(`Call LocalAppApproveMcpProposal exactly once for app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, create_without_mcp=true. This is the native create confirmation path: do not propose MCP tools, do not call the MCP authoring workflow, and do not publish or enable MCP. Return the Host-issued create receipt unchanged.`, { agentType: 'mcp-designer', label: 'native-create-approval', phase: 'Select and Design', schema: createApprovalSchema });
+  if (createApproval.approved !== true || createApproval.status !== 'create_approved_no_mcp' || !createApproval.receipt_id) throw new Error(`${WORKFLOW_ID}: create approval did not yield a unified scaffold receipt`);
+  build = await run(`Read LocalAppGet for app ${input.app_id} so the Host-confirmed current name and brief are the only values that reach the create transaction. Then call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.receipt_id}, and that exact Host-confirmed name/brief. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. MCP remains unconfigured and disabled until the user starts MCP authoring from the app settings. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_CREATE_BUILD_DENIES, label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: create builder did not produce a successful preview`);
 } else if (input.operation !== 'verify') {
   build = await run(`Use only the Host-persisted runtime profile in host_context; do not reselect or resolve a create candidate. Invoke exactly the matching runtime specialist ${specialistFor()} for that persisted profile. Implement the confirmed Local App update for ${input.app_id}; use only App-managed files, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Persist no final receipt or publish. Host context: ${JSON.stringify(context)}. Revision: ${input.revision_prompt || ''}`, { agentType: 'builder', disallowedTools: BUILDER_UPDATE_DENIES, label: 'builder', phase: 'Generate and Build', schema: buildSchema });
@@ -144,34 +126,7 @@ for (;;) {
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: repair builder did not produce a successful preview`);
 }
 
-let promotion;
-let mcpUpdate = null;
-if (input.operation === 'update') {
-  if (typeof context.invocation_capability !== 'string' || !/^mcpv_[A-Za-z0-9]{32}$/.test(context.invocation_capability)) throw new Error(`${WORKFLOW_ID}: HOST_INVOCATION_CAPABILITY_REQUIRED: update MCP impact-check requires a Host-minted capability`);
-  mcpUpdate = requireObject(await workflow('lingxi-local-app:local-app-mcp-authoring', {
-    app_id: input.app_id,
-    user_goal: input.revision_prompt || input.spec || 'Reconcile the Local App MCP surface with this update',
-    host_context: {
-      source: 'verified_host',
-      operation: 'revise',
-      app_id: input.app_id,
-      workflow_run_id: context.workflow_run_id,
-      invocation_capability: context.invocation_capability,
-      runtime_profile: context.runtime_profile,
-      template_catalog: context.template_catalog,
-      expected_writable_collections: context.expected_writable_collections || [],
-      dependency_snapshot: context.dependency_snapshot,
-      active_catalog: context.active_catalog || null
-    }
-  }), 'nested-mcp-authoring');
-  if (['needs_input', 'mcp_authoring_required', 'approval_required'].includes(mcpUpdate.status)) {
-    return { ok: false, workflow_id: WORKFLOW_ID, operation: input.operation, app_id: input.app_id, quality_level: quality, agent_calls: calls, repair_rounds: repairRounds, status: mcpUpdate.status, candidate_preserved: true, verification: report, mcp_update: mcpUpdate, preview_url: build?.preview_url || '', summary: mcpUpdate.reason || 'MCP impact-check requires follow-up before publication.' };
-  }
-  if (mcpUpdate.status !== 'promoted') throw new Error(`${WORKFLOW_ID}: update MCP impact-check returned an unsupported status: ${mcpUpdate.status}`);
-}
-if (input.operation === 'create') {
-  promotion = await run(`Use LocalAppQaMcpCandidate for app ${input.app_id}, workflow run ${context.workflow_run_id}, then LocalAppPromoteMcpCandidate without a receipt_id. The unified create receipt was already consumed by LocalAppScaffold; this final stage must only QA the built candidate and atomically promote the build/catalog pair. Return verification_sha256, catalog_sha256 and publication_state.`, { agentType: 'verifier', label: 'mcp-promote', phase: 'Operate and Verify', schema: promoteSchema });
-  if (promotion.ok !== true || promotion.publication_state !== 'published_unverified') throw new Error(`${WORKFLOW_ID}: create promotion did not publish the verified candidate`);
-}
+const promotion = null;
+const mcpUpdate = null;
 
 return { ok: true, workflow_id: WORKFLOW_ID, operation: input.operation, app_id: input.app_id, quality_level: quality, agent_calls: calls, repair_rounds: repairRounds, verification: report, approval: createApproval || null, mcp_update: mcpUpdate, promotion: promotion || null, preview_url: build?.preview_url || '', summary: report.summary };

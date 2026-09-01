@@ -3,6 +3,17 @@
 use super::*;
 
 impl ConversationOrchestrator {
+    /// `/brief` toggle reminder, consumed once by the next model call.
+    ///
+    /// The visible command status is rendered by the host immediately, while
+    /// Claude Code also sends this transient meta message to the model so the
+    /// next response uses the newly selected output channel. Startup
+    /// `--brief` does not queue a reminder; only the interactive toggle does.
+    pub(crate) fn brief_mode_reminder_message(&self) -> Option<ConversationMessage> {
+        platform_api::session_flags::take_brief_mode_reminder()
+            .map(|content| ConversationMessage::user_meta(MessageId::new(), content.to_string()))
+    }
+
     /// OUTSTYLE.3: the byte-exact per-turn output-style reminder, or `None` when
     /// the default style is active.
     ///

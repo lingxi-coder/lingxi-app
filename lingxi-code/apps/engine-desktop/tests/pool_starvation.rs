@@ -36,13 +36,13 @@ use agent::pool::StateMachinePool;
 use agent::PoolSubagentSpawner;
 use async_trait::async_trait;
 use engine_desktop::TEAMMATE_POOL_CAP;
-use protocol::AgentId;
-use test_harness::mocks::MockRuntimeSpawner;
 use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
 use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use protocol::AgentId;
+use test_harness::mocks::MockRuntimeSpawner;
 
 /// Scripted `SubagentApiClient`: one non-streaming round-trip per call, returning
 /// a single `end_turn` text turn so the non-persistent subagent loop terminates
@@ -182,6 +182,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         model_profile: None,
         api_client: None,
         tool_invoker: None,
+        new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
         budget: None,
@@ -325,7 +326,10 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
 
     // `PoolSubagentSpawner` preserves the pool-capacity condition as PoolFull.
     assert!(
-        matches!(err, platform_api::subagent_spawn::SubagentSpawnError::PoolFull),
+        matches!(
+            err,
+            platform_api::subagent_spawn::SubagentSpawnError::PoolFull
+        ),
         "shared-pool spawn fails pool-full; got {err:?}"
     );
     // The spawn never reached the runner, so no model round-trip occurred.

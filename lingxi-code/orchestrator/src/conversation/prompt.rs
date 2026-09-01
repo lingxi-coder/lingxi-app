@@ -2,6 +2,38 @@
 
 use super::*;
 
+fn prompt_tool_descriptions(
+    wire_tools: &[serde_json::Value],
+) -> Vec<platform_api::PromptToolDescription> {
+    let mut seen = std::collections::HashSet::new();
+    wire_tools
+        .iter()
+        .filter(|tool| {
+            !tool
+                .get("defer_loading")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?.trim();
+            let description = tool.get("description")?.as_str()?;
+            if name.is_empty() || !seen.insert(name.to_owned()) {
+                return None;
+            }
+            Some(platform_api::PromptToolDescription {
+                name: name.to_owned(),
+                description: description.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn valid_prompt_snapshot(snapshot: &platform_api::PromptSnapshot) -> bool {
+    !snapshot.system_prompt.is_empty()
+        && snapshot.system_prompt.iter().all(|part| !part.is_empty())
+        && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
+}
+
 impl ConversationOrchestrator {
     /// Assemble the system prompt this orchestrator would send on the next
     /// turn, WITHOUT running a turn (no API call, no message mutation).
@@ -217,6 +249,20 @@ impl ConversationOrchestrator {
         if let Some(custom) = &self.config.system_prompt_override {
             return custom.clone();
         }
+        if self.prompt_snapshot_eligible() {
+            if let Some(snapshot) = self.prompt_runtime.prompt_snapshot.lock().await.clone() {
+                if valid_prompt_snapshot(&snapshot) {
+                    // Carved-slate freezes only the static getSystemPrompt
+                    // members. `systemContext` (currently the git-status block
+                    // in this port) is intentionally recomputed for every
+                    // request, so a cwd/context change never gets baked into
+                    // the cacheable prefix.
+                    let mut prompt = snapshot.system_prompt.join("\n\n");
+                    self.append_dynamic_system_context(&mut prompt).await;
+                    return prompt;
+                }
+            }
+        }
         let main_thread_prompt = self
             .lifecycle_runtime
             .main_thread_agent
@@ -238,6 +284,123 @@ impl ConversationOrchestrator {
             }
         }
         prompt
+    }
+
+    /// Whether the Claude 2.1.252 static-system-prompt snapshot gate is active
+    /// for this main conversation. An explicit env opt-in is supported for
+    /// provider-neutral hosts; telemetry remains the default-off GrowthBook
+    /// equivalent. Auxiliary query sources and custom prompts are excluded.
+    pub(crate) fn prompt_snapshot_eligible(&self) -> bool {
+        let static_enabled = platform_api::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_CARVED_SLATE").ok().as_deref(),
+        ) || telemetry::flag_bool("tengu_carved_slate", false);
+        let simple =
+            platform_api::env::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
+        let source = crate::config::sanitize_query_source(&self.config.query_source);
+        static_enabled
+            && !simple
+            && self.config.system_prompt_override.is_none()
+            && source != "auxiliary"
+            && !source.starts_with("auxiliary:")
+    }
+
+    /// The resume path must never manufacture a missing snapshot. This flag is
+    /// set by cold/hot resume restoration and cleared by `/clear`.
+    pub(crate) fn prompt_snapshot_resume(&self) -> bool {
+        self.prompt_runtime
+            .prompt_snapshot_resume
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Persist the first eligible request's static prompt and initial inline
+    /// tool descriptions. State is published before disk I/O so an in-memory
+    /// host still gets stable semantics when persistence is unavailable.
+    pub(crate) async fn record_prompt_snapshot_if_needed(
+        &self,
+        system: Option<&str>,
+        wire_tools: &[serde_json::Value],
+    ) {
+        if !self.prompt_snapshot_eligible()
+            || self.prompt_snapshot_resume()
+            || system.is_none_or(str::is_empty)
+        {
+            return;
+        }
+        let system = system.unwrap_or_default();
+        let static_prompt = self
+            .current_system_context_block()
+            .await
+            .and_then(|dynamic| {
+                let suffix = format!("\n\n{dynamic}");
+                system.strip_suffix(&suffix).map(str::to_owned)
+            })
+            .unwrap_or_else(|| system.to_owned());
+        let snapshot = platform_api::PromptSnapshot {
+            system_prompt: vec![static_prompt],
+            tools: prompt_tool_descriptions(wire_tools),
+        };
+        let mut slot = self.prompt_runtime.prompt_snapshot.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(snapshot.clone());
+        drop(slot);
+        self.persist_prompt_snapshot_attachment(&snapshot).await;
+    }
+
+    /// After a successful, non-API-error response, append a replacement
+    /// snapshot only for newly seen non-deferred inline tools. Existing names
+    /// retain their original descriptions and order forever.
+    pub(crate) async fn record_inline_prompt_tools_after_success(
+        &self,
+        wire_tools: &[serde_json::Value],
+    ) {
+        if !self.prompt_snapshot_eligible() || self.prompt_snapshot_resume() {
+            return;
+        }
+        let additions = prompt_tool_descriptions(wire_tools);
+        if additions.is_empty() {
+            return;
+        }
+        let snapshot = {
+            let mut slot = self.prompt_runtime.prompt_snapshot.lock().await;
+            let Some(snapshot) = slot.as_mut() else {
+                return;
+            };
+            let known: std::collections::HashSet<String> = snapshot
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect();
+            let mut added = false;
+            for tool in additions {
+                if !known.contains(&tool.name) {
+                    snapshot.tools.push(tool);
+                    added = true;
+                }
+            }
+            added.then(|| snapshot.clone())
+        };
+        if let Some(snapshot) = snapshot {
+            self.persist_prompt_snapshot_attachment(&snapshot).await;
+        }
+    }
+
+    async fn persist_prompt_snapshot_attachment(&self, snapshot: &platform_api::PromptSnapshot) {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "type".to_string(),
+            serde_json::Value::String("prompt_snapshot".to_string()),
+        );
+        payload.insert(
+            "systemPrompt".to_string(),
+            serde_json::json!(snapshot.system_prompt),
+        );
+        if !snapshot.tools.is_empty() {
+            payload.insert("tools".to_string(), serde_json::json!(snapshot.tools));
+        }
+        self.persist_hook_attachment_to_jsonl(serde_json::Value::Object(payload))
+            .await;
     }
 
     /// Install a host-approved app Agent Profile as an additive prompt layer.
@@ -564,9 +727,19 @@ impl ConversationOrchestrator {
         )
     }
 
-    /// Assemble the full system-prompt STRING from [`Self::build_prompt_context`].
+    /// Assemble the full system-prompt STRING from the static prompt members
+    /// plus the current dynamic `systemContext` block.
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     pub(super) async fn build_system_prompt(&self) -> String {
+        let mut prompt = self.build_static_system_prompt().await;
+        self.append_dynamic_system_context(&mut prompt).await;
+        prompt
+    }
+
+    /// Build only the cacheable `getSystemPrompt` members. The git-status
+    /// suffix is kept out so a carved-slate snapshot can reuse this prefix
+    /// while still receiving live dynamic system context on every request.
+    pub(super) async fn build_static_system_prompt(&self) -> String {
         use crate::prompt::{assemble_system_prompt_with_style, ActiveOutputStyle};
         let ctx = self.build_prompt_context().await;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
@@ -581,36 +754,26 @@ impl ConversationOrchestrator {
             prompt: r.prompt.as_str(),
             keep_coding_instructions: r.keep_coding_instructions,
         });
-        let mut prompt = assemble_system_prompt_with_style(&ctx, style);
+        assemble_system_prompt_with_style(&ctx, style)
+    }
 
-        // R-P1c: append the `gitStatus` system-prompt attachment as a trailing
-        // dynamic block. claude-code threads the `systemContext` (whose only
-        // relevant key is `gitStatus`) into the system prompt via
-        // `WZa(systemPromptArray, systemContext)` → one extra `string[]` member
-        // `gitStatus: <value>` joined with `\n\n`, fed to `getSystemPrompt`.
-        // LingXi concatenates the system prompt into one string, so the block is
-        // appended here with the same blank-line boundary. `None` when cwd is not
-        // a git repo (claude-code omits the key, so nothing is appended).
-        //
-        // `--exclude-dynamic-system-prompt-sections`: gitStatus is a per-machine,
-        // commit-volatile section, so it is also OMITTED from the system prompt
-        // when the flag is set (claude empties systemContext). Leaving it in would
-        // churn the prompt-cache key on every commit — exactly what the flag
-        // prevents. (claude drops gitStatus entirely; it is NOT re-emitted in the
-        // user message.)
-        if !self.config.exclude_dynamic_system_prompt_sections {
-            // Use the SAME guest→host-resolved probe cwd as
-            // `build_prompt_context`. The model-facing `ctx.cwd` intentionally
-            // remains the guest path on mobile, but gitStatus is one frozen
-            // host snapshot in Claude's `systemContext`; re-probing the guest
-            // path here would replace that snapshot with `None`.
-            let probe_cwd = self.prompt_probe_cwd(&ctx.cwd);
-            if let Some(block) = self.cached_git_status(&probe_cwd).await.1 {
-                prompt.push_str("\n\n");
-                prompt.push_str(&block);
-            }
+    /// Return the current dynamic `systemContext` contribution. Today the
+    /// port models Claude's `gitStatus` member; the exclusion flag omits the
+    /// whole context just as the upstream custom/static path does.
+    async fn current_system_context_block(&self) -> Option<String> {
+        if self.config.exclude_dynamic_system_prompt_sections {
+            return None;
         }
-        prompt
+        let cwd = self.session_cwd.cwd();
+        let probe_cwd = self.prompt_probe_cwd(&cwd);
+        self.cached_git_status(&probe_cwd).await.1
+    }
+
+    async fn append_dynamic_system_context(&self, prompt: &mut String) {
+        if let Some(block) = self.current_system_context_block().await {
+            prompt.push_str("\n\n");
+            prompt.push_str(&block);
+        }
     }
 
     /// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail`

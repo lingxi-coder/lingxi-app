@@ -60,9 +60,9 @@ pub(crate) fn is_full_tty() -> bool {
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use platform_api::OrchestratorHandle;
 
 struct TuiMsgQueueInput {
     queue: Arc<msgqueue::MessageQueueManager>,
@@ -358,8 +358,11 @@ async fn run_tui(argv: &Argv) -> i32 {
         let dir = platform_api::live_sessions::LiveSessionDir::at_live(
             crate::agents_registry::sessions_dir(&home),
         );
-        let claim =
-            platform_api::live_sessions::install_process(dir, &initial_session_id.to_string(), user_name);
+        let claim = platform_api::live_sessions::install_process(
+            dir,
+            &initial_session_id.to_string(),
+            user_name,
+        );
         if let Some(claim) = claim {
             let source = if claim.notice.is_some() {
                 "collision"
@@ -417,10 +420,12 @@ pub(crate) fn ensure_live_messaging(
     registration: Option<&Arc<crate::agents_registry::SessionRegistration>>,
 ) {
     let home = crate::run::lingxi_home_dir();
-    let dir =
-        platform_api::live_sessions::LiveSessionDir::at_live(crate::agents_registry::sessions_dir(&home));
+    let dir = platform_api::live_sessions::LiveSessionDir::at_live(
+        crate::agents_registry::sessions_dir(&home),
+    );
     if platform_api::live_sessions::process_dir().is_none() {
-        let claim = platform_api::live_sessions::install_process(dir.clone(), session_id, user_name);
+        let claim =
+            platform_api::live_sessions::install_process(dir.clone(), session_id, user_name);
         if let Some(claim) = claim {
             if let Some(reg) = registration {
                 reg.set_name(
@@ -466,8 +471,9 @@ pub(crate) fn ensure_live_messaging(
             // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
             // auto-generated `mum()` path; absent, the oracle's own default
             // applies (`platform_api::uds_inbox::default_socket_path`).
-            let sock = messaging_socket_override()
-                .unwrap_or_else(|| platform_api::uds_inbox::default_socket_path(std::process::id()));
+            let sock = messaging_socket_override().unwrap_or_else(|| {
+                platform_api::uds_inbox::default_socket_path(std::process::id())
+            });
             match platform_api::uds_inbox::start_process_inbox(sock) {
                 Ok(path) => path,
                 Err(error) => {
@@ -559,6 +565,13 @@ pub(crate) enum RunOutcome {
         target: uuid::Uuid,
         state: Option<RemountState>,
     },
+    /// The agents view selected a session. The switch loop resolves the live
+    /// owner, attaches or queues an exact resume when appropriate, and only
+    /// converts this to `SwitchTo` after proving the transcript unowned.
+    OpenAgentSession {
+        target: tui::bottom_pane::view::AgentSessionTarget,
+        state: Option<RemountState>,
+    },
     /// `/branch`: fork the session driving the loop into a new session and
     /// switch into it. [`crate::run::drive_tui_switch_loop`] creates the branch
     /// transcript from the CURRENT session, then re-mounts the new id via
@@ -633,7 +646,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
             }))
             .await;
     }
-    let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
+    let concrete_orchestrator = tui_build.runtime.orchestrator.clone();
+    let orchestrator: Arc<dyn OrchestratorHandle> = concrete_orchestrator.clone();
     // Boot permission mode + bypass-cycle availability for the indicator (Copy,
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
@@ -642,10 +656,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
         initial_permission_mode.wire_str(),
         bypass_available,
     );
-    {
-        let sid = orchestrator.current_session_id().await.to_string();
-        ensure_live_messaging(&sid, None, registration.as_ref());
-    }
+    let current_session_id = orchestrator.current_session_id().await.to_string();
+    ensure_live_messaging(&current_session_id, None, registration.as_ref());
     let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
@@ -666,15 +678,38 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // consumed further below; selected + rendered into the startup banner.
     let company_announcements = tui_build.company_announcements;
     let emoji_completion_enabled = tui_build.emoji_completion_enabled;
+    let startup_view_mode = tui_build.startup_view_mode.clone();
     // (/permissions) The gate's live allow-rule bucket + the settings-file
     // roots the interactive editor writes to (same roots the AllowAlways
     // persist uses). Grabbed before `tui_build` is consumed further below.
     let permission_paths = tui_build.permission_paths.clone();
     let session_allow_rules = tui_build.session_allow_rules.clone();
+    let agents_snapshot_provider = {
+        let home = crate::run::lingxi_home_dir();
+        let self_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        let self_session_id = current_session_id.clone();
+        Arc::new(move || {
+            crate::background_dispatch::ensure_daemon_for_control(&home);
+            crate::commands::agents::tui_agents_snapshot(
+                &home,
+                self_pid,
+                Some(self_session_id.as_str()),
+            )
+        })
+    };
     // (P1-08 runtime `/add-dir`) the live session-cwd cell + MCP registry the
     // `/add-dir` effect widens; cloned before `tui_build.runtime` is consumed.
     let permission_session_cwd = tui_build.runtime.session_cwd.clone();
     let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
+    // Native scrollback must resolve relative attachment paths against the
+    // LIVE session cwd: `/cd` swaps this shared cell after the TUI mounts.
+    // Keep the TUI independent of the concrete cell type by passing a small
+    // read-only callback into its blocking render loop.
+    let hyperlink_cwd_provider = {
+        let session_cwd = permission_session_cwd.clone();
+        std::sync::Arc::new(move || session_cwd.cwd())
+            as std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>
+    };
     // The ENFORCING permission gate, for Shift+Tab live permission-mode cycling.
     let set_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // A second clone kept in THIS scope (the `on_set_permission_mode` closure
@@ -724,7 +759,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // before `tui_build` is consumed — threaded into the `ChatWidget` so a typed
     // `/commit` expands its embedded `!`git …`` bodies before submit.
     let shell_expansion = tui_build.runtime.shell_expansion.clone();
-    let session = build_session_info(orchestrator.as_ref()).await;
+    let session =
+        build_session_info(orchestrator.as_ref(), tui_build.runtime.model_provenance).await;
     // (cc 2.1.218) Persistent prompt history: the GLOBAL
     // `~/.lingxi/history.jsonl` store (rows carry a `project` field), keyed to
     // this session id for the recall ordering + dedupe key. `None` under the
@@ -747,7 +783,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let switch_orch = orchestrator.clone();
     // Cloned here (before the turn closure takes ownership) for the
     // `AddDirectory` arm's `DirectoryAdded` hook fire.
-    let permission_orch = orchestrator.clone();
+    let permission_orch = concrete_orchestrator.clone();
     let switch_handle = handle.clone();
     let web_handle = handle.clone();
     let connect_handle = handle.clone();
@@ -976,7 +1012,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     // reply and end the turn so the spinner + any "Retrying…" status
                     // clear.
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(
+                        platform_api::TurnOutcome::EndTurn,
+                    ));
                 }
                 queue.clear_active_turn().await;
             });
@@ -1378,7 +1416,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         .await
                     {
                         let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                        let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+                        let _ = tx.send(tui::TurnEvent::TurnEnded(
+                            platform_api::TurnOutcome::EndTurn,
+                        ));
                     }
                 }
                 // A local / unknown result runs no turn: surface the text and
@@ -1390,10 +1430,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         body: display,
                         is_error: false,
                     });
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(
+                        platform_api::TurnOutcome::EndTurn,
+                    ));
                 }
                 SlashDispatchResult::NotASlashCommand => {
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(
+                        platform_api::TurnOutcome::EndTurn,
+                    ));
                 }
             }
         });
@@ -1692,6 +1736,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             connect_availability,
             Some(shell_expansion),
             Some(widget_orch),
+            Some(hyperlink_cwd_provider),
             Some(sandbox_toggle),
             Some(command_registry),
             Some(task_registry_handle),
@@ -1699,6 +1744,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
             initial_permission_mode,
             bypass_available,
             emoji_completion_enabled,
+            startup_view_mode,
+            Some(agents_snapshot_provider),
             on_submit,
             on_queue_prompt,
             on_switch_model,
@@ -1784,6 +1831,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
         // so that stdout line would otherwise scroll into the next session.
         Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo {
             target: uuid,
+            state: carried_state,
+        },
+        Ok(Ok(tui::app::AppExit::OpenAgentSession(target))) => RunOutcome::OpenAgentSession {
+            target,
             state: carried_state,
         },
         Ok(Ok(tui::app::AppExit::BranchSession { title })) => RunOutcome::BranchFrom {
@@ -2203,6 +2254,62 @@ async fn run_sandbox_action(
     let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
 }
 
+/// Roll a `/cd` transcript move back when the durable background launch
+/// identity could not be refreshed. `launch.json` is authoritative: callers
+/// invoke this only after its read/write path returned an error, before
+/// acknowledging the directory change. If the inverse move also fails, keep
+/// the live cwd paired with the transcript that did move and terminal-fail the
+/// background job so a later respawn cannot consume the stale launch record.
+pub(crate) async fn rollback_cd_after_launch_identity_failure(
+    orch: &std::sync::Arc<orchestrator::ConversationOrchestrator>,
+    session_cwd: &std::sync::Arc<tool_api::SessionCwd>,
+    previous: (std::path::PathBuf, Vec<std::path::PathBuf>),
+    refresh_error: &str,
+) -> String {
+    let previous_cwd = previous.0.clone();
+    match orch.retarget_transcript_for_cwd(&previous_cwd).await {
+        Ok(_) => {
+            session_cwd.swap(previous.0, previous.1);
+            format!("Could not change directory: {refresh_error}")
+        }
+        Err(rollback_error) => {
+            fail_current_background_job_after_cd_failure(&format!(
+                "background launch identity refresh failed and transcript rollback failed: {refresh_error}; rollback: {rollback_error}"
+            ));
+            tracing::error!(
+                %refresh_error,
+                %rollback_error,
+                "failed to roll back /cd after background launch identity refresh failure; job disabled"
+            );
+            format!(
+                "Could not change directory: {refresh_error}; background session disabled because transcript rollback failed: {rollback_error}"
+            )
+        }
+    }
+}
+
+fn fail_current_background_job_after_cd_failure(detail: &str) {
+    let Ok(job_dir_raw) = std::env::var("LINGXI_JOB_DIR") else {
+        return;
+    };
+    let job_dir = std::path::PathBuf::from(job_dir_raw);
+    let Some(short) = job_dir.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let Some(config_home) = job_dir.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    if let Err(error) = crate::agents_registry::update_job_state_with_detail(
+        config_home,
+        short,
+        "failed",
+        None,
+        detail,
+    ) {
+        tracing::warn!(%error, "failed to disable background job after /cd rollback failure");
+    }
+}
+
 /// Run one `/permissions` [`tui::bottom_pane::PermissionAction`] to
 /// completion: merge the added/removed rule into its destination settings file
 /// via [`permission::persist_permission_update`] /
@@ -2225,11 +2332,10 @@ async fn run_permission_action(
     // arm to apply the add to the running session (file access + roots/list).
     session_cwd: std::sync::Arc<tool_api::SessionCwd>,
     mcp_registry: std::sync::Arc<mcp::McpRegistry>,
-    // Used only by the `AddDirectory` arm, to fire the `DirectoryAdded` hook
-    // (2.1.219) after a directory is actually added. Taken as the TRAIT handle
-    // (not the concrete orchestrator) so this stays on the same seam every
-    // other permission effect uses.
-    orch: std::sync::Arc<dyn platform_api::OrchestratorHandle>,
+    // Used by the `AddDirectory` arm to fire the `DirectoryAdded` hook
+    // (2.1.219) after a directory is actually added, and by `/cd` to persist
+    // the transcript relocation against the concrete session writer.
+    orch: std::sync::Arc<orchestrator::ConversationOrchestrator>,
 ) {
     use permission::{
         persist_permission_update, remove_permission_update, PermissionBehavior, PermissionRule,
@@ -2463,7 +2569,50 @@ async fn run_permission_action(
         // `swap(target, vec![target])` would instead drop every `/add-dir` grant.
         PermissionAction::ChangeDirectory { path } => {
             let target = std::path::PathBuf::from(&path);
-            session_cwd.change_cwd(target);
+            let previous = session_cwd.snapshot();
+            session_cwd.change_cwd(target.clone());
+            let transcript_path = match orch.retarget_transcript_for_cwd(&target).await {
+                Ok(path) => path,
+                Err(error) => {
+                    // A cwd move without its transcript is not a successful
+                    // session move: resume/indexing from the target directory
+                    // could select a partial file and hide the pre-move history.
+                    // Restore the cwd + trusted roots atomically before reporting
+                    // the rejection. `SessionCwd::swap` is infallible, so this
+                    // rollback cannot leave the file tools in a half-moved state.
+                    session_cwd.swap(previous.0, previous.1);
+                    tracing::warn!(%error, "failed to retarget transcript after /cd; rolled back cwd");
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("Could not change directory: {error}"),
+                        is_error: true,
+                    });
+                    return;
+                }
+            };
+            if let Some(path) = transcript_path {
+                if let Err(error) =
+                    crate::background_launch::refresh_current_background_launch_identity(
+                        &target, &path,
+                    )
+                {
+                    let body = rollback_cd_after_launch_identity_failure(
+                        &orch,
+                        &session_cwd,
+                        previous,
+                        &error.to_string(),
+                    )
+                    .await;
+                    tracing::warn!(
+                        %error,
+                        "rejected /cd because background launch identity is stale"
+                    );
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body,
+                        is_error: true,
+                    });
+                    return;
+                }
+            }
             command_core::cd::emit_command();
             let _ = turn_tx.send(TurnEvent::SystemNotice {
                 body: command_core::cd::result_message(&path),
@@ -2641,7 +2790,7 @@ async fn run_web_action(
 /// picker/method/key views return the action synchronously from the
 /// blocking ratatui loop; this async tail does the real persistence/network
 /// work off the render thread.
-async fn run_connect_action(
+pub(crate) async fn run_connect_action(
     action: tui::bottom_pane::ConnectAction,
     key_store: Arc<secret::CredentialManager>,
     oauth: Arc<dyn command_core::OAuthConnectDriver>,
@@ -3024,7 +3173,10 @@ fn spawn_status_computer_access_forwarder(
 /// `tui::session::SessionInfo` for the full-page screens (`/mcp`,
 /// `/hooks`, `/agents`, `/doctor`, `/model`). Awaited once before the blocking
 /// TUI loop starts, mirroring the iocraft screens' capture-at-open contract.
-async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::SessionInfo {
+async fn build_session_info(
+    orch: &dyn OrchestratorHandle,
+    default_model_provenance: platform_api::ModelProvenance,
+) -> tui::session::SessionInfo {
     use tui::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
 
     let servers = orch.list_mcp_servers().await;
@@ -3091,16 +3243,17 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .map(|m| {
             let supports_multimodal = m.capabilities.vision || m.capabilities.documents;
             let details = build_model_details(&m);
+            let is_current = m.request_model == current_model
+                && current_profile
+                    .as_deref()
+                    .is_none_or(|p| p == m.provider_id);
             ModelRow {
                 // Mark the current row by (model AND provider) so a wire id shared
                 // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
                 // dots the ACTUAL current provider's row. When the current profile
                 // is unknown (None — e.g. resolve-by-id after a cross-provider
                 // resume), fall back to matching by model id alone.
-                is_current: m.request_model == current_model
-                    && current_profile
-                        .as_deref()
-                        .is_none_or(|p| p == m.provider_id),
+                is_current,
                 // Keep `display` CLEAN — the `· 无思考` non-thinking tag is drawn at
                 // picker-render time from `supports_reasoning`, NOT baked in here, so
                 // the statusline / welcome identity (which read `display`) stay
@@ -3109,6 +3262,11 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
                 request_model: m.request_model,
                 profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
                 provider_label: m.provider_label,
+                provenance: if is_current {
+                    default_model_provenance
+                } else {
+                    platform_api::ModelProvenance::ProviderCatalogTier
+                },
                 supports_reasoning: m.supports_reasoning,
                 supports_multimodal,
                 details,
@@ -3173,6 +3331,7 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         skills,
         memory,
         models,
+        model_provenance: default_model_provenance,
         model_allowlist,
         model_overrides,
         large_memory_warnings,
@@ -3656,6 +3815,65 @@ mod tests {
     fn prompt_routes_to_print() {
         let a = argv(Some("fix it"), false);
         assert_eq!(decide_mode_with(&a, true), Mode::Print("fix it".into()));
+    }
+
+    #[test]
+    fn cd_rollback_failure_marks_background_job_terminal() {
+        use crate::agents_registry::{self, JobStateWrite};
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("config home");
+        let short = "deadbeef";
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let flags = Vec::new();
+        agents_registry::write_job_state(
+            home.path(),
+            short,
+            &JobStateWrite {
+                state: "working",
+                tempo: Some("active"),
+                name: None,
+                session_id: Some(session_id),
+                cwd: Some("/tmp/old"),
+                origin_cwd: Some("/tmp/old"),
+                created_at: Some("2026-07-04T00:00:00.000Z"),
+                intent: Some("resume"),
+                display_intent: None,
+                template: Some("bg"),
+                respawn_flags: &flags,
+                in_flight: None,
+                backend: Some("daemon"),
+                initial_prompt: None,
+                detail: None,
+                worker_pid: None,
+                worker_proc_start: None,
+                phase: Some("running"),
+                worker_generation: Some("gen-1"),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+        )
+        .expect("seed background job");
+
+        let job_dir = agents_registry::jobs_dir(home.path()).join(short);
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var("LINGXI_JOB_DIR", &job_dir);
+        fail_current_background_job_after_cd_failure("rollback failed");
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+
+        let job = agents_registry::read_job(home.path(), short).expect("updated job");
+        assert_eq!(job.state, "failed");
+        assert!(agents_registry::job_is_terminal(&job));
+        assert_eq!(job.detail.as_deref(), Some("rollback failed"));
     }
 
     /// `Ad(e)` (2.1.220 binary offset 226626865):

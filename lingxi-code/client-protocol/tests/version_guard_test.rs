@@ -1909,6 +1909,64 @@ fn current_contract_index() -> ContractIndex {
         "bool",
     );
     put(
+        "PluginCommandDto::StartLocalAppMcpAuthoring",
+        "start_local_app_mcp_authoring",
+    );
+    put(
+        "PluginCommandDto::StartLocalAppMcpAuthoring.app_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::StartLocalAppMcpAuthoring.user_goal",
+        "String",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpEnabled",
+        "set_local_app_mcp_enabled",
+    );
+    put("PluginCommandDto::SetLocalAppMcpEnabled.app_id", "String");
+    put("PluginCommandDto::SetLocalAppMcpEnabled.enabled", "bool");
+    put(
+        "PluginCommandDto::SetLocalAppMcpEnabled.expected_revision",
+        "u64",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpToolEnabled",
+        "set_local_app_mcp_tool_enabled",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpToolEnabled.app_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpToolEnabled.tool_name",
+        "String",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpToolEnabled.enabled",
+        "bool",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpToolEnabled.expected_revision",
+        "u64",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpConversationPinned",
+        "set_local_app_mcp_conversation_pinned",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpConversationPinned.conversation_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpConversationPinned.app_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::SetLocalAppMcpConversationPinned.pinned",
+        "bool",
+    );
+    put(
         "PluginCommandDto::GetManagedMcpInventory",
         "get_managed_mcp_inventory",
     );
@@ -1935,6 +1993,14 @@ fn current_contract_index() -> ContractIndex {
         "active_state_corrupt",
     );
     put(
+        "LocalAppPluginErrorCodeDto::RevisionConflict",
+        "revision_conflict",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::InvalidMcpSettings",
+        "invalid_mcp_settings",
+    );
+    put(
         "LocalAppPluginErrorCodeDto::McpAuthoringRequired",
         "mcp_authoring_required",
     );
@@ -1957,6 +2023,15 @@ fn current_contract_index() -> ContractIndex {
     );
     put("LocalAppVerificationSummaryDto.summary", "String");
     put("LocalAppVerificationSummaryDto.code", "Option<String>");
+    put("ManagedLocalAppMcpStatusDto::Disabled", "disabled");
+    put("ManagedLocalAppMcpStatusDto::NeedsSetup", "needs_setup");
+    put("ManagedLocalAppMcpStatusDto::Authoring", "authoring");
+    put("ManagedLocalAppMcpStatusDto::Enabled", "enabled");
+    put(
+        "ManagedLocalAppMcpStatusDto::NeedsRevalidation",
+        "needs_revalidation",
+    );
+    put("ManagedLocalAppMcpStatusDto::Error", "error");
     put("LocalAppGateStatusDto.gate_id", "String");
     put("LocalAppGateStatusDto.label", "String");
     put(
@@ -2127,9 +2202,19 @@ fn current_contract_index() -> ContractIndex {
         "LocalAppMcpProposalApprovalRequestDto.receipt",
         "Option<LocalAppReceiptStatusDto>",
     );
+    put("McpAppWidgetDto.resource_uri", "String");
+    put("McpAppWidgetDto.mime_type", "String");
+    put("McpAppWidgetDto.resource_sha256", "String");
     put("ManagedLocalAppMcpServerDto.server_name", "String");
     put("ManagedLocalAppMcpServerDto.app_id", "String");
     put("ManagedLocalAppMcpServerDto.app_name", "String");
+    put("ManagedLocalAppMcpServerDto.enabled", "bool");
+    put(
+        "ManagedLocalAppMcpServerDto.status",
+        "ManagedLocalAppMcpStatusDto",
+    );
+    put("ManagedLocalAppMcpServerDto.settings_revision", "u64");
+    put("ManagedLocalAppMcpServerDto.enabled_tools", "Vec<String>");
     put("ManagedLocalAppMcpServerDto.build_id", "String");
     put("ManagedLocalAppMcpServerDto.catalog_sha256", "String");
     put("ManagedLocalAppMcpServerDto.tool_surface_sha256", "String");
@@ -2146,6 +2231,10 @@ fn current_contract_index() -> ContractIndex {
     put(
         "ManagedLocalAppMcpServerDto.ui_verification",
         "LocalAppVerificationSummaryDto",
+    );
+    put(
+        "ManagedLocalAppMcpServerDto.widget",
+        "Option<McpAppWidgetDto>",
     );
     put(
         "ManagedLocalAppMcpServerDto.tools",

@@ -14,10 +14,10 @@
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
 use llm_client::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
+use platform_api::OutputStream;
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use platform_api::OutputStream;
 
 /// Result of routing one `StreamEvent`. The streaming loop acts on each.
 #[derive(Debug, Clone)]

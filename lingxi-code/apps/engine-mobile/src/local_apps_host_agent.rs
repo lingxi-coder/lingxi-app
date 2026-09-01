@@ -16,13 +16,13 @@ use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
     AppCapability, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
+use platform_api::{CostSnapshot, OutputStream};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use platform_api::{CostSnapshot, OutputStream};
 
 const REASON_AGENT_NOTIFY: &str = "应用请求向你的对话助手发送事件与数据。";
 
@@ -1112,13 +1112,13 @@ mod tests {
         AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout, AppService,
         NoopAppEventObserver,
     };
+    use platform_api::OutputStream;
     use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
-    use platform_api::OutputStream;
 
     struct Harness {
         _root: TempDir,

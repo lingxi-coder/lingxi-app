@@ -6,16 +6,16 @@
 //! browser, no real keychain).
 
 use async_trait::async_trait;
-use protocol::{HttpRequest, HttpResponse, SecureStorageData};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
 use platform_api::http::SseStream;
 use platform_api::{
     BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
     SecureStorage, SecureStorageBackend, SecureStorageError,
 };
+use protocol::{HttpRequest, HttpResponse, SecureStorageData};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 /// One canned response keyed loosely by a URL substring + method.
 #[derive(Clone)]

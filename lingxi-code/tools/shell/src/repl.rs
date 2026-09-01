@@ -269,8 +269,8 @@ impl Tool for REPLTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     #[test]
     fn lang_exec_python_routes_via_stdin() {

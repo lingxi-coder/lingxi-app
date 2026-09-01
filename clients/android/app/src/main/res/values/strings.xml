@@ -1841,17 +1841,6 @@
     <string name="settings_permission_mode_plan_detail">允许分析和读取，修改操作需要确认。</string>
     <string name="settings_permission_mode_sub">控制工具何时需要确认</string>
     <string name="settings_permission_mode_title">权限模式</string>
-    <string name="settings_typescript_lsp_title">TypeScript LSP</string>
-    <string name="settings_typescript_lsp_sub">JavaScript / JSX 实时代码诊断</string>
-    <string name="settings_typescript_lsp_auto">自动（推荐）</string>
-    <string name="settings_typescript_lsp_auto_detail">仅在受管 Local App 工作区启用。</string>
-    <string name="settings_typescript_lsp_off">关闭</string>
-    <string name="settings_typescript_lsp_off_detail">不启动语言服务器，也不暴露 LSP 工具。</string>
-    <string name="settings_typescript_lsp_on">始终开启</string>
-    <string name="settings_typescript_lsp_on_detail">也允许在普通 JavaScript / JSX 工作区使用。</string>
-    <string name="settings_typescript_lsp_footer">使用内置固定版本 TypeScript 7；命令和路径不可由项目修改。</string>
-    <string name="settings_typescript_lsp_unavailable">当前设备的 TypeScript 运行时不可用；已安全降级为关闭。</string>
-    <string name="settings_typescript_lsp_effective_fmt">当前有效模式：%1$s</string>
     <string name="chat_discarding">正在丢弃…</string>
     <string name="chat_error_discard_background_failed">丢弃后台对话失败：%1$s</string>
     <string name="chat_error_background_resume_failed">后台对话恢复失败：%1$s</string>

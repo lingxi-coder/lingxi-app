@@ -15,4 +15,6 @@
 //! This module re-exports the canonical consts from `traits` so any downstream
 //! that referenced the `agent::fork::` path stays stable.
 
-pub use platform_api::fork_subagent::{FORK_BOILERPLATE_TAG, FORK_DIRECTIVE_PREFIX, FORK_SUBAGENT_TYPE};
+pub use platform_api::fork_subagent::{
+    FORK_BOILERPLATE_TAG, FORK_DIRECTIVE_PREFIX, FORK_SUBAGENT_TYPE,
+};

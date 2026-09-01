@@ -5,9 +5,9 @@
 //! preference, and worktree requirement that downstream subsystems consult
 //! when a new agent is spawned. See spec §10.2.
 
+pub use platform_api::subagent_spawn::ObserverSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-pub use platform_api::subagent_spawn::ObserverSpec;
 
 /// Self-contained description of an agent type used by
 /// [`crate::context::SubagentContext`] and [`crate::pool::StateMachinePool`].

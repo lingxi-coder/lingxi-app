@@ -151,7 +151,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(customProfile["apiKeyEnv"] as? String, "OPENAI_API_KEY")
         XCTAssertEqual(
             (customProfile["models"] as? [[String: String]])?.map { $0["id"] },
-            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            ["gpt-4o", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
         )
     }
 
@@ -361,7 +361,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let routing = try XCTUnwrap(jsonObject(from: snapshot.routingJSON))
         let retry = try XCTUnwrap(routing["retry"] as? [String: Any])
         let fallback = try XCTUnwrap(routing["fallback"] as? [String: Any])
-        let targets = try XCTUnwrap(fallback["openai/gpt-4o"] as? [String])
+        let targets = try XCTUnwrap(fallback["openai/gpt-5.6-sol"] as? [String])
 
         XCTAssertEqual(retry["maxAttempts"] as? Int, 4)
         XCTAssertEqual(retry["backoffMs"] as? Int, 1200)
@@ -482,8 +482,8 @@ final class ProviderRepositoryTests: XCTestCase {
 
         repository.setDefaultProfile("openai")
         repository.updateRuntimeSnapshot(
-            models: ["openai/gpt-4o"],
-            activeModelID: "openai/gpt-4o",
+            models: ["openai/gpt-5.6-sol"],
+            activeModelID: "openai/gpt-5.6-sol",
             activeProfileID: "openai"
         )
         XCTAssertTrue(repository.settingsSummary.runtimeMatchesDefault)
@@ -533,7 +533,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let snapshot = repository.makeLaunchSnapshot()
         let routing = try XCTUnwrap(jsonObject(from: snapshot.routingJSON))
         let fallback = try XCTUnwrap(routing["fallback"] as? [String: Any])
-        let targets = try XCTUnwrap(fallback["openai/gpt-4o"] as? [String])
+        let targets = try XCTUnwrap(fallback["openai/gpt-5.6-sol"] as? [String])
         XCTAssertEqual(targets, ["kimi/kimi-k3"])
         XCTAssertFalse(targets.contains(where: { $0.contains("openai/") || $0.contains("deepseek/") }))
     }

@@ -13,12 +13,12 @@ use lsp::tool_operations::{
     MAX_LSP_FILE_SIZE_BYTES,
 };
 use lsp::{OpenFileTracker, MAX_OPEN_DOCUMENTS};
+use platform_api::LspServerConfig;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-use platform_api::LspServerConfig;
 
 const FRAME_BUFFER: usize = 64 * 1024;
 

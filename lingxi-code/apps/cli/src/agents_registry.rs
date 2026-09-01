@@ -33,6 +33,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
+const JOB_LOCKS_DIR: &str = ".locks";
+const JOB_STATE_LOCK_FILE: &str = ".lock";
+
 /// On-disk keys owned by [`LiveSessionRecord`]. Merge-writes drop these then
 /// re-insert the current struct so `None` fields (e.g. `waitingFor`) clear,
 /// while unknown keys written by `upsert_identity` survive.
@@ -94,6 +97,29 @@ pub fn sessions_dir(config_home: &Path) -> PathBuf {
 #[must_use]
 pub fn jobs_dir(config_home: &Path) -> PathBuf {
     config_home.join("jobs")
+}
+
+fn job_lock_relative(short: &str) -> PathBuf {
+    Path::new("jobs")
+        .join(JOB_LOCKS_DIR)
+        .join(format!("{short}{JOB_STATE_LOCK_FILE}"))
+}
+
+pub(crate) fn lock_job_state(
+    config_home: &Path,
+    short: &str,
+) -> std::io::Result<platform_api::rooted_fs::RootedFileLock> {
+    platform_api::rooted_fs::lock_exclusive(config_home, &job_lock_relative(short), 0o700, 0o600)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+}
+
+fn with_job_state_lock<T>(
+    config_home: &Path,
+    short: &str,
+    f: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let _lock = lock_job_state(config_home, short)?;
+    f()
 }
 
 /// One live-process registration (`sessions/<pid>.json`). Field order matches
@@ -247,6 +273,28 @@ pub struct JobState {
     /// observed keys (the reader ignores unknown fields, so this is additive).
     #[serde(rename = "workerPid", default)]
     pub worker_pid: Option<i32>,
+    /// Stable start-time identity for `workerPid`, when known.
+    #[serde(rename = "workerProcStart", default)]
+    pub worker_proc_start: Option<String>,
+    /// Internal execution phase (`creating` / `queued` / `launching` /
+    /// `running` / `restarting` / `deleting`). Fleet rendering ignores it.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Durable worker generation for the current/next owner.
+    #[serde(rename = "workerGeneration", default)]
+    pub worker_generation: Option<String>,
+    /// Exact transition claim token for launching/restarting/deleting phases.
+    #[serde(rename = "claimToken", default)]
+    pub claim_token: Option<String>,
+    /// Durable owner label for the current transitional claim.
+    #[serde(rename = "claimOwner", default)]
+    pub claim_owner: Option<String>,
+    /// Epoch-millis the current transitional claim was created.
+    #[serde(rename = "claimCreatedAt", default)]
+    pub claim_created_at: Option<i64>,
+    /// Lease window for the current transitional claim.
+    #[serde(rename = "claimLeaseMs", default)]
+    pub claim_lease_ms: Option<i64>,
 }
 
 /// `dXc` — sanitize a display name: strip C0/C1 control chars
@@ -669,6 +717,58 @@ pub struct JobStateWrite<'a> {
     /// disk entirely, so a fresh `--bg` job's `state.json` is byte-unchanged.
     #[serde(rename = "workerPid", skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i32>,
+    /// Stable start-time identity for `workerPid`, when known. Serialized
+    /// after `workerPid` so the existing pinned prefix key order is preserved.
+    #[serde(rename = "workerProcStart", skip_serializing_if = "Option::is_none")]
+    pub worker_proc_start: Option<&'a str>,
+    /// Internal execution phase (`creating` / `queued` / `launching` /
+    /// `running` / `restarting` / `deleting`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<&'a str>,
+    /// Durable worker generation for the current/next owner.
+    #[serde(rename = "workerGeneration", skip_serializing_if = "Option::is_none")]
+    pub worker_generation: Option<&'a str>,
+    /// Exact transition claim token for launching/restarting/deleting phases.
+    #[serde(rename = "claimToken", skip_serializing_if = "Option::is_none")]
+    pub claim_token: Option<&'a str>,
+    /// Durable owner label for the current transitional claim.
+    #[serde(rename = "claimOwner", skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<&'a str>,
+    /// Epoch-millis the current transitional claim was created.
+    #[serde(rename = "claimCreatedAt", skip_serializing_if = "Option::is_none")]
+    pub claim_created_at: Option<i64>,
+    /// Lease window for the current transitional claim.
+    #[serde(rename = "claimLeaseMs", skip_serializing_if = "Option::is_none")]
+    pub claim_lease_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JobStateMatch<'a> {
+    pub state: &'a str,
+    pub phase: Option<&'a str>,
+    pub worker_pid: Option<i32>,
+    pub worker_proc_start: Option<&'a str>,
+    pub worker_generation: Option<&'a str>,
+    pub claim_token: Option<&'a str>,
+    pub claim_owner: Option<&'a str>,
+    pub claim_created_at: Option<i64>,
+    pub claim_lease_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct JobStatePatch<'a> {
+    pub state: Option<&'a str>,
+    pub tempo: Option<Option<&'a str>>,
+    pub cwd: Option<Option<&'a str>>,
+    pub detail: Option<Option<&'a str>>,
+    pub worker_pid: Option<Option<i32>>,
+    pub worker_proc_start: Option<Option<&'a str>>,
+    pub phase: Option<Option<&'a str>>,
+    pub worker_generation: Option<Option<&'a str>>,
+    pub claim_token: Option<Option<&'a str>>,
+    pub claim_owner: Option<Option<&'a str>>,
+    pub claim_created_at: Option<Option<i64>>,
+    pub claim_lease_ms: Option<Option<i64>>,
 }
 
 /// Write `jobs/<short>/state.json` atomically (create the dir, write a
@@ -677,6 +777,24 @@ pub struct JobStateWrite<'a> {
 /// visible). Compact JSON: the reader ([`serde_json::from_str`]) tolerates
 /// either form and `state.json` files are conventionally unindented.
 pub fn write_job_state(
+    config_home: &Path,
+    short: &str,
+    job: &JobStateWrite,
+) -> std::io::Result<()> {
+    with_job_state_lock(config_home, short, || {
+        write_job_state_unlocked(config_home, short, job)
+    })
+}
+
+pub(crate) fn write_job_state_with_lock_held(
+    config_home: &Path,
+    short: &str,
+    job: &JobStateWrite,
+) -> std::io::Result<()> {
+    write_job_state_unlocked(config_home, short, job)
+}
+
+fn write_job_state_unlocked(
     config_home: &Path,
     short: &str,
     job: &JobStateWrite,
@@ -734,6 +852,10 @@ pub fn write_job_state(
 /// lifecycle identity; private prompt/runtime context comes from `launch.json`.
 #[must_use]
 pub fn read_job(config_home: &Path, short: &str) -> Option<JobState> {
+    read_job_unlocked(config_home, short)
+}
+
+fn read_job_unlocked(config_home: &Path, short: &str) -> Option<JobState> {
     let path = jobs_dir(config_home).join(short).join("state.json");
     let bytes = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<JobState>(&bytes).ok()
@@ -761,7 +883,24 @@ pub fn update_job_state(
     new_state: &str,
     worker_pid: Option<i32>,
 ) -> std::io::Result<()> {
-    update_job_state_inner(config_home, short, new_state, worker_pid, None)
+    update_job_state_inner(config_home, short, new_state, worker_pid, None, None)
+}
+
+pub fn update_job_state_with_generation(
+    config_home: &Path,
+    short: &str,
+    new_state: &str,
+    worker_pid: Option<i32>,
+    worker_proc_start: Option<&str>,
+) -> std::io::Result<()> {
+    update_job_state_inner(
+        config_home,
+        short,
+        new_state,
+        worker_pid,
+        worker_proc_start,
+        None,
+    )
 }
 
 /// [`update_job_state`] that also stamps a `detail` line on the job. Used by the
@@ -775,7 +914,51 @@ pub fn update_job_state_with_detail(
     worker_pid: Option<i32>,
     detail: &str,
 ) -> std::io::Result<()> {
-    update_job_state_inner(config_home, short, new_state, worker_pid, Some(detail))
+    update_job_state_inner(
+        config_home,
+        short,
+        new_state,
+        worker_pid,
+        None,
+        Some(detail),
+    )
+}
+
+pub fn update_job_state_if_matches(
+    config_home: &Path,
+    short: &str,
+    expected_state: &str,
+    expected_worker_pid: Option<i32>,
+    expected_worker_proc_start: Option<&str>,
+    new_state: &str,
+    worker_pid: Option<i32>,
+    worker_proc_start: Option<&str>,
+    detail: Option<&str>,
+) -> std::io::Result<bool> {
+    with_job_state_lock(config_home, short, || {
+        let existing = read_job_unlocked(config_home, short).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("job {short} has no state.json to update"),
+            )
+        })?;
+        if existing.state != expected_state
+            || existing.worker_pid != expected_worker_pid
+            || existing.worker_proc_start.as_deref() != expected_worker_proc_start
+        {
+            return Ok(false);
+        }
+        write_updated_job_state_unlocked(
+            config_home,
+            short,
+            &existing,
+            new_state,
+            worker_pid,
+            worker_proc_start,
+            detail,
+        )?;
+        Ok(true)
+    })
 }
 
 /// Read-modify-write core shared by [`update_job_state`] /
@@ -787,20 +970,54 @@ fn update_job_state_inner(
     short: &str,
     new_state: &str,
     worker_pid: Option<i32>,
+    worker_proc_start: Option<&str>,
     detail: Option<&str>,
 ) -> std::io::Result<()> {
-    let existing = read_job(config_home, short).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("job {short} has no state.json to update"),
+    with_job_state_lock(config_home, short, || {
+        let existing = read_job_unlocked(config_home, short).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("job {short} has no state.json to update"),
+            )
+        })?;
+        write_updated_job_state_unlocked(
+            config_home,
+            short,
+            &existing,
+            new_state,
+            worker_pid,
+            worker_proc_start,
+            detail,
         )
-    })?;
+    })
+}
+
+fn write_updated_job_state_unlocked(
+    config_home: &Path,
+    short: &str,
+    existing: &JobState,
+    new_state: &str,
+    worker_pid: Option<i32>,
+    worker_proc_start: Option<&str>,
+    detail: Option<&str>,
+) -> std::io::Result<()> {
+    if existing.phase.as_deref() == Some("deleting") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!("job {short} is being deleted"),
+        ));
+    }
     // A terminal outcome must leave tempo != "active" (else `job_is_terminal`
     // stays false and the row keeps rendering as "working").
     let tempo: Option<String> = if terminal_outcome(new_state).is_some() {
         Some("idle".to_string())
     } else {
         existing.tempo.clone()
+    };
+    let worker_proc_start = if worker_pid.is_some() {
+        worker_proc_start.or(existing.worker_proc_start.as_deref())
+    } else {
+        None
     };
     let job = JobStateWrite {
         state: new_state,
@@ -819,8 +1036,250 @@ fn update_job_state_inner(
         initial_prompt: existing.initial_prompt.as_deref(),
         detail,
         worker_pid,
+        worker_proc_start,
+        phase: existing.phase.as_deref(),
+        worker_generation: existing.worker_generation.as_deref(),
+        claim_token: existing.claim_token.as_deref(),
+        claim_owner: existing.claim_owner.as_deref(),
+        claim_created_at: existing.claim_created_at,
+        claim_lease_ms: existing.claim_lease_ms,
     };
-    write_job_state(config_home, short, &job)
+    write_job_state_unlocked(config_home, short, &job)
+}
+
+pub(crate) fn patch_job_state_if_matches(
+    config_home: &Path,
+    short: &str,
+    expected: JobStateMatch<'_>,
+    patch: JobStatePatch<'_>,
+) -> std::io::Result<bool> {
+    with_job_state_lock(config_home, short, || {
+        let existing = read_job_unlocked(config_home, short).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("job {short} has no state.json to update"),
+            )
+        })?;
+        if existing.state != expected.state
+            || existing.phase.as_deref() != expected.phase
+            || existing.worker_pid != expected.worker_pid
+            || existing.worker_proc_start.as_deref() != expected.worker_proc_start
+            || existing.worker_generation.as_deref() != expected.worker_generation
+            || existing.claim_token.as_deref() != expected.claim_token
+            || existing.claim_owner.as_deref() != expected.claim_owner
+            || (expected.claim_created_at.is_some()
+                && existing.claim_created_at != expected.claim_created_at)
+            || (expected.claim_lease_ms.is_some()
+                && existing.claim_lease_ms != expected.claim_lease_ms)
+        {
+            return Ok(false);
+        }
+        write_patched_job_state_unlocked(config_home, short, &existing, patch)?;
+        Ok(true)
+    })
+}
+
+pub(crate) fn patch_job_state_with_lock_held(
+    config_home: &Path,
+    short: &str,
+    patch: JobStatePatch<'_>,
+) -> std::io::Result<()> {
+    let existing = read_job_unlocked(config_home, short).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("job {short} has no state.json to update"),
+        )
+    })?;
+    write_patched_job_state_unlocked(config_home, short, &existing, patch)
+}
+
+fn write_patched_job_state_unlocked(
+    config_home: &Path,
+    short: &str,
+    existing: &JobState,
+    patch: JobStatePatch<'_>,
+) -> std::io::Result<()> {
+    let state = patch.state.unwrap_or(&existing.state);
+    let tempo = patch
+        .tempo
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| {
+            if terminal_outcome(state).is_some() {
+                Some("idle".to_string())
+            } else {
+                existing.tempo.clone()
+            }
+        });
+    let cwd = patch
+        .cwd
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.cwd.clone());
+    let detail = patch
+        .detail
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.detail.clone());
+    let worker_pid = patch.worker_pid.unwrap_or(existing.worker_pid);
+    let worker_proc_start = patch
+        .worker_proc_start
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.worker_proc_start.clone());
+    let phase = patch
+        .phase
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.phase.clone());
+    let worker_generation = patch
+        .worker_generation
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.worker_generation.clone());
+    let claim_token = patch
+        .claim_token
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.claim_token.clone());
+    let claim_owner = patch
+        .claim_owner
+        .map(|v| v.map(str::to_string))
+        .unwrap_or_else(|| existing.claim_owner.clone());
+    let claim_created_at = patch.claim_created_at.unwrap_or(existing.claim_created_at);
+    let claim_lease_ms = patch.claim_lease_ms.unwrap_or(existing.claim_lease_ms);
+    let (
+        worker_pid,
+        worker_proc_start,
+        worker_generation,
+        claim_token,
+        claim_owner,
+        claim_created_at,
+        claim_lease_ms,
+    ) = if worker_pid.is_some() {
+        (
+            worker_pid,
+            worker_proc_start,
+            worker_generation,
+            claim_token,
+            claim_owner,
+            claim_created_at,
+            claim_lease_ms,
+        )
+    } else {
+        let generation = if phase.as_deref() == Some("queued")
+            || phase.as_deref() == Some("creating")
+            || phase.as_deref() == Some("launching")
+            || phase.as_deref() == Some("restarting")
+            || phase.as_deref() == Some("deleting")
+        {
+            worker_generation
+        } else {
+            None
+        };
+        let claim = if phase.as_deref() == Some("launching")
+            || phase.as_deref() == Some("restarting")
+            || phase.as_deref() == Some("deleting")
+        {
+            claim_token
+        } else {
+            None
+        };
+        let claim_owner = if phase.as_deref() == Some("creating")
+            || phase.as_deref() == Some("launching")
+            || phase.as_deref() == Some("restarting")
+            || phase.as_deref() == Some("deleting")
+        {
+            claim_owner
+        } else {
+            None
+        };
+        let claim_created_at = if phase.as_deref() == Some("creating")
+            || phase.as_deref() == Some("launching")
+            || phase.as_deref() == Some("restarting")
+            || phase.as_deref() == Some("deleting")
+        {
+            claim_created_at
+        } else {
+            None
+        };
+        let claim_lease_ms = if phase.as_deref() == Some("creating")
+            || phase.as_deref() == Some("launching")
+            || phase.as_deref() == Some("restarting")
+            || phase.as_deref() == Some("deleting")
+        {
+            claim_lease_ms
+        } else {
+            None
+        };
+        (
+            None,
+            None,
+            generation,
+            claim,
+            claim_owner,
+            claim_created_at,
+            claim_lease_ms,
+        )
+    };
+    let job = JobStateWrite {
+        state,
+        tempo: tempo.as_deref(),
+        name: existing.name.as_deref(),
+        session_id: existing.session_id.as_deref(),
+        cwd: cwd.as_deref(),
+        origin_cwd: existing.origin_cwd.as_deref(),
+        created_at: existing.created_at.as_deref(),
+        intent: existing.intent.as_deref(),
+        display_intent: existing.display_intent.as_deref(),
+        template: existing.template.as_deref(),
+        respawn_flags: &existing.respawn_flags,
+        in_flight: existing.in_flight.as_ref(),
+        backend: existing.backend.as_deref(),
+        initial_prompt: existing.initial_prompt.as_deref(),
+        detail: detail.as_deref(),
+        worker_pid,
+        worker_proc_start: worker_proc_start.as_deref(),
+        phase: phase.as_deref(),
+        worker_generation: worker_generation.as_deref(),
+        claim_token: claim_token.as_deref(),
+        claim_owner: claim_owner.as_deref(),
+        claim_created_at,
+        claim_lease_ms,
+    };
+    write_job_state_unlocked(config_home, short, &job)
+}
+
+pub(crate) fn update_job_cwd_with_lock_held(
+    config_home: &Path,
+    short: &str,
+    cwd: &str,
+) -> std::io::Result<()> {
+    let existing = read_job_unlocked(config_home, short).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("job {short} has no state.json to update"),
+        )
+    })?;
+    let job = JobStateWrite {
+        state: &existing.state,
+        tempo: existing.tempo.as_deref(),
+        name: existing.name.as_deref(),
+        session_id: existing.session_id.as_deref(),
+        cwd: Some(cwd),
+        origin_cwd: existing.origin_cwd.as_deref(),
+        created_at: existing.created_at.as_deref(),
+        intent: existing.intent.as_deref(),
+        display_intent: existing.display_intent.as_deref(),
+        template: existing.template.as_deref(),
+        respawn_flags: &existing.respawn_flags,
+        in_flight: existing.in_flight.as_ref(),
+        backend: existing.backend.as_deref(),
+        initial_prompt: existing.initial_prompt.as_deref(),
+        detail: existing.detail.as_deref(),
+        worker_pid: existing.worker_pid,
+        worker_proc_start: existing.worker_proc_start.as_deref(),
+        phase: existing.phase.as_deref(),
+        worker_generation: existing.worker_generation.as_deref(),
+        claim_token: existing.claim_token.as_deref(),
+        claim_owner: existing.claim_owner.as_deref(),
+        claim_created_at: existing.claim_created_at,
+        claim_lease_ms: existing.claim_lease_ms,
+    };
+    write_job_state_unlocked(config_home, short, &job)
 }
 
 /// Mint a fresh 8-char lowercase-hex short id whose `jobs/<short>/` dir does not
@@ -1580,6 +2039,13 @@ mod tests {
             initial_prompt: Some(prompt),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: None,
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         }
     }
 
@@ -1736,6 +2202,222 @@ mod tests {
 
         // A missing job errors rather than fabricating a row.
         assert!(update_job_state(home, "missing0", "done", None).is_err());
+    }
+
+    #[test]
+    fn update_job_state_with_generation_round_trips_worker_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "i",
+            "p",
+            &respawn,
+        );
+        write_job_state(home, "abcd1234", &job).unwrap();
+
+        update_job_state_with_generation(
+            home,
+            "abcd1234",
+            "working",
+            Some(4242),
+            Some("START-4242"),
+        )
+        .unwrap();
+
+        let mid = read_job(home, "abcd1234").unwrap();
+        assert_eq!(mid.worker_pid, Some(4242));
+        assert_eq!(mid.worker_proc_start.as_deref(), Some("START-4242"));
+
+        update_job_state(home, "abcd1234", "done", None).unwrap();
+        let done = read_job(home, "abcd1234").unwrap();
+        assert_eq!(done.worker_pid, None);
+        assert_eq!(done.worker_proc_start, None);
+    }
+
+    #[test]
+    fn update_job_state_if_matches_is_compare_and_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "i",
+            "p",
+            &respawn,
+        );
+        write_job_state(home, "abcd1234", &job).unwrap();
+        update_job_state_with_generation(
+            home,
+            "abcd1234",
+            "working",
+            Some(4242),
+            Some("START-4242"),
+        )
+        .unwrap();
+
+        assert!(!update_job_state_if_matches(
+            home,
+            "abcd1234",
+            "working",
+            Some(4242),
+            Some("WRONG-START"),
+            "stopped",
+            None,
+            None,
+            None,
+        )
+        .unwrap());
+        assert!(update_job_state_if_matches(
+            home,
+            "abcd1234",
+            "working",
+            Some(4242),
+            Some("START-4242"),
+            "stopped",
+            None,
+            None,
+            None,
+        )
+        .unwrap());
+        let stopped = read_job(home, "abcd1234").unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.worker_pid, None);
+        assert_eq!(stopped.worker_proc_start, None);
+    }
+
+    #[test]
+    fn non_claimed_state_updates_cannot_overwrite_deleting_phase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "i",
+            "p",
+            &respawn,
+        );
+        write_job_state(home, "abcd1234", &job).unwrap();
+        assert!(patch_job_state_if_matches(
+            home,
+            "abcd1234",
+            JobStateMatch {
+                state: "working",
+                phase: None,
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            JobStatePatch {
+                phase: Some(Some("deleting")),
+                claim_token: Some(Some("delete-claim")),
+                claim_owner: Some(Some("delete")),
+                claim_created_at: Some(Some(100)),
+                claim_lease_ms: Some(Some(1_000)),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+
+        assert_eq!(
+            update_job_state(home, "abcd1234", "done", None)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let current = read_job(home, "abcd1234").unwrap();
+        assert_eq!(current.state, "working");
+        assert_eq!(current.phase.as_deref(), Some("deleting"));
+        assert_eq!(current.claim_token.as_deref(), Some("delete-claim"));
+    }
+
+    #[test]
+    fn concurrent_state_cas_allows_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "i",
+            "p",
+            &respawn,
+        );
+        write_job_state(&home, "abcd1234", &job).unwrap();
+        update_job_state_with_generation(
+            &home,
+            "abcd1234",
+            "working",
+            Some(4242),
+            Some("START-4242"),
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let home_done = home.clone();
+        let done_barrier = Arc::clone(&barrier);
+        let done = std::thread::spawn(move || {
+            done_barrier.wait();
+            update_job_state_if_matches(
+                &home_done,
+                "abcd1234",
+                "working",
+                Some(4242),
+                Some("START-4242"),
+                "done",
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let home_replaced = home.clone();
+        let replaced_barrier = Arc::clone(&barrier);
+        let replaced = std::thread::spawn(move || {
+            replaced_barrier.wait();
+            update_job_state_if_matches(
+                &home_replaced,
+                "abcd1234",
+                "working",
+                Some(4242),
+                Some("START-4242"),
+                "working",
+                Some(9000),
+                Some("START-9000"),
+                None,
+            )
+            .unwrap()
+        });
+
+        barrier.wait();
+        let done_won = done.join().unwrap();
+        let replaced_won = replaced.join().unwrap();
+        assert_ne!(done_won, replaced_won);
+
+        let final_job = read_job(&home, "abcd1234").unwrap();
+        if done_won {
+            assert_eq!(final_job.state, "done");
+            assert_eq!(final_job.worker_pid, None);
+            assert_eq!(final_job.worker_proc_start, None);
+        } else {
+            assert_eq!(final_job.state, "working");
+            assert_eq!(final_job.worker_pid, Some(9000));
+            assert_eq!(final_job.worker_proc_start.as_deref(), Some("START-9000"));
+        }
     }
 
     #[test]

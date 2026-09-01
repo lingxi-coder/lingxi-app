@@ -20,11 +20,11 @@ use crate::oauth::anthropic::config::{
     CLAUDE_CODE_INFERENCE_SCOPE, LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS,
 };
 use async_trait::async_trait;
+use platform_api::{AuthError, AuthHandle, LoginInfo};
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::{AuthError, AuthHandle, LoginInfo};
 
 /// Login-flow deadline (trait contract: §login docs).
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -516,10 +516,10 @@ mod tests {
     use crate::oauth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
+    use platform_api::HttpTransport;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use platform_api::HttpTransport;
 
     #[allow(dead_code)]
     fn _oauth_handle_is_send_sync() {

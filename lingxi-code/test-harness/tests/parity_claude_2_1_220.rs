@@ -1,7 +1,7 @@
 //! Historical contract fixtures captured from the Claude Code 2.1.220 oracle.
 //!
 //! These assertions intentionally keep their original capture version. Live
-//! version-facing identifier pins belong in `parity_claude_2_1_246.rs` so a
+//! version-facing identifier pins belong in `parity_claude_2_1_252.rs` so a
 //! target bump cannot make this historical fixture look current.
 
 use std::collections::BTreeSet;

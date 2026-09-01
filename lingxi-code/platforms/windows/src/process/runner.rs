@@ -8,12 +8,12 @@
 //! `taskkill /T /F /PID <pid>`.
 
 use async_trait::async_trait;
+use platform_api::process::ProcessStreamSink;
+use platform_api::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use platform_api::process::ProcessStreamSink;
-use platform_api::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 
 /// 30-minute default timeout matches the POSIX runner and claude-code's
 /// `DEFAULT_TIMEOUT` (`Shell.ts:44`).

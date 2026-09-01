@@ -185,12 +185,12 @@ pub async fn restore_parked_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::agent_rows::{write_row, ParkedAgentRow};
-    use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
     use platform_api::subagent_spawn::{
         AsyncLaunch, SelectedAgentMeta, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     };
+    use session::agent_rows::{write_row, ParkedAgentRow};
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {

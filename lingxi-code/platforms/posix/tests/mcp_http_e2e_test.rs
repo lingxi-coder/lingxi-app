@@ -14,8 +14,8 @@ use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use platform_posix::mcp::PosixMcpTransport;
 use platform_api::{McpTransport, McpTransportSpec};
+use platform_posix::mcp::PosixMcpTransport;
 
 /// Method-aware mock: switch on `body["method"]`, echo the `id`, return the
 /// matching MCP result envelope. `notifications/*` arrive without an `id`

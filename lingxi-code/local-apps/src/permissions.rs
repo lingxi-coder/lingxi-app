@@ -8,10 +8,10 @@
 use crate::error::AppError;
 use crate::manifest::{validate_domain, AppLayout};
 use crate::types::APPS_SCHEMA_VERSION;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use platform_api::FsError;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 const MAX_PERMISSIONS_BYTES: u64 = 512 * 1024;
 

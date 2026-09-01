@@ -23,10 +23,10 @@
 use crate::result::PermissionUpdateDestination;
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleValue};
 use crate::update::PermissionUpdate;
-use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use platform_api::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
 use platform_api::FsError;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 /// Filesystem roots used to resolve a [`PermissionUpdateDestination`] to a
 /// concrete settings file (the persistence analogue of [`crate::FsRoots`]).
@@ -279,7 +279,7 @@ fn mutate_settings_file<F>(
 where
     F: FnOnce(&str) -> Result<Option<String>, ()>,
 {
-    let Some(path) = confined_settings_path(paths, dest)? else {
+    let Some(mut path) = confined_settings_path(paths, dest)? else {
         return Ok(false);
     };
     // Ensure the settings DIR exists (oracle mkdir -p of the staging dir). This
@@ -288,6 +288,12 @@ where
     // final file + staging no-follow. Any failure here is surfaced by the
     // subsequent `lock_exclusive`/`open_root` as a `Confined` error.
     let _ = std::fs::create_dir_all(&path.root);
+    // This boundary intentionally permits a symlinked settings directory
+    // (for dotfile layouts), while rooted_fs still rejects symlinks below the
+    // resolved directory and on the final settings file.
+    if let Ok(canonical_root) = std::fs::canonicalize(&path.root) {
+        path.root = canonical_root;
+    }
     let lock_relative =
         lock_relative_path(&path.relative).map_err(|source| confined_error(&path, source))?;
     let _lock = rooted_fs::lock_exclusive(

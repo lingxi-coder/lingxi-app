@@ -6,11 +6,6 @@
 //! spawner and asserting the trait-object Arcs match the originals.
 
 use async_trait::async_trait;
-use serde_json::json;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
 use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 use platform_api::subagent_spawn::{
@@ -21,6 +16,11 @@ use platform_api::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 // =========================================================================
 // MockSubagentSpawner — records every spawn + exposes captured inheritance.

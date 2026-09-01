@@ -154,6 +154,7 @@ struct InlineVoicePanel: View {
                 Text("voice_config_required_title")
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(Color(okl: 0.96, 0.02, 280))
+                    .accessibilityIdentifier("voice.configuration-required")
                 Text(controller.statusDetail)
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(okl: 0.70, 0.03, 280))

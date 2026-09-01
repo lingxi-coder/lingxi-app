@@ -2,8 +2,8 @@
 //! specs to the shared connectors rather than returning
 //! `UnsupportedTransport`.
 
-use platform_posix::PosixMcpTransport;
 use platform_api::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_posix::PosixMcpTransport;
 
 #[tokio::test]
 async fn connect_sse_does_not_return_unsupported_transport() {

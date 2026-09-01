@@ -814,8 +814,8 @@ fn empty_result_model_content(pending: &[String], failed: &[(String, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1319,7 +1319,10 @@ mod tests {
         ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
             unreachable!()
         }
-        async fn ping(&self, _conn_id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+        async fn ping(
+            &self,
+            _conn_id: protocol::McpConnectionId,
+        ) -> Result<(), platform_api::McpError> {
             unreachable!()
         }
         async fn notifications(

@@ -12,12 +12,12 @@ use crate::jsonl::transcript_compact::{
     local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
     COMPACT_BACKSTOP_BYTES,
 };
+use platform_api::{FileSystem, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use platform_api::{FileSystem, FsError};
 
 /// Failure modes for [`JsonlWriter`] operations.
 #[derive(Debug, Error)]
@@ -112,6 +112,151 @@ fn writes_compact_boundary(msg: &JsonlMessage) -> bool {
         && msg.extra.get("subtype").and_then(serde_json::Value::as_str) == Some("compact_boundary")
 }
 
+/// Linux/macOS `EXDEV` and Windows `ERROR_NOT_SAME_DEVICE` are intentionally
+/// handled without a libc dependency: this leaf crate builds on both native
+/// and mobile targets, while the fallback is only reached after `rename`
+/// reports one of these platform error numbers.
+fn is_cross_device(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(18) | Some(17))
+}
+
+/// Move one transcript without replacing an occupied destination. A same-file
+/// rename is atomic on the normal path; a cross-device move copies the bytes,
+/// then removes the source only after the copy succeeds. The destination is
+/// removed again if source cleanup fails, preserving the source as the
+/// recoverable copy.
+fn move_file_with_cross_device_fallback(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device(&error) => {
+            if let Err(copy_error) = std::fs::copy(from, to) {
+                let _ = std::fs::remove_file(to);
+                return Err(copy_error);
+            }
+            if let Err(remove_error) = std::fs::remove_file(from) {
+                let _ = std::fs::remove_file(to);
+                return Err(remove_error);
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Quarantine an occupied destination with a non-JSONL suffix. Keeping the
+/// suffix off the session filename prevents the indexer from presenting stale
+/// bytes as the active session while retaining the file for manual recovery.
+fn move_to_superseded_path(path: &Path) -> std::io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("session transcript path is not UTF-8"))?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    for attempt in 0..1000_u32 {
+        let suffix = if attempt == 0 {
+            format!(".superseded-{millis}")
+        } else {
+            format!(".superseded-{millis}-{attempt}")
+        };
+        let candidate = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{file_name}{suffix}"));
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            std::fs::rename(path, &candidate)?;
+            return Ok(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a superseded transcript name",
+    ))
+}
+
+/// Find the lexical root shared by both transcript parent directories.
+/// `/cd` paths normally share `<config-home>/projects`; keeping this generic
+/// preserves the writer's direct relocation tests and embedded callers.
+fn relocation_root(from: &Path, to: &Path) -> std::io::Result<PathBuf> {
+    let from = from
+        .parent()
+        .ok_or_else(|| std::io::Error::other("transcript source has no parent"))?;
+    let to = to
+        .parent()
+        .ok_or_else(|| std::io::Error::other("transcript destination has no parent"))?;
+    let mut root = PathBuf::new();
+    for (left, right) in from.components().zip(to.components()) {
+        if left != right {
+            break;
+        }
+        root.push(left.as_os_str());
+    }
+    if root.as_os_str().is_empty() {
+        return Err(std::io::Error::other(
+            "transcript paths have no shared relocation root",
+        ));
+    }
+    Ok(root)
+}
+
+/// Reject a symlink or non-directory anywhere from `root` through `parent`.
+/// `symlink_metadata` inspects each directory entry itself instead of
+/// following it. Callers run this both before destination quarantine and again
+/// immediately before the move, bounding the pathname-swap window without
+/// changing the established rename/EXDEV behavior.
+fn validate_real_parent_chain(root: &Path, parent: &Path) -> std::io::Result<()> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::other("transcript parent is outside the relocation root"))?;
+    let root_metadata = std::fs::symlink_metadata(root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "transcript relocation root is not a real directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(std::io::Error::other(
+                "transcript parent contains a non-normal path component",
+            ));
+        };
+        current.push(segment);
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "transcript parent is not a real directory: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relocation_parents(
+    root: &Path,
+    from: &Path,
+    to: &Path,
+    source_exists: bool,
+) -> std::io::Result<()> {
+    if source_exists {
+        validate_real_parent_chain(
+            root,
+            from.parent()
+                .ok_or_else(|| std::io::Error::other("transcript source has no parent"))?,
+        )?;
+    }
+    validate_real_parent_chain(
+        root,
+        to.parent()
+            .ok_or_else(|| std::io::Error::other("transcript destination has no parent"))?,
+    )
+}
+
 impl JsonlWriter {
     /// Open (or create on first append) `path`.
     ///
@@ -162,6 +307,230 @@ impl JsonlWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
     }
 
+    /// Record that the live session moved to `relocated_cwd`, then retarget
+    /// subsequent appends to `path`.
+    ///
+    /// A directory change must keep one session in one transcript.  When the
+    /// project path changes, the existing file is rehomed before the marker is
+    /// appended; otherwise a resume from the new cwd would select a fresh
+    /// partial file and silently lose the pre-`/cd` history.  If the sanitized
+    /// project path is unchanged, the marker is appended in place because it
+    /// is the only durable, lossless signal that lets the session index
+    /// distinguish the new cwd from the first message's cwd.
+    ///
+    /// The metadata mirror is updated as part of the same state transition, so
+    /// a later metadata backstop keeps the relocation marker near the tail.
+    /// When the project path changes, byte backstop counters are reset because
+    /// they belong to the old transcript rather than the newly targeted file.
+    pub async fn retarget_with_relocation(
+        &self,
+        path: PathBuf,
+        session_id: &str,
+        relocated_cwd: &str,
+    ) -> Result<(), WriterError> {
+        let line = serde_json::to_string(&serde_json::json!({
+            "type": "relocated",
+            "relocatedCwd": relocated_cwd,
+            "sessionId": session_id,
+        }))?;
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(&line);
+        payload.push('\n');
+
+        // Keep lock ordering consistent with maybe_re_append_metadata:
+        // metadata_state -> append lock.  No append path takes these locks in
+        // the opposite order while the metadata guard is held.
+        let mut metadata_state = self.metadata_state.lock().await;
+        let _g = self.lock.lock().await;
+        let old_path = self.active_path();
+        let same_path = old_path == path;
+        let relocation_root = if same_path {
+            None
+        } else {
+            Some(relocation_root(&old_path, &path).map_err(|error| {
+                FsError::Io(format!("unsafe transcript relocation path: {error}"))
+            })?)
+        };
+
+        let old_exists = match std::fs::symlink_metadata(&old_path) {
+            // `symlink_metadata` deliberately inspects the directory entry
+            // itself.  A relocation may only rehome the regular transcript
+            // file; accepting a directory or symlink here would let `/cd`
+            // rename an unrelated tree or redirect the move outside the
+            // session root.  Keep this validation before touching the target
+            // so a failed relocation is entirely side-effect free.
+            Ok(metadata) if metadata.file_type().is_file() => true,
+            Ok(_) => {
+                return Err(WriterError::Fs(FsError::Io(format!(
+                    "transcript source is not a regular file: {}",
+                    old_path.display()
+                ))));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(WriterError::Fs(FsError::Io(format!(
+                    "could not inspect transcript source: {error}"
+                ))));
+            }
+        };
+        let mut moved_existing = false;
+        if !same_path {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        std::fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(parent)
+                            .map_err(|e| FsError::Io(e.to_string()))?;
+                    }
+                    #[cfg(not(unix))]
+                    std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
+                }
+            }
+
+            validate_relocation_parents(
+                relocation_root
+                    .as_deref()
+                    .expect("different paths have a relocation root"),
+                &old_path,
+                &path,
+                old_exists,
+            )
+            .map_err(|error| {
+                FsError::Io(format!("unsafe transcript relocation parent: {error}"))
+            })?;
+
+            // A stale/occupied destination must never be overwritten. Set it
+            // aside under a non-JSONL suffix so session discovery cannot treat
+            // it as the active transcript. If the move fails, put it back. Do
+            // this before checking the source: an absent source must not make
+            // us silently adopt an unrelated file already at the target.
+            let target_exists = match std::fs::symlink_metadata(&path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(WriterError::Fs(FsError::Io(format!(
+                        "could not inspect transcript destination: {error}"
+                    ))));
+                }
+            };
+            let superseded = if target_exists {
+                Some(move_to_superseded_path(&path).map_err(|e| {
+                    FsError::Io(format!("transcript destination quarantine failed: {e}"))
+                })?)
+            } else {
+                None
+            };
+
+            if !old_exists {
+                if let Some(superseded) = superseded {
+                    if let Err(error) = std::fs::rename(&superseded, &path) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "failed to restore occupied transcript destination"
+                        );
+                    }
+                    return Err(WriterError::Fs(FsError::Io(format!(
+                        "transcript source missing and destination occupied: {}",
+                        path.display()
+                    ))));
+                }
+                // Claude retargets a writer whose old file disappeared, but
+                // deliberately skips the relocation marker; the first future
+                // append will create the target transcript.
+            } else {
+                // `JsonlWriter` is only constructed with the host path selected
+                // by the session composition root. Rehome the regular
+                // transcript atomically; on EXDEV (e.g. a mounted config
+                // directory), copy the bytes durably and remove the source
+                // only after the copy succeeds.
+                if let Err(error) = validate_relocation_parents(
+                    relocation_root
+                        .as_deref()
+                        .expect("different paths have a relocation root"),
+                    &old_path,
+                    &path,
+                    true,
+                ) {
+                    if let Some(superseded) = superseded.as_ref() {
+                        let _ = std::fs::rename(superseded, &path);
+                    }
+                    return Err(WriterError::Fs(FsError::Io(format!(
+                        "unsafe transcript relocation parent: {error}"
+                    ))));
+                }
+                if let Err(error) = move_file_with_cross_device_fallback(&old_path, &path) {
+                    if let Some(superseded) = superseded.as_ref() {
+                        let _ = std::fs::rename(superseded, &path);
+                    }
+                    return Err(WriterError::Fs(FsError::Io(format!(
+                        "transcript move failed: {error}"
+                    ))));
+                }
+                moved_existing = true;
+            }
+
+            // With no source there is no rename seam at which to perform the
+            // second check above. Revalidate immediately before publishing the
+            // future append path so a parent swapped after the first check is
+            // not accepted as the writer's new destination.
+            if !old_exists {
+                validate_real_parent_chain(
+                    relocation_root
+                        .as_deref()
+                        .expect("different paths have a relocation root"),
+                    path.parent()
+                        .expect("a transcript destination always has a parent"),
+                )
+                .map_err(|error| {
+                    FsError::Io(format!("unsafe transcript relocation parent: {error}"))
+                })?;
+            }
+        }
+
+        // Publish the target before writing the marker.  Marker persistence is
+        // deliberately best-effort in Claude: a failed marker must not turn an
+        // already-completed cwd move into a split-brain rollback.  In
+        // particular, when the old transcript is gone, do not create a
+        // marker-only file in the new project directory.
+        *self
+            .active_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+        let should_append_marker = (same_path && old_exists) || moved_existing;
+        if should_append_marker {
+            let active_path = self.active_path();
+            if let Err(error) = self
+                .append_payload_to_path(&active_path, &payload, true)
+                .await
+            {
+                tracing::warn!(
+                    path = %active_path.display(),
+                    %error,
+                    "transcript relocation marker append failed"
+                );
+            }
+        }
+        metadata_state.relocated_cwd = Some(relocated_cwd.to_string());
+        if !same_path {
+            self.bytes_since_metadata_re_append
+                .store(0, Ordering::Relaxed);
+            self.bytes_since_compact.store(0, Ordering::Relaxed);
+        }
+        drop(_g);
+        drop(metadata_state);
+
+        // A same-directory move may have crossed the metadata backstop while
+        // writing the marker.  Poll outside the critical section just like all
+        // other public writer paths.
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
     /// Append one JSONL line — `serde_json::to_string(msg) + "\n"`.
     ///
     /// Creates the parent directory on first call. The `FileSystem` trait
@@ -202,6 +571,19 @@ impl JsonlWriter {
     /// plan under one critical section.
     async fn append_payload(&self, payload: &str) -> Result<(), WriterError> {
         let path = self.active_path();
+        self.append_payload_to_path(&path, payload, true).await
+    }
+
+    /// Write `payload` to an explicit path while the caller holds
+    /// [`Self::lock`].  `account` is false when the write is the final record
+    /// on an old path during a retarget; those bytes must not arm backstops for
+    /// the newly selected transcript.
+    async fn append_payload_to_path(
+        &self,
+        path: &Path,
+        payload: &str,
+        account: bool,
+    ) -> Result<(), WriterError> {
         let path_str = path.to_str().expect("session paths are UTF-8");
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -231,10 +613,12 @@ impl JsonlWriter {
         // only on a SUCCESSFUL write, matching the oracle's post-await position.
         // `appendToFile` (@296775839) bumps BOTH counters from the same
         // `Buffer.byteLength`, so they never drift apart.
-        self.bytes_since_metadata_re_append
-            .fetch_add(payload.len(), Ordering::Relaxed);
-        self.bytes_since_compact
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        if account {
+            self.bytes_since_metadata_re_append
+                .fetch_add(payload.len(), Ordering::Relaxed);
+            self.bytes_since_compact
+                .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -1029,6 +1413,400 @@ mod tests {
         assert!(std::fs::read_to_string(second)
             .unwrap()
             .contains("\"second\""));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn retarget_with_relocation_records_special_cwd_before_switching_files() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "special"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let session_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb";
+        let old_cwd = "/tmp/work space/[old]";
+        let new_cwd = "/tmp/work space/[new] \"quoted\"\\slash";
+        let old_path = crate::jsonl::path::session_path(&home, old_cwd, session_id);
+        let new_path = crate::jsonl::path::session_path(&home, new_cwd, session_id);
+        assert_ne!(
+            old_path, new_path,
+            "special cwd should select a new project dir"
+        );
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+
+        writer
+            .append_payload_for_test(&format!(
+                "{}\n",
+                serde_json::json!({
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": old_cwd,
+                })
+            ))
+            .await;
+        writer
+            .retarget_with_relocation(new_path.clone(), session_id, new_cwd)
+            .await
+            .expect("record relocation");
+
+        assert_eq!(writer.active_path(), new_path);
+        assert!(
+            !old_path.exists(),
+            "cross-directory move must rehome the transcript"
+        );
+        let before_post = std::fs::read_to_string(&new_path).expect("read new transcript");
+        let marker: serde_json::Value =
+            serde_json::from_str(before_post.lines().nth(1).expect("relocation line"))
+                .expect("relocation line parses");
+        assert_eq!(marker["type"], "relocated");
+        assert_eq!(marker["sessionId"], session_id);
+        assert_eq!(marker["relocatedCwd"], new_cwd);
+        assert!(before_post
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("\"user\"")));
+
+        writer
+            .append_payload_for_test(&format!(
+                "{}\n",
+                serde_json::json!({ "type": "assistant", "sessionId": session_id })
+            ))
+            .await;
+        let new_lines = std::fs::read_to_string(&new_path).expect("read new transcript");
+        assert!(new_lines.contains("\"assistant\""));
+        assert_eq!(
+            new_lines.lines().count(),
+            3,
+            "pre-/cd, marker, and post-/cd stay together"
+        );
+        assert!(
+            !old_path.exists(),
+            "old project path must not present the moved session"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn retarget_with_relocation_keeps_sanitized_collision_on_one_transcript() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "collision"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let session_id = "88888888-9999-4aaa-bbbb-cccccccccccc";
+        let old_cwd = "/tmp/collision-a_b";
+        let new_cwd = "/tmp/collision-a-b";
+        let old_path = crate::jsonl::path::session_path(&home, old_cwd, session_id);
+        let new_path = crate::jsonl::path::session_path(&home, new_cwd, session_id);
+        assert_eq!(old_path, new_path, "both cwd values sanitize identically");
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+        writer
+            .append_payload_for_test(&format!(
+                "{}\n",
+                serde_json::json!({
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": old_cwd,
+                })
+            ))
+            .await;
+
+        writer
+            .retarget_with_relocation(new_path.clone(), session_id, new_cwd)
+            .await
+            .expect("record collision relocation");
+        assert_eq!(writer.active_path(), old_path);
+        let raw = std::fs::read_to_string(&old_path).expect("read collision transcript");
+        let routed = crate::jsonl::reader::route_lines(&raw);
+        assert_eq!(
+            routed.relocated_cwds.get(session_id).map(String::as_str),
+            Some(new_cwd),
+            "the marker must disambiguate cwd values sharing one sanitized dir"
+        );
+        assert_eq!(raw.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn retarget_with_relocation_rejects_directory_source_before_quarantining_target() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "directory-source"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let old_path = tmp.join("old.jsonl");
+        let new_path = tmp.join("new.jsonl");
+        std::fs::create_dir_all(&old_path).expect("directory source");
+        std::fs::write(&new_path, "stale destination\n").expect("occupied destination");
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+
+        let error = writer
+            .retarget_with_relocation(
+                new_path.clone(),
+                "11111111-2222-3333-4444-555555555555",
+                "/tmp/new",
+            )
+            .await
+            .expect_err("a directory is not a transcript source");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(writer.active_path(), old_path);
+        assert!(std::fs::symlink_metadata(&old_path)
+            .expect("source remains")
+            .file_type()
+            .is_dir());
+        assert_eq!(
+            std::fs::read_to_string(&new_path).expect("target remains"),
+            "stale destination\n",
+            "source validation must happen before destination quarantine"
+        );
+        assert!(
+            std::fs::read_dir(&tmp)
+                .expect("list temp dir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("new.jsonl.superseded")),
+            "a rejected source must not leave a quarantined target"
+        );
+        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retarget_with_relocation_rejects_symlink_source_before_quarantining_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "symlink-source"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let real_source = tmp.join("real.jsonl");
+        let old_path = tmp.join("old.jsonl");
+        let new_path = tmp.join("new.jsonl");
+        std::fs::write(&real_source, "real transcript\n").expect("real source");
+        symlink(&real_source, &old_path).expect("symlink source");
+        std::fs::write(&new_path, "stale destination\n").expect("occupied destination");
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+
+        let error = writer
+            .retarget_with_relocation(
+                new_path.clone(),
+                "22222222-3333-4444-5555-666666666666",
+                "/tmp/new",
+            )
+            .await
+            .expect_err("a symlink is not a transcript source");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(writer.active_path(), old_path);
+        assert!(std::fs::symlink_metadata(&old_path)
+            .expect("symlink remains")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real_source).expect("real source remains"),
+            "real transcript\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&new_path).expect("target remains"),
+            "stale destination\n",
+            "source validation must happen before destination quarantine"
+        );
+        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retarget_with_relocation_rejects_symlinked_destination_project_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "symlink-destination-parent"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let victim = tmp.join("victim");
+        std::fs::create_dir_all(&victim).expect("create victim dir");
+        let session_id = "33333333-4444-4555-8666-777777777777";
+        let old_path = crate::jsonl::path::session_path(&home, "/tmp/safe-old", session_id);
+        let new_path = crate::jsonl::path::session_path(&home, "/tmp/unsafe-new", session_id);
+        assert_ne!(old_path, new_path);
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+        writer
+            .append_payload_for_test("{\"type\":\"user\",\"body\":\"original\"}\n")
+            .await;
+        let original = std::fs::read(&old_path).expect("read original transcript");
+
+        let new_parent = new_path.parent().expect("new project directory");
+        assert!(!new_parent.exists());
+        symlink(&victim, new_parent).expect("redirect destination project directory");
+
+        let error = writer
+            .retarget_with_relocation(new_path.clone(), session_id, "/tmp/unsafe-new")
+            .await
+            .expect_err("a symlinked destination parent must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("unsafe transcript relocation parent"));
+        assert_eq!(writer.active_path(), old_path);
+        assert_eq!(
+            std::fs::read(&old_path).expect("old transcript remains"),
+            original,
+            "the rejected move must preserve the original bytes"
+        );
+        assert!(
+            victim.read_dir().expect("read victim").next().is_none(),
+            "the symlink target must remain untouched"
+        );
+        assert!(std::fs::symlink_metadata(new_parent)
+            .expect("destination symlink remains")
+            .file_type()
+            .is_symlink());
+        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn retarget_with_relocation_does_not_create_marker_for_missing_source() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "missing-source"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let session_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+        let old_path = crate::jsonl::path::session_path(&home, "/tmp/missing-old", session_id);
+        let new_path = crate::jsonl::path::session_path(&home, "/tmp/missing-new", session_id);
+        assert_ne!(old_path, new_path);
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+
+        writer
+            .retarget_with_relocation(new_path.clone(), session_id, "/tmp/missing-new")
+            .await
+            .expect("missing source still retargets successfully");
+
+        assert_eq!(writer.active_path(), new_path);
+        assert!(!old_path.exists());
+        assert!(
+            !new_path.exists(),
+            "missing source must not leave a marker-only transcript"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn retarget_with_missing_source_rejects_occupied_destination() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "missing-occupied"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let session_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        let old_path = crate::jsonl::path::session_path(&home, "/tmp/missing-old", session_id);
+        let new_path = crate::jsonl::path::session_path(&home, "/tmp/missing-new", session_id);
+        assert_ne!(old_path, new_path);
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+        let new_parent = new_path.parent().expect("new project parent");
+        std::fs::create_dir_all(new_parent).expect("new project");
+        std::fs::write(&new_path, "stale destination\n").expect("occupied destination");
+
+        let error = writer
+            .retarget_with_relocation(new_path.clone(), session_id, "/tmp/missing-new")
+            .await
+            .expect_err("an occupied destination cannot be adopted without the source");
+        assert!(
+            error.to_string().contains("source missing")
+                && error.to_string().contains("destination occupied")
+        );
+        assert_eq!(writer.active_path(), old_path);
+        assert!(!old_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&new_path).expect("restored target"),
+            "stale destination\n",
+            "the stale target must be restored byte-for-byte"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retarget_with_relocation_keeps_success_when_marker_append_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-relocation-{}-{}",
+            std::process::id(),
+            "marker-failure"
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let home = tmp.join("home");
+        let session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let old_path = crate::jsonl::path::session_path(&home, "/tmp/marker-old", session_id);
+        let new_path = crate::jsonl::path::session_path(&home, "/tmp/marker-new", session_id);
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(old_path.clone(), fs);
+        writer
+            .append_payload_for_test("{\"type\":\"user\"}\n")
+            .await;
+        std::fs::set_permissions(&old_path, std::fs::Permissions::from_mode(0o400))
+            .expect("make moved transcript read-only");
+
+        writer
+            .retarget_with_relocation(new_path.clone(), session_id, "/tmp/marker-new")
+            .await
+            .expect("marker persistence is best-effort");
+
+        assert_eq!(writer.active_path(), new_path);
+        assert!(
+            !old_path.exists(),
+            "the successful transcript move remains published"
+        );
+        let moved = std::fs::read_to_string(&new_path).expect("read moved transcript");
+        assert!(moved.contains("\"user\""));
+        assert!(
+            !moved.contains("\"relocated\""),
+            "a failed marker write must not make /cd fail or fabricate a marker"
+        );
+        std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore cleanup permissions");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::http::HttpError;
 use protocol::{HttpMethod, HttpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -39,7 +40,6 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
-use platform_api::http::HttpError;
 
 /// Maximum transfer size for the response body — byte-locked to claude-code
 /// `MAX_HTTP_CONTENT_LENGTH` (`WebFetchTool/utils.ts:112`, the axios

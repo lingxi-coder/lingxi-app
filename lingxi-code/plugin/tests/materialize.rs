@@ -792,6 +792,10 @@ impl McpTransport for RoleMcpTransport {
             tool_name: "send".into(),
             description: "send through the role fixture".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: String::new(),
             search_hint: None,
             always_load: None,
@@ -862,6 +866,7 @@ impl McpTransport for RoleMcpTransport {
 async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
     let tmp = tempfile::tempdir().unwrap();
     write_full_component_plugin(tmp.path(), "full", "fullplugin");
+    let session_cwd = tmp.path().join("session-cwd");
 
     let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
     let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
@@ -893,7 +898,8 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         mcp_registry.clone(),
         lsp_registry.clone(),
         tool_registry,
-    );
+    )
+    .with_project_dir(session_cwd.clone());
 
     let discovered = plugin::discover_installed_plugins(tmp.path()).await;
     assert_eq!(discovered.len(), 1);
@@ -953,7 +959,7 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
     // LSP server config: plugin-scoped, public camelCase schema loaded, and
     // plugin host tokens expanded before registration.
     let lsp_name = "plugin:fullplugin:pyls";
-    let project_dir = std::env::current_dir().unwrap();
+    let project_dir = session_cwd;
     let plugin_data_dir = tmp.path().join("data").join("fullplugin");
     assert!(
         plugin_data_dir.is_dir(),
@@ -1511,14 +1517,20 @@ async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
     );
 }
 
-fn write_monitor_plugin(root: &Path, dir_name: &str) {
+fn write_monitor_plugin_with_version(root: &Path, dir_name: &str, version: &str) {
     let plugin_dir = root.join(dir_name);
     fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
         plugin_dir.join(".lingxi-plugin").join("plugin.json"),
-        r#"{"name":"monitor-plugin","version":"1.0.0","monitors":[{"name":"always","command":"echo ${LINGXI_PLUGIN_ROOT}","description":"watch now"},{"name":"deploy","command":"echo deploy","description":"watch deploy","when":"on-skill-invoke:deploy"}]}"#,
+        format!(
+            r#"{{"name":"monitor-plugin","version":"{version}","monitors":[{{"name":"always","command":"echo ${{LINGXI_PLUGIN_ROOT}}","description":"watch now"}},{{"name":"deploy","command":"echo deploy","description":"watch deploy","when":"on-skill-invoke:deploy"}}]}}"#
+        ),
     )
     .unwrap();
+}
+
+fn write_monitor_plugin(root: &Path, dir_name: &str) {
+    write_monitor_plugin_with_version(root, dir_name, "1.0.0");
 }
 
 #[tokio::test]
@@ -1548,11 +1560,13 @@ async fn enable_arms_plugin_monitors_through_the_shared_task_registry() {
         assert_eq!(
             monitors[0].command,
             format!(
-                "export CLAUDE_PLUGIN_ROOT='{}' LINGXI_PLUGIN_ROOT='{}' CLAUDE_PROJECT_DIR='{}' LINGXI_PROJECT_DIR='{}'; echo ${{LINGXI_PLUGIN_ROOT}}",
+                "export CLAUDE_PLUGIN_ROOT='{}' {lingxi_plugin_root}='{}' CLAUDE_PROJECT_DIR='{}' {lingxi_project_dir}='{}'; echo ${{{lingxi_plugin_root}}}",
                 dir.display(),
                 dir.display(),
                 tmp.path().display(),
                 tmp.path().display(),
+                lingxi_plugin_root = branding::PLUGIN_ROOT_ENV,
+                lingxi_project_dir = branding::PROJECT_DIR_ENV,
             ),
             "plugin variables are shell-quoted without rewriting plugin syntax"
         );
@@ -1587,6 +1601,76 @@ async fn enable_arms_plugin_monitors_through_the_shared_task_registry() {
     assert!(
         task_registry.killed.lock().expect("kill lock").is_empty(),
         "disable retains running monitors; session teardown owns their cleanup"
+    );
+}
+
+#[tokio::test]
+async fn reload_retains_plugin_monitors_for_the_session_and_dedupes_stable_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_monitor_plugin_with_version(tmp.path(), "monitor-v1", "1.0.0");
+    write_monitor_plugin_with_version(tmp.path(), "monitor-v2", "2.0.0");
+    let task_registry = Arc::new(RecordingTaskRegistry::default());
+    let (manager, _commands) = make_manager_with_task_registry(
+        tmp.path(),
+        &tmp.path().join("secrets"),
+        Some(task_registry.clone() as Arc<dyn TaskRegistryHandle>),
+    )
+    .await;
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 2);
+    let (id_v1, manifest_v1, dir_v1) = discovered
+        .iter()
+        .find(|(_, manifest, _)| manifest.version == "1.0.0")
+        .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+        .expect("v1 plugin discovered");
+    let (id_v2, manifest_v2, dir_v2) = discovered
+        .iter()
+        .find(|(_, manifest, _)| manifest.version == "2.0.0")
+        .map(|(id, manifest, dir)| (*id, manifest.clone(), dir.clone()))
+        .expect("v2 plugin discovered");
+
+    manager
+        .enable(&id_v1, manifest_v1, dir_v1.clone())
+        .await
+        .expect("enable v1");
+    assert_eq!(
+        manager.activate_skill_monitors("deploy").await,
+        vec!["monitor-2".to_string()],
+        "the on-skill monitor arms once"
+    );
+    manager.disable(&id_v1).await.expect("disable v1");
+    assert!(
+        task_registry.killed.lock().expect("kill lock").is_empty(),
+        "ordinary disable leaves persistent monitors for session teardown"
+    );
+
+    manager
+        .enable(&id_v2, manifest_v2, dir_v2.clone())
+        .await
+        .expect("enable v2");
+    assert!(
+        manager.activate_skill_monitors("deploy").await.is_empty(),
+        "reload keeps the stable monitor key armed"
+    );
+
+    let monitors = task_registry.monitors.lock().expect("monitor lock");
+    assert_eq!(
+        monitors.len(),
+        2,
+        "reload does not restart session-owned monitors"
+    );
+    assert!(
+        monitors
+            .iter()
+            .all(|monitor| monitor.command.contains(dir_v1.to_string_lossy().as_ref())),
+        "retained commands remain bound to the original install directory"
+    );
+    assert!(
+        monitors
+            .iter()
+            .all(|monitor| !monitor.command.contains(dir_v2.to_string_lossy().as_ref())),
+        "reload does not spawn replacement commands"
     );
 }
 

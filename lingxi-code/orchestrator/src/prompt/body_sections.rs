@@ -449,12 +449,12 @@ fn lean_body(output_style_active: bool, model: &str) -> String {
     } else {
         "with software engineering tasks."
     };
-    let system_turns = if platform_api::model_capabilities::normalize_model_id(model) == "claude-opus-4-8"
-    {
-        LEAN_REMINDER_TAGS
-    } else {
-        LEAN_SYSTEM_TURNS
-    };
+    let system_turns =
+        if platform_api::model_capabilities::normalize_model_id(model) == "claude-opus-4-8" {
+            LEAN_REMINDER_TAGS
+        } else {
+            LEAN_SYSTEM_TURNS
+        };
     // NOTE: the lean opening deliberately omits the long arm's trailing
     // "Use the instructions below and the tools available to you to assist the
     // user." sentence — `wMy` does not carry it.

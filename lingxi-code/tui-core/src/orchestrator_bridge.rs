@@ -17,10 +17,10 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
+use platform_api::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
-use platform_api::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 
 /// One live heartbeat value retained by the bridge. Heartbeats are transient
 /// render state and therefore may be replaced by a newer value for the same

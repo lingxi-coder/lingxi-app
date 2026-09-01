@@ -52,18 +52,218 @@
 //!   events.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use platform_api::{Clock, HttpTransport, McpTransportSpec};
 use protocol::{HttpMethod, HttpRequest, Secret};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use telemetry::pii::Verified;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
-use platform_api::{Clock, HttpTransport, McpTransportSpec};
 
 pub mod callback;
 
 pub use callback::{CallbackError, CallbackListener, CallbackParams};
+
+#[derive(Debug, Clone)]
+pub struct McpOAuthTelemetryContext {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+impl McpOAuthTelemetryContext {
+    #[must_use]
+    pub fn for_server(name: &str, spec: &McpTransportSpec) -> Self {
+        Self {
+            transport_type: Verified::assert_safe(spec.kind().to_string()),
+            mcp_server_key_hash: telemetry_server_key_hash(name, spec),
+        }
+    }
+}
+
+#[must_use]
+pub fn telemetry_server_key_hash(name: &str, spec: &McpTransportSpec) -> Verified {
+    telemetry_server_key_hash_for_key(&server_key(name, spec))
+}
+
+#[must_use]
+pub fn telemetry_server_key_hash_for_key(key: &str) -> Verified {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut short = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut short, "{byte:02x}");
+    }
+    Verified::assert_safe(short)
+}
+
+fn new_flow_attempt_id() -> Verified {
+    let mut rng = rand::rng();
+    let bytes: [u8; 16] = std::array::from_fn(|_| rng.random::<u8>());
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    Verified::assert_safe(out)
+}
+
+fn emit_oauth_flow_start(ctx: Option<&McpOAuthTelemetryContext>, flow_attempt_id: &Verified) {
+    let Some(ctx) = ctx else { return };
+    let payload = telemetry::tengu::mcp::OAuthFlowStartPayload {
+        flow_attempt_id: flow_attempt_id.clone(),
+        is_oauth_flow: true,
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_oauth_flow_start(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_FLOW_START, &payload);
+}
+
+fn emit_oauth_flow_success(ctx: Option<&McpOAuthTelemetryContext>, flow_attempt_id: &Verified) {
+    let Some(ctx) = ctx else { return };
+    let payload = telemetry::tengu::mcp::OAuthFlowSuccessPayload {
+        flow_attempt_id: flow_attempt_id.clone(),
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_oauth_flow_success(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_FLOW_SUCCESS, &payload);
+}
+
+fn emit_oauth_flow_error(
+    ctx: Option<&McpOAuthTelemetryContext>,
+    flow_attempt_id: &Verified,
+    err: &OAuthError,
+) {
+    let Some(ctx) = ctx else { return };
+    let (reason, error_code, http_status) = oauth_flow_error_fields(err);
+    let payload = telemetry::tengu::mcp::OAuthFlowErrorPayload {
+        flow_attempt_id: flow_attempt_id.clone(),
+        reason: Verified::assert_safe(reason.to_string()),
+        error_code: error_code.map(|code| Verified::assert_safe(code.to_string())),
+        http_status,
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_oauth_flow_error(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_FLOW_ERROR, &payload);
+}
+
+fn oauth_flow_error_fields(err: &OAuthError) -> (&'static str, Option<&'static str>, Option<u16>) {
+    let message = err.to_string();
+    let status = message
+        .split_whitespace()
+        .find_map(|part| part.parse::<u16>().ok())
+        .filter(|status| (100..=599).contains(status));
+    match err {
+        OAuthError::Discovery(_) => ("discovery_failed", None, status),
+        OAuthError::Registration(_) => ("dcr_failed", None, status),
+        OAuthError::Callback(message) if message.contains("timed out") => ("timeout", None, None),
+        OAuthError::Callback(message) if message.contains("state mismatch") => {
+            ("state_mismatch", None, None)
+        }
+        OAuthError::Callback(message) if message.contains("authorization server returned") => {
+            ("provider_denied", None, None)
+        }
+        OAuthError::Callback(message)
+            if message.contains("already in use")
+                || message.contains("EADDRINUSE")
+                || message.contains("No available port")
+                || message.contains("bind failed")
+                || message.contains("callback server failed") =>
+        {
+            ("port_unavailable", None, None)
+        }
+        OAuthError::Callback(_) => ("cancelled", None, None),
+        OAuthError::Token(message) => {
+            let error_code = if message.contains("invalid_client") {
+                Some("invalid_client")
+            } else if message.contains("unauthorized_client") {
+                Some("unauthorized_client")
+            } else {
+                None
+            };
+            ("token_exchange_failed", error_code, status)
+        }
+        OAuthError::RefreshRejected(_) => ("token_exchange_failed", Some("invalid_grant"), None),
+    }
+}
+
+pub fn emit_oauth_browser_open(
+    ctx: &McpOAuthTelemetryContext,
+    success: bool,
+    headless: bool,
+    platform: &str,
+) {
+    let payload = telemetry::tengu::mcp::OAuthBrowserOpenPayload {
+        success,
+        headless,
+        platform: Verified::assert_safe(platform.to_string()),
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_oauth_browser_open(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_BROWSER_OPEN, &payload);
+}
+
+pub fn emit_auth_config_authenticate(ctx: &McpOAuthTelemetryContext, was_authenticated: bool) {
+    let payload = telemetry::tengu::mcp::AuthConfigAuthenticatePayload {
+        was_authenticated,
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_auth_config_authenticate(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::AUTH_CONFIG_AUTHENTICATE, &payload);
+}
+
+pub fn emit_auth_config_clear(ctx: &McpOAuthTelemetryContext) {
+    let payload = telemetry::tengu::mcp::AuthConfigClearPayload {
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_auth_config_clear(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::AUTH_CONFIG_CLEAR, &payload);
+}
+
+pub fn emit_oauth_refresh_success(ctx: &McpOAuthTelemetryContext) {
+    let payload = telemetry::tengu::mcp::OAuthRefreshSuccessPayload {
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+    };
+    telemetry::emit_mcp_oauth_refresh_success(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_REFRESH_SUCCESS, &payload);
+}
+
+pub fn emit_oauth_refresh_failure(ctx: &McpOAuthTelemetryContext, reason: &str) {
+    let payload = telemetry::tengu::mcp::OAuthRefreshFailurePayload {
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+        reason: Verified::assert_safe(reason.to_string()),
+    };
+    telemetry::emit_mcp_oauth_refresh_failure(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_REFRESH_FAILURE, &payload);
+}
+
+pub fn emit_oauth_token_persist_failed(ctx: &McpOAuthTelemetryContext, reason: &str) {
+    let payload = telemetry::tengu::mcp::OAuthTokenPersistFailedPayload {
+        transport_type: ctx.transport_type.clone(),
+        mcp_server_key_hash: ctx.mcp_server_key_hash.clone(),
+        reason: Verified::assert_safe(reason.to_string()),
+    };
+    telemetry::emit_mcp_oauth_token_persist_failed(&payload);
+    #[cfg(test)]
+    record_test_oauth_telemetry_event(telemetry::tengu::mcp::OAUTH_TOKEN_PERSIST_FAILED, &payload);
+}
 
 /// Timeout for the discovery / DCR / token-exchange / refresh POSTs. Mirrors
 /// claude-code's 15-second auth-request deadline.
@@ -990,6 +1190,7 @@ pub async fn perform_oauth_flow(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    telemetry: Option<&McpOAuthTelemetryContext>,
     scope_override: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
     perform_oauth_flow_inner(
@@ -999,6 +1200,7 @@ pub async fn perform_oauth_flow(
         server_name,
         server_url,
         on_auth_url,
+        telemetry,
         scope_override,
         None,
         None,
@@ -1018,6 +1220,7 @@ pub async fn perform_oauth_flow_with_manual_input(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    telemetry: Option<&McpOAuthTelemetryContext>,
     scope_override: Option<&str>,
     manual_input: &mut (dyn AsyncBufRead + Unpin + Send),
 ) -> Result<Tokens, OAuthError> {
@@ -1028,6 +1231,7 @@ pub async fn perform_oauth_flow_with_manual_input(
         server_name,
         server_url,
         on_auth_url,
+        telemetry,
         scope_override,
         None,
         Some(manual_input),
@@ -1048,6 +1252,7 @@ pub(crate) async fn perform_oauth_flow_for_reauth(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    telemetry: Option<&McpOAuthTelemetryContext>,
     scope_override: Option<&str>,
     resource_metadata_url: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
@@ -1058,6 +1263,7 @@ pub(crate) async fn perform_oauth_flow_for_reauth(
         server_name,
         server_url,
         on_auth_url,
+        telemetry,
         scope_override,
         resource_metadata_url,
         None,
@@ -1073,10 +1279,15 @@ async fn perform_oauth_flow_inner(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    telemetry: Option<&McpOAuthTelemetryContext>,
     scope_override: Option<&str>,
     resource_metadata_url: Option<&str>,
     manual_input: Option<&mut (dyn AsyncBufRead + Unpin + Send)>,
 ) -> Result<Tokens, OAuthError> {
+    let flow_attempt_id = new_flow_attempt_id();
+    emit_oauth_flow_start(telemetry, &flow_attempt_id);
+
+    let result: Result<Tokens, OAuthError> = async {
     // 1. Discovery.
     let meta = discover_auth_server_metadata(
         http,
@@ -1190,6 +1401,19 @@ async fn perform_oauth_flow_inner(
         &redirect_uri,
     )
     .await
+    }
+    .await;
+
+    match result {
+        Ok(tokens) => {
+            emit_oauth_flow_success(telemetry, &flow_attempt_id);
+            Ok(tokens)
+        }
+        Err(err) => {
+            emit_oauth_flow_error(telemetry, &flow_attempt_id, &err);
+            Err(err)
+        }
+    }
 }
 
 /// Parse a headless OAuth response pasted by the user. A bare value is treated
@@ -1402,6 +1626,16 @@ pub async fn store_tokens(
     key: &str,
     stored: &StoredTokens,
 ) -> Result<(), OAuthError> {
+    store_tokens_with_telemetry(storage, clock, key, stored, None).await
+}
+
+pub async fn store_tokens_with_telemetry(
+    storage: &Arc<dyn platform_api::SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    key: &str,
+    stored: &StoredTokens,
+    telemetry: Option<&McpOAuthTelemetryContext>,
+) -> Result<(), OAuthError> {
     let bytes =
         serde_json::to_vec(stored).map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
     let metadata = protocol::SecureStorageMetadata {
@@ -1413,7 +1647,12 @@ pub async fn store_tokens(
     storage
         .store(MCP_OAUTH_SERVICE, key, data)
         .await
-        .map_err(|e| OAuthError::Token(format!("storage store: {e}")))?;
+        .map_err(|e| {
+            if let Some(ctx) = telemetry {
+                emit_oauth_token_persist_failed(ctx, "storage_write_failed");
+            }
+            OAuthError::Token(format!("storage store: {e}"))
+        })?;
     Ok(())
 }
 
@@ -1427,20 +1666,18 @@ pub async fn save_tokens(
     key: &str,
     tokens: &Tokens,
 ) -> Result<(), OAuthError> {
+    save_tokens_with_telemetry(storage, clock, key, tokens, None).await
+}
+
+pub async fn save_tokens_with_telemetry(
+    storage: &Arc<dyn platform_api::SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    key: &str,
+    tokens: &Tokens,
+    telemetry: Option<&McpOAuthTelemetryContext>,
+) -> Result<(), OAuthError> {
     let stored = StoredTokens::from_tokens(tokens);
-    let bytes = serde_json::to_vec(&stored)
-        .map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
-    let metadata = protocol::SecureStorageMetadata {
-        created_at: clock.now(),
-        last_accessed: None,
-        kind: protocol::SecretKindDto("mcp_oauth_tokens".into()),
-    };
-    let data = protocol::SecureStorageData::new(bytes, metadata);
-    storage
-        .store(MCP_OAUTH_SERVICE, key, data)
-        .await
-        .map_err(|e| OAuthError::Token(format!("storage store: {e}")))?;
-    Ok(())
+    store_tokens_with_telemetry(storage, clock, key, &stored, telemetry).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1634,6 +1871,41 @@ pub async fn revoke_server_tokens(
     if let Err(e) = storage.delete(MCP_OAUTH_SERVICE, key).await {
         tracing::debug!(error = %e, "mcp oauth: failed to clear local tokens after revocation");
     }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct CapturedOAuthTelemetryEvent {
+    name: &'static str,
+    payload: serde_json::Value,
+}
+
+#[cfg(test)]
+fn test_oauth_telemetry_events() -> &'static std::sync::Mutex<Vec<CapturedOAuthTelemetryEvent>> {
+    static EVENTS: std::sync::OnceLock<std::sync::Mutex<Vec<CapturedOAuthTelemetryEvent>>> =
+        std::sync::OnceLock::new();
+    EVENTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn clear_test_oauth_telemetry_events() {
+    test_oauth_telemetry_events().lock().unwrap().clear();
+}
+
+#[cfg(test)]
+fn take_test_oauth_telemetry_events() -> Vec<CapturedOAuthTelemetryEvent> {
+    std::mem::take(&mut *test_oauth_telemetry_events().lock().unwrap())
+}
+
+#[cfg(test)]
+fn record_test_oauth_telemetry_event<T: serde::Serialize>(name: &'static str, payload: &T) {
+    test_oauth_telemetry_events()
+        .lock()
+        .unwrap()
+        .push(CapturedOAuthTelemetryEvent {
+            name,
+            payload: serde_json::to_value(payload).unwrap(),
+        });
 }
 
 /// Inner discovery + per-token revocation (the `try` block of auth.ts:481-570).
@@ -2118,7 +2390,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .rows
                 .lock()
@@ -2889,5 +3164,145 @@ mod tests {
         )
         .await
         .expect("a matching resource must not be rejected");
+    }
+
+    #[tokio::test]
+    async fn manual_oauth_cancel_emits_flow_start_and_cancelled_error() {
+        clear_test_oauth_telemetry_events();
+        let http = MockPrmHttp::new(&[
+            (
+                "https://mcp.example.com/.well-known/oauth-protected-resource/v1",
+                404,
+                "",
+            ),
+            (
+                "https://mcp.example.com/.well-known/oauth-authorization-server/v1",
+                200,
+                r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http;
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(0));
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: platform_api::McpHeaders::new(),
+            headers_helper: None,
+            oauth: None,
+        };
+        let telemetry = McpOAuthTelemetryContext::for_server("srv", &spec);
+        let oauth_cfg = platform_api::McpOAuthConfigDto {
+            client_id: Some("client".into()),
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        };
+        let on_url: OnAuthorizationUrl = Arc::new(|_| {});
+        let mut input = tokio::io::BufReader::new(tokio::io::empty());
+
+        let err = perform_oauth_flow_with_manual_input(
+            &http_dyn,
+            &clock,
+            &oauth_cfg,
+            "srv",
+            "https://mcp.example.com/v1",
+            &on_url,
+            Some(&telemetry),
+            None,
+            &mut input,
+        )
+        .await
+        .expect_err("empty stdin must cancel the flow");
+        assert!(matches!(err, OAuthError::Callback(_)));
+
+        let events = take_test_oauth_telemetry_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].name, telemetry::tengu::mcp::OAUTH_FLOW_START);
+        assert_eq!(events[1].name, telemetry::tengu::mcp::OAUTH_FLOW_ERROR);
+        assert_eq!(events[1].payload["reason"], serde_json::json!("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn save_tokens_with_telemetry_emits_persist_failure() {
+        #[derive(Default)]
+        struct FailingStorage;
+
+        #[async_trait::async_trait]
+        impl platform_api::SecureStorage for FailingStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), platform_api::SecureStorageError> {
+                Err(platform_api::SecureStorageError::BackendUnavailable(
+                    "store failed".into(),
+                ))
+            }
+
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError>
+            {
+                Ok(None)
+            }
+
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), platform_api::SecureStorageError> {
+                Ok(())
+            }
+
+            async fn list(
+                &self,
+                _service: &str,
+            ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+                Ok(Vec::new())
+            }
+
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+
+            fn backend(&self) -> platform_api::SecureStorageBackend {
+                platform_api::SecureStorageBackend::PlainText
+            }
+        }
+
+        clear_test_oauth_telemetry_events();
+        let storage: Arc<dyn platform_api::SecureStorage> = Arc::new(FailingStorage);
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(0));
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: platform_api::McpHeaders::new(),
+            headers_helper: None,
+            oauth: None,
+        };
+        let telemetry = McpOAuthTelemetryContext::for_server("srv", &spec);
+        let tokens = Tokens {
+            access_token: Secret::new("access".into()),
+            refresh_token: Some(Secret::new("refresh".into())),
+            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            client_id: Some("client".into()),
+        };
+
+        save_tokens_with_telemetry(&storage, &clock, "key", &tokens, Some(&telemetry))
+            .await
+            .expect_err("store failure must bubble");
+
+        let events = take_test_oauth_telemetry_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].name,
+            telemetry::tengu::mcp::OAUTH_TOKEN_PERSIST_FAILED
+        );
+        assert_eq!(
+            events[0].payload["reason"],
+            serde_json::json!("storage_write_failed")
+        );
     }
 }

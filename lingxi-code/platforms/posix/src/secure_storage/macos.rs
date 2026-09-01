@@ -18,6 +18,7 @@ use crate::secure_storage::helpers::{
     full_service_name, KEYCHAIN_CACHE_TTL, SECURITY_STDIN_LINE_LIMIT,
 };
 use async_trait::async_trait;
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use protocol::SecureStorageData;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,7 +29,6 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify, RwLock};
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 type CacheKey = (String, String);
 const SECURITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);

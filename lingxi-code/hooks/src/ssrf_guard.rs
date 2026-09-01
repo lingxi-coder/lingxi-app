@@ -9,8 +9,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use thiserror::Error;
 use platform_api::ResolvedAddressOverride;
+use thiserror::Error;
 
 /// Outbound URL validator used by the HTTP hook executor.
 ///

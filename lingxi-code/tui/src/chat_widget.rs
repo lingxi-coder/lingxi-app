@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::io::Write;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyEvent;
@@ -52,6 +52,13 @@ use crate::renderable::Renderable;
 use crate::session::SessionInfo;
 use crate::spinner;
 use crate::transcript::Transcript;
+
+const FOCUS_VIEW_ENABLED_NOTICE: &str = "Focus view enabled";
+const FOCUS_VIEW_DISABLED_NOTICE: &str = "Focus view disabled";
+const FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE: &str = "Focus view needs the fullscreen renderer.";
+const FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE: &str =
+    "Focus view is enabled by settings (viewMode: focus). Focus view needs the fullscreen renderer.";
+const AGENTS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 /// What one routed key press or paste means to the owning event loop.
 pub enum ChatOutcome {
@@ -155,6 +162,10 @@ pub enum ChatOutcome {
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
     SwitchSession(uuid::Uuid),
+    /// The agents view selected a session whose process ownership must be
+    /// resolved before any transcript remount. The CLI may live-attach, queue
+    /// an exact background resume, or remount only after proving it unowned.
+    OpenAgentSession(crate::bottom_pane::view::AgentSessionTarget),
     /// The `/rewind` picker resolved to `message` with restore `scope`. Same
     /// unwind seam as [`Self::SwitchSession`]: the app returns `AppExit::Rewind`
     /// so the CLI runs the code file-rewind (via `session::file_history`) and/or
@@ -250,6 +261,15 @@ struct PendingBackgrounding {
     requested_at: Instant,
 }
 
+#[derive(Clone)]
+enum FocusRefreshKind {
+    None,
+    AgentsOnly,
+    AppendText(String),
+    ResetAssistantTail,
+    Full,
+}
+
 fn is_live_turn_event(event: &TurnEvent) -> bool {
     matches!(
         event,
@@ -275,6 +295,39 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
     )
 }
 
+fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
+    match event {
+        TurnEvent::AgentStatusSnapshot { .. } => FocusRefreshKind::AgentsOnly,
+        TurnEvent::TextDelta(delta) => FocusRefreshKind::AppendText(delta.clone()),
+        TurnEvent::Attachment { .. }
+        | TurnEvent::SystemNotice { .. }
+        | TurnEvent::BashOutput { .. }
+        | TurnEvent::CompactionCompleted { .. }
+        | TurnEvent::TurnEnded(_) => FocusRefreshKind::Full,
+        TurnEvent::TurnStarted
+        | TurnEvent::ThinkingDelta(_)
+        | TurnEvent::ToolUseStart { .. }
+        | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
+        TurnEvent::RateLimit { .. } | TurnEvent::SubagentActivity { .. } => FocusRefreshKind::None,
+        TurnEvent::PermissionRequest { .. }
+        | TurnEvent::ToolHeartbeat { .. }
+        | TurnEvent::ToolHeartbeatBatch { .. }
+        | TurnEvent::CostUpdated(_)
+        | TurnEvent::CostSnapshotUpdated(_)
+        | TurnEvent::ApiRetry { .. }
+        | TurnEvent::ContextPressure { .. }
+        | TurnEvent::TerminalSequence { .. }
+        | TurnEvent::CompactStarted
+        | TurnEvent::CompactEnded
+        | TurnEvent::RawUtilization { .. }
+        | TurnEvent::CommandCatalogRefreshed { .. }
+        | TurnEvent::MultiAgent(_)
+        | TurnEvent::HookProgressStarted { .. }
+        | TurnEvent::HookProgressFinished { .. }
+        | TurnEvent::ProviderConnected { .. } => FocusRefreshKind::None,
+    }
+}
+
 /// The chat surface: owns the conversation state and the interactive footer,
 /// leaving only loop plumbing (terminal, channels, callbacks) to the app.
 pub struct ChatWidget {
@@ -288,6 +341,12 @@ pub struct ChatWidget {
     bottom_pane: BottomPane,
     /// Startup snapshot the read-only screens and the model picker render from.
     session: SessionInfo,
+    /// Live session cwd provider used when native scrollback turns relative
+    /// attachment paths into OSC 8 file URLs. The startup `SessionInfo`
+    /// snapshot is intentionally only a fallback: `/cd` swaps the shared
+    /// session cwd after the widget is mounted, so resolving against that
+    /// snapshot would link post-`/cd` attachments to the old directory.
+    hyperlink_cwd_provider: Option<std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
     /// Theme for transcript rendering (native-scrollback flush).
     theme: Theme,
     /// The active theme *preference* (drives the `/theme` picker's current
@@ -431,6 +490,18 @@ pub struct ChatWidget {
     /// Live terminal surface used by the collapse classifier. Fullscreen folds
     /// extra Bash/MCP/memory categories; inline preserves native scrollback.
     collapse_fullscreen: bool,
+    /// `/focus` owner state: fullscreen transcript rendering swaps to the
+    /// brief projection while this stays enabled.
+    brief_transcript: bool,
+    /// Startup/default `viewMode === "focus"` request from merged settings.
+    startup_view_mode_focus: bool,
+    /// Cached owner-computed `/focus` projection. Rebuilt only while
+    /// [`Self::brief_transcript`] is enabled.
+    focus_projection: crate::bottom_pane::view::FocusProjection,
+    /// Number of trailing projection lines owned by the live active assistant
+    /// cell. Lets `TextDelta` append incrementally instead of rescanning the
+    /// whole transcript on every streamed chunk.
+    focus_active_assistant_lines: usize,
     /// Composition-root-shared `/web` config snapshot slot (`None` until the
     /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
     /// reads a clone to seed the picker; the async `on_web_action` effect
@@ -517,11 +588,29 @@ pub struct ChatWidget {
     /// [`ChatOutcome::TaskAction`]. `None` (every test widget) makes `/tasks` a
     /// graceful "unavailable" line.
     task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    /// Composition-root-supplied live agents snapshot provider for the fleet
+    /// pane. `None` degrades to an empty agents pane.
+    agents_snapshot_provider:
+        Option<std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>>,
+    /// Throttled cache for the live agents pane so an open fleet view does
+    /// not rescan sessions/jobs on every 20 Hz UI tick.
+    agents_snapshot_cache: crate::bottom_pane::view::AgentsSnapshot,
+    agents_snapshot_last_refresh: Option<Instant>,
     goal_handler: Option<command_core::goal::GoalHandler>,
     /// Most recent history-inert `/btw` exchange. Claude Code keeps this
     /// panel-local state so a bare `/btw` reopens the exchange without issuing
     /// another side query or mutating the main transcript.
     last_btw_exchange: Option<(String, String)>,
+    #[cfg(test)]
+    focus_projection_full_scans: usize,
+    /// Test-only proof that streaming projection work is linear in the bytes
+    /// delivered, rather than reprocessing the accumulated assistant body.
+    #[cfg(test)]
+    focus_projection_delta_bytes: usize,
+    /// Test-only count of backing-buffer growths while appending a single
+    /// streamed focus line. Geometric `String` growth keeps this bounded.
+    #[cfg(test)]
+    focus_projection_delta_growths: usize,
 }
 
 impl ChatWidget {
@@ -534,6 +623,7 @@ impl ChatWidget {
             transcript: Transcript::from_messages(messages),
             bottom_pane: BottomPane::new(theme),
             session,
+            hyperlink_cwd_provider: None,
             theme,
             theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
@@ -573,6 +663,10 @@ impl ChatWidget {
             collapse_group_id: None,
             collapse_ids: std::collections::HashSet::new(),
             collapse_fullscreen: false,
+            brief_transcript: false,
+            startup_view_mode_focus: false,
+            focus_projection: crate::bottom_pane::view::FocusProjection::default(),
+            focus_active_assistant_lines: 0,
             web_snapshot: None,
             permission_snapshot: None,
             plugin_snapshot: None,
@@ -582,11 +676,20 @@ impl ChatWidget {
             shell_expansion: None,
             orchestrator: None,
             task_registry: None,
+            agents_snapshot_provider: None,
+            agents_snapshot_cache: crate::bottom_pane::view::AgentsSnapshot::default(),
+            agents_snapshot_last_refresh: None,
             sandbox_toggle: None,
             invoked_slash: String::new(),
             command_registry: None,
             goal_handler: None,
             last_btw_exchange: None,
+            #[cfg(test)]
+            focus_projection_full_scans: 0,
+            #[cfg(test)]
+            focus_projection_delta_bytes: 0,
+            #[cfg(test)]
+            focus_projection_delta_growths: 0,
         }
     }
 
@@ -612,6 +715,24 @@ impl ChatWidget {
         if self.collapse_fullscreen != fullscreen {
             self.finalize_collapse_group();
             self.collapse_fullscreen = fullscreen;
+            self.brief_transcript = fullscreen && self.startup_view_mode_focus;
+            if self.brief_transcript {
+                self.sync_focus_projection();
+            } else {
+                self.focus_active_assistant_lines = 0;
+            }
+        }
+    }
+
+    /// Apply the merged startup `viewMode` preference from settings.
+    pub fn set_startup_view_mode(&mut self, view_mode: Option<&str>) {
+        self.startup_view_mode_focus = matches!(view_mode, Some("focus"));
+        self.brief_transcript = self.collapse_fullscreen && self.startup_view_mode_focus;
+        if self.brief_transcript {
+            self.sync_focus_projection();
+        } else {
+            self.focus_projection = crate::bottom_pane::view::FocusProjection::default();
+            self.focus_active_assistant_lines = 0;
         }
     }
 
@@ -622,7 +743,10 @@ impl ChatWidget {
     /// lose it — see the `goal_handler` field). Wired from the CLI `run_app`
     /// off the engine runtime; `None` (every test widget) keeps those commands
     /// as graceful no-ops.
-    pub fn set_orchestrator(&mut self, handle: std::sync::Arc<dyn platform_api::OrchestratorHandle>) {
+    pub fn set_orchestrator(
+        &mut self,
+        handle: std::sync::Arc<dyn platform_api::OrchestratorHandle>,
+    ) {
         self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
         self.orchestrator = Some(handle);
     }
@@ -719,6 +843,18 @@ impl ChatWidget {
     /// model picker render from.
     pub fn set_session(&mut self, session: SessionInfo) {
         self.session = session;
+    }
+
+    /// Wire a live session-cwd reader for native-scrollback attachment links.
+    /// The CLI supplies a closure over its shared `SessionCwd` cell, whose
+    /// value changes when `/cd` succeeds. Keeping the reader as a callback
+    /// leaves the TUI independent of the composition-root cell type while
+    /// ensuring each flush resolves against the current, not boot, cwd.
+    pub fn set_hyperlink_cwd_provider(
+        &mut self,
+        provider: std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
+    ) {
+        self.hyperlink_cwd_provider = Some(provider);
     }
 
     /// Apply a theme preference live: resolve it (`Auto` consults the OSC-11
@@ -881,6 +1017,7 @@ impl ChatWidget {
     /// channel and pop the view without requiring a key press.
     pub fn pump_view_timeout(&mut self) -> bool {
         let had_prompt = self.has_open_interactive_prompt();
+        let agents_changed = self.refresh_agents_view();
         let outcome = self.bottom_pane.handle_view_tick(Instant::now());
         let chat_outcome = self.on_pane_outcome(outcome);
         debug_assert!(matches!(chat_outcome, ChatOutcome::Continue));
@@ -888,7 +1025,7 @@ impl ChatWidget {
         self.pump_held_peer();
         // If a modal was open this tick, redraw even if it just popped
         // (otherwise the expired view stays on screen until the next key).
-        had_prompt
+        had_prompt || agents_changed
     }
 
     fn pump_held_peer(&mut self) {
@@ -915,11 +1052,14 @@ impl ChatWidget {
             Ok(path) => {
                 let _ = self.push_image(&path);
             }
-            Err(err) => self.transcript.push_message(RenderedMessage::SystemText {
-                body: format!("Failed to paste image: {err}"),
-                timestamp: 0,
-                is_error: true,
-            }),
+            Err(err) => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body: format!("Failed to paste image: {err}"),
+                    timestamp: 0,
+                    is_error: true,
+                });
+                self.sync_focus_projection();
+            }
         }
     }
 
@@ -1025,6 +1165,7 @@ impl ChatWidget {
     /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
     /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
+        let focus_refresh = focus_refresh_for_turn_event(&event);
         let belongs_to_manual_compaction = self.current_compaction.is_some()
             && matches!(
                 &event,
@@ -1182,6 +1323,7 @@ impl ChatWidget {
                     self.collapse_ids.insert(id.clone());
                     self.tool_inputs.insert(id.clone(), input.clone());
                     self.render_active_collapse();
+                    self.apply_focus_refresh(focus_refresh);
                     return;
                 }
                 // A non-collapsible tool use breaks any open fold.
@@ -1235,6 +1377,7 @@ impl ChatWidget {
                 if self.collapse_ids.remove(&id) {
                     self.tool_inputs.remove(&id);
                     self.render_active_collapse();
+                    self.apply_focus_refresh(focus_refresh);
                     return;
                 }
                 self.finalize_collapse_group();
@@ -1537,6 +1680,7 @@ impl ChatWidget {
                     .push_message(RenderedMessage::SubagentActivity { text });
             }
         }
+        self.apply_focus_refresh(focus_refresh);
     }
 
     /// Merge foreground Agent/Task calls with the registry-backed background
@@ -1818,6 +1962,17 @@ impl ChatWidget {
         self.task_registry = Some(handle);
     }
 
+    /// Wire the live agents-pane snapshot provider. The app supplies the
+    /// session/fleet reader; tests may replace it with a deterministic fixture.
+    pub fn set_agents_snapshot_provider(
+        &mut self,
+        provider: std::sync::Arc<
+            dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync,
+        >,
+    ) {
+        self.agents_snapshot_provider = Some(provider);
+    }
+
     /// Cancel any in-flight streaming turn (its `CancellationToken`), used when
     /// the app loop is about to UNWIND for a `/resume` switch so the outgoing
     /// turn stops streaming into the session file the user just left. Mirrors
@@ -1849,6 +2004,12 @@ impl ChatWidget {
         self.connect_availability = availability;
     }
 
+    /// Public owner seam for the shared `/connect` picker without requiring
+    /// callers in other crates to reach the slash-command handler directly.
+    pub fn open_connect_picker(&mut self) -> ChatOutcome {
+        self.cmd_connect("")
+    }
+
     /// The current model's `(wire_id, display)` pair (falls back to
     /// `("(default)", "(default)")`), for the statusline payload's
     /// `model.id`/`model.display_name`.
@@ -1877,9 +2038,33 @@ impl ChatWidget {
     /// `mode.rs`. When `profile` is `None` (resolve-by-id, no provider pinned),
     /// falls back to matching by model id alone.
     fn set_current_model(&mut self, request_model: &str, profile: Option<&str>) {
+        let target_was_current = self.session.models.iter().any(|m| {
+            m.is_current
+                && m.request_model == request_model
+                && profile.is_none_or(|p| m.profile.as_deref() == Some(p))
+        });
+        let target_found = self.session.models.iter().any(|m| {
+            m.request_model == request_model
+                && profile.is_none_or(|p| m.profile.as_deref() == Some(p))
+        });
+        let selection_changed = target_found && !target_was_current;
         for m in &mut self.session.models {
             m.is_current = m.request_model == request_model
                 && profile.is_none_or(|p| m.profile.as_deref() == Some(p));
+            if selection_changed {
+                // A model selected from the picker is user-owned for the live
+                // session, even when the boot/default row was imposed by
+                // managed policy. Clear the old row's administrator provenance
+                // as the active selection moves, so the suffix cannot linger.
+                m.provenance = if m.is_current {
+                    platform_api::ModelProvenance::UserOrEnv
+                } else {
+                    platform_api::ModelProvenance::ProviderCatalogTier
+                };
+            }
+        }
+        if selection_changed {
+            self.session.model_provenance = platform_api::ModelProvenance::UserOrEnv;
         }
     }
 
@@ -2154,6 +2339,19 @@ impl ChatWidget {
     /// frame therefore renders the structured transcript tail into all rows
     /// above the status/composer pane.
     pub fn render_fullscreen_frame(&mut self, frame: &mut crate::terminal::Frame<'_>) {
+        self.render_fullscreen_frame_with_hyperlinks(
+            frame,
+            crate::terminal::hyperlinks_supported(),
+        );
+    }
+
+    /// Full-screen render seam with an explicit hyperlink gate for tests and
+    /// embedders that already performed terminal capability detection.
+    fn render_fullscreen_frame_with_hyperlinks(
+        &mut self,
+        frame: &mut crate::terminal::Frame<'_>,
+        hyperlinks_enabled: bool,
+    ) {
         let area = frame.area();
         self.bottom_pane.set_task_running(self.pane_status());
 
@@ -2173,9 +2371,15 @@ impl ChatWidget {
         let status_area = Rect::new(area.x, history_area.bottom(), area.width, status_height);
         let pane_area = Rect::new(area.x, status_area.bottom(), area.width, pane_height);
 
-        let history = self
-            .transcript
-            .visible_fullscreen_lines(history_area.width, &self.theme);
+        let live_hyperlink_cwd = self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .map(|provider| provider());
+        let snapshot_hyperlink_cwd = (!self.session.doctor.cwd.is_empty())
+            .then(|| std::path::Path::new(self.session.doctor.cwd.as_str()));
+        let hyperlink_cwd = live_hyperlink_cwd.as_deref().or(snapshot_hyperlink_cwd);
+        let history =
+            self.fullscreen_history_lines(history_area.width, hyperlinks_enabled, hyperlink_cwd);
         let skip = history
             .len()
             .saturating_sub(usize::from(history_area.height));
@@ -2186,7 +2390,7 @@ impl ChatWidget {
                 history_area.width,
                 1,
             );
-            Renderable::render(line, row_area, frame.buffer_mut());
+            crate::render::render_line_with_hyperlinks(line, row_area, frame.buffer_mut());
         }
         for (row, line) in status_lines.iter().enumerate() {
             let row_area = Rect::new(
@@ -2208,6 +2412,28 @@ impl ChatWidget {
         }
     }
 
+    fn fullscreen_history_lines(
+        &self,
+        width: u16,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&std::path::Path>,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        if !self.brief_transcript {
+            return self.transcript.visible_fullscreen_lines_with_hyperlinks(
+                width,
+                &self.theme,
+                hyperlinks_enabled,
+                hyperlink_cwd,
+            );
+        }
+        self.focus_projection
+            .lines
+            .iter()
+            .flat_map(|line| crate::screen_reader::word_wrap(line, usize::from(width.max(1))))
+            .map(ratatui::text::Line::raw)
+            .collect()
+    }
+
     /// Commit finalized transcript cells into the terminal's native scrollback
     /// via [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE
     /// the bottom viewport), delegating to
@@ -2224,9 +2450,30 @@ impl ChatWidget {
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
+        self.flush_scrollback_with_hyperlinks(terminal, crate::terminal::hyperlinks_supported())
+    }
+
+    fn flush_scrollback_with_hyperlinks<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+        hyperlinks_enabled: bool,
+    ) -> io::Result<()> {
         let width = terminal.size()?.width.max(1);
+        let live_hyperlink_cwd = self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .map(|provider| provider());
+        let snapshot_hyperlink_cwd = (!self.session.doctor.cwd.is_empty())
+            .then(|| std::path::Path::new(self.session.doctor.cwd.as_str()));
+        let hyperlink_cwd = live_hyperlink_cwd.as_deref().or(snapshot_hyperlink_cwd);
         self.transcript
-            .flush_to_native_scrollback(terminal, width, &self.theme)
+            .flush_to_native_scrollback_with_hyperlinks_and_cwd(
+                terminal,
+                width,
+                &self.theme,
+                hyperlinks_enabled,
+                hyperlink_cwd,
+            )
     }
 
     /// Read-only access to the transcript (rendering/tests).
@@ -2264,6 +2511,7 @@ impl ChatWidget {
             || self.has_open_interactive_prompt()
             || !self.foreground_agents.is_empty()
             || !self.background_agents.is_empty()
+            || self.bottom_pane.active_view_needs_redraw()
     }
 
     // ===== Registry-dispatched command handlers (`crate::command::BUILTIN`) =====
@@ -2278,6 +2526,30 @@ impl ChatWidget {
     /// the widget only emits an intent.
     pub(crate) fn cmd_tui(&mut self, _args: &str) -> ChatOutcome {
         ChatOutcome::ToggleFullscreen
+    }
+
+    /// `/focus`: toggle the focused transcript view.
+    pub(crate) fn cmd_focus(&mut self, _args: &str) -> ChatOutcome {
+        if !self.collapse_fullscreen {
+            self.brief_transcript = false;
+            self.focus_projection = crate::bottom_pane::view::FocusProjection::default();
+            self.focus_active_assistant_lines = 0;
+            return self.show_system_text(
+                if self.startup_view_mode_focus {
+                    FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE
+                } else {
+                    FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE
+                },
+                false,
+            );
+        }
+        self.brief_transcript = !self.brief_transcript;
+        if self.brief_transcript {
+            self.sync_focus_projection();
+            self.show_system_text(FOCUS_VIEW_ENABLED_NOTICE, false)
+        } else {
+            self.show_system_text(FOCUS_VIEW_DISABLED_NOTICE, false)
+        }
     }
 
     /// `/model`: open the model picker over the CONNECTED subset of
@@ -2393,6 +2665,17 @@ impl ChatWidget {
             }
         });
         self.show_system_text(&message, is_error)
+    }
+
+    /// `/ide`: render the secret-free local IDE inventory or run an explicit
+    /// connect/open/disconnect action through the live engine handle. The
+    /// command-core handler owns the same grammar for headless dispatch, so
+    /// TUI and non-TUI paths share lifecycle behavior and error text.
+    pub(crate) fn cmd_ide(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/ide is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("ide", args, &command_core::IdeHandler::new(handle))
     }
 
     /// Async glue for `/mcp reconnect` — mirrors claude's `lJy` reconnect
@@ -2868,17 +3151,20 @@ impl ChatWidget {
         }
     }
 
-    /// `/diff`: render uncommitted working-tree changes (`git diff HEAD`) into
-    /// the transcript as read-only system output. Faithful v1 of claude-code's
-    /// interactive `DiffDialog`; a scrollable overlay + per-turn-diff pages are
-    /// deferred. The git call is a local, read-only host subprocess (no engine
-    /// handle, no network, no state mutation), so it runs synchronously on the
-    /// slash path — same class as the filesystem I/O `/export` performs — with
-    /// no off-loop `ChatOutcome` effect.
+    /// `/diff`: open a scrollable, live-refreshed overlay for uncommitted
+    /// working-tree changes (`git diff HEAD`). The git call remains local and
+    /// read-only (no engine handle, network, or state mutation); the view takes
+    /// one initial snapshot and debounced owner-tick refreshes make external
+    /// branch/commit changes visible without another slash command.
     pub(crate) fn cmd_diff(&mut self, _args: &str) -> ChatOutcome {
-        let cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
-        let out = crate::diff::collect_diff(&cwd);
-        self.show_system_text(&out.body, out.is_error)
+        let cwd = if self.session.doctor.cwd.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(&self.session.doctor.cwd)
+        };
+        self.bottom_pane
+            .show_view(Box::new(crate::diff::DiffView::new(cwd)));
+        ChatOutcome::Continue
     }
 
     /// `/export [filename]`: write the transcript (every committed cell's
@@ -3113,8 +3399,10 @@ impl ChatWidget {
     /// through `/tasks`'s empty-list system line injected a spurious cell at the
     /// top of every conversation and opened nothing.
     pub(crate) fn open_agents_view(&mut self) -> ChatOutcome {
-        self.bottom_pane
-            .show_tasks(self.task_snapshot().unwrap_or_default());
+        let snapshot = self.agents_snapshot();
+        self.agents_snapshot_cache = snapshot.clone();
+        self.agents_snapshot_last_refresh = Some(Instant::now());
+        self.bottom_pane.show_agents(snapshot);
         ChatOutcome::Continue
     }
 
@@ -3239,7 +3527,9 @@ impl ChatWidget {
             u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
         match platform_api::classify_backgrounding(&snapshot, elapsed_ms) {
-            platform_api::BackgroundingDecision::IdleFork => self.perform_backgrounding(snapshot, false),
+            platform_api::BackgroundingDecision::IdleFork => {
+                self.perform_backgrounding(snapshot, false)
+            }
             platform_api::BackgroundingDecision::DeferThenFork { .. } => {
                 if self.pending_backgrounding.is_some() {
                     // A confirmed second ← is the oracle's “skip ahead” path.
@@ -3531,6 +3821,7 @@ impl ChatWidget {
         // backend tracker.
         self.cost = None;
         self.with_status_line(|s| s.data.cost = String::new());
+        self.focus_projection = crate::bottom_pane::view::FocusProjection::default();
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -3650,6 +3941,7 @@ impl ChatWidget {
             body: invocation,
             timestamp: 0,
         });
+        self.sync_focus_projection();
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
@@ -3665,7 +3957,18 @@ impl ChatWidget {
             timestamp: 0,
             is_error,
         });
+        self.sync_focus_projection();
         ChatOutcome::Continue
+    }
+
+    /// `/brief`: toggle the live brief-only mode shared with the tool gate.
+    pub(crate) fn cmd_brief(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command("brief", args, &command_core::BriefHandler::new())
+    }
+
+    /// `/powerup`: show the lesson list/detail view and persist completions.
+    pub(crate) fn cmd_powerup(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command("powerup", args, &command_core::PowerupHandler::new())
     }
 
     /// `/init`: inject the LINGXI.md initialization prompt as the next turn.
@@ -4254,6 +4557,298 @@ impl ChatWidget {
         line_count(&self.live_tail(width))
     }
 
+    fn sync_focus_projection(&mut self) {
+        if !self.brief_transcript {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.focus_projection_full_scans += 1;
+        }
+        self.focus_projection = self.compute_focus_projection();
+        self.focus_active_assistant_lines = self.active_assistant_focus_lines();
+    }
+
+    fn apply_focus_refresh(&mut self, refresh: FocusRefreshKind) {
+        match refresh {
+            FocusRefreshKind::None => {}
+            FocusRefreshKind::AgentsOnly => {
+                if self.brief_transcript {
+                    self.focus_projection.running_agents =
+                        self.bottom_pane.running_agents().to_vec();
+                }
+            }
+            FocusRefreshKind::AppendText(delta) => self.append_focus_text_delta(&delta),
+            FocusRefreshKind::ResetAssistantTail => {
+                self.focus_active_assistant_lines = 0;
+            }
+            FocusRefreshKind::Full => self.sync_focus_projection(),
+        }
+    }
+
+    fn active_assistant_focus_tail_lines(&self) -> Vec<String> {
+        use crate::history_cell::message::AssistantTextCell;
+
+        self.transcript
+            .active_cell()
+            .filter(|cell| cell.as_any().is::<AssistantTextCell>())
+            .map(|cell| {
+                cell.raw_lines()
+                    .into_iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .filter(|line| !line.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn active_assistant_focus_lines(&self) -> usize {
+        self.active_assistant_focus_tail_lines().len()
+    }
+
+    fn append_focus_text_delta(&mut self, delta: &str) {
+        if !self.brief_transcript || delta.is_empty() {
+            return;
+        }
+
+        use crate::history_cell::message::{ASSISTANT_MARKER, CONT_INDENT};
+
+        #[cfg(test)]
+        {
+            self.focus_projection_delta_bytes = self
+                .focus_projection_delta_bytes
+                .saturating_add(delta.len());
+        }
+
+        let active_tail_is_valid = self.focus_active_assistant_lines > 0
+            && self.focus_projection.lines.len() >= self.focus_active_assistant_lines;
+        let mut segments = delta.split('\n');
+        let first = segments.next().unwrap_or_default();
+        if active_tail_is_valid {
+            if let Some(line) = self.focus_projection.lines.last_mut() {
+                #[cfg(test)]
+                let prior_capacity = line.capacity();
+                line.push_str(first);
+                #[cfg(test)]
+                if line.capacity() != prior_capacity {
+                    self.focus_projection_delta_growths =
+                        self.focus_projection_delta_growths.saturating_add(1);
+                }
+            }
+        } else {
+            let mut line = String::with_capacity(ASSISTANT_MARKER.len() + first.len());
+            line.push_str(ASSISTANT_MARKER);
+            line.push_str(first);
+            #[cfg(test)]
+            if line.capacity() > 0 {
+                self.focus_projection_delta_growths =
+                    self.focus_projection_delta_growths.saturating_add(1);
+            }
+            self.focus_projection.lines.push(line);
+            self.focus_active_assistant_lines = 1;
+        }
+
+        for segment in segments {
+            let mut line = String::with_capacity(CONT_INDENT.len() + segment.len());
+            line.push_str(CONT_INDENT);
+            line.push_str(segment);
+            #[cfg(test)]
+            if line.capacity() > 0 {
+                self.focus_projection_delta_growths =
+                    self.focus_projection_delta_growths.saturating_add(1);
+            }
+            self.focus_projection.lines.push(line);
+            self.focus_active_assistant_lines = self.focus_active_assistant_lines.saturating_add(1);
+        }
+    }
+
+    fn refresh_agents_view(&mut self) -> bool {
+        if !self
+            .bottom_pane
+            .view_stack()
+            .contains::<crate::bottom_pane::agents_view::AgentsView>()
+        {
+            return false;
+        }
+        let now = Instant::now();
+        let should_refresh = self.agents_snapshot_last_refresh.is_none_or(|last| {
+            now.saturating_duration_since(last) >= AGENTS_SNAPSHOT_REFRESH_INTERVAL
+        });
+        if !should_refresh {
+            return false;
+        }
+        let snapshot = self.agents_snapshot();
+        self.agents_snapshot_last_refresh = Some(now);
+        if snapshot == self.agents_snapshot_cache {
+            return false;
+        }
+        self.agents_snapshot_cache = snapshot.clone();
+        self.bottom_pane.refresh_agents(snapshot);
+        true
+    }
+
+    fn agents_snapshot(&self) -> crate::bottom_pane::view::AgentsSnapshot {
+        self.agents_snapshot_provider
+            .as_ref()
+            .map(|provider| provider())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn live_agents_snapshot() -> crate::bottom_pane::view::AgentsSnapshot {
+        let self_session_id = platform_api::live_sessions::process_session_id();
+        let mut rows = platform_api::live_sessions::process_live_dir()
+            .list_live()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| {
+                let session_id = record.session_id.clone().unwrap_or_default();
+                if self_session_id
+                    .as_deref()
+                    .is_some_and(|self_id| self_id == session_id)
+                {
+                    return None;
+                }
+                let kind = match record.kind.as_deref() {
+                    Some("bg") => "background",
+                    Some("interactive") | None => "interactive",
+                    Some(_) => return None,
+                };
+                let status = record.status.as_deref().map(|status| match status {
+                    "idle" => "idle",
+                    "waiting" => "waiting",
+                    _ => "busy",
+                });
+                let state = if status == Some("waiting") {
+                    "blocked"
+                } else {
+                    "working"
+                };
+                Some(crate::bottom_pane::view::AgentsPaneRow {
+                    session_id,
+                    name: record.display_name().to_string(),
+                    state: state.to_string(),
+                    kind: kind.to_string(),
+                    cwd: record.cwd.unwrap_or_default(),
+                    status: status.map(str::to_string),
+                    waiting_for: record.waiting_for,
+                    detail: None,
+                    model: None,
+                    tokens: None,
+                    tool_calls: None,
+                    started_at_ms: record
+                        .started_at
+                        .and_then(|value| u64::try_from(value).ok()),
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.started_at_ms.unwrap_or(0));
+        crate::bottom_pane::view::AgentsSnapshot { rows }
+    }
+
+    #[cfg(test)]
+    fn expire_agents_snapshot_refresh_for_test(&mut self) {
+        self.agents_snapshot_last_refresh = Some(
+            Instant::now()
+                .checked_sub(AGENTS_SNAPSHOT_REFRESH_INTERVAL + Duration::from_millis(1))
+                .unwrap_or_else(Instant::now),
+        );
+    }
+
+    fn compute_focus_projection(&self) -> crate::bottom_pane::view::FocusProjection {
+        use crate::history_cell::message::{
+            AssistantTextCell, UserBashInputCell, UserCommandCell, UserPromptCell, UserTextCell,
+        };
+        use crate::history_cell::system::CompactBoundaryCell;
+        use crate::history_cell::team::{AgentNotificationCell, UserTeammateCell};
+
+        enum FocusCellKind {
+            Visible,
+            CompletedNotification,
+            Hidden,
+        }
+
+        let plain_lines = |cell: &dyn crate::history_cell::HistoryCell| {
+            cell.raw_lines()
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+        };
+        let classify = |cell: &dyn crate::history_cell::HistoryCell, lines: &[String]| {
+            if cell.as_any().is::<UserTextCell>()
+                || cell.as_any().is::<UserPromptCell>()
+                || cell.as_any().is::<UserCommandCell>()
+                || cell.as_any().is::<UserBashInputCell>()
+                || cell.as_any().is::<AssistantTextCell>()
+                || cell.as_any().is::<CompactBoundaryCell>()
+            {
+                return FocusCellKind::Visible;
+            }
+            if cell.as_any().is::<AgentNotificationCell>() || cell.as_any().is::<UserTeammateCell>()
+            {
+                return if lines.first().is_some_and(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.contains("completed")
+                        && !lower.contains("failed")
+                        && !lower.contains("killed")
+                }) {
+                    FocusCellKind::CompletedNotification
+                } else {
+                    FocusCellKind::Visible
+                };
+            }
+            FocusCellKind::Hidden
+        };
+
+        let mut lines = Vec::new();
+        let mut completed_lines = Vec::new();
+        let flush_completed = |lines: &mut Vec<String>, completed_lines: &mut Vec<String>| {
+            match completed_lines.len() {
+                0 => {}
+                1..=3 => lines.append(completed_lines),
+                count => {
+                    lines.extend(completed_lines.drain(..2));
+                    lines.push(format!("+{} more tasks completed", count - 2));
+                    completed_lines.clear();
+                }
+            }
+        };
+        let mut visit = |cell: &dyn crate::history_cell::HistoryCell| {
+            let cell_lines = plain_lines(cell);
+            match classify(cell, &cell_lines) {
+                FocusCellKind::Visible => {
+                    flush_completed(&mut lines, &mut completed_lines);
+                    lines.extend(cell_lines);
+                }
+                FocusCellKind::CompletedNotification => {
+                    completed_lines.push(cell_lines.join(" "));
+                }
+                FocusCellKind::Hidden => {}
+            }
+        };
+        for cell in self.transcript.committed_cells() {
+            visit(cell.as_ref());
+        }
+        if let Some(active) = self.transcript.active_cell() {
+            visit(active);
+        }
+        flush_completed(&mut lines, &mut completed_lines);
+        crate::bottom_pane::view::FocusProjection {
+            lines,
+            running_agents: self.bottom_pane.running_agents().to_vec(),
+        }
+    }
+
     /// The custom-statusline command output as dim rows, read from the shared
     /// pump slot (empty when no statusline is configured or the command has not
     /// produced output yet). Rendered just above the bottom pane.
@@ -4345,6 +4940,7 @@ impl ChatWidget {
     fn on_pane_outcome(&mut self, outcome: BottomPaneOutcome) -> ChatOutcome {
         match outcome {
             BottomPaneOutcome::Consumed => ChatOutcome::Continue,
+            BottomPaneOutcome::OpenRewindPicker => self.cmd_rewind(""),
             // ← on an empty composer: open the background-agents view. Routed
             // through the SAME path as `/tasks` so the two cannot drift — the
             // row snapshot comes from the live registry, which only the owner
@@ -4444,6 +5040,7 @@ impl ChatWidget {
                 })
             }
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
+            BottomPaneOutcome::OpenAgentSession(target) => ChatOutcome::OpenAgentSession(target),
             BottomPaneOutcome::RewakePeer => {
                 if self.current_turn.is_some() {
                     ChatOutcome::Continue
@@ -4486,6 +5083,7 @@ impl ChatWidget {
             body: text.clone(),
             timestamp: 0,
         });
+        self.sync_focus_projection();
         if self.current_turn.is_some() {
             return ChatOutcome::QueuePrompt(text, self.take_pending_images());
         }
@@ -4503,6 +5101,7 @@ impl ChatWidget {
                 self.clear_transcript();
                 ChatOutcome::Continue
             }
+            CommandAction::OpenConnectPicker => self.cmd_connect(""),
             CommandAction::Quit => ChatOutcome::Quit,
             CommandAction::SetTheme(setting) => {
                 // Applied live here; the caller persists it (best-effort).
@@ -4842,7 +5441,10 @@ fn mcp_reconnect_nothing_msg(disabled_count: usize) -> String {
 /// Single-target `reconnect` outcome, keyed on the post-reconnect state `k`
 /// (claude's `k` = `x[0].value.client.type`, or `void 0` when the attempt
 /// hard-failed). Returns `(message, is_error)`.
-fn mcp_reconnect_single_msg(k: Option<platform_api::McpActionState>, target: &str) -> (String, bool) {
+fn mcp_reconnect_single_msg(
+    k: Option<platform_api::McpActionState>,
+    target: &str,
+) -> (String, bool) {
     use platform_api::McpActionState::{Connected, NeedsAuth};
     match k {
         Some(Connected) => (format!("Reconnected \"{target}\"."), false),
@@ -5007,6 +5609,106 @@ mod tests {
         ChatWidget::new(Vec::new(), SessionInfo::default())
     }
 
+    fn widget_with_agents_snapshot(
+        snapshot: std::sync::Arc<std::sync::Mutex<crate::bottom_pane::view::AgentsSnapshot>>,
+    ) -> ChatWidget {
+        let mut widget = widget();
+        widget.set_agents_snapshot_provider(std::sync::Arc::new(move || {
+            snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }));
+        widget
+    }
+
+    fn active_agents_view(widget: &ChatWidget) -> &crate::bottom_pane::agents_view::AgentsView {
+        widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| {
+                view.as_any()
+                    .downcast_ref::<crate::bottom_pane::agents_view::AgentsView>()
+            })
+            .expect("agents view active")
+    }
+
+    fn fullscreen_output(widget: &mut ChatWidget) -> String {
+        let backend = TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = Terminal::with_options_at_origin(backend).expect("test terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 80, 24));
+        raw.borrow_mut().clear();
+        terminal
+            .draw(|frame| widget.render_fullscreen_frame_with_hyperlinks(frame, false))
+            .expect("fullscreen draw");
+        let rendered = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        rendered
+    }
+
+    fn completed_notification_line(task_id: &str) -> String {
+        let mut widget = widget();
+        widget
+            .transcript
+            .push_message(RenderedMessage::UserTeammate {
+                display_name: "worker".into(),
+                color: None,
+                kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                    task_id: task_id.into(),
+                    task_subject: None,
+                },
+            });
+        widget
+            .compute_focus_projection()
+            .lines
+            .into_iter()
+            .find(|line| !line.is_empty())
+            .expect("completed notification line")
+    }
+
+    fn last_system_text(widget: &ChatWidget) -> &str {
+        cells(widget)
+            .last()
+            .and_then(|cell| {
+                cell.as_any()
+                    .downcast_ref::<crate::history_cell::system::SystemTextCell>()
+            })
+            .expect("system notice")
+            .body()
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    let mut prev_was_esc = false;
+                    for next in chars.by_ref() {
+                        if next == '\u{7}' || (prev_was_esc && next == '\\') {
+                            break;
+                        }
+                        prev_was_esc = next == '\u{1b}';
+                    }
+                }
+                Some(_) | None => {}
+            }
+        }
+        out
+    }
+
     // ── `/mcp` state-aware message set (byte-exact vs claude-code 2.1.206 `lJy`) ──
 
     #[test]
@@ -5130,7 +5832,10 @@ mod tests {
         assert_eq!(NeedsApproval.label(), "pending approval");
     }
 
-    fn toggle(name: &str, state: Option<platform_api::McpActionState>) -> platform_api::McpToggleOutcome {
+    fn toggle(
+        name: &str,
+        state: Option<platform_api::McpActionState>,
+    ) -> platform_api::McpToggleOutcome {
         platform_api::McpToggleOutcome {
             name: name.to_string(),
             state,
@@ -5288,18 +5993,14 @@ mod tests {
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut w = widget();
         w.handle_paste(&path.display().to_string());
-        std::fs::remove_file(&path).ok();
         typ(&mut w, "hi");
         let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert_eq!(images, vec![path.clone()], "image rides the Submit payload");
-        typ(&mut w, "again");
-        let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
-            panic!("expected submit");
-        };
+        std::fs::remove_file(&path).ok();
         assert!(
-            images.is_empty(),
+            w.pending_images.is_empty(),
             "queue drained; nothing leaks to later turns"
         );
     }
@@ -5414,8 +6115,10 @@ mod tests {
     #[test]
     fn cmd_config_shorthand_sets_and_reports_errors() {
         let prior_workflow = platform_api::session_flags::workflow_size_guideline();
-        let prior_workflow_managed = platform_api::session_flags::workflow_size_guideline_is_managed();
-        let prior_workflow_default = platform_api::session_flags::workflow_size_guideline_is_default();
+        let prior_workflow_managed =
+            platform_api::session_flags::workflow_size_guideline_is_managed();
+        let prior_workflow_default =
+            platform_api::session_flags::workflow_size_guideline_is_default();
         let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
 
         // vim=true applies live and confirms.
@@ -5684,7 +6387,10 @@ mod tests {
     /// every new conversation and opened no view at all.
     #[test]
     fn open_agents_view_opens_the_picker_when_empty() {
-        let mut w = widget();
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::view::AgentsSnapshot::default(),
+        ));
+        let mut w = widget_with_agents_snapshot(snapshot);
         assert!(matches!(w.open_agents_view(), ChatOutcome::Continue));
         let picker = w
             .bottom_pane()
@@ -5692,7 +6398,7 @@ mod tests {
             .active()
             .and_then(|v| {
                 v.as_any()
-                    .downcast_ref::<crate::bottom_pane::tasks_view::TasksView>()
+                    .downcast_ref::<crate::bottom_pane::agents_view::AgentsView>()
             })
             .expect("agents view active");
         assert!(picker.rows().is_empty());
@@ -5707,6 +6413,475 @@ mod tests {
         assert_eq!(
             cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
             "/tasks is unavailable (no engine handle wired)"
+        );
+    }
+
+    #[test]
+    fn agents_snapshot_updates_a_live_agents_view_without_reopening_it() {
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::view::AgentsSnapshot::default(),
+        ));
+        let mut widget = widget_with_agents_snapshot(snapshot.clone());
+        assert!(matches!(widget.open_agents_view(), ChatOutcome::Continue));
+        *snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::bottom_pane::view::AgentsSnapshot {
+                rows: vec![crate::bottom_pane::view::AgentsPaneRow {
+                    session_id: "11111111-1111-4111-8111-111111111111".into(),
+                    name: "Review queue".into(),
+                    state: "blocked".into(),
+                    kind: "background".into(),
+                    cwd: "/repo".into(),
+                    status: Some("waiting".into()),
+                    waiting_for: Some("Approve deploy".into()),
+                    detail: None,
+                    model: Some("gpt-5.4".into()),
+                    tokens: Some(42),
+                    tool_calls: Some(3),
+                    started_at_ms: Some(1),
+                }],
+            };
+        widget.expire_agents_snapshot_refresh_for_test();
+        assert!(widget.pump_view_timeout());
+        let view = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| {
+                v.as_any()
+                    .downcast_ref::<crate::bottom_pane::agents_view::AgentsView>()
+            })
+            .expect("agents view active");
+        assert_eq!(view.rows().len(), 1);
+        assert_eq!(view.rows()[0].name, "Review queue");
+        assert_eq!(
+            view.rows()[0].waiting_for.as_deref(),
+            Some("Approve deploy")
+        );
+    }
+
+    #[test]
+    fn agents_view_refresh_is_throttled_while_open() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut widget = widget();
+        widget.set_agents_snapshot_provider(std::sync::Arc::new({
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                crate::bottom_pane::view::AgentsSnapshot::default()
+            }
+        }));
+
+        assert!(matches!(widget.open_agents_view(), ChatOutcome::Continue));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!widget.pump_view_timeout());
+        assert!(!widget.pump_view_timeout());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "refreshes stay throttled");
+
+        widget.expire_agents_snapshot_refresh_for_test();
+        let _ = widget.pump_view_timeout();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "stale cache fetches once");
+    }
+
+    #[test]
+    fn agents_login_opens_connect_picker_and_cancel_returns_to_selected_row() {
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::view::AgentsSnapshot {
+                rows: vec![
+                    crate::bottom_pane::view::AgentsPaneRow {
+                        session_id: "11111111-1111-4111-8111-111111111111".into(),
+                        name: "alpha".into(),
+                        state: "working".into(),
+                        kind: "background".into(),
+                        cwd: "/repo/a".into(),
+                        status: Some("busy".into()),
+                        waiting_for: None,
+                        detail: None,
+                        model: None,
+                        tokens: None,
+                        tool_calls: None,
+                        started_at_ms: Some(1),
+                    },
+                    crate::bottom_pane::view::AgentsPaneRow {
+                        session_id: "22222222-2222-4222-8222-222222222222".into(),
+                        name: "beta".into(),
+                        state: "blocked".into(),
+                        kind: "background".into(),
+                        cwd: "/repo/b".into(),
+                        status: Some("waiting".into()),
+                        waiting_for: Some("Approve".into()),
+                        detail: None,
+                        model: None,
+                        tokens: None,
+                        tool_calls: None,
+                        started_at_ms: Some(2),
+                    },
+                ],
+            },
+        ));
+        let mut widget = widget_with_agents_snapshot(snapshot);
+        widget.set_connect_data(
+            [
+                ("anthropic".to_string(), "api_key".to_string()),
+                ("openrouter".to_string(), "api_key".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            std::collections::BTreeMap::new(),
+        );
+
+        assert!(matches!(widget.open_agents_view(), ChatOutcome::Continue));
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Down)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(active_agents_view(&widget).selected_index(), 1);
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Char('l'))),
+            ChatOutcome::Continue
+        ));
+        let connect = strip_ansi(&fullscreen_output(&mut widget));
+        assert!(connect.contains("Connectaprovider"), "{connect}");
+        assert!(connect.contains("Anthropic"), "{connect}");
+        assert!(connect.contains("OpenRouter"), "{connect}");
+
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(active_agents_view(&widget).selected_index(), 1);
+        assert!(
+            cells(&widget).is_empty(),
+            "connect flow should not write transcript rows"
+        );
+    }
+
+    #[test]
+    fn agents_login_success_keeps_parent_view_and_selection() {
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::view::AgentsSnapshot {
+                rows: vec![
+                    crate::bottom_pane::view::AgentsPaneRow {
+                        session_id: "11111111-1111-4111-8111-111111111111".into(),
+                        name: "alpha".into(),
+                        state: "working".into(),
+                        kind: "background".into(),
+                        cwd: "/repo/a".into(),
+                        status: Some("busy".into()),
+                        waiting_for: None,
+                        detail: None,
+                        model: None,
+                        tokens: None,
+                        tool_calls: None,
+                        started_at_ms: Some(1),
+                    },
+                    crate::bottom_pane::view::AgentsPaneRow {
+                        session_id: "22222222-2222-4222-8222-222222222222".into(),
+                        name: "beta".into(),
+                        state: "working".into(),
+                        kind: "background".into(),
+                        cwd: "/repo/b".into(),
+                        status: Some("busy".into()),
+                        waiting_for: None,
+                        detail: None,
+                        model: None,
+                        tokens: None,
+                        tool_calls: None,
+                        started_at_ms: Some(2),
+                    },
+                ],
+            },
+        ));
+        let mut widget = widget_with_agents_snapshot(snapshot);
+        widget.set_connect_data(
+            [("openrouter".to_string(), "api_key".to_string())]
+                .into_iter()
+                .collect(),
+            std::collections::BTreeMap::new(),
+        );
+
+        assert!(matches!(widget.open_agents_view(), ChatOutcome::Continue));
+        let _ = widget.handle_key(press(KeyCode::Down));
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Char('l'))),
+            ChatOutcome::Continue
+        ));
+        let _ = widget.handle_key(press(KeyCode::Enter));
+        widget.handle_paste("sk-or-v1-test");
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        assert!(matches!(
+            outcome,
+            ChatOutcome::ConnectAction(ConnectAction::StoreKey { .. })
+        ));
+        assert_eq!(active_agents_view(&widget).selected_index(), 1);
+        assert!(
+            cells(&widget).is_empty(),
+            "connect action should not submit a turn"
+        );
+    }
+
+    #[test]
+    fn focus_command_keeps_typing_live_filters_tool_chatter_and_folds_notifications() {
+        let mut widget = widget();
+        widget.set_collapse_fullscreen(true);
+        widget.transcript.push_message(RenderedMessage::UserText {
+            body: "Ship it".into(),
+            timestamp: 0,
+        });
+        widget
+            .transcript
+            .push_message(RenderedMessage::AssistantText {
+                body: "Working on it".into(),
+                timestamp: 0,
+            });
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".into(),
+            input: serde_json::json!({ "command": "cargo test" }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".into(),
+            result: serde_json::json!({ "stdout": "ok" }),
+        });
+        for id in ["41", "42"] {
+            widget
+                .transcript
+                .push_message(RenderedMessage::UserTeammate {
+                    display_name: "worker".into(),
+                    color: None,
+                    kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                        task_id: id.into(),
+                        task_subject: None,
+                    },
+                });
+        }
+        assert!(matches!(widget.cmd_focus(""), ChatOutcome::Continue));
+        assert!(widget.brief_transcript);
+        assert_eq!(last_system_text(&widget), FOCUS_VIEW_ENABLED_NOTICE);
+        for ch in "next".chars() {
+            assert!(matches!(
+                widget.handle_key(press(KeyCode::Char(ch))),
+                ChatOutcome::Continue
+            ));
+        }
+        assert_eq!(widget.bottom_pane().composer().text(), "next");
+        let output = strip_ansi(&fullscreen_output(&mut widget));
+        // The raw test backend omits terminal cells that remain the default
+        // blank, so compare rendered content after normalizing whitespace.
+        let compact = |text: &str| {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        };
+        let compact_output = compact(&output);
+        assert!(compact_output.contains("Shipit"), "{output:?}");
+        assert!(compact_output.contains("Workingonit"), "{output:?}");
+        assert!(
+            compact_output.contains(&compact(&completed_notification_line("41"))),
+            "{output:?}"
+        );
+        assert!(
+            compact_output.contains(&compact(&completed_notification_line("42"))),
+            "{output:?}"
+        );
+        assert!(!compact_output.contains("Bash"), "{output:?}");
+        assert!(compact_output.contains("next"), "{output:?}");
+
+        assert!(matches!(widget.cmd_focus(""), ChatOutcome::Continue));
+        assert!(!widget.brief_transcript);
+        assert_eq!(last_system_text(&widget), FOCUS_VIEW_DISABLED_NOTICE);
+    }
+
+    #[test]
+    fn focus_command_requires_fullscreen_when_inline() {
+        let mut widget = widget();
+
+        assert!(matches!(widget.cmd_focus(""), ChatOutcome::Continue));
+
+        assert!(!widget.brief_transcript);
+        assert_eq!(
+            last_system_text(&widget),
+            FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE
+        );
+    }
+
+    #[test]
+    fn startup_focus_mode_is_fullscreen_only_and_reports_settings_enforcement_inline() {
+        let mut widget = widget();
+        widget.set_startup_view_mode(Some("focus"));
+
+        assert!(!widget.brief_transcript);
+        assert!(matches!(widget.cmd_focus(""), ChatOutcome::Continue));
+        assert!(!widget.brief_transcript);
+        assert_eq!(
+            last_system_text(&widget),
+            FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE
+        );
+
+        widget.set_collapse_fullscreen(true);
+        assert!(
+            widget.brief_transcript,
+            "fullscreen startup should honor settings viewMode=focus"
+        );
+    }
+
+    #[test]
+    fn focus_projection_keeps_three_completed_notifications_and_collapses_four_plus() {
+        let expected = |id| completed_notification_line(id);
+
+        let mut two = widget();
+        for id in ["41", "42"] {
+            two.transcript.push_message(RenderedMessage::UserTeammate {
+                display_name: "worker".into(),
+                color: None,
+                kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                    task_id: id.into(),
+                    task_subject: None,
+                },
+            });
+        }
+        assert_eq!(
+            two.compute_focus_projection().lines,
+            vec![expected("41"), expected("42")]
+        );
+
+        let mut three = widget();
+        for id in ["41", "42", "43"] {
+            three
+                .transcript
+                .push_message(RenderedMessage::UserTeammate {
+                    display_name: "worker".into(),
+                    color: None,
+                    kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                        task_id: id.into(),
+                        task_subject: None,
+                    },
+                });
+        }
+        assert_eq!(
+            three.compute_focus_projection().lines,
+            vec![expected("41"), expected("42"), expected("43")]
+        );
+
+        let mut four = widget();
+        for id in ["41", "42", "43", "44"] {
+            four.transcript.push_message(RenderedMessage::UserTeammate {
+                display_name: "worker".into(),
+                color: None,
+                kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                    task_id: id.into(),
+                    task_subject: None,
+                },
+            });
+        }
+        assert_eq!(
+            four.compute_focus_projection().lines,
+            vec![
+                expected("41"),
+                expected("42"),
+                "+2 more tasks completed".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_projection_does_zero_full_scans_while_focus_is_off() {
+        let mut widget = widget();
+        assert_eq!(widget.focus_projection_full_scans, 0);
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Char('h'))),
+            ChatOutcome::Continue
+        ));
+        widget.handle_paste("ello");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TextDelta("reply".into()));
+        assert_eq!(widget.focus_projection_full_scans, 0);
+    }
+
+    #[test]
+    fn focus_projection_streaming_updates_without_full_rescan_per_chunk() {
+        let mut widget = widget();
+        widget.set_collapse_fullscreen(true);
+        assert!(matches!(widget.cmd_focus(""), ChatOutcome::Continue));
+        let scans_after_enable = widget.focus_projection_full_scans;
+
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TextDelta("hello".into()));
+        widget.apply_turn_event(TurnEvent::TextDelta(", world".into()));
+        widget.apply_turn_event(TurnEvent::TextDelta("\nsecond line".into()));
+
+        assert_eq!(
+            widget.focus_projection_full_scans, scans_after_enable,
+            "streaming deltas should append into the active assistant line"
+        );
+        assert_eq!(
+            widget.focus_projection.lines,
+            vec![
+                format!(
+                    "{}hello, world",
+                    crate::history_cell::message::ASSISTANT_MARKER
+                ),
+                format!("{}second line", crate::history_cell::message::CONT_INDENT),
+            ]
+        );
+        let output = strip_ansi(&fullscreen_output(&mut widget));
+        // `TestWriteBackend` emits only cells whose contents differ from the
+        // terminal's blank default, so inter-word spaces are absent from its
+        // raw byte stream. The projection assertion above owns exact spacing;
+        // this assertion proves both streamed lines reached the renderer.
+        assert!(output.contains("hello"), "{output:?}");
+        assert!(output.contains(",world"), "{output:?}");
+        assert!(output.contains("second"), "{output:?}");
+        assert!(output.contains("line"), "{output:?}");
+
+        let before_end = widget.focus_projection.lines.clone();
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        let after_end = widget.focus_projection.lines.clone();
+        assert_eq!(
+            after_end, before_end,
+            "turn end should not change focus rendering"
+        );
+
+        let mut perf = ChatWidget::new(Vec::new(), SessionInfo::default());
+        perf.set_collapse_fullscreen(true);
+        assert!(matches!(perf.cmd_focus(""), ChatOutcome::Continue));
+        let scans_before = perf.focus_projection_full_scans;
+        let bytes_before = perf.focus_projection_delta_bytes;
+        let growths_before = perf.focus_projection_delta_growths;
+        perf.apply_turn_event(TurnEvent::TurnStarted);
+        for _ in 0..256 {
+            perf.apply_turn_event(TurnEvent::TextDelta("!".into()));
+        }
+        assert_eq!(perf.focus_projection_full_scans, scans_before);
+        assert_eq!(
+            perf.focus_projection_delta_bytes - bytes_before,
+            256,
+            "the incremental projector must touch each delivered source byte once"
+        );
+        assert!(
+            perf.focus_projection_delta_growths - growths_before < 20,
+            "single-line delta appends should grow geometrically, not allocate per chunk"
+        );
+    }
+
+    #[test]
+    fn idle_double_escape_routes_to_rewind_command() {
+        let mut widget = widget();
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
+            "/rewind is unavailable (no engine handle wired)"
         );
     }
 
@@ -5736,6 +6911,70 @@ mod tests {
             "foreground cancellation happens only after the durable handoff succeeds"
         );
         assert!(widget.bottom_pane().view_stack().active().is_some());
+    }
+
+    #[test]
+    fn background_conversation_opens_agents_pane_and_enter_attaches_selected_session() {
+        let want = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::bottom_pane::view::AgentsSnapshot {
+                rows: vec![crate::bottom_pane::view::AgentsPaneRow {
+                    session_id: want.to_string(),
+                    name: "mock-bg-abcd".into(),
+                    state: "working".into(),
+                    kind: "background".into(),
+                    cwd: "/repo".into(),
+                    status: Some("busy".into()),
+                    waiting_for: None,
+                    detail: None,
+                    model: Some("gpt-5.4".into()),
+                    tokens: Some(10),
+                    tool_calls: Some(2),
+                    started_at_ms: Some(1),
+                }],
+            },
+        ));
+        let (mut widget, _mock) = widget_with_orchestrator();
+        widget.set_agents_snapshot_provider(std::sync::Arc::new({
+            let snapshot = snapshot.clone();
+            move || {
+                snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            }
+        }));
+
+        assert!(matches!(
+            widget.request_open_agents(),
+            ChatOutcome::Continue
+        ));
+        let notice = cells(&widget)
+            .last()
+            .and_then(|cell| {
+                cell.as_any()
+                    .downcast_ref::<crate::history_cell::system::SystemTextCell>()
+            })
+            .expect("backgrounding notice");
+        assert_eq!(
+            notice.body(),
+            "Moved conversation into a background session (mock-bg-abcd)."
+        );
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<crate::bottom_pane::agents_view::AgentsView>());
+        match widget.handle_key(press(KeyCode::Enter)) {
+            ChatOutcome::OpenAgentSession(target) => {
+                assert_eq!(target.session_id, want);
+                assert!(target.background);
+                assert!(target.live);
+            }
+            other => panic!(
+                "expected OpenAgentSession, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 
     #[test]
@@ -5999,6 +7238,51 @@ mod tests {
             "version output rendered as system text"
         );
         assert!(!systext.is_error(), "version output is not an error");
+    }
+
+    #[test]
+    fn latest_local_commands_use_core_handlers_instead_of_model_dispatch() {
+        let _env = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
+        let config_dir = tempfile::tempdir().expect("powerup settings dir");
+        std::env::set_var(branding::CONFIG_DIR_ENV, config_dir.path());
+
+        let prior_brief = platform_api::session_flags::brief_mode_enabled();
+        platform_api::session_flags::set_brief_mode_enabled(false);
+
+        let mut brief_widget = widget();
+        assert!(matches!(
+            brief_widget.handle_slash("/brief"),
+            Some(ChatOutcome::Continue)
+        ));
+        assert!(platform_api::session_flags::brief_mode_enabled());
+        let brief = cell::<crate::history_cell::system::SystemTextCell>(&brief_widget, 0);
+        assert_eq!(brief.body(), "Brief-only mode enabled");
+        assert!(
+            !brief_widget.turn_running(),
+            "/brief must not start a model turn"
+        );
+
+        let mut powerup = widget();
+        assert!(matches!(
+            powerup.handle_slash("/powerup"),
+            Some(ChatOutcome::Continue)
+        ));
+        let powerup_output = cell::<crate::history_cell::system::SystemTextCell>(&powerup, 0);
+        assert!(powerup_output.body().contains("Power-ups"));
+        assert!(powerup_output.body().contains("0/10 unlocked"));
+        assert!(
+            !powerup.turn_running(),
+            "/powerup must not start a model turn"
+        );
+
+        platform_api::session_flags::set_brief_mode_enabled(prior_brief);
+        match prior_config_dir {
+            Some(value) => std::env::set_var(branding::CONFIG_DIR_ENV, value),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+        }
     }
 
     /// A handler that echoes the `ParsedSlashCommand` the bridge built, so the
@@ -6806,6 +8090,7 @@ mod tests {
                         request_model: "claude-opus-4-8".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: true,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -6816,6 +8101,7 @@ mod tests {
                         request_model: "claude-sonnet-5".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -7306,6 +8592,185 @@ mod tests {
     }
 
     #[test]
+    fn cmd_diff_opens_a_scrollable_live_view_without_transcript_output() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(tmp.path().join("a.txt"), "before\n").expect("write file");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(tmp.path().join("a.txt"), "after\n").expect("edit file");
+
+        let mut widget = ChatWidget::new(
+            Vec::new(),
+            SessionInfo {
+                doctor: crate::session::DoctorInfo {
+                    cwd: tmp.path().to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            widget.handle_slash("/diff"),
+            Some(ChatOutcome::Continue)
+        ));
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<crate::diff::DiffView>());
+        {
+            let view = widget
+                .bottom_pane()
+                .view_stack()
+                .active()
+                .and_then(|view| view.as_any().downcast_ref::<crate::diff::DiffView>())
+                .expect("diff view active");
+            assert!(view.body_text().contains("+after"));
+        }
+        assert!(widget.transcript().committed_cells().is_empty());
+
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(widget.bottom_pane().view_stack().is_empty());
+    }
+
+    #[test]
+    fn native_scrollback_uses_live_cwd_after_cd_for_relative_attachments() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let old_cwd = std::path::PathBuf::from("/workspace/old");
+        let new_cwd = std::path::PathBuf::from("/workspace/new");
+        let live_cwd = std::sync::Arc::new(std::sync::Mutex::new(old_cwd.clone()));
+        let cwd_reader = {
+            let live_cwd = live_cwd.clone();
+            std::sync::Arc::new(move || live_cwd.lock().expect("live cwd lock").clone())
+                as std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>
+        };
+        let mut widget = ChatWidget::new(
+            vec![RenderedMessage::Attachment {
+                attachment: tui_core::message::Attachment::File {
+                    display_path: "src/report.txt".to_string(),
+                    num_lines: 1,
+                    truncated: false,
+                },
+            }],
+            SessionInfo {
+                doctor: crate::session::DoctorInfo {
+                    cwd: old_cwd.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        widget.set_hyperlink_cwd_provider(cwd_reader);
+
+        // `/cd` swaps the composition root's shared SessionCwd. Model that
+        // live swap here without making this rendering test depend on the
+        // concrete tool-api cell type.
+        *live_cwd.lock().expect("live cwd lock") = new_cwd.clone();
+
+        let backend = TestWriteBackend::new(80, 24);
+        let raw: Rc<RefCell<Vec<u8>>> = backend.raw_handle();
+        let mut terminal = Terminal::with_options(backend).expect("test terminal");
+        terminal.set_bottom_viewport_height(4).expect("viewport");
+        raw.borrow_mut().clear();
+        widget
+            .flush_scrollback_with_hyperlinks(&mut terminal, true)
+            .unwrap();
+
+        let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        assert!(
+            out.contains(&tui_core::render::osc8::file_link(
+                "/workspace/new/src/report.txt"
+            )),
+            "relative attachment must follow the post-/cd cwd: {out:?}"
+        );
+        assert!(
+            !out.contains("/workspace/old/src/report.txt"),
+            "startup cwd must not be used after /cd: {out:?}"
+        );
+    }
+
+    #[test]
+    fn fullscreen_frame_emits_gated_osc8_without_polluting_plain_mode() {
+        let messages = vec![
+            RenderedMessage::AssistantText {
+                body: "See [docs](https://example.com/docs).".to_string(),
+                timestamp: 0,
+            },
+            RenderedMessage::Attachment {
+                attachment: tui_core::message::Attachment::File {
+                    display_path: "src/report.txt".to_string(),
+                    num_lines: 1,
+                    truncated: false,
+                },
+            },
+        ];
+        let session = SessionInfo {
+            doctor: crate::session::DoctorInfo {
+                cwd: "/workspace/project".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let backend = TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = Terminal::with_options_at_origin(backend).expect("test terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 80, 24));
+        raw.borrow_mut().clear();
+        let mut linked = ChatWidget::new(messages.clone(), session.clone());
+        terminal
+            .draw(|frame| linked.render_fullscreen_frame_with_hyperlinks(frame, true))
+            .expect("fullscreen draw");
+        let linked_output = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        assert!(linked_output.contains(&tui_core::render::osc8::hyperlink(
+            "d",
+            "https://example.com/docs",
+        )));
+        assert!(
+            linked_output.contains(&tui_core::render::osc8::hyperlink(
+                "/",
+                "file:///workspace/project/src/report.txt",
+            )),
+            "linked fullscreen output: {linked_output:?}"
+        );
+
+        let backend = TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = Terminal::with_options_at_origin(backend).expect("test terminal");
+        terminal.set_viewport_area(Rect::new(0, 0, 80, 24));
+        raw.borrow_mut().clear();
+        let mut plain = ChatWidget::new(messages, session);
+        terminal
+            .draw(|frame| plain.render_fullscreen_frame_with_hyperlinks(frame, false))
+            .expect("plain fullscreen draw");
+        let plain_output = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        assert!(
+            !plain_output.contains("\x1b]8;;"),
+            "disabled fullscreen gate remains escape-free: {plain_output:?}"
+        );
+    }
+
+    #[test]
     fn ctrl_c_keeps_turn_owned_until_terminal_and_heartbeats_continue() {
         let mut widget = widget();
         typ(&mut widget, "x");
@@ -7680,6 +9145,7 @@ mod tests {
                         request_model: "claude-opus-4-8".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: true,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -7690,6 +9156,7 @@ mod tests {
                         request_model: "openrouter/auto".into(),
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -7700,6 +9167,7 @@ mod tests {
                         request_model: "openai/gpt-4o".into(),
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -7756,6 +9224,10 @@ mod tests {
         // `session.models`' is_current, so reopening /model still marked the OLD
         // model. Switch Opus→Sonnet, then the reopened picker marks Sonnet.
         let mut widget = widget_with_models(); // Opus (current) + Sonnet, anthropic connected
+        widget.session.model_provenance =
+            platform_api::ModelProvenance::ManagedAdministratorDefault;
+        widget.session.models[0].provenance =
+            platform_api::ModelProvenance::ManagedAdministratorDefault;
         assert_eq!(
             widget
                 .session
@@ -7794,6 +9266,19 @@ mod tests {
             vec!["claude-sonnet-5".to_string()],
             "the `●` current marker follows the switch"
         );
+        assert_eq!(
+            widget.session.model_provenance,
+            platform_api::ModelProvenance::UserOrEnv,
+            "a picker switch changes the live model ownership"
+        );
+        assert!(
+            widget
+                .session
+                .models
+                .iter()
+                .all(|row| !row.provenance.is_managed()),
+            "the old managed row must not retain the administrator attribution"
+        );
     }
 
     #[test]
@@ -7811,6 +9296,7 @@ mod tests {
                         request_model: "gpt-5.5".into(),
                         profile: Some("openai".into()),
                         provider_label: "OpenAI".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -7821,6 +9307,7 @@ mod tests {
                         request_model: "gpt-5.5".into(),
                         profile: Some("github-copilot".into()),
                         provider_label: "GitHub Copilot".into(),
+                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,

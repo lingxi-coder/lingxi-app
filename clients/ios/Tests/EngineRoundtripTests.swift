@@ -271,7 +271,7 @@ import XCTest
             XCTAssertEqual(sections.last?.models.first?.name, "K3")
             XCTAssertEqual(
                 Presets.llm.first(where: { $0.id == "kimi-code" })?.models.first,
-                "kimi-for-coding"
+                "k3"
             )
         }
 

@@ -186,11 +186,11 @@ fn register_with_options(
 #[cfg(test)]
 mod ask_timeout_wiring_tests {
     use super::*;
+    use platform_api::process::ProcessOutput;
     use serde_json::json;
     use std::sync::Arc;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::ToolError;
-    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -289,7 +289,9 @@ mod process_globals_lock_gate {
             .find("fn process_lock()")
             .unwrap_or_else(|| panic!("{file} no longer declares `fn process_lock()`; if it was renamed, retarget this gate rather than deleting it"));
         let rest = &source[start..];
-        let end = rest.find("\n    }").unwrap_or_else(|| panic!("{file}: could not find the end of `fn process_lock()`"));
+        let end = rest
+            .find("\n    }")
+            .unwrap_or_else(|| panic!("{file}: could not find the end of `fn process_lock()`"));
         rest[..end].to_string()
     }
 

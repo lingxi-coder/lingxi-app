@@ -4,12 +4,12 @@
 use super::*;
 use crate::task_trait::{Task, TaskContext, TaskHandle};
 use async_trait::async_trait;
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
 // ---- In-memory FileSystem (mirrors the other handler/registry tests) ----
 
@@ -1392,7 +1392,11 @@ impl FileSystem for ExclusiveCountingFs {
             total_lines,
         })
     }
-    async fn write_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn write_file(
+        &self,
+        path: &str,
+        body: &str,
+    ) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1403,7 +1407,9 @@ impl FileSystem for ExclusiveCountingFs {
         self.creates.fetch_add(1, Ord2::SeqCst);
         let mut map = self.files.lock().await;
         if map.contains_key(path) {
-            return Err(platform_api::filesystem::FsError::AlreadyExists(path.to_string()));
+            return Err(platform_api::filesystem::FsError::AlreadyExists(
+                path.to_string(),
+            ));
         }
         map.insert(path.to_string(), String::new());
         Ok(())
@@ -1420,7 +1426,11 @@ impl FileSystem for ExclusiveCountingFs {
     > {
         Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
-    async fn append_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn append_file(
+        &self,
+        path: &str,
+        body: &str,
+    ) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1452,7 +1462,8 @@ impl FileSystem for ExclusiveCountingFs {
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
+    {
         Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
     async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
@@ -3561,7 +3572,10 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
         Err(platform_api::ProcessError::Unsupported)
     }
-    async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
+    async fn kill(
+        &self,
+        _handle: &platform_api::ProcessHandle,
+    ) -> Result<(), platform_api::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {

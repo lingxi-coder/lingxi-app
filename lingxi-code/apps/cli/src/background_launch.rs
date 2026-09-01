@@ -9,11 +9,11 @@
 use crate::agents_registry;
 use crate::argv::Argv;
 use crate::daemon_roster::{self, Dispatch, Launch};
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
 
 /// Current on-disk `launch.json` schema.
 pub const LAUNCH_SPEC_VERSION: u32 = 1;
@@ -23,6 +23,10 @@ pub const LAUNCH_SPEC_FILE: &str = "launch.json";
 pub const PTY_RUNTIME_FILE: &str = "pty.json";
 /// Recent PTY output retained for the `logs <id>` control command.
 pub const OUTPUT_LOG_FILE: &str = "output.log";
+/// Hard bound for a background session's retained raw PTY output.
+pub const OUTPUT_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Size restored after compaction, leaving headroom before the next rewrite.
+pub const OUTPUT_LOG_RETAIN_BYTES: u64 = 3 * 1024 * 1024;
 /// Refuse unexpectedly large files before parsing them.
 const MAX_LAUNCH_SPEC_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -494,6 +498,128 @@ pub fn read_launch_spec(config_home: &Path, short: &str) -> std::io::Result<Back
     Ok(spec)
 }
 
+fn refresh_current_background_launch_identity_inner(
+    cwd: &Path,
+    transcript_path: &Path,
+    after_launch_write: impl FnOnce(&Path, &str, &str) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    refresh_current_background_launch_identity_with(
+        cwd,
+        transcript_path,
+        write_launch_spec,
+        after_launch_write,
+    )
+}
+
+/// Refresh a live background session's durable cwd/transcript identity.
+///
+/// The writer is injected so tests can force a launch-spec failure after the
+/// transcript has been moved and verify callers roll the move back. The
+/// launch spec is authoritative; a best-effort state-row mirror failure is
+/// logged but does not make the already-published launch identity stale.
+fn refresh_current_background_launch_identity_with<W, A>(
+    cwd: &Path,
+    transcript_path: &Path,
+    write_launch: W,
+    after_launch_write: A,
+) -> std::io::Result<bool>
+where
+    W: FnOnce(&Path, &str, &BackgroundLaunchSpec) -> std::io::Result<()>,
+    A: FnOnce(&Path, &str, &str) -> std::io::Result<()>,
+{
+    let Ok(job_dir_raw) = std::env::var("LINGXI_JOB_DIR") else {
+        return Ok(false);
+    };
+    let job_dir = PathBuf::from(job_dir_raw);
+    let short = job_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "background job dir is malformed"))?;
+    validate_short(short)?;
+    let config_home = job_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "background job dir is malformed"))?;
+    let _job_lock = agents_registry::lock_job_state(config_home, short)?;
+    let mut spec = read_launch_spec(config_home, short)?;
+    let expected_name = format!("{}.jsonl", spec.session_id);
+    let projects_root = config_home.join("projects");
+    let transcript_path = if let Ok(metadata) = std::fs::symlink_metadata(transcript_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "transcript is not a regular file",
+            ));
+        }
+        let canonical_transcript = std::fs::canonicalize(transcript_path)?;
+        let canonical_projects_root = std::fs::canonicalize(&projects_root)?;
+        if !canonical_transcript.starts_with(&canonical_projects_root)
+            || canonical_transcript
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(expected_name.as_str())
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "transcript path does not match the recorded session",
+            ));
+        }
+        canonical_transcript
+    } else {
+        if !transcript_path.is_absolute()
+            || transcript_path.file_name().and_then(|name| name.to_str())
+                != Some(expected_name.as_str())
+            || transcript_path.strip_prefix(&projects_root).is_err()
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "transcript path does not match the recorded session",
+            ));
+        }
+        transcript_path.to_path_buf()
+    };
+    spec.cwd = cwd.display().to_string();
+    spec.transcript_path = transcript_path.display().to_string();
+    write_launch(config_home, short, &spec)?;
+    if let Err(error) = after_launch_write(config_home, short, &spec.cwd) {
+        tracing::warn!(
+            short,
+            %error,
+            "failed to mirror background launch identity into job state; launch spec remains authoritative"
+        );
+    }
+    Ok(true)
+}
+
+pub fn refresh_current_background_launch_identity(
+    cwd: &Path,
+    transcript_path: &Path,
+) -> std::io::Result<bool> {
+    refresh_current_background_launch_identity_inner(
+        cwd,
+        transcript_path,
+        |config_home, short, cwd| {
+            agents_registry::update_job_cwd_with_lock_held(config_home, short, cwd)
+        },
+    )
+}
+
+pub fn reconcile_job_cwd_from_launch_spec(
+    config_home: &Path,
+    short: &str,
+) -> std::io::Result<bool> {
+    let _job_lock = agents_registry::lock_job_state(config_home, short)?;
+    let spec = read_launch_spec(config_home, short)?;
+    let Some(job) = agents_registry::read_job(config_home, short) else {
+        return Ok(false);
+    };
+    if job.cwd.as_deref() == Some(spec.cwd.as_str()) {
+        return Ok(false);
+    }
+    agents_registry::update_job_cwd_with_lock_held(config_home, short, &spec.cwd)?;
+    Ok(true)
+}
+
 /// Load `launch.json`, or convert a protocol-v1 job/roster record once.
 ///
 /// `Ok(None)` means neither a launch file nor enough legacy state exists. A
@@ -505,7 +631,10 @@ pub fn load_or_migrate_launch_spec(
     short: &str,
 ) -> std::io::Result<Option<BackgroundLaunchSpec>> {
     match read_launch_spec(config_home, short) {
-        Ok(spec) => return Ok(Some(spec)),
+        Ok(spec) => {
+            let _ = reconcile_job_cwd_from_launch_spec(config_home, short);
+            return Ok(Some(spec));
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
@@ -674,6 +803,9 @@ fn reject_insecure_mode(_metadata: &std::fs::Metadata, _label: &str) -> std::io:
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmpdir() -> PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -717,6 +849,40 @@ mod tests {
         }
     }
 
+    fn seed_job(home: &std::path::Path, short: &str, session_id: &str, cwd: &str) {
+        let flags: Vec<String> = Vec::new();
+        agents_registry::write_job_state(
+            home,
+            short,
+            &agents_registry::JobStateWrite {
+                state: "working",
+                tempo: Some("active"),
+                name: None,
+                session_id: Some(session_id),
+                cwd: Some(cwd),
+                origin_cwd: Some(cwd),
+                created_at: Some("2026-07-04T00:00:00.000Z"),
+                intent: Some("resume"),
+                display_intent: None,
+                template: Some("bg"),
+                respawn_flags: &flags,
+                in_flight: None,
+                backend: Some("daemon"),
+                initial_prompt: None,
+                detail: None,
+                worker_pid: None,
+                worker_proc_start: None,
+                phase: Some("queued"),
+                worker_generation: Some("gen-1"),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn launch_spec_round_trips_atomically_and_tui_argv_is_promptless() {
         let home = tmpdir();
@@ -751,6 +917,258 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn refresh_current_background_launch_identity_retargets_cwd_and_transcript() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tmpdir();
+        let short = "cafe0009";
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let old_cwd = home.join("old");
+        let new_cwd = home.join("new");
+        std::fs::create_dir_all(&old_cwd).unwrap();
+        std::fs::create_dir_all(&new_cwd).unwrap();
+        let transcript = home
+            .join("projects")
+            .join("workspace")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\"}}\n",
+        )
+        .unwrap();
+
+        let mut spec = sample(short, BackgroundLaunchKind::Fresh);
+        spec.session_id = session_id.to_string();
+        spec.cwd = old_cwd.display().to_string();
+        spec.origin_cwd = old_cwd.display().to_string();
+        spec.transcript_path = transcript.display().to_string();
+        write_launch_spec(&home, short, &spec).unwrap();
+        seed_job(&home, short, session_id, &old_cwd.display().to_string());
+
+        let job_dir = agents_registry::jobs_dir(&home).join(short);
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var("LINGXI_JOB_DIR", &job_dir);
+        let refreshed = refresh_current_background_launch_identity(&new_cwd, &transcript).unwrap();
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+
+        assert!(refreshed);
+        let updated = read_launch_spec(&home, short).unwrap();
+        let new_cwd_s = new_cwd.display().to_string();
+        assert_eq!(updated.cwd, new_cwd_s);
+        assert_eq!(
+            updated.transcript_path,
+            std::fs::canonicalize(&transcript)
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        let job = agents_registry::read_job(&home, short).unwrap();
+        assert_eq!(job.cwd.as_deref(), Some(new_cwd_s.as_str()));
+    }
+
+    #[test]
+    fn refresh_current_background_launch_identity_accepts_future_transcript_path() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tmpdir();
+        let short = "cafe0010";
+        let session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let old_cwd = home.join("old");
+        let new_cwd = home.join("new");
+        std::fs::create_dir_all(&old_cwd).unwrap();
+        std::fs::create_dir_all(&new_cwd).unwrap();
+        let future_transcript = home
+            .join("projects")
+            .join("workspace")
+            .join("nested")
+            .join(format!("{session_id}.jsonl"));
+
+        let mut spec = sample(short, BackgroundLaunchKind::Fresh);
+        spec.session_id = session_id.to_string();
+        spec.cwd = old_cwd.display().to_string();
+        spec.origin_cwd = old_cwd.display().to_string();
+        spec.transcript_path = home
+            .join("projects")
+            .join("old.jsonl")
+            .display()
+            .to_string();
+        write_launch_spec(&home, short, &spec).unwrap();
+        seed_job(&home, short, session_id, &old_cwd.display().to_string());
+
+        let job_dir = agents_registry::jobs_dir(&home).join(short);
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var("LINGXI_JOB_DIR", &job_dir);
+        let refreshed =
+            refresh_current_background_launch_identity(&new_cwd, &future_transcript).unwrap();
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+
+        assert!(refreshed);
+        let updated = read_launch_spec(&home, short).unwrap();
+        let new_cwd_s = new_cwd.display().to_string();
+        assert_eq!(updated.cwd, new_cwd_s);
+        assert_eq!(
+            updated.transcript_path,
+            future_transcript.display().to_string()
+        );
+        let job = agents_registry::read_job(&home, short).unwrap();
+        assert_eq!(job.cwd.as_deref(), Some(new_cwd_s.as_str()));
+    }
+
+    #[test]
+    fn job_state_mirror_failure_keeps_launch_spec_authoritative() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tmpdir();
+        let short = "cafe0011";
+        let session_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+        let old_cwd = home.join("old");
+        let new_cwd = home.join("new");
+        std::fs::create_dir_all(&old_cwd).unwrap();
+        std::fs::create_dir_all(&new_cwd).unwrap();
+        let transcript = home
+            .join("projects")
+            .join("workspace")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\"}}\n",
+        )
+        .unwrap();
+
+        let flags: Vec<String> = Vec::new();
+        agents_registry::write_job_state(
+            &home,
+            short,
+            &agents_registry::JobStateWrite {
+                state: "working",
+                tempo: Some("active"),
+                name: None,
+                session_id: Some(session_id),
+                cwd: Some(&old_cwd.display().to_string()),
+                origin_cwd: Some(&old_cwd.display().to_string()),
+                created_at: Some("2026-07-04T00:00:00.000Z"),
+                intent: Some("resume"),
+                display_intent: None,
+                template: Some("bg"),
+                respawn_flags: &flags,
+                in_flight: None,
+                backend: Some("daemon"),
+                initial_prompt: None,
+                detail: None,
+                worker_pid: None,
+                worker_proc_start: None,
+                phase: Some("queued"),
+                worker_generation: Some("gen-1"),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+        )
+        .unwrap();
+
+        let mut spec = sample(short, BackgroundLaunchKind::Fresh);
+        spec.session_id = session_id.to_string();
+        spec.cwd = old_cwd.display().to_string();
+        spec.origin_cwd = old_cwd.display().to_string();
+        spec.transcript_path = transcript.display().to_string();
+        write_launch_spec(&home, short, &spec).unwrap();
+
+        let job_dir = agents_registry::jobs_dir(&home).join(short);
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var("LINGXI_JOB_DIR", &job_dir);
+        let refreshed = refresh_current_background_launch_identity_inner(
+            &new_cwd,
+            &transcript,
+            |_config_home, _short, _cwd| Err(Error::other("simulated second write failure")),
+        )
+        .unwrap();
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+        assert!(refreshed);
+
+        let launch = read_launch_spec(&home, short).unwrap();
+        assert_eq!(launch.cwd, new_cwd.display().to_string());
+        let stale_job = agents_registry::read_job(&home, short).unwrap();
+        assert_eq!(
+            stale_job.cwd.as_deref(),
+            Some(old_cwd.display().to_string().as_str())
+        );
+
+        assert!(reconcile_job_cwd_from_launch_spec(&home, short).unwrap());
+        let repaired_job = agents_registry::read_job(&home, short).unwrap();
+        assert_eq!(
+            repaired_job.cwd.as_deref(),
+            Some(new_cwd.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn injected_launch_write_failure_leaves_old_resumable_identity_untouched() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tmpdir();
+        let short = "cafe0012";
+        let session_id = "cccccccc-dddd-eeee-ffff-000000000000";
+        let old_cwd = home.join("old");
+        let new_cwd = home.join("new");
+        std::fs::create_dir_all(&old_cwd).unwrap();
+        std::fs::create_dir_all(&new_cwd).unwrap();
+        let transcript = home
+            .join("projects")
+            .join("workspace")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\"}}\n",
+        )
+        .unwrap();
+
+        let mut spec = sample(short, BackgroundLaunchKind::Resume);
+        spec.session_id = session_id.to_string();
+        spec.cwd = old_cwd.display().to_string();
+        spec.origin_cwd = old_cwd.display().to_string();
+        spec.transcript_path = transcript.display().to_string();
+        write_launch_spec(&home, short, &spec).unwrap();
+
+        let job_dir = agents_registry::jobs_dir(&home).join(short);
+        let prior = std::env::var_os("LINGXI_JOB_DIR");
+        std::env::set_var("LINGXI_JOB_DIR", &job_dir);
+        let error = refresh_current_background_launch_identity_with(
+            &new_cwd,
+            &transcript,
+            |_config_home, _short, _spec| Err(Error::other("simulated launch write failure")),
+            |_config_home, _short, _cwd| panic!("state mirror must not run after launch failure"),
+        )
+        .unwrap_err();
+        match prior {
+            Some(value) => std::env::set_var("LINGXI_JOB_DIR", value),
+            None => std::env::remove_var("LINGXI_JOB_DIR"),
+        }
+
+        assert!(error.to_string().contains("simulated launch write failure"));
+        let launch = read_launch_spec(&home, short).unwrap();
+        assert_eq!(launch.launch, BackgroundLaunchKind::Resume);
+        assert_eq!(launch.cwd, old_cwd.display().to_string());
+        assert_eq!(launch.transcript_path, transcript.display().to_string());
     }
 
     #[test]
@@ -953,6 +1371,13 @@ mod tests {
             initial_prompt: Some("continue"),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: None,
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         agents_registry::write_job_state(&home, short, &job).unwrap();
         let job = agents_registry::read_job(&home, short).unwrap();

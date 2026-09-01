@@ -27,13 +27,13 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
 use platform_api::mobile_linux::guest_paths;
 use platform_api::{
     FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime, MountSpec,
 };
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// [`FileSystem`] decorator that makes guest paths first-class for file
 /// tools. See the module docs for the resolution rules.
@@ -251,12 +251,12 @@ impl FileSystem for GuestPathFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use platform_api::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, PtyOpenRequest, PtySessionHandle,
         RootfsStatus, SandboxBackend,
     };
+    use std::sync::Mutex;
 
     /// Runtime stub that exists only to serve a mount table.
     struct MountsOnlyRuntime {

@@ -157,9 +157,13 @@ mod tests {
 
     build_targets! {
         ReactDomR1 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
+        ReactDomR2 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
         Canvas2dR1 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
+        Canvas2dR2 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
         Three3dR1 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
+        Three3dR2 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
         Phaser2dR1 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
+        Phaser2dR2 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
         Babylon3dR1 => (local_apps::AppRuntimeProfile::Babylon3d, PLUGIN_BUILD_WORKFLOW_ID),
     }
 

@@ -20,10 +20,10 @@
 //! depends on `apps/cli`.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::Arc;
 use platform_api::bg_session_forker::{BgForkError, BgSessionForker};
 use platform_api::FileSystem;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Concrete `/fork`-to-background forker bound to the resolved config/runtime
 /// dirs. Constructed in `init::resolve_desktop_config` and set on

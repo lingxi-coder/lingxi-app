@@ -1260,7 +1260,10 @@ mod tests {
             .pricing
             .as_ref()
             .expect("display pricing override");
-        assert_eq!(display.billing_mode, platform_api::ModelBillingMode::PerToken);
+        assert_eq!(
+            display.billing_mode,
+            platform_api::ModelBillingMode::PerToken
+        );
         assert_eq!(display.input_per_million, Some(1.0));
         assert_eq!(display.output_per_million, Some(2.0));
         assert_eq!(display.cache_read_per_million, Some(0.25));

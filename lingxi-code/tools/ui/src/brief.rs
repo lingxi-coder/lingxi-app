@@ -54,24 +54,19 @@ const DESCRIPTION: &str = "Send a message to the user";
 const BRIEF_GATE_FLAG: &str = "tengu_kairos_brief";
 
 /// Port of claude-code `isBriefEnabled` / `aKr()`:
-/// `return Z.CLAUDE_CODE_BRIEF || dge("tengu_kairos_brief", !1)`.
+/// `return Z.CLAUDE_CODE_BRIEF || dge("tengu_kairos_brief", !1)`; LingXi
+/// publishes the equivalent live session value through `session_flags`.
 ///
 /// The `SendUserMessage` (Brief) tool is exposed to the model ONLY when the
-/// `--brief` CLI flag is set — which exports `LINGXI_BRIEF=1` for this process +
-/// children (CC registry key `CLAUDE_CODE_BRIEF`; both are honored) — OR the
-/// `tengu_kairos_brief` Statsig gate is on (code-default `false`). This is
-/// DEFAULT-OFF, matching the shipped binary: without `--brief` the tool is
-/// invisible to the model, exactly like CC 2.1.215 (whose root `--help` lists
-/// `--brief  Enable SendUserMessage tool for agent-to-user communication`).
-///
-/// The env is read with raw JS-string truthiness (any non-empty value enables),
-/// matching CC's `Z.CLAUDE_CODE_BRIEF` (a plain `process.env` read, not
-/// `isEnvTruthy`) and the `--forward-subagent-text` sibling convention.
+/// session's live Brief-only mode is enabled — by `--brief` at startup or the
+/// `/brief` runtime toggle — OR the `tengu_kairos_brief` Statsig gate is on
+/// (code-default `false`). This is DEFAULT-OFF, matching the shipped binary:
+/// without either trigger the tool is invisible to the model. The state lives
+/// in `platform_api::session_flags`, rather than a process-environment snapshot,
+/// so a runtime toggle is observed by subsequent tool-list assemblies.
 #[must_use]
 pub fn brief_tool_enabled() -> bool {
-    let env_on = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
-    env_on("LINGXI_BRIEF")
-        || env_on("CLAUDE_CODE_BRIEF")
+    platform_api::session_flags::brief_mode_enabled()
         || telemetry::flag_bool(BRIEF_GATE_FLAG, false)
 }
 
@@ -244,8 +239,8 @@ impl Tool for BriefTool {
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // PARITY: claude-code `isBriefEnabled` (`aKr()`). Default-off — the tool
-        // is exposed only under `--brief` (env `LINGXI_BRIEF`/`CLAUDE_CODE_BRIEF`)
-        // or the `tengu_kairos_brief` gate, so the default toolset is unchanged.
+        // is exposed only under the live Brief-only session flag (startup
+        // `--brief` or `/brief`) or the `tengu_kairos_brief` gate.
         brief_tool_enabled()
     }
     fn max_result_size_chars(&self) -> usize {
@@ -412,8 +407,8 @@ impl Tool for BriefTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -487,41 +482,33 @@ mod tests {
         assert!(tool.is_read_only(&json!({})));
     }
 
-    /// Serialize the env/flag-mutating gate tests and reset shared state (the
-    /// `--brief` env keys + the `tengu_kairos_brief` gate) so they cannot leak
+    /// Serialize the flag-mutating gate tests and reset shared state (the live
+    /// Brief mode flag + the `tengu_kairos_brief` gate) so they cannot leak
     /// across tests. Mirrors `push_notification::tests::guard`.
     fn brief_guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("LINGXI_BRIEF");
-        std::env::remove_var("CLAUDE_CODE_BRIEF");
+        platform_api::session_flags::set_brief_mode_enabled(false);
         telemetry::test_clear_flag(BRIEF_GATE_FLAG);
         g
     }
 
     #[test]
-    fn disabled_by_default_enabled_by_brief_flag() {
+    fn disabled_by_default_enabled_by_live_brief_mode() {
         let _g = brief_guard();
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
         let ctx = ToolStaticContext::default();
-        // Default: no --brief env, gate off → invisible to the model (default-off,
-        // so the default toolset is unchanged from the shipped binary).
+        // Default: no live --brief state, gate off → invisible to the model
+        // (default-off, so the default toolset is unchanged from the binary).
         assert!(!tool.is_enabled(&ctx));
         assert!(!brief_tool_enabled());
 
-        // `--brief` exports LINGXI_BRIEF=1 → tool enabled.
-        std::env::set_var("LINGXI_BRIEF", "1");
+        // Startup `--brief` and runtime `/brief` both publish the same live
+        // session flag → tool enabled.
+        platform_api::session_flags::set_brief_mode_enabled(true);
         assert!(tool.is_enabled(&ctx));
-        std::env::remove_var("LINGXI_BRIEF");
+        platform_api::session_flags::set_brief_mode_enabled(false);
         assert!(!tool.is_enabled(&ctx));
-
-        // CC registry key CLAUDE_CODE_BRIEF is also honored (raw truthiness: any
-        // non-empty value enables, matching `Z.CLAUDE_CODE_BRIEF`).
-        std::env::set_var("CLAUDE_CODE_BRIEF", "anything");
-        assert!(tool.is_enabled(&ctx));
-        std::env::set_var("CLAUDE_CODE_BRIEF", "");
-        assert!(!tool.is_enabled(&ctx), "empty env value is falsy");
-        std::env::remove_var("CLAUDE_CODE_BRIEF");
 
         // The Statsig gate `tengu_kairos_brief` (default false) also enables it.
         assert!(!tool.is_enabled(&ctx));

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use permission::bypass_guard::BypassEnv;
-use protocol::transport::{HttpMethod, HttpRequest};
 use platform_api::HttpTransport;
+use protocol::transport::{HttpMethod, HttpRequest};
 
 /// Production environment probe for the bypass safety guard.
 pub struct RealBypassEnv {

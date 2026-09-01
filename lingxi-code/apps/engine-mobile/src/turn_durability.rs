@@ -1124,8 +1124,7 @@ mod tests {
             .append_event(
                 "session-a",
                 11,
-                r#"{"type":"text_delta","text":"partial"}"#
-                    .to_string(),
+                r#"{"type":"text_delta","text":"partial"}"#.to_string(),
             )
             .expect("append");
         store

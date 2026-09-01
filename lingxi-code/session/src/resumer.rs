@@ -8,10 +8,10 @@
 use crate::filestate::{self, FileStateCache};
 use crate::rollout::{InitialHistory, RolloutRecorder};
 use crate::storage::{LoadedSession, SessionStorage};
+use platform_api::FileSystem;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use platform_api::FileSystem;
 
 /// Output of [`SessionResumer::resume`].
 pub struct ResumedSession {

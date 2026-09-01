@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use platform_api::HttpTransport;
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
-use platform_api::HttpTransport;
 
 use crate::oauth::openai::client::OAuthError;
 use crate::oauth::openai::config::OpenAiOAuthConfig;

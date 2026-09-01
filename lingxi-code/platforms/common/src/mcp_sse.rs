@@ -13,10 +13,10 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
+use platform_api::mcp::McpError;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use platform_api::mcp::McpError;
 
 /// Header name used by claude-code IDE plugins for the auth token.
 /// LITERAL — must match claude-code byte-for-byte.

@@ -152,13 +152,13 @@ mod tests {
         assert!(!without.contains("worktreePath"));
         assert!(without.contains("to continue this agent)\n<usage>"));
     }
+    use platform_api::budget::BudgetEnforcerHandle;
+    use platform_api::subagent_spawn::SubagentSpawner;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
     use tool_api::context::{ToolUseContext, ToolUseOptions};
     use tool_api::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
     use tool_api::ToolRegistry;
-    use platform_api::budget::BudgetEnforcerHandle;
-    use platform_api::subagent_spawn::SubagentSpawner;
 
     /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
     /// tests whose `build_prompt`/`prompt` output depends on the
@@ -180,7 +180,8 @@ mod tests {
             vec![PathBuf::from("/tmp")],
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
-        bctx.task_registry = Some(registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+        bctx.task_registry =
+            Some(registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router = Some(mailbox as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
         bctx
@@ -289,7 +290,8 @@ mod tests {
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(parent_budget.clone());
@@ -358,7 +360,9 @@ mod tests {
             "spawner must not be invoked once budget gate trips"
         );
         assert_eq!(
-            platform_api::task_registry::TaskRegistryHandle::get_total_agent_spawns(registry.as_ref()),
+            platform_api::task_registry::TaskRegistryHandle::get_total_agent_spawns(
+                registry.as_ref()
+            ),
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
@@ -2722,9 +2726,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Unset env: interactive defaults ON, headless defaults OFF (2.1.232).
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
-        let interactive = platform_api::session_flags::scope_non_interactive_session(false, async {
-            AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
-        });
+        let interactive =
+            platform_api::session_flags::scope_non_interactive_session(false, async {
+                AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
+            });
         let headless = platform_api::session_flags::scope_non_interactive_session(true, async {
             AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
@@ -3323,7 +3328,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let mut bctx = ctx_for_file_tools(make_dummy_fs(), bus, vec![PathBuf::from("/tmp")]);
         bctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(arc_mock_budget(u64::MAX) as Arc<dyn BudgetEnforcerHandle>);

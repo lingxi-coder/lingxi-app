@@ -670,8 +670,10 @@ mod refresh_tests {
         )]);
         let clock = TestClock::new(2_000);
         let storage = MemStorage::new();
-        let credentials =
-            mem_credential_manager(storage.clone(), clock.clone() as Arc<dyn platform_api::Clock>);
+        let credentials = mem_credential_manager(
+            storage.clone(),
+            clock.clone() as Arc<dyn platform_api::Clock>,
+        );
 
         let state = AuthState::new(
             OpenAiOAuthConfig::default(),

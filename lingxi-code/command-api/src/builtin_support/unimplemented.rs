@@ -1,11 +1,10 @@
 //! Shared stub handler used for every slash command that lingxi-core has not
 //! yet implemented in v0.6.0 (M5).
 //!
-//! 84 of the 102 builtin commands point at a single shared instance of this
-//! handler. The 18 core commands point at per-name placeholder structs (see
-//! `builtin/core_placeholders.rs`) so M5-10 / M5-11 can swap each one's body
-//! independently. Both kinds return the same locked literal until the real
-//! bodies land.
+//! The current registry advertises 86 builtin names. The 19 core commands
+//! point at per-name placeholder structs (see `builtin/core_placeholders.rs`)
+//! so M5-10 / M5-11 can swap each one's body independently. Both kinds return
+//! the same locked literal until the real bodies land.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 4 for the byte-locked literal.
@@ -70,15 +69,15 @@ mod tests {
 
     #[tokio::test]
     async fn returns_locked_literal_with_name_substituted() {
-        let h = UnimplementedCommandHandler::new("ant-trace", "(unimplemented in v0.6.0)");
+        let h = UnimplementedCommandHandler::new("teleport", "(unimplemented in v0.6.0)");
         let args = ParsedSlashCommand {
-            name: "ant-trace".to_string(),
+            name: "teleport".to_string(),
             raw_args: String::new(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "ant-trace: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Done{{display: Some(...)}}, got {other:?}"),
         }
@@ -86,9 +85,9 @@ mod tests {
 
     #[tokio::test]
     async fn name_and_description_accessors_return_constructor_values() {
-        let h = UnimplementedCommandHandler::new("x402", "Crypto micropayments");
-        assert_eq!(h.name(), "x402");
-        assert_eq!(h.description(), "Crypto micropayments");
+        let h = UnimplementedCommandHandler::new("teleport", "Configure remote sessions");
+        assert_eq!(h.name(), "teleport");
+        assert_eq!(h.description(), "Configure remote sessions");
     }
 
     #[tokio::test]

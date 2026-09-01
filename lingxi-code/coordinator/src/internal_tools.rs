@@ -24,11 +24,11 @@ use crate::team_registry::TeamRegistry;
 use crate::tool_send_message::SendMessageTool;
 use crate::tool_team_create::TeamCreateTool;
 use crate::tool_team_delete::TeamDeleteTool;
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 use std::sync::Arc;
 use telemetry::AnalyticsBus;
 use tool_api::Tool;
-use platform_api::team_spawn::TeamSpawnSeam;
-use platform_api::{OutputStream, RuntimeSpawner};
 
 /// Build the coordinator-only tools carrying net-new behavior.
 ///
@@ -79,8 +79,8 @@ pub fn coordinator_internal_tools(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use protocol::AgentId;
     use platform_api::team_spawn::TeamSpawnError;
+    use protocol::AgentId;
 
     /// No-op spawn seam — the factory under test never invokes it; it only needs
     /// a concrete `Arc<dyn TeamSpawnSeam>` to construct the tools.

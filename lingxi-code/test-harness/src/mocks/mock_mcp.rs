@@ -10,15 +10,15 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonrpc::{Connection, Mode};
+use platform_api::{
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDefinitionDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
 
 /// Per-server `resources/list` behavior the responder applies (Batch 5c).
 /// Keyed by the server's `InProcess` `registry_key` (== the config name).
@@ -144,6 +144,10 @@ impl MockMcpTransport {
             tool_name: name.into(),
             description: format!("{name} test tool"),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: format!("mcp__mock__{name}"),
             search_hint: None,
             always_load: None,
@@ -293,7 +297,7 @@ impl McpTransport for MockMcpTransport {
     ) -> Result<ServerCapabilitiesDto, McpError> {
         Ok(ServerCapabilitiesDto {
             tools: true,
-            resources: false,
+            resources: true,
             prompts: false,
             logging: false,
             directory_read: false,

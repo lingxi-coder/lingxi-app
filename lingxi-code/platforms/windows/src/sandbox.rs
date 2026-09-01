@@ -67,10 +67,10 @@ impl Sandbox for WindowsSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use platform_api::{
         NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     };
+    use std::collections::HashMap;
 
     fn empty_cmd() -> ProcessCommand {
         ProcessCommand {

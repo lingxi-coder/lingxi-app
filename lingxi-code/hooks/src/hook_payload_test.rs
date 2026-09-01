@@ -765,7 +765,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(post.decision, None);
-        assert_eq!(post.additional_context.as_deref(), Some("use the new model"));
+        assert_eq!(
+            post.additional_context.as_deref(),
+            Some("use the new model")
+        );
     }
 
     #[test]
@@ -1554,7 +1557,8 @@ mod tests {
         let post_json = serde_json::to_string(&post).unwrap();
         assert!(post_json.contains(r#""hook_event_name":"PostModelSwitch""#));
         assert!(post_json.contains(r#""requested_model":"opus""#));
-        assert!(post_json.contains(r#""cache_ttl":"1h","estimated_cache_write_usd":0.0,"pricing":"default""#));
+        assert!(post_json
+            .contains(r#""cache_ttl":"1h","estimated_cache_write_usd":0.0,"pricing":"default""#));
     }
 
     #[test]

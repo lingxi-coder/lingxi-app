@@ -59,6 +59,7 @@ sandbox-runtime-runner = { path = "../../sandbox-runtime-runner" }
 telemetry = { path = "../../telemetry" }
 cost = { path = "../../cost" }
 mcp = { path = "../../mcp" }
+bridge = { path = "../../bridge" }
 hooks = { path = "../../hooks" }
 agent = { path = "../../agent" }
 plugin = { path = "../../plugin" }
@@ -155,6 +156,12 @@ tui-core = { path = "../../tui-core" }
 # (Also used by T16's task-output temp-dir name via the shared `current_uid()`.)
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", default-features = false, features = ["user"] }
+
+[target.'cfg(windows)'.dependencies]
+# Windows desktop composition selects the Windows MCP transport at runtime;
+# the remaining desktop capabilities retain their existing cross-platform
+# adapters above.
+platform-windows = { path = "../../platforms/windows" }
 
 [dev-dependencies]
 # Snapshot the assembled tool set (§14 criterion 8). `test-support` exposes the

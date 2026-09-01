@@ -56,9 +56,9 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{OrchestratorHandle, RecapOutcome};
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use platform_api::{OrchestratorHandle, RecapOutcome};
 
 /// Fixed no-arg-invocation display when the session has had zero qualifying
 /// turns yet. Byte-exact from the 2.1.198 binary.
@@ -242,7 +242,9 @@ mod tests {
         async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
             Ok(())
         }
-        async fn force_compact(&self) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+        async fn force_compact(
+            &self,
+        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
             Ok(platform_api::CompactionSummary::default())
         }
         async fn snapshot_cost(&self) -> platform_api::CostSnapshot {

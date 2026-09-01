@@ -63,7 +63,9 @@ impl TodoStoreReminderTasks {
             }
         }
         // 4. Leader team name (set by `TeamCreate`).
-        if let Some(team) = platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
+        if let Some(team) =
+            platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty())
+        {
             return team;
         }
         // 5. Standalone session fallback.

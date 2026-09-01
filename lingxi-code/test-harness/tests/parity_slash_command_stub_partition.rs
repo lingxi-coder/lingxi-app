@@ -37,8 +37,8 @@ use command_api::builtin_support::names::{
 use command_api::builtin_support::unimplemented::UnimplementedCommandHandler;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::register_all_builtin_commands;
-use tokio::sync::RwLock;
 use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
+use tokio::sync::RwLock;
 
 fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {
     table.iter().map(|(n, _)| *n).collect()
@@ -49,13 +49,11 @@ fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {
 // ============================================================================
 
 #[test]
-fn correct_by_design_set_is_locked_at_22() {
+fn correct_by_design_set_is_locked_at_3() {
     assert_eq!(
         CORRECT_BY_DESIGN_STUBS.len(),
-        22,
-        "the correct-by-design faithful-stub set is locked at 22 commands \
-         (23 until SLASH-06 removed `share`, which the shipped binary does not \
-         define as a command at all — it is the `bug` command's alias)"
+        3,
+        "only three faithful stubs remain after the 2.1.252 stale-name audit"
     );
 }
 
@@ -83,10 +81,10 @@ fn correct_by_design_and_host_bound_deferred_are_disjoint() {
 
 #[test]
 fn correct_by_design_excludes_every_host_bound_name() {
-    // Belt-and-braces against regression: none of the three implemented
+    // Belt-and-braces against regression: none of the two implemented
     // commands may appear in the faithful-by-design set.
     let cbd = names_of(CORRECT_BY_DESIGN_STUBS);
-    for name in ["btw", "x402", "reload-plugins"] {
+    for name in ["btw", "reload-plugins"] {
         assert!(
             !cbd.contains(name),
             "'{name}' is implemented by claude-code and must NOT be marked correct-by-design"

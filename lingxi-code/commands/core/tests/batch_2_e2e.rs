@@ -10,13 +10,13 @@ use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use command_core::{register_all_builtin_commands, register_core_batch_1, register_core_batch_2};
 use orchestrator::test_support::MockOrchestratorHandle;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use tokio::sync::RwLock;
 use platform_api::{
     AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::RwLock;
 
 struct MockAuth {
     result: StdMutex<Result<LoginInfo, AuthError>>,

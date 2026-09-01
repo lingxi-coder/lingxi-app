@@ -11,6 +11,7 @@ use crate::repl_loop::{step, StepOutcome};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
+use platform_api::{OrchestratorHandle, OutputStream};
 use protocol::SessionId;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -21,7 +22,6 @@ use tokio::io::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use platform_api::{OrchestratorHandle, OutputStream};
 
 /// Pure decision: should the REPL surface an interactive permission prompt?
 ///
@@ -251,7 +251,11 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             permission::InteractivePromptingGate::new(shared, Arc::new(Mutex::new(stderr())));
         cfg.injected_permission_gate =
             Some(Arc::new(gate) as Arc<dyn permission::gate::PermissionGate>);
-        crate::init::build_runtime_from_config(cfg, adapter).await
+        let result = crate::init::build_runtime_from_config(cfg, adapter).await;
+        if let Ok(runtime) = result.as_ref() {
+            crate::init::auto_connect_ide_if_requested(argv, runtime).await;
+        }
+        result
     } else {
         crate::init::build_runtime(argv, adapter, permission_mode).await
     };

@@ -15,13 +15,13 @@
 
 use crate::connection::{ConfigScope, McpServerConfig, McpServerMetadata, McpServerRole};
 use crate::env_expansion::expand_env_vars_in_string;
-use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 use platform_api::{
     McpConfiguredToolPolicyDto, McpHeaders, McpOAuthConfigDto, McpPermissionCeiling,
     McpToolPermissionPolicy, McpTransportSpec,
 };
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 /// Expand `${VAR}` / `${VAR:-default}` references in one string against the
 /// process environment, appending any missing-variable names to `missing`.
@@ -1080,6 +1080,7 @@ fn build_entry(
                     McpTransportSpec::SseIde {
                         url,
                         ide_name,
+                        auth_token: None,
                         ide_running_in_windows,
                     }
                 }
@@ -1875,10 +1876,12 @@ mod tests {
             McpTransportSpec::SseIde {
                 url,
                 ide_name,
+                auth_token,
                 ide_running_in_windows,
             } => {
                 assert_eq!(url, "http://127.0.0.1:9999/sse");
                 assert_eq!(ide_name, "VS Code");
+                assert!(auth_token.is_none());
                 assert!(ide_running_in_windows);
             }
             other => panic!("expected SseIde, got {other:?}"),
@@ -2075,6 +2078,7 @@ mod tests {
         let sse_ide = McpTransportSpec::SseIde {
             url: "http://x/sse".to_string(),
             ide_name: "VS Code".to_string(),
+            auth_token: None,
             ide_running_in_windows: false,
         };
         assert_eq!(

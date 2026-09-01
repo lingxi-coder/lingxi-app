@@ -9,12 +9,13 @@
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 /// The literal `ideName` value we publish in the `~/.lingxi/ide/` lockfile,
 /// scanned by the real IDE peer (claude-code, VS Code Claude, …).
@@ -29,7 +30,7 @@ pub const TRANSPORT: &str = "ws";
 /// JSON body of a lockfile (matches claude-code's `LockfileJsonContent`).
 ///
 /// Field names are camelCase to match the wire format byte-for-byte.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LockfileBody {
     /// Process ID of the bridge that wrote the file.
     pub pid: u32,
@@ -50,12 +51,38 @@ pub struct LockfileBody {
     pub auth_token: String,
 }
 
+// Lockfiles are routinely included in diagnostic values. Never let the local
+// bearer escape through a derived `Debug` implementation (the wire token is
+// intentionally kept out of status, telemetry, and logs).
+impl fmt::Debug for LockfileBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LockfileBody")
+            .field("pid", &self.pid)
+            .field("workspace_folders", &self.workspace_folders)
+            .field("ide_name", &self.ide_name)
+            .field("transport", &self.transport)
+            .field("running_in_windows", &self.running_in_windows)
+            .field("auth_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Self-describing lockfile: knows its directory, its port, and its JSON body.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IdeLockfile {
     ide_dir: PathBuf,
     port: u16,
     body: LockfileBody,
+}
+
+impl fmt::Debug for IdeLockfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IdeLockfile")
+            .field("ide_dir", &self.ide_dir)
+            .field("port", &self.port)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl IdeLockfile {
@@ -212,6 +239,42 @@ impl IdeLockfile {
         self.port
     }
 
+    /// Human-readable IDE name from the lockfile.
+    #[must_use]
+    pub fn ide_name(&self) -> &str {
+        &self.body.ide_name
+    }
+
+    /// Transport selector (`"ws"` or `"sse"`).
+    #[must_use]
+    pub fn transport(&self) -> &str {
+        &self.body.transport
+    }
+
+    /// Workspace folders advertised by the IDE peer.
+    #[must_use]
+    pub fn workspace_folders(&self) -> &[PathBuf] {
+        &self.body.workspace_folders
+    }
+
+    /// Whether the peer expects Windows path semantics.
+    #[must_use]
+    pub fn running_in_windows(&self) -> bool {
+        self.body.running_in_windows
+    }
+
+    /// Endpoint URL derived from the lockfile's loopback port and transport.
+    #[must_use]
+    pub fn endpoint_url(&self) -> String {
+        if self.transport() == "sse" {
+            format!("http://127.0.0.1:{}/sse", self.port)
+        } else {
+            // Claude's IDE detector targets the loopback root for WebSocket
+            // lockfiles (the bridge accepts both root and `/mcp` paths).
+            format!("ws://127.0.0.1:{}", self.port)
+        }
+    }
+
     /// Exclusively write the JSON body as a private regular file.
     ///
     /// # Errors
@@ -272,6 +335,222 @@ impl IdeLockfile {
             })?;
         Ok((body, port))
     }
+
+    /// Parse and validate a lockfile before using it as a local endpoint.
+    ///
+    /// Discovery is an authority boundary: a symlink, group/world-readable
+    /// file, or lockfile owned by another user must never be allowed to supply
+    /// an auth token to a client connection. The file is opened with
+    /// `O_NOFOLLOW` on Unix after the metadata checks, closing the usual
+    /// check-then-open symlink race. `read` remains the intentionally lenient
+    /// parser used by compatibility callers and tests; all endpoint discovery
+    /// goes through this method.
+    pub fn read_secure(path: &Path) -> std::io::Result<(LockfileBody, u16)> {
+        Self::read_secure_with(path, is_process_alive)
+    }
+
+    /// Testable form of [`Self::read_secure`] with an injected liveness probe.
+    pub fn read_secure_with<F>(
+        path: &Path,
+        process_alive: F,
+    ) -> std::io::Result<(LockfileBody, u16)>
+    where
+        F: Fn(u32) -> bool,
+    {
+        let port = Self::parse_port_from_path(path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(invalid_lockfile("lockfile is not a regular file"));
+        }
+
+        #[cfg(unix)]
+        {
+            let expected_uid = nix::unistd::geteuid().as_raw();
+            if metadata.uid() != expected_uid {
+                return Err(invalid_lockfile(
+                    "lockfile owner does not match current user",
+                ));
+            }
+            // The writer creates 0600 files. Requiring no group/other bits is
+            // the important invariant; retaining owner read/write allows a
+            // manually-created 0400 lockfile to be diagnosed as a valid,
+            // read-only endpoint rather than silently following it.
+            if metadata.mode() & 0o077 != 0 {
+                return Err(invalid_lockfile("lockfile permissions are too broad"));
+            }
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+        let mut file = options.open(path)?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.is_file() {
+            return Err(invalid_lockfile("lockfile is not a regular file"));
+        }
+        #[cfg(unix)]
+        {
+            // Re-check the opened handle and make sure it is the same inode
+            // examined above. This closes a rename/hard-link replacement
+            // between `symlink_metadata` and `open`, in addition to
+            // `O_NOFOLLOW`'s symlink protection.
+            if opened_metadata.uid() != nix::unistd::geteuid().as_raw()
+                || opened_metadata.mode() & 0o077 != 0
+                || opened_metadata.dev() != metadata.dev()
+                || opened_metadata.ino() != metadata.ino()
+            {
+                return Err(invalid_lockfile("lockfile changed during discovery"));
+            }
+        }
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)?;
+        let body: LockfileBody = serde_json::from_slice(&raw)
+            .map_err(|error| invalid_lockfile(format!("malformed JSON: {error}")))?;
+        validate_body(&body, port, &process_alive)?;
+        Ok((body, port))
+    }
+
+    fn parse_port_from_path(path: &Path) -> std::io::Result<u16> {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix(".lock"))
+            // `u16::from_str` accepts a leading `+`; the on-disk contract is
+            // the literal `<port>.lock` decimal form, so reject signs and
+            // every other non-digit spelling before parsing.
+            .filter(|s| !s.is_empty() && s.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .ok_or_else(|| invalid_lockfile("lockfile name not <port>.lock"))
+    }
+}
+
+fn invalid_lockfile(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+}
+
+fn validate_body<F>(body: &LockfileBody, _port: u16, process_alive: &F) -> std::io::Result<()>
+where
+    F: Fn(u32) -> bool,
+{
+    if body.pid == 0 || !process_alive(body.pid) {
+        return Err(invalid_lockfile("lockfile process is not alive"));
+    }
+    if body.ide_name.trim().is_empty() {
+        return Err(invalid_lockfile("lockfile ideName is empty"));
+    }
+    if body
+        .ide_name
+        .chars()
+        .any(|character| character.is_control())
+    {
+        return Err(invalid_lockfile(
+            "lockfile ideName contains control characters",
+        ));
+    }
+    if !matches!(body.transport.as_str(), "ws" | "sse") {
+        return Err(invalid_lockfile("lockfile transport is not ws or sse"));
+    }
+    if body.auth_token.is_empty()
+        || !body.auth_token.is_ascii()
+        || body
+            .auth_token
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        return Err(invalid_lockfile("lockfile authToken is invalid"));
+    }
+    if body
+        .workspace_folders
+        .iter()
+        .any(|folder| !folder.is_absolute())
+    {
+        return Err(invalid_lockfile(
+            "lockfile workspace folder is not absolute",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    matches!(kill(Pid::from_raw(pid), None), Ok(()) | Err(Errno::EPERM))
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(pid: u32) -> bool {
+    // Windows does not expose a safe, dependency-free process-liveness probe
+    // in this crate. The endpoint still gets strict file/JSON validation; a
+    // subsequent local connection failure rejects an expired endpoint.
+    pid != 0
+}
+
+/// Discover every valid local IDE lockfile in deterministic port order.
+///
+/// Invalid candidates are ignored individually so one stale or attacker-owned
+/// file cannot hide a healthy peer. The caller can use the resulting count to
+/// implement the `--ide` rule: auto-connect only when exactly one endpoint is
+/// valid.
+#[must_use]
+pub fn discover_all(ide_dir: &Path) -> Vec<IdeLockfile> {
+    discover_all_with(ide_dir, is_process_alive)
+}
+
+/// Deterministic discovery seam used by tests and embedders that already own a
+/// process-liveness oracle. Production callers should use [`discover_all`].
+#[must_use]
+pub fn discover_all_with<F>(ide_dir: &Path, process_alive: F) -> Vec<IdeLockfile>
+where
+    F: Fn(u32) -> bool,
+{
+    let Ok(dir_metadata) = std::fs::symlink_metadata(ide_dir) else {
+        return Vec::new();
+    };
+    if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
+        return Vec::new();
+    }
+    #[cfg(unix)]
+    {
+        if dir_metadata.uid() != nix::unistd::geteuid().as_raw() || dir_metadata.mode() & 0o077 != 0
+        {
+            return Vec::new();
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(ide_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || !name.ends_with(".lock") {
+            continue;
+        }
+        let Ok((body, port)) = IdeLockfile::read_secure_with(&path, &process_alive) else {
+            continue;
+        };
+        out.push(IdeLockfile {
+            ide_dir: ide_dir.to_path_buf(),
+            port,
+            body,
+        });
+    }
+    out.sort_by(|left, right| {
+        left.port
+            .cmp(&right.port)
+            .then_with(|| left.body.ide_name.cmp(&right.body.ide_name))
+    });
+    out
 }
 
 /// Discover the most-recently-modified `<port>.lock` file in `ide_dir`.
@@ -281,38 +560,17 @@ impl IdeLockfile {
 /// running IDE peer (mirrors claude-code's `cleanupStaleIdeLockfiles` scan).
 #[must_use]
 pub fn discover_latest(ide_dir: &Path) -> Option<IdeLockfile> {
-    let entries = std::fs::read_dir(ide_dir).ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Filter to <port>.lock; reject our own `.<port>.lock.tmp` shadow.
-        if path.extension().and_then(|s| s.to_str()) != Some("lock") {
-            continue;
-        }
-        if path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_none_or(|s| s.starts_with('.'))
-        {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
+    let mut best: Option<(std::time::SystemTime, IdeLockfile)> = None;
+    for candidate in discover_all(ide_dir) {
+        let mtime = std::fs::symlink_metadata(candidate.path())
             .ok()
-            .and_then(|m| m.modified().ok())
+            .and_then(|metadata| metadata.modified().ok())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        match &best {
-            Some((existing, _)) if *existing >= mtime => {}
-            _ => best = Some((mtime, path)),
+        if best.as_ref().is_none_or(|(existing, _)| *existing < mtime) {
+            best = Some((mtime, candidate));
         }
     }
-    let (_, path) = best?;
-    let (body, port) = IdeLockfile::read(&path).ok()?;
-    Some(IdeLockfile {
-        ide_dir: ide_dir.to_path_buf(),
-        port,
-        body,
-    })
+    best.map(|(_, candidate)| candidate)
 }
 
 /// Drop-guard that removes a lockfile when the bridge shuts down OR panics.
@@ -434,5 +692,102 @@ mod tests {
         let guard = LockfileGuard::new(lf.path());
         guard.disarm();
         assert!(lf.path().exists(), "disarm must preserve the file");
+    }
+
+    #[test]
+    fn secure_discovery_rejects_expired_processes() {
+        let tmp = TempDir::new().unwrap();
+        let lf = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43126, vec![]);
+        lf.write().unwrap();
+        assert!(discover_all_with(tmp.path(), |_| false).is_empty());
+    }
+
+    #[test]
+    fn secure_discovery_rejects_malformed_body_and_non_ascii_token() {
+        let tmp = TempDir::new().unwrap();
+        let malformed = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43125, vec![]);
+        malformed.write().unwrap();
+        std::fs::write(malformed.path(), b"not-json").unwrap();
+        assert!(IdeLockfile::read_secure_with(&malformed.path(), |_| true).is_err());
+
+        let signed_name = tmp.path().join("+43126.lock");
+        std::fs::write(&signed_name, b"{}").unwrap();
+        assert!(IdeLockfile::read_secure_with(&signed_name, |_| true).is_err());
+
+        let non_ascii = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43124, vec![]);
+        non_ascii.write().unwrap();
+        let body = serde_json::json!({
+            "pid": std::process::id(),
+            "workspaceFolders": [],
+            "ideName": "IDE",
+            "transport": "ws",
+            "runningInWindows": false,
+            "authToken": "té"
+        });
+        std::fs::write(non_ascii.path(), serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(IdeLockfile::read_secure_with(&non_ascii.path(), |_| true).is_err());
+
+        let control_name = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43123, vec![]);
+        control_name.write().unwrap();
+        let body = serde_json::json!({
+            "pid": std::process::id(),
+            "workspaceFolders": [],
+            "ideName": "IDE\n",
+            "transport": "ws",
+            "runningInWindows": false,
+            "authToken": "token"
+        });
+        std::fs::write(control_name.path(), serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(IdeLockfile::read_secure_with(&control_name.path(), |_| true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_discovery_rejects_broad_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let lf = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43127, vec![]);
+        lf.write().unwrap();
+        std::fs::set_permissions(&lf.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(discover_all_with(tmp.path(), |_| true).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_discovery_rejects_symlink_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.lock");
+        let link = tmp.path().join("43128.lock");
+        let lf = IdeLockfile::new_for_ide_dir(tmp.path().to_path_buf(), 43129, vec![]);
+        lf.write().unwrap();
+        std::fs::rename(lf.path(), &target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(discover_all_with(tmp.path(), |_| true).is_empty());
+    }
+
+    #[test]
+    fn secure_discovery_is_sorted_and_exposes_endpoint_without_token() {
+        let tmp = TempDir::new().unwrap();
+        let first = IdeLockfile::new_for_ide_dir(
+            tmp.path().to_path_buf(),
+            43130,
+            vec![PathBuf::from("/workspace/one")],
+        );
+        let second = IdeLockfile::new_for_ide_dir(
+            tmp.path().to_path_buf(),
+            43131,
+            vec![PathBuf::from("/workspace/two")],
+        );
+        first.write().unwrap();
+        second.write().unwrap();
+        let found = discover_all_with(tmp.path(), |pid| pid == std::process::id());
+        assert_eq!(
+            found.iter().map(IdeLockfile::port).collect::<Vec<_>>(),
+            vec![43130, 43131]
+        );
+        assert_eq!(found[0].endpoint_url(), "ws://127.0.0.1:43130");
+        let debug = format!("{:?}", found[0]);
+        assert!(!debug.contains(found[0].auth_token()));
     }
 }

@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::http::HttpError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -28,7 +29,6 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 use tool_api::BuiltinToolContext;
-use platform_api::http::HttpError;
 
 /// Wire `type` field on the WebSearch tool block. Spec §7 lock; matches
 /// `claude-code/src/tools/WebSearchTool/WebSearchTool.ts:78`.
@@ -2163,12 +2163,12 @@ mod tests {
     // sequence, except `fallback_*` which force a `stream_sse` connect error and
     // assert the blocking fallback.
 
+    use platform_api::http::HttpTransport;
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
     use tool_api::progress::{progress_channel, ToolProgress, ToolProgressReceiver};
     use tool_api::test_support::fresh_ctx;
-    use platform_api::http::HttpTransport;
 
     /// A streaming-aware mock `HttpTransport` with INDEPENDENT queues for
     /// `stream_sse` (SSE event frames) and `request` (blocking responses), so a

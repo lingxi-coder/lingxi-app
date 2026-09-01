@@ -313,12 +313,12 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
+    use platform_api::http::HttpTransport;
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
     use tool_api::test_support::{fresh_ctx, fresh_tx};
-    use platform_api::http::HttpTransport;
 
     /// Serializes every test that touches the process-global
     /// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var. The skip test *sets* it; the

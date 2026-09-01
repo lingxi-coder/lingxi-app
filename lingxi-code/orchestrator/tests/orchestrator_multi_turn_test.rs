@@ -8,6 +8,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::OutputEvent;
 use protocol::ToolUseId;
 use serde_json::json;
 use std::sync::Arc;
@@ -17,7 +18,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::OutputEvent;
 
 /// Mock tool that always returns `{"ok": true}`.
 struct AlwaysOkTool;
@@ -170,12 +170,15 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     assert_eq!(captured.len(), 2);
     // The 2nd call carries a leading `additionalContext` meta message (R-P1c/d,
     // prepended each turn) followed by: user(prompt), assistant(tool_use),
-    // user(tool_result).
+    // user(tool_result), then the transient total-tokens reminder.
     let second_call = &captured[1];
-    assert_eq!(second_call.len(), 4);
+    assert_eq!(second_call.len(), 5);
     assert!(
         second_call[0].is_meta(),
         "first message is the leading additionalContext meta; got {:?}",
         second_call[0]
     );
+    assert!(serde_json::to_string(&second_call[3])
+        .unwrap()
+        .contains("tool_result"));
 }

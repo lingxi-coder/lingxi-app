@@ -3,8 +3,8 @@
 //! implementation (and the OS keychain variants) ships in Plan 17.
 
 use async_trait::async_trait;
-use protocol::SecureStorageData;
 use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use protocol::SecureStorageData;
 
 /// Stub secure storage — declares the plaintext backend without persisting.
 #[derive(Default)]

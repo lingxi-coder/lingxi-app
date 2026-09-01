@@ -5,10 +5,12 @@
 //!    `lingxi-lsp` crate. A doctest with `compile_fail` proves this.
 
 use lsp::LspRegistry;
+use platform_api::{
+    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
+};
 use protocol::PluginId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 struct DummyTransport;
 

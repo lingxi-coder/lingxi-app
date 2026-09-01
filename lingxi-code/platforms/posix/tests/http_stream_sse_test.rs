@@ -7,12 +7,12 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use futures_util::StreamExt;
+use platform_api::HttpTransport;
 use platform_posix::PosixHttp;
 use protocol::{HttpMethod, HttpRequest};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use platform_api::HttpTransport;
 
 const SSE_BODY: &str = concat!(
     "event: message_start\n",

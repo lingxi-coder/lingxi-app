@@ -79,6 +79,7 @@ class LocalAppsViewModel(
     private val sessionStrings: SessionCatalogStrings = DefaultSessionCatalogStrings,
     private val webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
     private val widgetSnapshotSync: LocalAppWidgetSnapshotSync = NoopLocalAppWidgetSnapshotSync,
+    private val currentConversationId: () -> String? = { null },
     /** Injectable "now" so relative-time bucketing is deterministic in tests. */
     internal var nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000L },
 ) : ViewModel() {
@@ -366,6 +367,23 @@ class LocalAppsViewModel(
             is LocalAppsAction.ResolveDependencyChangeConfirmation -> resolveDependencyChangeConfirmation(action.approved)
             is LocalAppsAction.ResolveApprovalSheet -> resolveApprovalSheet(action.approved)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
+            is LocalAppsAction.UpdateMcpGoal -> _uiState.update { state ->
+                state.copy(
+                    mcpDrafts = state.mcpDrafts + (action.appId to LocalAppMcpDraft(action.userGoal)),
+                    mcpErrorByApp = state.mcpErrorByApp - action.appId,
+                )
+            }
+            is LocalAppsAction.StartMcpAuthoring -> startManagedMcpAuthoring(action.appId)
+            is LocalAppsAction.SetMcpEnabled -> setManagedMcpEnabled(action.appId, action.enabled)
+            is LocalAppsAction.SetMcpToolEnabled -> setManagedMcpToolEnabled(
+                action.appId,
+                action.toolName,
+                action.enabled,
+            )
+            is LocalAppsAction.SetMcpPinnedToConversation -> setManagedMcpPinnedToConversation(
+                action.appId,
+                action.pinned,
+            )
             is LocalAppsAction.SelectDetailsTab -> _uiState.update { state ->
                 val appId = state.selectedAppId ?: return@update state
                 state.copy(
@@ -380,7 +398,10 @@ class LocalAppsViewModel(
     }
 
     private suspend fun requestSnapshots(bound: ConversationSource) {
-        runCatching { bound.submitClientCommand(ClientCommand.ListApps) }
+        runCatching {
+            bound.submitClientCommand(ClientCommand.ListApps)
+            bound.submitClientCommand(ClientCommand.PluginCommand(PluginCommandDto.GetManagedMcpInventory))
+        }
             .onFailure {
                 error(
                     strings.resolve(
@@ -694,6 +715,124 @@ class LocalAppsViewModel(
     private fun requestSessions(appId: String, offset: ULong?) {
         sessionRequestOffsets[appId] = offset
         submit(ClientCommand.ListAppSessions(appId = appId, offset = offset, limit = null))
+    }
+
+    private fun startManagedMcpAuthoring(appId: String) {
+        val goal = _uiState.value.mcpDraft(appId).userGoal.trim().ifBlank {
+            _uiState.value.apps.firstOrNull { it.id == appId }?.brief?.trim().orEmpty()
+        }
+        if (goal.isBlank()) {
+            setManagedMcpError(
+                appId,
+                strings.resolve(
+                    R.string.local_apps_mcp_goal_required,
+                    "请先描述希望 LLM 通过这个应用完成什么工作。",
+                ),
+            )
+            return
+        }
+        val command = PluginCommandDto.StartLocalAppMcpAuthoring(
+            appId = appId,
+            userGoal = goal,
+        )
+        submitManagedMcpCommand(
+            appId = appId,
+            pendingMessage = strings.resolve(R.string.local_apps_mcp_pending_authoring, "正在生成 MCP 方案…"),
+            command = command,
+            refreshInventoryAfterSubmit = false,
+        )
+    }
+
+    private fun setManagedMcpEnabled(appId: String, enabled: Boolean) {
+        val managed = _uiState.value.managedMcp(appId)
+        val revision = managed.settingsRevision ?: 0uL
+        submitManagedMcpCommand(
+            appId = appId,
+            pendingMessage = strings.resolve(R.string.local_apps_mcp_pending_service, "正在更新 MCP 服务…"),
+            command = PluginCommandDto.SetLocalAppMcpEnabled(
+                appId = appId,
+                enabled = enabled,
+                expectedRevision = revision,
+            ),
+        )
+    }
+
+    private fun setManagedMcpToolEnabled(appId: String, toolName: String, enabled: Boolean) {
+        val managed = _uiState.value.managedMcp(appId)
+        val revision = managed.settingsRevision ?: 0uL
+        submitManagedMcpCommand(
+            appId = appId,
+            pendingMessage = strings.resolve(R.string.local_apps_mcp_pending_tool, "正在更新工具开关…"),
+            command = PluginCommandDto.SetLocalAppMcpToolEnabled(
+                appId = appId,
+                toolName = toolName,
+                enabled = enabled,
+                expectedRevision = revision,
+            ),
+        )
+    }
+
+    private fun setManagedMcpPinnedToConversation(appId: String, pinned: Boolean) {
+        val conversationId = currentConversationId()?.takeUnless { it.isBlank() || it == "new" }
+        if (conversationId == null) {
+            setManagedMcpError(
+                appId,
+                strings.resolve(
+                    R.string.local_apps_mcp_conversation_required,
+                    "请先进入一个真实会话，再把这个应用的 MCP 暴露给当前对话。",
+                ),
+            )
+            return
+        }
+        submitManagedMcpCommand(
+            appId = appId,
+            pendingMessage = strings.resolve(R.string.local_apps_mcp_pending_pin, "正在更新当前对话暴露状态…"),
+            command = PluginCommandDto.SetLocalAppMcpConversationPinned(
+                conversationId = conversationId,
+                appId = appId,
+                pinned = pinned,
+            ),
+        )
+    }
+
+    private fun submitManagedMcpCommand(
+        appId: String,
+        pendingMessage: String,
+        command: PluginCommandDto,
+        refreshInventoryAfterSubmit: Boolean = true,
+    ) {
+        _uiState.update { state ->
+            state.copy(
+                mcpPendingByApp = state.mcpPendingByApp + (appId to pendingMessage),
+                mcpErrorByApp = state.mcpErrorByApp - appId,
+            )
+        }
+        submit(
+            onFailure = {
+                clearManagedMcpPending(appId)
+            },
+        ) {
+            it.submitClientCommand(ClientCommand.PluginCommand(command))
+            if (refreshInventoryAfterSubmit) {
+                it.submitClientCommand(ClientCommand.PluginCommand(PluginCommandDto.GetManagedMcpInventory))
+            }
+        }
+    }
+
+    private fun clearManagedMcpPending(appId: String) {
+        _uiState.update { state ->
+            state.copy(mcpPendingByApp = state.mcpPendingByApp - appId)
+        }
+    }
+
+    private fun setManagedMcpError(appId: String, message: String) {
+        _uiState.update { state ->
+            state.copy(
+                mcpPendingByApp = state.mcpPendingByApp - appId,
+                mcpErrorByApp = state.mcpErrorByApp + (appId to message),
+                error = message,
+            )
+        }
     }
 
     private fun deleteApp(appId: String) {
@@ -1134,6 +1273,7 @@ class LocalAppsViewModel(
             is AppEventDto.AppDependencyChangeConfirmationRequested -> {
                 enqueueDependencyChangeConfirmation(event.request.toUiDependencyChangeConfirmation())
             }
+            is AppEventDto.ManagedMcpInventoryChanged -> reduceManagedMcpInventory(event.servers)
             is AppEventDto.AppCheckpointsChanged -> _uiState.update { state ->
                 val details = state.details[event.appId] ?: return@update state
                 state.copy(
@@ -1195,10 +1335,10 @@ class LocalAppsViewModel(
             is AppEventDto.CreateConfirmationRequested -> enqueueApprovalSheet(
                 event.request.toUiCreateApprovalSheet(),
             )
-            is AppEventDto.McpProposalApprovalRequested -> enqueueApprovalSheet(
-                event.request.toUiMcpProposalApprovalSheet(),
-            )
-            is AppEventDto.ManagedMcpInventoryChanged -> Unit
+            is AppEventDto.McpProposalApprovalRequested -> {
+                clearManagedMcpPending(event.request.appId)
+                enqueueApprovalSheet(event.request.toUiMcpProposalApprovalSheet())
+            }
             is AppEventDto.VerificationSummaryChanged -> reduceVerificationSummary(
                 appId = event.appId,
                 workflow = event.publicationState.toUiWorkflow(),
@@ -1334,7 +1474,27 @@ class LocalAppsViewModel(
                     )
                 )
             } ?: state.details
+            val managedMcp = state.managedMcp[appId]?.let { managed ->
+                state.managedMcp + (
+                    appId to managed.copy(
+                        mcpVerification = mcpVerification,
+                        uiVerification = uiVerification,
+                    )
+                )
+            } ?: state.managedMcp
             state.copy(apps = apps, details = details)
+                .copy(managedMcp = managedMcp)
+        }
+    }
+
+    private fun reduceManagedMcpInventory(servers: List<com.lingxi.code.bindings.ManagedLocalAppMcpServerDto>) {
+        val byAppId = servers.associateBy { it.appId }
+        _uiState.update { state ->
+            state.copy(
+                managedMcp = byAppId.mapValues { (_, server) -> server.toUiManagedMcpServer() },
+                mcpPendingByApp = emptyMap(),
+                mcpErrorByApp = state.mcpErrorByApp - byAppId.keys,
+            )
         }
     }
 
@@ -1461,6 +1621,10 @@ class LocalAppsViewModel(
             state.copy(
                 apps = apps,
                 details = state.details.filterKeys(liveIds::contains),
+                managedMcp = state.managedMcp.filterKeys(liveIds::contains),
+                mcpDrafts = state.mcpDrafts.filterKeys(liveIds::contains),
+                mcpPendingByApp = state.mcpPendingByApp.filterKeys(liveIds::contains),
+                mcpErrorByApp = state.mcpErrorByApp.filterKeys(liveIds::contains),
                 appSessions = state.appSessions.filterKeys(liveIds::contains),
                 bridgeResults = state.bridgeResults.filterValues { it.appId in liveIds },
                 selectedAppId = state.selectedAppId?.takeIf { it in liveIds },
@@ -1595,6 +1759,7 @@ class LocalAppsViewModel(
             sessionStrings: SessionCatalogStrings = DefaultSessionCatalogStrings,
             webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
             widgetSnapshotSync: LocalAppWidgetSnapshotSync = NoopLocalAppWidgetSnapshotSync,
+            currentConversationId: () -> String? = { null },
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
@@ -1605,6 +1770,7 @@ class LocalAppsViewModel(
                         sessionStrings = sessionStrings,
                         webStorageCleanup = webStorageCleanup,
                         widgetSnapshotSync = widgetSnapshotSync,
+                        currentConversationId = currentConversationId,
                     ) as T
             }
     }
@@ -1867,6 +2033,98 @@ private fun LocalAppVerificationSummaryDto.toUiVerificationSummary(): LocalAppVe
         code = code,
     )
 
+private fun com.lingxi.code.bindings.ManagedLocalAppMcpServerDto.toUiManagedMcpServer(): LocalAppManagedMcpServer {
+    val reflectedEnabled = reflectBoolean("getEnabled")
+    val reflectedStatus = reflectStatus("getStatus")
+    val reflectedRevision = reflectULong("getSettingsRevision")
+    val reflectedEnabledTools = reflectStringList("getEnabledTools").toSet()
+    val reflectedPinned = reflectBoolean("getPinnedToCurrentConversation")
+        ?: reflectBoolean("getConversationPinned")
+        ?: false
+    val reflectedWidget = reflectWidget("getWidget")
+    val effectiveEnabled = reflectedEnabled ?: false
+    val effectiveStatus = reflectedStatus ?: when {
+        toolCount.toInt() == 0 -> LocalAppManagedMcpStatus.NeedsSetup
+        effectiveEnabled -> LocalAppManagedMcpStatus.Enabled
+        else -> LocalAppManagedMcpStatus.Disabled
+    }
+    val effectiveEnabledTools = if (reflectedEnabledTools.isEmpty() && effectiveEnabled) {
+        tools.mapTo(linkedSetOf()) { it.name }
+    } else {
+        reflectedEnabledTools
+    }
+    return LocalAppManagedMcpServer(
+        serverName = serverName,
+        appId = appId,
+        appName = appName,
+        enabled = effectiveEnabled,
+        status = effectiveStatus,
+        settingsRevision = reflectedRevision,
+        toolCount = toolCount.toInt(),
+        authoringRevision = authoringRevision,
+        mcpVerification = mcpVerification.toUiVerificationSummary(),
+        uiVerification = uiVerification.toUiVerificationSummary(),
+        tools = tools.map { tool ->
+            LocalAppManagedMcpTool(
+                name = tool.name,
+                title = tool.title,
+                description = tool.description,
+                permissionCeiling = tool.permissionCeiling,
+                enabled = tool.name in effectiveEnabledTools,
+            )
+        },
+        enabledTools = effectiveEnabledTools,
+        pinnedToCurrentConversation = reflectedPinned,
+        widget = reflectedWidget,
+    )
+}
+
+private fun Any.reflectBoolean(methodName: String): Boolean? =
+    runCatching { javaClass.methods.firstOrNull { it.name == methodName }?.invoke(this) as? Boolean }.getOrNull()
+
+private fun Any.reflectULong(methodName: String): ULong? =
+    runCatching {
+        when (val value = javaClass.methods.firstOrNull { it.name == methodName }?.invoke(this)) {
+            is ULong -> value
+            is UInt -> value.toULong()
+            is Long -> value.toULong()
+            is Int -> value.toULong()
+            else -> null
+        }
+    }.getOrNull()
+
+private fun Any.reflectStringList(methodName: String): List<String> =
+    runCatching {
+        @Suppress("UNCHECKED_CAST")
+        (javaClass.methods.firstOrNull { it.name == methodName }?.invoke(this) as? List<Any?>)
+            ?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }
+            .orEmpty()
+    }.getOrDefault(emptyList())
+
+private fun Any.reflectStatus(methodName: String): LocalAppManagedMcpStatus? =
+    runCatching {
+        javaClass.methods.firstOrNull { it.name == methodName }?.invoke(this)?.toString()?.let { raw ->
+            when (raw.lowercase()) {
+                "disabled" -> LocalAppManagedMcpStatus.Disabled
+                "needs_setup", "needssetup" -> LocalAppManagedMcpStatus.NeedsSetup
+                "authoring" -> LocalAppManagedMcpStatus.Authoring
+                "enabled" -> LocalAppManagedMcpStatus.Enabled
+                "needs_revalidation", "needsrevalidation" -> LocalAppManagedMcpStatus.NeedsRevalidation
+                "error" -> LocalAppManagedMcpStatus.Error
+                else -> null
+            }
+        }
+    }.getOrNull()
+
+private fun Any.reflectWidget(methodName: String): LocalAppManagedMcpWidget? =
+    runCatching {
+        val value = javaClass.methods.firstOrNull { it.name == methodName }?.invoke(this) ?: return@runCatching null
+        val label = value.javaClass.methods.firstOrNull { it.name == "getLabel" }?.invoke(value) as? String
+        val detail = (value.javaClass.methods.firstOrNull { it.name == "getSummary" }?.invoke(value) as? String)
+            ?: (value.javaClass.methods.firstOrNull { it.name == "getResourceUri" }?.invoke(value) as? String)
+        LocalAppManagedMcpWidget(available = true, label = label, detail = detail)
+    }.getOrNull()
+
 private fun LocalAppGateStatusDto.toUiApprovalGate(): LocalAppApprovalGate =
     LocalAppApprovalGate(
         name = label,
@@ -1977,6 +2235,10 @@ private fun LocalAppPluginErrorCodeDto.localizedPluginError(
         strings.resolve(R.string.local_apps_error_catalog_stale, fallback)
     LocalAppPluginErrorCodeDto.ACTIVE_STATE_CORRUPT ->
         strings.resolve(R.string.local_apps_error_active_state_corrupt, fallback)
+    LocalAppPluginErrorCodeDto.REVISION_CONFLICT ->
+        strings.resolve(R.string.local_apps_error_catalog_stale, fallback)
+    LocalAppPluginErrorCodeDto.INVALID_MCP_SETTINGS ->
+        strings.resolve(R.string.local_apps_error_proposal_invalid, fallback)
     LocalAppPluginErrorCodeDto.MCP_AUTHORING_REQUIRED ->
         strings.resolve(R.string.local_apps_error_mcp_authoring_required, fallback)
     LocalAppPluginErrorCodeDto.REPAIR_BUDGET_EXHAUSTED ->

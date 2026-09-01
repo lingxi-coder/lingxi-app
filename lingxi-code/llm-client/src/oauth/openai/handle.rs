@@ -27,10 +27,10 @@ use crate::oauth::openai::callback::{CallbackError, CallbackListener};
 use crate::oauth::openai::client::OpenAiOAuthClient;
 use crate::oauth::openai::device_code;
 use crate::oauth::openai::token_data::parse_id_token;
+use platform_api::Clock;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-use platform_api::Clock;
 
 /// Wall-clock source for production use in the device-code path.
 struct RealClock;
@@ -426,10 +426,10 @@ mod tests {
     use crate::oauth::openai::testsupport::{
         mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, TestClock,
     };
+    use platform_api::HttpTransport;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use platform_api::HttpTransport;
 
     #[allow(dead_code)]
     fn _openai_oauth_handle_is_send_sync() {

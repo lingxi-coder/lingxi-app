@@ -1923,7 +1923,6 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        if (_state.value.streaming) return // ignore overlapping submit while streaming
         if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
@@ -2327,10 +2326,19 @@ class ChatViewModel(
                     val completed = state.streamingMessage
                         ?.let { live -> message.copy(id = live.id) }
                         ?: message
+                    // Some hosts emit MessageComplete before TurnEnded. Settle
+                    // the live run here so tool rows survive the later terminal
+                    // event (and a subsequent turn replacing agentRun).
+                    val settled = state.settleTurn(
+                        run = state.agentRun,
+                        settling = completed,
+                    )
                     state.copy(
-                        messages = state.messages + completed,
+                        messages = settled.messages,
                         streamingMessage = null,
                         streaming = true,
+                        agentRun = settled.run,
+                        agentRunsByMessageId = settled.agentRunsByMessageId,
                     )
                 }
             }
@@ -2734,7 +2742,7 @@ internal fun ChatState.settleTurn(run: AgentRunState?, settling: Message?): Sett
     val terminalRun = run?.takeUnless { it.active || it.outcome == AgentRunOutcome.Running }
     val terminalAlreadySettled = terminalRun != null &&
         agentRunsByMessageId.values.any { it.turnId == terminalRun.turnId }
-    if (absorbed.isEmpty() && settling == null && (terminalRun == null || terminalAlreadySettled)) {
+    if (absorbed.isEmpty() && settling == null) {
         return SettledTurn(messages, run, agentRunsByMessageId)
     }
     // A turn can end with tools or status and no prose at all. Mint a hidden

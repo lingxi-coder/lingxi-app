@@ -13,6 +13,7 @@ expression: names
 - ExitPlanMode
 - Glob
 - Grep
+- LSP
 - ListAgents
 - NotebookEdit
 - PushNotification

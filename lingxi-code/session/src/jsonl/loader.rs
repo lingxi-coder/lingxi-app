@@ -31,6 +31,7 @@ use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{
     extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
 };
+use platform_api::{FileSystem, FileSystemCacheIdentity};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -41,7 +42,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use platform_api::{FileSystem, FileSystemCacheIdentity};
 use uuid::Uuid;
 
 /// Metadata for one resumable session row (uuid + title + activity time + visible-message count).

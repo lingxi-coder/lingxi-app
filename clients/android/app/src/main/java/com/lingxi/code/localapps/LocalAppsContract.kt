@@ -292,6 +292,54 @@ data class LocalAppDetails(
     val uiVerification: LocalAppVerificationSummary? = null,
 )
 
+enum class LocalAppManagedMcpStatus {
+    Disabled,
+    NeedsSetup,
+    Authoring,
+    Enabled,
+    NeedsRevalidation,
+    Error,
+}
+
+@Immutable
+data class LocalAppManagedMcpTool(
+    val name: String,
+    val title: String? = null,
+    val description: String? = null,
+    val permissionCeiling: String,
+    val enabled: Boolean,
+)
+
+@Immutable
+data class LocalAppManagedMcpWidget(
+    val available: Boolean,
+    val label: String? = null,
+    val detail: String? = null,
+)
+
+@Immutable
+data class LocalAppManagedMcpServer(
+    val serverName: String,
+    val appId: String,
+    val appName: String,
+    val enabled: Boolean = false,
+    val status: LocalAppManagedMcpStatus = LocalAppManagedMcpStatus.NeedsSetup,
+    val settingsRevision: ULong? = null,
+    val toolCount: Int = 0,
+    val authoringRevision: ULong? = null,
+    val mcpVerification: LocalAppVerificationSummary? = null,
+    val uiVerification: LocalAppVerificationSummary? = null,
+    val tools: List<LocalAppManagedMcpTool> = emptyList(),
+    val enabledTools: Set<String> = emptySet(),
+    val pinnedToCurrentConversation: Boolean = false,
+    val widget: LocalAppManagedMcpWidget? = null,
+)
+
+@Immutable
+data class LocalAppMcpDraft(
+    val userGoal: String = "",
+)
+
 /**
  * One row of an app's workspace-scoped session catalog — the UI projection of
  * the wire `AppSessionRowDto`. [relativeTime] is humanized from the wire
@@ -540,7 +588,7 @@ data class LocalAppProfileApprovalSheet(
  * scope now, so its session catalog is the primary surface; the runtime
  * preview / data / code / history / permissions tabs stay reachable behind it.
  */
-enum class LocalAppDetailsTab { Sessions, Preview, Data, Code, History, PermissionsLogs }
+enum class LocalAppDetailsTab { Sessions, Preview, Mcp, Data, Code, History, PermissionsLogs }
 
 sealed interface LocalAppsDestination {
     data object Library : LocalAppsDestination
@@ -555,6 +603,10 @@ data class LocalAppsUiState(
     val destination: LocalAppsDestination = LocalAppsDestination.Library,
     val query: String = "",
     val details: Map<String, LocalAppDetails> = emptyMap(),
+    val managedMcp: Map<String, LocalAppManagedMcpServer> = emptyMap(),
+    val mcpDrafts: Map<String, LocalAppMcpDraft> = emptyMap(),
+    val mcpPendingByApp: Map<String, String> = emptyMap(),
+    val mcpErrorByApp: Map<String, String> = emptyMap(),
     /**
      * Per-app workspace-scoped session catalogs — the accumulated
      * `AppSessionsChanged` pages, init row pinned first. Feeds the Details
@@ -589,6 +641,17 @@ data class LocalAppsUiState(
     /** The app's live preview url — the runtime's loopback url once running. */
     fun previewUrl(appId: String): String? =
         apps.firstOrNull { it.id == appId }?.runtime?.url ?: details[appId]?.runtime?.url
+
+    fun managedMcp(appId: String): LocalAppManagedMcpServer {
+        val app = apps.firstOrNull { it.id == appId }
+        return managedMcp[appId] ?: LocalAppManagedMcpServer(
+            serverName = "local_app_$appId",
+            appId = appId,
+            appName = app?.name.orEmpty(),
+        )
+    }
+
+    fun mcpDraft(appId: String): LocalAppMcpDraft = mcpDrafts[appId] ?: LocalAppMcpDraft()
 }
 
 sealed interface LocalAppsAction {
@@ -633,6 +696,11 @@ sealed interface LocalAppsAction {
         val resultJson: String?,
         val error: String?,
     ) : LocalAppsAction
+    data class UpdateMcpGoal(val appId: String, val userGoal: String) : LocalAppsAction
+    data class StartMcpAuthoring(val appId: String) : LocalAppsAction
+    data class SetMcpEnabled(val appId: String, val enabled: Boolean) : LocalAppsAction
+    data class SetMcpToolEnabled(val appId: String, val toolName: String, val enabled: Boolean) : LocalAppsAction
+    data class SetMcpPinnedToConversation(val appId: String, val pinned: Boolean) : LocalAppsAction
     data class SelectDetailsTab(val tab: LocalAppDetailsTab) : LocalAppsAction
 
     /**

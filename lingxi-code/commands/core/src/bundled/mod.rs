@@ -1,7 +1,6 @@
 //! Bundled (programmatically-registered) skills — port of the reference
 //! `registerBundledSkill` / `registerBundledSkills` family
-//! (`claude-code/src/skills/bundledSkills.ts`). Today the only bundled skill is
-//! [`loop_skill`] (`/loop`).
+//! (`claude-code/src/skills/bundledSkills.ts`).
 
 use std::sync::Arc;
 
@@ -11,6 +10,7 @@ use command_api::{
 
 pub mod batch_skill;
 pub mod code_review_skill;
+pub mod dataviz_skill;
 pub mod deep_research_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod loop_skill;
@@ -36,6 +36,29 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_code_review_skill(reg);
     register_deep_research_skill(reg);
     register_batch_skill(reg);
+    register_dataviz_skill(reg);
+}
+
+/// Register the `/dataviz` design-guidance skill. The 2.1.252 oracle exposes
+/// this file-backed bundle unconditionally to local sessions (`userInvocable:
+/// true`, no feature gate). Its provider-neutral body is built dynamically so
+/// an optional raw user request follows the same `## User Request` shape as the
+/// reference `getPromptForCommand` implementation.
+fn register_dataviz_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "dataviz".into(),
+        description: dataviz_skill::DATAVIZ_DESCRIPTION.into(),
+        menu_description: Some("Chart and dashboard design guidance".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(dataviz_skill::DatavizPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the manual-only `/deep-research` launcher. The short prompt invokes
@@ -498,6 +521,36 @@ mod tests {
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dataviz_is_unconditional_user_invocable_bundle_with_reference_assets() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("dataviz").expect("dataviz registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(!cmd.disable_model_invocation);
+        assert!(cmd.has_user_specified_description);
+        assert_eq!(
+            cmd.menu_description.as_deref(),
+            Some("Chart and dashboard design guidance")
+        );
+        assert!(cmd
+            .description
+            .starts_with("Use this skill whenever you are about to create"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let prompt = prompt_fn.as_ref().expect("prompt_fn set");
+                assert!(prompt.build("").starts_with("# Data Visualization\n"));
+                assert!(prompt
+                    .build("make this dashboard accessible")
+                    .contains("\n\n## User Request\n\nmake this dashboard accessible"));
+            }
+            other => panic!("expected bundled command, got {other:?}"),
+        }
+        assert_eq!(dataviz_skill::DATAVIZ_REFERENCE_FILES.len(), 3);
     }
 
     #[test]

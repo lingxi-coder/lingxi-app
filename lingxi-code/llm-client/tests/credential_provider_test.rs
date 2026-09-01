@@ -11,10 +11,10 @@ use llm_client::oauth::anthropic::{
     refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig,
 };
 use llm_client::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
+use platform_api::{Clock, HttpError, HttpTransport};
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use platform_api::{Clock, HttpError, HttpTransport};
 
 // ---------------------------------------------------------------------------
 // Test doubles (defined locally — testsupport is crate-private)
@@ -42,7 +42,10 @@ impl HttpTransport for FreshTokenTransport {
             body_bytes: Vec::new(),
         })
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         unimplemented!("sse not used");
     }
 }
@@ -60,7 +63,10 @@ impl HttpTransport for FailingTransport {
             body_bytes: Vec::new(),
         })
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         unimplemented!("sse not used");
     }
 }

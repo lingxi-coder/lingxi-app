@@ -13,8 +13,8 @@
 //! * `disconnect(unknown_id)` is idempotent (returns Ok or a transport error;
 //!   never panics).
 
-use protocol::McpConnectionId;
 use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use protocol::McpConnectionId;
 
 /// Run the standard [`McpTransport`] contract against an impl.
 ///

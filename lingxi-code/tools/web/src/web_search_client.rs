@@ -13,11 +13,11 @@
 //!   `LINGXI_SEARXNG_URL` → DuckDuckGo Lite.
 
 use crate::web_search_config::{WebSearchConfig, WebSearchProvider};
+use platform_api::http::HttpTransport;
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::http::HttpTransport;
 
 /// One normalized search result.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -47,13 +47,13 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // Re-use the status-sink seam from the bash handler so callers wire a single
 // implementation across handlers (defined once in `local_bash` to avoid
@@ -497,6 +497,9 @@ impl Task for DreamHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
     use serde_json::json;
     use std::any::Any;
     use std::collections::HashMap as StdHashMap;
@@ -505,9 +508,6 @@ mod tests {
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
 
     // ---- In-memory FileSystem (mirrors local_agent test fixture) -----------
 

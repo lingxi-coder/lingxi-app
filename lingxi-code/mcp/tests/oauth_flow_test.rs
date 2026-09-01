@@ -16,13 +16,6 @@ use async_trait::async_trait;
 use mcp::connection::{ConfigScope, McpServerConfig};
 use mcp::oauth::{self, OnAuthorizationUrl};
 use mcp::registry::{McpRegistry, OAuthDeps};
-use protocol::{
-    HttpMethod, HttpRequest, HttpResponse, SecretKindDto, SecureStorageData, SecureStorageMetadata,
-};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
 use platform_api::http::SseStream;
 use platform_api::{
     Clock, ElicitRequestDto, ElicitResultDto, HttpError, HttpTransport, McpError,
@@ -31,6 +24,13 @@ use platform_api::{
     McpTransportKind, McpTransportSpec, SecureStorage, SecureStorageBackend, SecureStorageError,
     ServerCapabilitiesDto,
 };
+use protocol::{
+    HttpMethod, HttpRequest, HttpResponse, SecretKindDto, SecureStorageData, SecureStorageMetadata,
+};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 // ---------------------------------------------------------------------------
 // Mock authorization server (HTTP transport with canned, body-aware routes).

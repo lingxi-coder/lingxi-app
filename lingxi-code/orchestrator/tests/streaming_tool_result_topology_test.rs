@@ -20,6 +20,7 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use serde_json::json;
@@ -34,7 +35,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::FileSystem;
 
 /// A trivial concurrency-safe tool whose result echoes its own name, so the
 /// per-result blocks can be matched back to received (in-stream) order.

@@ -257,11 +257,11 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use platform_api::{
         BackendPlanHandle, ProcessCommand, ProcessError, ProcessRunner, SandboxBackend,
         SandboxedCommand, SandboxedTag,
     };
+    use std::collections::HashMap;
 
     fn cmd() -> ProcessCommand {
         ProcessCommand {

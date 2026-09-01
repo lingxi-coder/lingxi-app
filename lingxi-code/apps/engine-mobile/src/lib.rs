@@ -21,11 +21,11 @@ use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
+use platform_api::{AuthHandle, OrchestratorHandle};
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
-use platform_api::{AuthHandle, OrchestratorHandle};
 
 // F3-03: the shared mobile session-host module — `MobileConfig` +
 // `build_mobile(MobileConfig, Platform, listener, sink) -> MobileRuntime`. It
@@ -236,6 +236,7 @@ fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManife
         user_config: None,
         channels: Vec::new(),
         settings: std::collections::HashMap::new(),
+        settings_declared: false,
         keywords: Vec::new(),
         license: None,
         repository: None,
@@ -378,6 +379,12 @@ pub fn materialize_mobile_builtin_plugin(
 > {
     let (root, inventory) =
         builtin_bundle::materialize_compiled_in_plugin_bundle(bundle_root, previous_verified_root)?;
+    let root = std::fs::canonicalize(&root).map_err(|error| {
+        builtin_bundle::BuiltinBundleError::BuiltinBundleUnavailable(format!(
+            "failed to canonicalize verified builtin bundle root {}: {error}",
+            root.display()
+        ))
+    })?;
     let (id, mut manifest) = mobile_builtin_plugin_manifest();
     manifest.components = mobile_builtin_plugin_components(&inventory);
     Ok((id, manifest, root))
@@ -842,12 +849,12 @@ pub fn register_android_ui_automation(
 mod android_ui_registration_tests {
     use super::register_android_ui_automation;
     use async_trait::async_trait;
-    use std::sync::Arc;
     use platform_api::{
         AndroidAccessRequest, AndroidAction, AndroidActionResult, AndroidAppInfo,
         AndroidAutomationError, AndroidAutomationStatus, AndroidNodeQuery, AndroidScreenshot,
         AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
     };
+    use std::sync::Arc;
 
     struct StubAutomation;
 
@@ -990,10 +997,10 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::process::ProcessOutput;
     use std::collections::HashMap;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::tool_trait::{ToolError, ToolStaticContext};
-    use platform_api::process::ProcessOutput;
 
     struct NoopSkillLoader;
 

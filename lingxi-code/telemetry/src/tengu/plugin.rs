@@ -1,6 +1,6 @@
 //! `tengu_plugin_*` event schemas (2.1.251 byte-alignment §20c).
 //!
-//! # ⚠️ SUBSTRATE ONLY — none of these 14 events is emitted anywhere yet
+//! # ⚠️ SUBSTRATE ONLY — none of these 24 events is emitted anywhere yet
 //!
 //! This module defines names and payload shapes. **It has no production
 //! emit site.** A repo-wide
@@ -8,7 +8,7 @@
 //! only this file, `tengu/mod.rs`, and two test files: no crate outside
 //! `telemetry` references the module at all. `ALL_EVENT_NAMES` has no
 //! runtime consumer (only tests read it), so nothing misbehaves — but the
-//! registry advertises 14 plugin events that cannot appear in any telemetry
+//! registry advertises 24 plugin events that cannot appear in any telemetry
 //! stream, and §20c is therefore **OPEN, not closed**. Do not read the
 //! registered names, the count-lock test, or the parity fixture as evidence
 //! that plugin telemetry ships.
@@ -132,6 +132,27 @@ pub const COMMAND_FAILED: &str = "tengu_plugin_command_failed";
 /// `tengu_plugin_remote_fetch` — a marketplace/plugin archive fetch over the
 /// network (git or direct download).
 pub const REMOTE_FETCH: &str = "tengu_plugin_remote_fetch";
+/// `tengu_plugin_install_command` — the install CLI surface was invoked.
+pub const INSTALL_COMMAND: &str = "tengu_plugin_install_command";
+/// `tengu_plugin_uninstall_command` — the uninstall CLI surface was invoked.
+pub const UNINSTALL_COMMAND: &str = "tengu_plugin_uninstall_command";
+/// `tengu_plugin_enable_command` — the enable CLI surface was invoked.
+pub const ENABLE_COMMAND: &str = "tengu_plugin_enable_command";
+/// `tengu_plugin_disable_command` — the disable CLI surface was invoked.
+pub const DISABLE_COMMAND: &str = "tengu_plugin_disable_command";
+/// `tengu_plugin_update_command` — the update CLI surface was invoked.
+pub const UPDATE_COMMAND: &str = "tengu_plugin_update_command";
+/// `tengu_plugin_list_command` — the list CLI surface was invoked.
+pub const LIST_COMMAND: &str = "tengu_plugin_list_command";
+/// `tengu_plugin_details_command` — the details CLI surface was invoked.
+pub const DETAILS_COMMAND: &str = "tengu_plugin_details_command";
+/// `tengu_plugin_prune_command` — the prune CLI surface was invoked.
+pub const PRUNE_COMMAND: &str = "tengu_plugin_prune_command";
+/// `tengu_plugin_prune_cli` — prune removed one or more orphaned plugins.
+pub const PRUNE_CLI: &str = "tengu_plugin_prune_cli";
+/// `tengu_plugin_state_file_error` — the installed-plugin durable state file
+/// could not be read, parsed, or normalized cleanly.
+pub const STATE_FILE_ERROR: &str = "tengu_plugin_state_file_error";
 
 /// Registry block — order is locked (append-only). Consumed by
 /// [`crate::tengu::ALL_EVENT_NAMES`].
@@ -150,6 +171,16 @@ pub const NAMES: &[&str] = &[
     UPDATED_CLI,
     COMMAND_FAILED,
     REMOTE_FETCH,
+    INSTALL_COMMAND,
+    UNINSTALL_COMMAND,
+    ENABLE_COMMAND,
+    DISABLE_COMMAND,
+    UPDATE_COMMAND,
+    LIST_COMMAND,
+    DETAILS_COMMAND,
+    PRUNE_COMMAND,
+    PRUNE_CLI,
+    STATE_FILE_ERROR,
 ];
 
 /// How a plugin came to be enabled for this session. See the module doc:
@@ -218,20 +249,16 @@ pub struct PluginEnabledForSessionPayload {
     pub has_hooks: bool,
     /// Whether the manifest declares `settings`.
     pub has_settings: bool,
-    /// Sessions elapsed since this plugin was last used.
-    ///
-    /// **Unconditional.** The oracle destructures
-    /// `{sessionsSinceLastUse:B,daysSinceLastUse:W}` from a lookup that
-    /// DEFAULTS to `{sessionsSinceLastUse:0,daysSinceLastUse:0}` when the
-    /// plugin has no last-use record, then spreads both keys flat. Modelling
-    /// them as `Option` + `skip_serializing_if` (as an earlier revision did)
-    /// omitted the keys entirely where the oracle emits `0`.
-    pub sessions_since_last_use: u32,
-    /// Days elapsed since this plugin was last used. Unconditional, for the
-    /// same reason as [`Self::sessions_since_last_use`].
-    pub days_since_last_use: u32,
+    /// Sessions elapsed since this plugin was last used, when the host
+    /// surfaced a last-use record for this plugin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions_since_last_use: Option<u32>,
+    /// Days elapsed since this plugin was last used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_since_last_use: Option<u32>,
     /// Whether the plugin is running under safe mode.
-    pub safe_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_mode: Option<bool>,
     /// Sorted, comma-joined settings key list, when the plugin declares any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_keys: Option<Verified>,

@@ -54,9 +54,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
+use platform_api::{FileEvent, FileSystem, PermissionGate};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use platform_api::{FileEvent, FileSystem, PermissionGate};
 
 /// Narrow fire seam: the watcher fires a `ConfigChange` without depending on
 /// the full orchestrator surface. The composition root injects the live
@@ -409,8 +409,8 @@ pub async fn handle_event_with_permission_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use platform_api::FileEventKind;
+    use std::sync::Mutex;
 
     /// Recording fake firer — captures every `(source, file_path)` the watcher
     /// fires so tests can assert deterministically without a real orchestrator.

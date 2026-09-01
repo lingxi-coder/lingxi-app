@@ -4,13 +4,14 @@ use lingxi_core::session::ActiveGoalState;
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use protocol::ConversationMessage;
 use serde_json::json;
 use session::jsonl::project_dir_name;
 use std::sync::Arc;
 use tempfile::TempDir;
-use platform_api::FileSystem;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 async fn setup_two_turn_jsonl() -> (
@@ -86,6 +87,99 @@ async fn replay_returns_state_with_last_uuid_set() {
         ConversationMessage::Assistant { .. } => {}
         other => panic!("expected Assistant second, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn replay_recovers_off_chain_prompt_snapshot_from_full_entries() {
+    // The resumable chain is intentionally narrower than the routed entry
+    // stream: an attachment can be a sibling of the active user/assistant
+    // branch and therefore be absent from `replayed.messages`.  Cold resume
+    // must still recover the latest prompt snapshot from all transcript
+    // entries, otherwise the next turn silently rebuilds a live prompt.
+    let (_temp, lingxi_home, cwd, sid, last_uuid, fs) = setup_two_turn_jsonl().await;
+    let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
+    let branch_user = Uuid::new_v4();
+    let branch_assistant = Uuid::new_v4();
+    let snapshot_uuid = Uuid::new_v4();
+    let lines = format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&json!({
+            "type": "attachment",
+            "uuid": snapshot_uuid.to_string(),
+            "parentUuid": last_uuid.to_string(),
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-05-25T12:00:01.500Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "message": {},
+            "attachment": {
+                "type": "prompt_snapshot",
+                "systemPrompt": ["frozen from an off-chain attachment"],
+                "tools": [{"name": "Read", "description": "frozen Read"}]
+            }
+        }))
+        .unwrap(),
+        serde_json::to_string(&json!({
+            "type": "user",
+            "uuid": branch_user.to_string(),
+            "parentUuid": last_uuid.to_string(),
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-05-25T12:00:02.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": "continue"}
+        }))
+        .unwrap(),
+        serde_json::to_string(&json!({
+            "type": "assistant",
+            "uuid": branch_assistant.to_string(),
+            "parentUuid": branch_user.to_string(),
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-05-25T12:00:03.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "assistant", "content": "ready"}
+        }))
+        .unwrap(),
+    );
+    tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript_path)
+        .await
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .await
+        .unwrap();
+
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    assert_eq!(
+        replayed.last_message_uuid,
+        Some(branch_assistant),
+        "the active chain still resumes from the latest assistant line"
+    );
+    assert!(
+        replayed
+            .messages
+            .iter()
+            .all(|message| message.uuid != snapshot_uuid.to_string()),
+        "the sibling attachment must remain outside the selected chain"
+    );
+    let snapshot = replayed
+        .runtime_metadata
+        .prompt_snapshot
+        .expect("full-entry restore must recover the off-chain snapshot");
+    assert_eq!(
+        snapshot.system_prompt,
+        vec!["frozen from an off-chain attachment".to_string()]
+    );
+    assert_eq!(snapshot.tools[0].name, "Read");
 }
 
 #[tokio::test]

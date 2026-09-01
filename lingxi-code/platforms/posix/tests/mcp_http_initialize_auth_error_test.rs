@@ -20,8 +20,8 @@ use axum::{routing::post, Json};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use platform_posix::mcp::PosixMcpTransport;
 use platform_api::{McpError, McpTransport, McpTransportSpec};
+use platform_posix::mcp::PosixMcpTransport;
 
 /// Literal `WWW-Authenticate` challenge carrying an RFC 6750 `insufficient_scope`
 /// error, an elevated `scope`, and an RFC 9728 `resource_metadata` pointer —

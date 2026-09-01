@@ -801,7 +801,10 @@ impl ApiService {
     /// resolved, the drive loops read subscriber/enterprise state from it at
     /// call time instead of the build-time [`SubscriberState`] copy.
     #[must_use]
-    pub fn with_subscription(mut self, slot: platform_api::subscription::SharedSubscription) -> Self {
+    pub fn with_subscription(
+        mut self,
+        slot: platform_api::subscription::SharedSubscription,
+    ) -> Self {
         self.subscription = Some(slot);
         self
     }

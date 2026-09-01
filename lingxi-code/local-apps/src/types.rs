@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Schema version stamped on every persisted local-apps file.
-pub const APPS_SCHEMA_VERSION: u32 = 3;
+pub const APPS_SCHEMA_VERSION: u32 = 4;
 
 /// New apps use Git-backed source version control unless the user opts out
 /// during creation. Missing values on older records deserialize as enabled.

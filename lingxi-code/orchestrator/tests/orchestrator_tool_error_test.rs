@@ -7,6 +7,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::OutputEvent;
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use serde_json::json;
 use std::sync::Arc;
@@ -16,7 +17,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::OutputEvent;
 
 struct AlwaysFailingTool;
 

@@ -151,6 +151,21 @@ class LocalAppsScreenTest {
         )
     }
 
+    @Test
+    fun `the details screen includes a dedicated MCP tab and avoids raw transport fields`() {
+        val source = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
+
+        assertTrue("the Local App details tabs must include MCP", "LocalAppDetailsTab.Mcp" in source)
+        assertTrue(
+            "the MCP tab must drive app-local commands instead of settings MCP editing",
+            "LocalAppsAction.StartMcpAuthoring(" in source,
+        )
+        assertTrue(
+            "the Local App MCP tab must not expose raw transport fields",
+            "mcp_endpoint" !in source && "mcp_command" !in source && "mcp_arguments" !in source,
+        )
+    }
+
     /**
      * Whether [needle] appears inside the braced block that some occurrence of
      * [byBlockOpenedBy] starts — that opener ending at the block's `{`.

@@ -1572,9 +1572,9 @@ mod tests {
     use client_protocol::commands::{ClientCommand, ImageRefDto};
     use client_protocol::events::ClientEvent;
     use client_protocol::permission::{PermissionRequest, PermissionResponseDto};
+    use platform_api::{PermissionDecision, PermissionGate};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
-    use platform_api::{PermissionDecision, PermissionGate};
 
     use super::{is_owned_turn_event, ActiveTurnControl, BridgeConnection, TurnDriver};
 

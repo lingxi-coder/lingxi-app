@@ -4,9 +4,9 @@
 //! execution in `process.rs`. Fail-closed: every unenforceable request is
 //! rejected with a named guarantee.
 
+use platform_api::{NetworkPolicy, SandboxError, SandboxPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use platform_api::{NetworkPolicy, SandboxError, SandboxPolicy};
 
 /// What the runner will ultimately `execve` (spec r3 §`AndroidSandboxPlan`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,8 +278,8 @@ pub fn build_shell_env<S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use platform_api::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
+    use std::collections::HashMap;
 
     #[test]
     fn plan_types_construct() {

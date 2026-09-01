@@ -302,6 +302,7 @@ mod read_file_state_tests {
     use crate::turn_loop::{dispatch_tool_uses, execute_one_turn};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
+    use platform_api::OrchestratorHandle;
     use protocol::ToolUseId;
     use serde_json::json;
     use std::path::PathBuf;
@@ -313,7 +314,6 @@ mod read_file_state_tests {
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
     };
-    use platform_api::OrchestratorHandle;
 
     /// Minimal Read/Edit/Write-shaped stub. Resolves `file_path` against
     /// `cwd` (mirroring how the real `FileReadTool` resolves against
@@ -1443,8 +1443,8 @@ mod read_file_state_tests {
 
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_clears_read_state() {
-        use protocol::{ConversationMessage, MessageId};
         use platform_api::OrchestratorHandle;
+        use protocol::{ConversationMessage, MessageId};
 
         // Compaction with a tiny threshold so a small seeded history compacts.
         let (compactor, slot) = wired_compaction(10);
@@ -1608,8 +1608,8 @@ mod read_file_state_tests {
         // orchestrator, a tool's read feeds the post-compact file restore. Before
         // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
         // always empty in production.
-        use protocol::{ConversationMessage, MessageId};
         use platform_api::OrchestratorHandle;
+        use protocol::{ConversationMessage, MessageId};
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
         let shared = tool_api::read_file_state::new_read_file_state_map();
@@ -1854,9 +1854,9 @@ mod max_output_tokens_recovery_tests {
     async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-            dir.path().to_path_buf(),
-        ));
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,
@@ -2989,9 +2989,9 @@ mod pre_tool_hook_tests {
         // context, dispatch a tool, and assert the fields are populated.
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-            dir.path().to_path_buf(),
-        ));
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,

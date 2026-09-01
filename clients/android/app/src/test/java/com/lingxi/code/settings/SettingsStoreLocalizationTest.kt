@@ -21,7 +21,7 @@ class SettingsStoreLocalizationTest {
         val store = SettingsStore(resolveString = { id -> "localized-$id" })
 
         val skills = store.state.value.skills
-        assertEquals(5, skills.size)
+        assertEquals(8, skills.size)
         assertTrue(
             "every bundled skill description must be localized, not a literal: " +
                 skills.map { it.desc },

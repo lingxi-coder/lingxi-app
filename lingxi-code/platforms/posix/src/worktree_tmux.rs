@@ -167,9 +167,9 @@ mod tests {
     use super::*;
     use crate::sandbox::PosixSandbox;
     use async_trait::async_trait;
+    use platform_api::{ProcessError, ProcessHandle, ProcessOutput, SandboxedCommand};
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use platform_api::{ProcessError, ProcessHandle, ProcessOutput, SandboxedCommand};
 
     #[test]
     fn build_worktree_tmux_argv_shape_is_exact() {

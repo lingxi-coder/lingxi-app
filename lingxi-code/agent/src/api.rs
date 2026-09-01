@@ -18,9 +18,9 @@
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, LlmResponse};
+use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 use protocol::AgentId;
 use std::sync::Arc;
-use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 
 const OBSERVER_EVENT_BUFFER: usize = 100;
 

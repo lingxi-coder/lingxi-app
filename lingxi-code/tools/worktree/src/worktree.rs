@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,7 +29,6 @@ use telemetry::tengu::tool::{
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED, WORKTREE_CREATED,
     WORKTREE_ENTERED_EXISTING, WORKTREE_KEPT, WORKTREE_REMOVED,
 };
-use platform_api::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 use unicode_normalization::UnicodeNormalization;
 
 use tool_api::context::ToolUseContext;
@@ -1762,12 +1762,12 @@ impl Tool for ExitWorktreeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::worktree::WorktreeManager;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tool_api::test_support::{
         ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
     };
-    use platform_api::worktree::WorktreeManager;
 
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
@@ -3010,7 +3010,10 @@ mod tests {
             Err(platform_api::ProcessError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
+        async fn kill(
+            &self,
+            _handle: &platform_api::ProcessHandle,
+        ) -> Result<(), platform_api::ProcessError> {
             Ok(())
         }
 

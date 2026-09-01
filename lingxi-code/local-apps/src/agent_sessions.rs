@@ -7,10 +7,10 @@
 use crate::error::AppError;
 use crate::manifest::AppLayout;
 use crate::runtime_v2::{AgentSessionRecord, AppAgentProfile, RUNTIME_CONTRACT_SCHEMA_VERSION};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use platform_api::FsError;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Maximum persisted Agent session catalog size per app.
 pub const MAX_AGENT_SESSION_CATALOG_BYTES: u64 = 2 * 1024 * 1024;

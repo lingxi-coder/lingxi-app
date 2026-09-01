@@ -14,10 +14,10 @@ use orchestrator::test_support_stream::{
     text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use platform_api::OutputEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use platform_api::OutputEvent;
 
 #[tokio::test]
 async fn streaming_text_only_three_deltas() {

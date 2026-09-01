@@ -30,7 +30,10 @@ impl platform_api::RuntimeSpawner for InlineRuntime {
         })
     }
     async fn sleep(&self, _d: std::time::Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), platform_api::RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &platform_api::BackgroundTaskHandle,
+    ) -> Result<(), platform_api::RuntimeError> {
         Ok(())
     }
 }

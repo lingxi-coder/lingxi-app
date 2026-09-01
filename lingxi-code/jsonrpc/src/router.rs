@@ -89,6 +89,43 @@ pub enum OutboundMessage {
     Notification(Notification),
 }
 
+/// A request that has been enqueued and assigned a concrete JSON-RPC id, but
+/// whose response will be awaited later by the caller.
+pub struct StartedCall {
+    id: Id,
+    outcome: oneshot::Receiver<Result<Value, ResponseError>>,
+    drop_guard: DropGuard,
+}
+
+impl StartedCall {
+    /// The JSON-RPC request id assigned by the router.
+    #[must_use]
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
+
+    /// Await the raw JSON result.
+    pub async fn wait_value(self) -> Result<Value, RouterError> {
+        let StartedCall {
+            outcome,
+            drop_guard,
+            ..
+        } = self;
+        let result = outcome.await;
+        drop(drop_guard);
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(remote)) => Err(RouterError::Remote(remote)),
+            Err(_recv_err) => Err(RouterError::WriterClosed),
+        }
+    }
+
+    /// Await and deserialize the JSON result into the caller's type.
+    pub async fn wait<R: DeserializeOwned>(self) -> Result<R, RouterError> {
+        serde_json::from_value(self.wait_value().await?).map_err(RouterError::Deserialize)
+    }
+}
+
 impl Router {
     /// Construct a router. The `outbound` sender is owned by the writer task
     /// (typically the `Broker`); when that task drops the receiver, pending
@@ -207,6 +244,16 @@ impl Router {
         self.call_inner(method, params, None, false).await
     }
 
+    /// Enqueue an outbound request without a local deadline and return a
+    /// handle that exposes the assigned request id plus a later wait step.
+    pub fn start_call_unbounded<P: Serialize>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<StartedCall, RouterError> {
+        self.start_call(method, params)
+    }
+
     /// Send an outbound request and await the typed response with an explicit timeout.
     pub async fn call_with_timeout<P: Serialize, R: DeserializeOwned>(
         &self,
@@ -237,26 +284,11 @@ impl Router {
         timeout: Option<Duration>,
         classify_unknown_id: bool,
     ) -> Result<R, RouterError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(RouterError::WriterClosed);
-        }
-        let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let params_value = serde_json::to_value(params).map_err(RouterError::Serialize)?;
-        let req = Request::new(method, Some(params_value), id.clone());
-        let (tx, rx) = oneshot::channel();
-        self.pending.insert(id.clone(), tx);
-
-        // Drop guard: if the future is cancelled (dropped), remove the entry
-        // so a late response from the peer doesn't accumulate.
-        let drop_guard = DropGuard {
-            pending: self.pending.clone(),
-            id: id.clone(),
-            unknown_response_ids: if classify_unknown_id {
-                Some(self.unknown_response_ids.clone())
-            } else {
-                None
-            },
-        };
+        let StartedCall {
+            id,
+            outcome: rx,
+            drop_guard,
+        } = self.start_call(method, params)?;
 
         let unknown_id_rx = if classify_unknown_id {
             let (tx, rx) = oneshot::channel();
@@ -265,22 +297,6 @@ impl Router {
         } else {
             None
         };
-
-        // Close may race the first check. Re-check after insertion so a
-        // terminal clear cannot happen immediately before a late pending slot
-        // is added.
-        if self.closed.load(Ordering::Acquire) {
-            self.pending.remove(&id);
-            return Err(RouterError::WriterClosed);
-        }
-
-        self.outbound
-            .send(OutboundMessage::Request(req))
-            .map_err(|_| {
-                // Writer closed — eagerly clean up the pending slot.
-                self.pending.remove(&id);
-                RouterError::WriterClosed
-            })?;
 
         let outcome = if let Some(timeout) = timeout {
             if let Some(unknown_id_rx) = unknown_id_rx {
@@ -331,6 +347,45 @@ impl Router {
         };
 
         serde_json::from_value(value).map_err(RouterError::Deserialize)
+    }
+
+    fn start_call<P: Serialize>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<StartedCall, RouterError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RouterError::WriterClosed);
+        }
+        let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let params_value = serde_json::to_value(params).map_err(RouterError::Serialize)?;
+        let req = Request::new(method, Some(params_value), id.clone());
+        let (tx, rx) = oneshot::channel();
+        self.pending.insert(id.clone(), tx);
+
+        let drop_guard = DropGuard {
+            pending: self.pending.clone(),
+            id: id.clone(),
+            unknown_response_ids: None,
+        };
+
+        if self.closed.load(Ordering::Acquire) {
+            self.pending.remove(&id);
+            return Err(RouterError::WriterClosed);
+        }
+
+        self.outbound
+            .send(OutboundMessage::Request(req))
+            .map_err(|_| {
+                self.pending.remove(&id);
+                RouterError::WriterClosed
+            })?;
+
+        Ok(StartedCall {
+            id,
+            outcome: rx,
+            drop_guard,
+        })
     }
 }
 

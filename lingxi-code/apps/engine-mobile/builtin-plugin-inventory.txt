@@ -105,6 +105,11 @@ assets/templates/react-dom/r1/public/.gitkeep
 assets/templates/react-dom/r1/src/stores/app-store.js
 assets/templates/react-dom/r1/styles/foundation.css
 assets/templates/react-dom/r1/vite.config.mjs
+assets/templates/shared/mcp-widget/r2/index.html
+assets/templates/shared/mcp-widget/r2/package.json
+assets/templates/shared/mcp-widget/r2/src/main.jsx
+assets/templates/shared/mcp-widget/r2/src/widget.jsx
+assets/templates/shared/mcp-widget/r2/vite.config.mjs
 assets/templates/three-3d/r1/.gitignore
 assets/templates/three-3d/r1/.lingxi/source-policy.json
 assets/templates/three-3d/r1/app/app.jsx

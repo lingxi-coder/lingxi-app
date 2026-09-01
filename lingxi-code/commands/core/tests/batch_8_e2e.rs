@@ -10,10 +10,10 @@ use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use command_core::{register_all_builtin_commands, register_core_batch_8};
 use orchestrator::test_support::MockOrchestratorHandle;
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// A fresh, uniquely-named temp directory (no `tempfile` dependency here — same
 /// idiom as the handler unit tests). Callers are responsible for removing it.

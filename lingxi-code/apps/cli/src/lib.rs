@@ -698,15 +698,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
     }
 
-    // (M-01, cc2.1.215) `--brief` exports `LINGXI_BRIEF=1` for this process +
-    // children (CC registry key `CLAUDE_CODE_BRIEF`; both honored by the tool
-    // gate). Mirrors CC's `CAn(e)`, where `e.brief` and `Z.CLAUDE_CODE_BRIEF`
-    // are equivalent triggers and the env is what the `SendUserMessage` tool's
-    // `isBriefEnabled`/`aKr()` gate reads. Default-off: without this flag the
-    // Brief tool stays invisible to the model (see `tool_ui::brief`).
-    if parsed.brief {
-        std::env::set_var("LINGXI_BRIEF", "1");
-    }
+    // (M-01, cc2.1.215) `--brief` selects Brief-only mode for this process.
+    // Keep the value in shared live-session state so `/brief` can toggle it
+    // later without relying on a stale process-environment snapshot.
+    platform_api::session_flags::set_brief_mode_enabled(parsed.brief);
 
     // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
     // the cross-session messaging socket instead of the auto-generated path.
@@ -878,11 +873,63 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     run_config_startup(parsed.command.as_ref()).await;
 
+    // (Item B) Resolve the session permission mode from CLI flags + settings,
+    // run the bypass safety guards, and capture the startup notice. This must
+    // happen AFTER `cwd::apply_cwd` (so the project `.lingxi/settings.json` is
+    // read from the effective project dir) and BEFORE `build_runtime` — a
+    // refused bypass exits before the runtime is constructed, and the resolved
+    // mode threads into `DesktopConfig.permission_mode`.
+    let (permission_mode, permission_notice) = resolve_permission_mode(&parsed);
+    if parsed.restricted_enabled()
+        && (permission_mode == permission::PermissionMode::BypassPermissions
+            || parsed.dangerously_skip_permissions
+            || parsed.allow_dangerously_skip_permissions)
+    {
+        eprintln!("bypassPermissions not supported in restricted mode");
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if permission_mode == permission::PermissionMode::BypassPermissions
+        || parsed.dangerously_skip_permissions
+    {
+        if let Err(msg) = permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
+        {
+            eprintln!("{msg}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    }
+
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
     // command token, run that family and exit — this is what stops a bare `mcp`/
     // `auth` token from being swallowed as a billable chat prompt.
     if let Some(command) = parsed.command.clone() {
+        if let crate::commands::Commands::Plugin(cli) = &command {
+            if matches!(
+                cli.command.as_ref(),
+                Some(crate::commands::plugin::Sub::Install(_))
+                    | Some(crate::commands::plugin::Sub::Update(_))
+            ) {
+                let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
+                    Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+                } else {
+                    Arc::new(output::PlainSink::new())
+                };
+                let adapter: Arc<dyn platform_api::OutputStream> =
+                    Arc::new(output_adapter::SinkAdapter::new(sink));
+                let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("lingxi-cli: {e}");
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                };
+                return crate::commands::plugin::run_with_shared_analytics_bus(
+                    cli,
+                    runtime.analytics_bus.clone(),
+                )
+                .await;
+            }
+        }
         return command.run().await;
     }
 
@@ -956,38 +1003,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     }
 
     // (`cwd::apply_cwd` already ran above, before the subcommand dispatch.)
-
-    // (Item B) Resolve the session permission mode from CLI flags + settings,
-    // run the bypass safety guards, and capture the startup notice. This must
-    // happen AFTER `cwd::apply_cwd` (so the project `.lingxi/settings.json` is
-    // read from the effective project dir) and BEFORE `build_runtime` — a
-    // refused bypass exits before the runtime is constructed, and the resolved
-    // mode threads into `DesktopConfig.permission_mode`.
-    //
-    // (Task 8) The resolution itself is now the shared `resolve_permission_mode`
-    // helper so the interactive TUI/REPL paths resolve the SAME mode without
-    // re-implementing it. The bypass-safety GUARD stays HERE in `run_cli`: it
-    // runs exactly once, before mode dispatch, for ALL modes — a refusal exits 1
-    // before any runtime is built, so the interactive paths never re-run it.
-    let (permission_mode, permission_notice) = resolve_permission_mode(&parsed);
-    if parsed.restricted_enabled()
-        && (permission_mode == permission::PermissionMode::BypassPermissions
-            || parsed.dangerously_skip_permissions
-            || parsed.allow_dangerously_skip_permissions)
-    {
-        eprintln!("bypassPermissions not supported in restricted mode");
-        return exit_codes::RUNTIME_ERROR;
-    }
-    // Guards run when bypass is requested OR resolved (setup.ts:396).
-    if permission_mode == permission::PermissionMode::BypassPermissions
-        || parsed.dangerously_skip_permissions
-    {
-        if let Err(msg) = permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
-        {
-            eprintln!("{msg}");
-            return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
-        }
-    }
 
     // Background dispatch happens only after session/settings validation and
     // permission safety enforcement. The dispatcher then runs the foreground
@@ -1183,6 +1198,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     rt.orchestrator.clone(),
                 ),
             ));
+            init::auto_connect_ide_if_requested(&parsed, &rt).await;
             rt
         } else {
             match init::build_runtime(&parsed, adapter, permission_mode).await {
@@ -1424,8 +1440,9 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     // `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `platforms/posix` runner) forces the
     // permission mode to `default` — a hardened / scrubbed subprocess must not
     // inherit a requested bypass/plan/etc.
-    let env_scrub_active =
-        platform_api::env::is_env_truthy(std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref());
+    let env_scrub_active = platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
+    );
     // MODE-FRONTMATTER-04: the selected main-thread agent's frontmatter
     // `permissionMode` sits between the CLI override and the settings
     // `defaultMode`. The agent catalog is resolved later in

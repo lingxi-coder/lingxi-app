@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use http_client::ReqwestHttp;
 use llm_client::LlmTransportBridge;
-use protocol::{HttpRequest, HttpResponse, SseEvent};
 use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, WebSocketMessageStreamWithMeta,
 };
 use platform_api::{HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse, SseEvent};
 
 type ScriptedSse = Mutex<Option<Result<Vec<Result<SseEvent, HttpError>>, HttpError>>>;
 type ScriptedRaw = Mutex<Option<Result<RawByteStreamWithMeta, HttpError>>>;

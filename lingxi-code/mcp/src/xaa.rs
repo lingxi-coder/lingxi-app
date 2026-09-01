@@ -30,10 +30,10 @@
 #![allow(clippy::doc_markdown)]
 
 use base64::Engine;
+use platform_api::HttpTransport;
 use protocol::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::HttpTransport;
 
 /// XAA request deadline (xaa.ts `XAA_REQUEST_TIMEOUT_MS = 30000`).
 const XAA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

@@ -22,6 +22,7 @@ use orchestrator::test_support::{
 use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome,
 };
+use platform_api::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse, SessionId};
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -31,7 +32,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use platform_api::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
 
 static GOAL_CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -42,7 +42,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

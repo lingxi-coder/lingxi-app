@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use platform_api::{HttpError, HttpTransport};
 use protocol::{HttpMethod, HttpRequest};
 use regex::Regex;
-use platform_api::{HttpError, HttpTransport};
 
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::hook_payload::parse_response;
@@ -477,9 +477,9 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
+    use platform_api::ResolvedAddressOverride;
     use protocol::{HookId, HttpResponse};
     use std::sync::Mutex;
-    use platform_api::ResolvedAddressOverride;
 
     struct MockHttp {
         recorded: Mutex<Vec<HttpRequest>>,

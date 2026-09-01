@@ -551,8 +551,9 @@ pub fn save_dynamic_workflow(
     };
     let relative = relative_dir.join(format!("{sanitized}.js"));
     let lock_relative = relative_dir.join(".save.lock");
-    let io_error =
-        |error: platform_api::FsError| WorkflowSaveError::Io(std::io::Error::other(error.to_string()));
+    let io_error = |error: platform_api::FsError| {
+        WorkflowSaveError::Io(std::io::Error::other(error.to_string()))
+    };
     let _lock = platform_api::rooted_fs::lock_exclusive(
         &root,
         &lock_relative,
@@ -840,7 +841,8 @@ impl WorkflowTool {
             let _ = state.set(size.as_wire(), managed);
         } else {
             let managed = platform_api::session_flags::workflow_size_guideline_is_managed();
-            let _ = platform_api::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
+            let _ =
+                platform_api::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
         }
         self
     }
@@ -921,7 +923,9 @@ impl WorkflowTool {
             .as_ref()
             .map(|state| WorkflowSizeGuideline::from_wire(state.value()))
             .unwrap_or_else(|| {
-                WorkflowSizeGuideline::from_wire(platform_api::session_flags::workflow_size_guideline())
+                WorkflowSizeGuideline::from_wire(
+                    platform_api::session_flags::workflow_size_guideline(),
+                )
             })
     }
 
@@ -1155,14 +1159,16 @@ impl Tool for WorkflowTool {
                 Ok(platform_api::permission_gate::PermissionResolution::Allow { .. }) => {
                     Self::allow_script_path_permission(&path)
                 }
-                Ok(platform_api::permission_gate::PermissionResolution::Deny { reason, .. })
+                Ok(platform_api::permission_gate::PermissionResolution::Deny {
+                    reason, ..
+                })
                 | Err(platform_api::permission_gate::PermissionAbort { message: reason }) => {
                     Self::deny_script_path_permission(&path, reason)
                 }
                 Ok(platform_api::permission_gate::PermissionResolution::Ask)
-                | Ok(platform_api::permission_gate::PermissionResolution::AskWithContext { .. }) => {
-                    Self::ask_script_path_permission(&path)
-                }
+                | Ok(platform_api::permission_gate::PermissionResolution::AskWithContext {
+                    ..
+                }) => Self::ask_script_path_permission(&path),
             };
             if matches!(
                 result,
@@ -2071,7 +2077,8 @@ mod tests {
         let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
 
         let session_state =
-            platform_api::session_flags::WorkflowSizeGuidelineState::new("large", false, false).unwrap();
+            platform_api::session_flags::WorkflowSizeGuidelineState::new("large", false, false)
+                .unwrap();
         let session_owned = WorkflowTool::new(None)
             .with_size_guideline_state(session_state.clone())
             .with_size_guideline_source(WorkflowSizeGuideline::Large, false, false);

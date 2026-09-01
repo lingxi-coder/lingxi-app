@@ -14,8 +14,57 @@ use std::time::Instant;
 use crossterm::event::KeyEvent;
 use permission::gate::PermissionResponse;
 use permission::{PermissionBehavior, PermissionUpdateDestination};
+use tui_core::orchestrator_bridge::RunningAgentStatus;
 
 use crate::renderable::Renderable;
+
+/// Owner-pushed data refresh for a mounted dynamic view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerViewUpdate {
+    Focus(FocusProjection),
+    Agents(AgentsSnapshot),
+    RunningAgents(Vec<RunningAgentStatus>),
+}
+
+/// Owner-computed `/focus` transcript + activity projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FocusProjection {
+    pub lines: Vec<String>,
+    pub running_agents: Vec<RunningAgentStatus>,
+}
+
+/// One live agents-pane row sourced from the owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentsPaneRow {
+    pub session_id: String,
+    pub name: String,
+    pub state: String,
+    pub kind: String,
+    pub cwd: String,
+    pub status: Option<String>,
+    pub waiting_for: Option<String>,
+    pub detail: Option<String>,
+    pub model: Option<String>,
+    pub tokens: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub started_at_ms: Option<u64>,
+}
+
+/// Owner-computed live agents-pane snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentsSnapshot {
+    pub rows: Vec<AgentsPaneRow>,
+}
+
+/// Ownership hints carried when the agents view opens a session. The CLI
+/// re-resolves them against the durable job/roster state before attaching or
+/// remounting; these flags only preserve what the selected snapshot knew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionTarget {
+    pub session_id: uuid::Uuid,
+    pub background: bool,
+    pub live: bool,
+}
 
 /// The result of routing one key (or paste) into the active view.
 pub enum ViewOutcome {
@@ -84,6 +133,11 @@ pub enum ViewOutcome {
     /// the runtime is re-mounted in-process against that session (the JSONL
     /// writer is retargeted) — NEVER an in-place `resume_session` swap.
     SwitchSession(uuid::Uuid),
+    /// The agents view selected a live-or-durable session. This uses a distinct
+    /// ownership-aware unwind path: a live background row attaches to its
+    /// authenticated endpoint, while a transcript is remounted only after the
+    /// CLI proves that no other process still owns it.
+    OpenAgentSession(AgentSessionTarget),
     /// The `/rewind` picker resolved to `message` with restore `scope`. Like
     /// [`Self::SwitchSession`] this UNWINDS the app loop (the owner returns
     /// `AppExit::Rewind`) so the code is rewound and/or the conversation is
@@ -321,6 +375,8 @@ pub enum ViewAction {
 pub enum CommandAction {
     /// Clear the conversation transcript (`/clear`).
     ClearTranscript,
+    /// Open the shared `/connect` provider picker without submitting a turn.
+    OpenConnectPicker,
     /// Exit the app (`/exit`, `/quit`).
     Quit,
     /// Apply (and persist) this theme setting (`/theme` picker commit).
@@ -350,6 +406,23 @@ pub trait BottomPaneView: Renderable {
     fn handle_tick(&mut self, _now: Instant) -> ViewOutcome {
         ViewOutcome::Pending
     }
+
+    /// Whether the owner should redraw while this view is open even when no
+    /// input or turn event arrived. Dynamic read-only views (for example
+    /// `/diff`) use this to refresh external state such as git changes.
+    fn needs_redraw(&self) -> bool {
+        false
+    }
+
+    /// Whether this view is one step in the `/connect` flow. When a terminal
+    /// connect action fires, the stack dismisses only the contiguous connect
+    /// children so the launching parent surface can stay mounted.
+    fn is_connect_flow(&self) -> bool {
+        false
+    }
+
+    /// Fold owner-managed live state into this view without reopening it.
+    fn refresh_from_owner(&mut self, _update: OwnerViewUpdate) {}
 
     /// Fold a pushed multi-agent lifecycle update into this view. Most views
     /// are unrelated and keep the default no-op; workflow list/detail views

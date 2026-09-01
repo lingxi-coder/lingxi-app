@@ -807,10 +807,10 @@ mod tests {
     #[tokio::test]
     async fn dispatches_known_command_to_locked_stub() {
         let d = seeded_dispatcher();
-        let result = d.dispatch("/ant-trace").await;
+        let result = d.dispatch("/teleport").await;
         match result {
             SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "ant-trace: not implemented in v0.6.0 (M5)");
+                assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Handled, got {other:?}"),
         }

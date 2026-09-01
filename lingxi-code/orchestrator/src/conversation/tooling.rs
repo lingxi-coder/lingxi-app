@@ -699,7 +699,62 @@ impl ConversationOrchestrator {
                 tool.get("name").and_then(serde_json::Value::as_str) != Some("ToolSearch")
             });
         }
+        // Carved-slate keeps descriptions for already-inline tools stable
+        // while allowing deferred tools to remain provider-discovered. Apply
+        // the recorded map only to entries that are actually inline on this
+        // request; the schema and defer markers stay live.
+        self.apply_prompt_snapshot_tool_descriptions(&mut wire)
+            .await;
         wire
+    }
+
+    async fn apply_prompt_snapshot_tool_descriptions(&self, wire: &mut [serde_json::Value]) {
+        if !self.prompt_snapshot_eligible() {
+            return;
+        }
+        let recorded = self
+            .prompt_runtime
+            .prompt_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .filter(|snapshot| {
+                !snapshot.system_prompt.is_empty()
+                    && snapshot.system_prompt.iter().all(|part| !part.is_empty())
+                    && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
+            })
+            .map(|snapshot| {
+                snapshot
+                    .tools
+                    .iter()
+                    .map(|tool| (tool.name.clone(), tool.description.clone()))
+                    .collect::<std::collections::HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        if recorded.is_empty() {
+            return;
+        }
+        for tool in wire {
+            if tool
+                .get("defer_loading")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(description) = recorded.get(name) else {
+                continue;
+            };
+            if let Some(object) = tool.as_object_mut() {
+                object.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(description.clone()),
+                );
+            }
+        }
     }
 
     /// `getTools`' (`iJ`) 2.1.238 tail block — the path that puts

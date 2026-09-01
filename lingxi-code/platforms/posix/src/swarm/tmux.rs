@@ -11,12 +11,12 @@
 //! - requires tmux >= 3.2 (`set-option -p` is per-pane only in 3.2+)
 
 use async_trait::async_trait;
+use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 use protocol::AgentId;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 use super::detection;
 

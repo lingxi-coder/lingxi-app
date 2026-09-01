@@ -1,11 +1,11 @@
 //! Dynamic authentication headers for remote MCP transports.
 
 use crate::{ConfigScope, McpServerConfig};
+use platform_api::{McpError, McpHeaders, McpTransportSpec};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use platform_api::{McpError, McpHeaders, McpTransportSpec};
 
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HELPER_STDOUT: usize = 1024 * 1024;

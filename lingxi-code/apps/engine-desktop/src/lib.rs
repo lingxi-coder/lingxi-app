@@ -33,9 +33,11 @@ mod background_agent;
 mod connect;
 pub mod file_changed_watch;
 pub mod fork_resume;
+pub mod ide;
 pub mod settings_watch;
 mod skill_loader;
 
+use crate::ide::DesktopIdeHandle;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
@@ -63,8 +65,8 @@ use orchestrator::{
 use permission::gate::PermissionGate;
 use platform_api::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 use platform_posix::{
-    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixMcpTransport,
-    PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
+    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixProcess,
+    PosixRuntime, PosixSandbox, PosixWorktreeManager,
 };
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
@@ -78,6 +80,51 @@ use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
+
+#[cfg(unix)]
+use platform_posix::PosixMcpTransport;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
+
+#[cfg(unix)]
+type DesktopMcpTransport = PosixMcpTransport;
+#[cfg(windows)]
+type DesktopMcpTransport = WindowsMcpTransport;
+
+fn new_desktop_mcp_transport() -> Arc<DesktopMcpTransport> {
+    Arc::new(DesktopMcpTransport::new())
+}
+
+#[cfg(test)]
+mod mcp_transport_wiring_tests {
+    use super::new_desktop_mcp_transport;
+    use platform_api::{McpTransport, McpTransportKind};
+    use std::sync::Arc;
+
+    /// Compile-time coverage for the production composition boundary. The
+    /// target-specific concrete value must implement both registry traits and
+    /// must be the platform selected by the current target.
+    #[test]
+    fn desktop_mcp_transport_is_target_specific_and_dual_wired() {
+        let transport = new_desktop_mcp_transport();
+        #[cfg(unix)]
+        let _: &platform_posix::PosixMcpTransport = &*transport;
+        #[cfg(windows)]
+        let _: &platform_windows::WindowsMcpTransport = &*transport;
+
+        let kinds = transport.supported_transports();
+        assert!(kinds.contains(&McpTransportKind::Sse));
+        assert!(kinds.contains(&McpTransportKind::Http));
+        #[cfg(windows)]
+        {
+            assert!(kinds.contains(&McpTransportKind::SseIde));
+            assert!(kinds.contains(&McpTransportKind::WsIde));
+        }
+
+        let _: Arc<dyn McpTransport> = transport.clone();
+        let _: Arc<dyn mcp::RawConnectionProvider> = transport;
+    }
+}
 
 struct DesktopWebSearchConfigProvider {
     lingxi_home: std::path::PathBuf,
@@ -730,6 +777,70 @@ fn managed_model_policy_source(
         }
     }
     PolicySource::Loaded(view)
+}
+
+/// Resolve the model setting's ownership from the same effective settings
+/// snapshot used by the desktop composition root. Explicit CLI/env pins are
+/// user-owned; a managed `settings.model` is administrator-owned; and a
+/// missing setting falls back to the provider catalog tier.
+#[must_use]
+fn model_provenance_for_config(
+    cfg: &DesktopConfig,
+    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
+) -> platform_api::ModelProvenance {
+    if cfg.default_model_explicit || cfg.default_model_env_pinned {
+        return platform_api::ModelProvenance::UserOrEnv;
+    }
+    match effective_settings
+        .and_then(|settings| settings.effective_for("model"))
+        .and_then(|provenance| provenance.contributors.last())
+    {
+        Some(lingxi_core::settings::tracer::Source::Managed)
+            if effective_settings
+                .and_then(|settings| settings.settings.model.as_deref())
+                .is_some_and(|model| !model.trim().is_empty()) =>
+        {
+            platform_api::ModelProvenance::ManagedAdministratorDefault
+        }
+        Some(
+            lingxi_core::settings::tracer::Source::Env
+            | lingxi_core::settings::tracer::Source::User
+            | lingxi_core::settings::tracer::Source::Project
+            | lingxi_core::settings::tracer::Source::Local
+            | lingxi_core::settings::tracer::Source::Cli,
+        ) => platform_api::ModelProvenance::UserOrEnv,
+        Some(lingxi_core::settings::tracer::Source::Managed) => {
+            platform_api::ModelProvenance::ProviderCatalogTier
+        }
+        Some(lingxi_core::settings::tracer::Source::Defaults) | None => {
+            platform_api::ModelProvenance::ProviderCatalogTier
+        }
+    }
+}
+
+/// Return the effective managed `settings.model`, when it is the winning model
+/// source and no explicit CLI/env pin is in force. This keeps the existing
+/// provider-qualified model reference intact for later `parse_model_ref`.
+#[must_use]
+fn managed_model_setting_for_config(
+    cfg: &DesktopConfig,
+    effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
+) -> Option<String> {
+    if cfg.default_model_explicit || cfg.default_model_env_pinned {
+        return None;
+    }
+    let settings = effective_settings?;
+    let source = settings
+        .effective_for("model")
+        .and_then(|provenance| provenance.contributors.last());
+    if source != Some(&lingxi_core::settings::tracer::Source::Managed) {
+        return None;
+    }
+    settings
+        .settings
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
 }
 
 /// The MANAGED `availableModels` allowlist + `modelOverrides` in effect for the
@@ -2574,8 +2685,6 @@ impl std::fmt::Debug for DesktopAudio {
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
 ///     strict_mcp_config: false,
-///     restricted: false,
-///     restricted_tools: None,
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
 ///     customization_gates: engine_desktop::CustomizationGates::default(),
@@ -3889,6 +3998,10 @@ pub struct DesktopRuntime {
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
     pub orchestrator: Arc<ConversationOrchestrator>,
+    /// The runtime analytics bus shared with the orchestrator and host-side
+    /// producers. `mcp serve` uses this to emit process-scope startup
+    /// telemetry after boot succeeds and before the request loop starts.
+    pub analytics_bus: Arc<telemetry::AnalyticsBus>,
     /// Shared slash-command registry populated during build and observed by both
     /// the dispatcher and skill/plugin loaders. Surfaced so non-TUI hosts can
     /// snapshot the live catalog and detect command-set mutations.
@@ -3990,6 +4103,10 @@ pub struct DesktopRuntime {
     /// bridge relies on the `tracing::warn!` `build()` already emitted. `None`
     /// ⟶ the configured default booted unchanged.
     pub default_model_fallback: Option<DefaultModelFallbackNotice>,
+    /// Provenance of the model that the engine selected for the session's
+    /// initial/default row. Provider-neutral so managed policy is not inferred
+    /// from an Anthropic-specific auth or profile name.
+    pub model_provenance: platform_api::ModelProvenance,
     /// (T2a) Per-provider login method tag, keyed by profile_name, derived from
     /// the real catalog auth strategy: "api_key" | "copilot_device" | "oauth".
     /// Threaded into the TUI so the /connect picker shows the real method.
@@ -4064,6 +4181,10 @@ pub struct DesktopRuntime {
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
     /// every connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: Arc<mcp::McpRegistry>,
+    /// Provider-neutral local IDE endpoint lifecycle. The handle owns secure
+    /// lockfile discovery and local auth tokens; callers only see redacted
+    /// status and action results.
+    pub ide_handle: Arc<dyn platform_api::IdeHandle>,
     /// The assembled tool registry — the SAME `Arc` the orchestrator dispatches
     /// through.
     ///
@@ -5361,6 +5482,30 @@ async fn load_plugin_configs(
     merged
 }
 
+/// Read the managed-only enabled plugin names (name-part only) used to recover
+/// org-policy provenance for plugin session telemetry.
+async fn load_managed_plugin_names() -> std::collections::HashSet<String> {
+    let mut managed = std::collections::HashSet::new();
+    for raw in crate::settings_watch::managed_settings_raw_tiers().await {
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for (key, value) in map {
+            if !value.as_bool().unwrap_or(false) {
+                continue;
+            }
+            let name = key.split('@').next().unwrap_or(key);
+            if !name.is_empty() {
+                managed.insert(name.to_string());
+            }
+        }
+    }
+    managed
+}
+
 /// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
 /// last-write-wins across the managed tiers.
 async fn load_blocked_marketplaces() -> std::collections::HashSet<String> {
@@ -5399,6 +5544,7 @@ async fn discover_plugin_set(
     additional_project_roots: &[std::path::PathBuf],
     restricted: bool,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
+    analytics_bus: &Arc<telemetry::AnalyticsBus>,
 ) -> Vec<(
     protocol::PluginId,
     plugin::PluginManifest,
@@ -5413,17 +5559,32 @@ async fn discover_plugin_set(
             flag_settings,
         )
         .await;
-        let mut d = plugin::discover_effective_plugins(plugins_dir, &enabled).await;
+        let mut d = plugin::discovery::discover_effective_plugins_with_bus(
+            plugins_dir,
+            &enabled,
+            Some(analytics_bus),
+        )
+        .await;
         // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
         if d.is_empty() && ambient {
-            d = plugin::discover_installed_plugins(plugins_dir).await;
+            d = plugin::discovery::discover_installed_plugins_with_bus(
+                plugins_dir,
+                Some(analytics_bus),
+            )
+            .await;
         }
         d
     } else {
         Vec::new()
     };
     if inline {
-        discovered.extend(plugin::discover_cli_plugin_dirs(cli_plugin_dirs).await);
+        discovered.extend(
+            plugin::discovery::discover_cli_plugin_dirs_with_bus(
+                cli_plugin_dirs,
+                Some(analytics_bus),
+            )
+            .await,
+        );
     }
     discovered
 }
@@ -5568,6 +5729,7 @@ impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
 /// of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
+    analytics_bus: Arc<telemetry::AnalyticsBus>,
     plugins_dir: std::path::PathBuf,
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
@@ -5598,6 +5760,9 @@ impl PluginRuntime {
         self.manager
             .replace_blocked_marketplaces(load_blocked_marketplaces().await)
             .await;
+        self.manager
+            .replace_managed_plugin_names(load_managed_plugin_names().await)
+            .await;
         // (1) The fresh target set from disk + settings.
         let additional_project_roots = self.additional_project_roots.read().await.clone();
         let target = discover_plugin_set(
@@ -5610,6 +5775,7 @@ impl PluginRuntime {
             &additional_project_roots,
             self.restricted,
             self.flag_settings.as_ref(),
+            &self.analytics_bus,
         )
         .await;
 
@@ -6095,6 +6261,8 @@ pub struct LlmStack {
     pub provider_availability: std::collections::BTreeMap<String, bool>,
     /// See [`build`] for the resolution rules behind `default_model_fallback`.
     pub default_model_fallback: Option<DefaultModelFallbackNotice>,
+    /// See [`build`] for the resolution rules behind `model_provenance`.
+    pub model_provenance: platform_api::ModelProvenance,
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
     pub session_model_restriction:
         Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
@@ -6182,6 +6350,17 @@ pub async fn build_shared_credential_stack(
 /// environment and the network (the availability probe), but creates no
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
+    // Resolve the winning model setting from the canonical tier stack before
+    // assembling provider profiles. Managed `settings.model` is the only
+    // administrator-owned default; explicit CLI/env pins remain user-owned.
+    let managed_settings_for_model = crate::settings_watch::managed_settings_raw_tiers().await;
+    let effective_settings_for_model =
+        load_effective_settings_for_config(cfg, &managed_settings_for_model);
+    let mut model_provenance =
+        model_provenance_for_config(cfg, effective_settings_for_model.as_ref());
+    let configured_model =
+        managed_model_setting_for_config(cfg, effective_settings_for_model.as_ref())
+            .unwrap_or_else(|| cfg.default_model.clone());
     // (1) Platform-minimal façade shared byte-for-byte with CLI/TUI auth.
     let SharedCredentialStack {
         http,
@@ -6561,7 +6740,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
 
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
-        anthropic_models: anthropic_models_for(&cfg.default_model, cfg.fallback_model.as_deref()),
+        anthropic_models: anthropic_models_for(&configured_model, cfg.fallback_model.as_deref()),
         anthropic_has_api_key: has_api_key && !has_oauth,
         anthropic_has_oauth: has_oauth,
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
@@ -6613,7 +6792,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         })
         .collect();
     let (mut default_model_id, mut default_model_profile) =
-        platform_api::parse_model_ref(&cfg.default_model, &default_listings);
+        platform_api::parse_model_ref(&configured_model, &default_listings);
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it
@@ -6743,14 +6922,18 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         ) {
             let to = format!("{}/{}", fb.profile, fb.model);
             tracing::warn!(
-                from = %cfg.default_model,
+                from = %configured_model,
                 to = %to,
                 "default model's provider is not connected; booting on a connected provider"
             );
             default_model_fallback = Some(DefaultModelFallbackNotice {
-                from: cfg.default_model.clone(),
+                from: configured_model.clone(),
                 to,
             });
+            // A disconnected-provider fallback is a catalog choice, not an
+            // administrator default, even when the displaced model came from
+            // a lower-priority settings source.
+            model_provenance = platform_api::ModelProvenance::ProviderCatalogTier;
             default_model_id = fb.model;
             default_model_profile = Some(fb.profile);
         }
@@ -6817,6 +7000,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         "default model is not in the managed availableModels allowlist; \
                          resolving Default to the first allowed availableModels entry"
                     );
+                    model_provenance = platform_api::ModelProvenance::ManagedAdministratorDefault;
                     default_model_id = picked;
                     default_model_profile = picked_profile.or(default_model_profile);
                 }
@@ -6832,7 +7016,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // fallback just declared disconnected.
     let model_setting_for_spawns = default_model_fallback
         .as_ref()
-        .map_or_else(|| cfg.default_model.clone(), |n| n.to.clone());
+        .map_or_else(|| configured_model.clone(), |n| n.to.clone());
 
     // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
     // firstParty gate: `false` when the session's default model routes to a
@@ -6940,6 +7124,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         first_party_environment_provider: first_party_environment_provider.to_string(),
         provider_availability,
         default_model_fallback,
+        model_provenance,
         session_model_restriction,
         model_setting_for_spawns,
         session_provider_first_party,
@@ -7220,6 +7405,7 @@ pub async fn build(
         first_party_environment_provider,
         provider_availability,
         default_model_fallback,
+        model_provenance,
         session_model_restriction,
         model_setting_for_spawns,
         session_provider_first_party,
@@ -8034,14 +8220,12 @@ pub async fn build(
     mcp::apply_project_server_gate(&mut mcp_configs, &global_mcp_path, &cwd);
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
-    // Build one concrete `PosixMcpTransport` and hand it to the registry as
-    // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
-    // (live-client bridge), so a connected server yields a working `McpClient`
-    // via `get_client`. The real transport is now wired: for a connected
-    // server its `RawConnectionProvider::connection_for` returns the live
-    // `Arc<jsonrpc::Connection>` (Stdio/Sse/Http), so the bridge hands back a
-    // working client; only an unknown connection id yields `None`.
-    let posix = Arc::new(PosixMcpTransport::new());
+    // Build one concrete host MCP transport and hand the SAME `Arc` to the
+    // registry as BOTH `McpTransport` (discovery) and `RawConnectionProvider`
+    // (live-client bridge). Unix keeps `PosixMcpTransport`; Windows selects
+    // `WindowsMcpTransport`, whose remote IDE connections expose the same
+    // shared JSON-RPC handle to the registry.
+    let mcp_transport = new_desktop_mcp_transport();
     // The registry is BUILT here but `connect_all` is deferred to (5.26),
     // after the real `hooks` executor exists: the elicitation hook dispatcher
     // (`OrchestratorHookDispatcher`) must be wired via `with_hook_dispatcher`
@@ -8661,8 +8845,8 @@ pub async fn build(
     let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
-            posix.clone() as Arc<dyn McpTransport>,
-            posix as Arc<dyn mcp::RawConnectionProvider>,
+            mcp_transport.clone() as Arc<dyn McpTransport>,
+            mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
         )
         .with_hook_dispatcher(Some(elicitation_dispatcher))
         .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
@@ -9139,7 +9323,6 @@ pub async fn build(
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
             .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
             .with_worktree_manager(worktree_manager.clone())
-            .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_status_sink(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
@@ -9462,6 +9645,14 @@ pub async fn build(
     // `trusted_dirs` set (cwd + `--add-dir`/`additionalDirectories`) so the
     // file tools' `ctx.trusted_dirs()` gate keeps allowing the additional dirs.
     let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
+    let _ = teammate_session_cwd_cell.set(session_cwd.clone());
+    // Local IDE endpoints are discovered lazily by the provider-neutral
+    // controller. The same MCP registry owns their live JSON-RPC connection;
+    // no Anthropic credential or cloud auth path participates here.
+    let ide_handle: Arc<dyn platform_api::IdeHandle> = Arc::new(DesktopIdeHandle::new(
+        cfg.lingxi_home.join("ide"),
+        mcp_registry.clone(),
+    ));
     // Handle the runtime `/add-dir` live effect needs to widen the file-tool
     // trusted set (the same `Arc<SessionCwd>` is moved into the orchestrator
     // builder below via `with_session_cwd`). P1-08.
@@ -9998,7 +10189,12 @@ pub async fn build(
         if let Some(policy) = boot_permission_policy.clone() {
             workflow_tool = workflow_tool.with_permission_policy(policy);
         }
-        tools_inner.register_builtin(Arc::new(workflow_tool));
+        let workflow_tool = Arc::new(workflow_tool);
+        #[cfg(test)]
+        {
+            wired_workflow_tool = Some(workflow_tool.clone());
+        }
+        tools_inner.register_builtin(workflow_tool);
     }
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await
@@ -10418,8 +10614,9 @@ pub async fn build(
         // restricted=false defaults.
         .with_workspace_trusted(goal_workspace_trusted)
         .with_hooks_restricted(goal_hooks_restricted)
-        .with_analytics_bus(analytics_bus)
+        .with_analytics_bus(analytics_bus.clone())
         .with_mcp_registry(mcp_registry.clone())
+        .with_ide_handle(ide_handle.clone())
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)
         .with_repo_root_reloader(repo_root_reloader.clone())
@@ -10554,18 +10751,18 @@ pub async fn build(
     // P1 session-memory standalone trigger (§6.5, gated, default OFF). When
     // `LINGXI_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
     // so durable notes are background-distilled (a Haiku-class fork) once the
-    // tool-call threshold crosses and written to
+    // Claude-compatible token/activity gates cross and written to
     // `<configHome>/agents/session-memory/<id>.md`, which the Session-tier memdir
-    // scan re-loads next session. Thresholds are unpinned upstream (spec §6.5) —
-    // 30/30 tool calls is a tunable default. Unset/false ⇒ no handle ⇒ inert, so
-    // the locked fixtures stay byte-identical.
+    // scan re-loads next session. The builder's legacy tool-count parameters
+    // stay zero so its 10k/5k/3 defaults apply. Unset/false ⇒ no handle ⇒ inert,
+    // so the locked fixtures stay byte-identical.
     let orch_builder = match (session_memory_on, dirs::home_dir()) {
         (true, Some(home)) => {
             orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
                 side_query_client.clone(),
                 "claude-haiku-4-5".to_string(),
-                30,
-                30,
+                0,
+                0,
                 &home,
                 Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
             ))
@@ -10909,6 +11106,7 @@ pub async fn build(
             &[],
             cfg.restricted,
             cfg.flag_settings.as_ref(),
+            &analytics_bus,
         )
         .await;
         // Build the manager UNCONDITIONALLY (even when zero plugins resolve on
@@ -10936,6 +11134,7 @@ pub async fn build(
         let plugin_configs =
             load_plugin_configs(&cfg.lingxi_home, cfg.restricted, cfg.flag_settings.as_ref()).await;
         let blocked_marketplaces = load_blocked_marketplaces().await;
+        let managed_plugin_names = load_managed_plugin_names().await;
         let pm = Arc::new(
             plugin::PluginManager::new(
                 plugins_dir.clone(),
@@ -10953,8 +11152,11 @@ pub async fn build(
                 Arc::new(RwLock::new(ToolRegistry::new())),
             )
             .with_agent_catalog(plugin_agent_catalog.clone())
+            .with_analytics_bus(analytics_bus.clone())
             .with_plugin_configs(plugin_configs)
             .with_blocked_marketplaces(blocked_marketplaces)
+            .with_managed_plugin_names(managed_plugin_names)
+            .with_safe_mode(cfg.customization_gates.safe_mode)
             .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_project_dir(cwd_for_plugins.clone())
             .with_task_registry(
@@ -10985,6 +11187,7 @@ pub async fn build(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
+            analytics_bus: analytics_bus.clone(),
             plugins_dir,
             home: cfg.lingxi_home.clone(),
             cwd: cwd_for_plugins.clone(),
@@ -11426,6 +11629,7 @@ pub async fn build(
 
     Ok(DesktopRuntime {
         orchestrator: orch,
+        analytics_bus,
         shared_command_registry,
         dispatcher,
         auth,
@@ -11447,6 +11651,7 @@ pub async fn build(
         plugin_runtime,
         provider_availability,
         default_model_fallback,
+        model_provenance,
         provider_auth_methods,
         model_providers,
         provider_adapter: provider_adapter_handle,
@@ -11463,6 +11668,7 @@ pub async fn build(
         // orchestrator builder consumed the originals).
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
+        ide_handle,
         workflow_events: Some(workflow_event_rx),
         tools: runtime_tools,
         audio: desktop_audio,
@@ -11506,6 +11712,9 @@ mod tests {
     #[test]
     fn build_wires_one_plugin_workflow_registry_into_every_participant() {
         const SRC: &str = include_str!("lib.rs");
+        let build_src = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(production, _)| production);
         let registry_var = "plugin_workflow_registr".to_string() + "y";
         let construct =
             format!("let {registry_var} = Arc::new(workflow::PluginWorkflowRegistry::new());");
@@ -11513,17 +11722,17 @@ mod tests {
         let launcher_field = format!("plugin_workflows: {registry_var}.clone()");
 
         assert_eq!(
-            SRC.matches(&construct).count(),
+            build_src.matches(&construct).count(),
             1,
             "build() must construct exactly ONE shared plugin-workflow registry ({construct})"
         );
         assert_eq!(
-            SRC.matches(&builder).count(),
+            build_src.matches(&builder).count(),
             3,
             "`{builder}` must appear 3× in build(): LocalWorkflowHandler, WorkflowTool, PluginManager"
         );
         assert_eq!(
-            SRC.matches(&launcher_field).count(),
+            build_src.matches(&launcher_field).count(),
             1,
             "TaskRegistryWorkflowLauncher must be built with the shared registry (`{launcher_field}`)"
         );
@@ -11535,7 +11744,7 @@ mod tests {
         // a zero-match assertion would be green by default here.
         let uses = format!("Some(self.plugin_workflow{}.as_ref())", "s");
         assert_eq!(
-            SRC.matches(&uses).count(),
+            build_src.matches(&uses).count(),
             2,
             "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
         );
@@ -11588,6 +11797,21 @@ mod tests {
         assert_eq!(resolve_memory_feature_gates(true, false), (true, false));
         assert_eq!(resolve_memory_feature_gates(false, true), (true, true));
         assert_eq!(resolve_memory_feature_gates(true, true), (true, true));
+    }
+
+    #[test]
+    fn session_memory_composition_uses_token_gate_defaults() {
+        const SRC: &str = include_str!("lib.rs");
+        // Keep the needle assembled so this source-level guard cannot match
+        // its own assertion while still pinning the production composition
+        // root to the memory crate's 10k/5k/3 defaults.
+        let needle = "\"claude-haiku-".to_string()
+            + "4-5\".to_string(),\n                0,\n                0,";
+        assert_eq!(
+            SRC.matches(&needle).count(),
+            1,
+            "desktop must leave legacy session-memory thresholds at zero"
+        );
     }
 
     #[test]
@@ -12731,6 +12955,10 @@ mod tests {
             tool_name: tool_name.into(),
             description: tool_name.into(),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: format!("mcp__srv__{tool_name}"),
             search_hint: None,
             always_load: None,
@@ -16378,6 +16606,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn model_setting_provenance_is_provider_neutral() {
+        fn effective_model(
+            model: &str,
+            source: lingxi_core::settings::tracer::Source,
+        ) -> lingxi_core::settings::EffectiveSettings {
+            let mut settings = lingxi_core::settings::SettingsJson::default();
+            settings.model = Some(model.to_string());
+            let mut trace = lingxi_core::settings::tracer::ProvenanceTrace::default();
+            trace.by_field.insert(
+                "model".to_string(),
+                lingxi_core::settings::tracer::FieldProvenance {
+                    contributors: vec![source],
+                },
+            );
+            lingxi_core::settings::EffectiveSettings { settings, trace }
+        }
+
+        let cfg = DesktopConfig::default();
+        let managed = effective_model(
+            "copilot/claude-sonnet-4-5",
+            lingxi_core::settings::tracer::Source::Managed,
+        );
+        assert_eq!(
+            super::model_provenance_for_config(&cfg, Some(&managed)),
+            platform_api::ModelProvenance::ManagedAdministratorDefault
+        );
+        assert_eq!(
+            super::managed_model_setting_for_config(&cfg, Some(&managed)).as_deref(),
+            Some("copilot/claude-sonnet-4-5")
+        );
+
+        let blank_managed = effective_model(" ", lingxi_core::settings::tracer::Source::Managed);
+        assert_eq!(
+            super::model_provenance_for_config(&cfg, Some(&blank_managed)),
+            platform_api::ModelProvenance::ProviderCatalogTier
+        );
+        assert!(
+            super::managed_model_setting_for_config(&cfg, Some(&blank_managed)).is_none(),
+            "a blank managed model must not attribute the catalog default to policy"
+        );
+
+        let user = effective_model(
+            "openai/gpt-5.5",
+            lingxi_core::settings::tracer::Source::User,
+        );
+        assert_eq!(
+            super::model_provenance_for_config(&cfg, Some(&user)),
+            platform_api::ModelProvenance::UserOrEnv
+        );
+        assert!(super::managed_model_setting_for_config(&cfg, Some(&user)).is_none());
+
+        let catalog = effective_model(
+            "claude-sonnet-4-5",
+            lingxi_core::settings::tracer::Source::Defaults,
+        );
+        assert_eq!(
+            super::model_provenance_for_config(&cfg, Some(&catalog)),
+            platform_api::ModelProvenance::ProviderCatalogTier
+        );
+
+        let mut explicit = cfg.clone();
+        explicit.default_model_explicit = true;
+        assert_eq!(
+            super::model_provenance_for_config(&explicit, Some(&managed)),
+            platform_api::ModelProvenance::UserOrEnv
+        );
+        assert!(super::managed_model_setting_for_config(&explicit, Some(&managed)).is_none());
+
+        let mut env_pinned = cfg;
+        env_pinned.default_model_env_pinned = true;
+        assert_eq!(
+            super::model_provenance_for_config(&env_pinned, Some(&managed)),
+            platform_api::ModelProvenance::UserOrEnv
+        );
+    }
+
     // ── P1-10 (parity 2.1.207): managed (policySettings) PERMISSION RULES in
     // the boot policy ────────────────────────────────────────────────────────
     //
@@ -17196,6 +17501,7 @@ mod tests {
         ));
         let rt = super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -17276,6 +17582,7 @@ mod tests {
         .await;
         let rt = super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -17382,6 +17689,7 @@ mod tests {
         .await;
         let rt = Arc::new(super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -17902,6 +18210,7 @@ mod tests {
         .await;
         let rt = super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -18027,6 +18336,7 @@ mod tests {
         .await;
         let rt = super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -18351,6 +18661,7 @@ mod tests {
         );
         let rt = super::PluginRuntime {
             manager: manager.clone(),
+            analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -18537,6 +18848,7 @@ mod tests {
         assert!(std::fs::read_to_string(&registered_workflow)
             .expect("registered workflow")
             .contains("name: 'assemble'"));
+        let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
         let discovered_at_boot = super::discover_plugin_set(
             true,
             false,
@@ -18547,6 +18859,7 @@ mod tests {
             &[],
             false,
             None,
+            &analytics_bus,
         )
         .await;
         assert_eq!(

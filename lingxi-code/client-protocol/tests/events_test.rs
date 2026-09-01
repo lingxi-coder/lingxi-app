@@ -27,7 +27,7 @@ use client_protocol::local_apps::{
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
     LocalAppPluginErrorCodeDto, LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto,
     LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
-    ManagedLocalAppMcpServerDto,
+    ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::PermissionResolutionDto;
@@ -901,6 +901,11 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
                     server_name: "local_app_habits-1a2b".to_string(),
                     app_id: "habits-1a2b".to_string(),
                     app_name: "Habits".to_string(),
+                    enabled: true,
+                    status: ManagedLocalAppMcpStatusDto::Enabled,
+                    settings_revision: 6,
+                    enabled_tools: vec!["save_habit".to_string()],
+                    pinned_to_current_conversation: true,
                     build_id: "build-0001".to_string(),
                     catalog_sha256: "6".repeat(64),
                     tool_surface_sha256: "7".repeat(64),
@@ -917,6 +922,13 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
                         summary: "UI runner unavailable.".to_string(),
                         code: Some("verification_unavailable".to_string()),
                     },
+                    widget: Some(McpAppWidgetDto {
+                        resource_uri:
+                            "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html"
+                                .to_string(),
+                        mime_type: "text/html;profile=mcp-app".to_string(),
+                        resource_sha256: "8".repeat(64),
+                    }),
                     tools: vec![tool.clone()],
                 }],
             },
@@ -960,8 +972,8 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
         ),
         (
             "managed_mcp_inventory_changed",
-            "/event/servers/0/toolCount",
-            serde_json::Value::from(1_u64),
+            "/event/servers/0/status",
+            serde_json::Value::String("enabled".to_string()),
         ),
         (
             "verification_summary_changed",

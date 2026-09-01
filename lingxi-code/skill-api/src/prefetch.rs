@@ -40,9 +40,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 use crate::registry::SkillRegistry;
+use platform_api::RuntimeSpawner;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use platform_api::RuntimeSpawner;
 
 /// One skill selected for surfacing this turn, in the shape
 /// [`render_skill_discovery_block`] renders. 1:1 with the TS attachment element

@@ -502,12 +502,55 @@ pub fn emit_mcp_degraded(payload: &crate::tengu::mcp::DegradedPayload) {
 
 /// Emit [`crate::tengu::mcp::SERVER_CONFIG_INVALID`] — a server's config
 /// failed the loader-time or connect-time URL/shape re-validation.
+pub fn emit_mcp_start(payload: &crate::tengu::mcp::StartPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::START,
+        transport = payload.transport.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::SERVER_CONFIG_INVALID`] — a server's config
+/// failed the loader-time or connect-time URL/shape re-validation.
 pub fn emit_mcp_server_config_invalid(payload: &crate::tengu::mcp::ServerConfigInvalidPayload) {
     tracing::warn!(
         event = crate::tengu::mcp::SERVER_CONFIG_INVALID,
         transport_type = payload.transport_type.as_str(),
         field = payload.field.as_str(),
         source = payload.source.wire_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::SERVER_CONNECTION_SUCCEEDED`].
+pub fn emit_mcp_server_connection_succeeded(
+    payload: &crate::tengu::mcp::ServerConnectionSucceededPayload,
+) {
+    tracing::info!(
+        event = crate::tengu::mcp::SERVER_CONNECTION_SUCCEEDED,
+        connection_duration_ms = payload.connection_duration_ms,
+        transport_type = payload.transport_type.as_str(),
+        scope = payload.scope.as_str(),
+        is_plugin = payload.is_plugin,
+        negotiation_mode = payload.negotiation_mode.as_ref().map(Verified::as_str),
+        protocol_era = payload.protocol_era.as_ref().map(Verified::as_str),
+        negotiated_protocol_version = payload
+            .negotiated_protocol_version
+            .as_ref()
+            .map(Verified::as_str),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::SERVER_CONNECTION_FAILED`].
+pub fn emit_mcp_server_connection_failed(
+    payload: &crate::tengu::mcp::ServerConnectionFailedPayload,
+) {
+    tracing::warn!(
+        event = crate::tengu::mcp::SERVER_CONNECTION_FAILED,
+        transport_type = payload.transport_type.as_str(),
+        scope = payload.scope.as_str(),
+        is_plugin = payload.is_plugin,
+        connection_duration_ms = payload.connection_duration_ms,
+        negotiation_mode = payload.negotiation_mode.as_ref().map(Verified::as_str),
+        error_code = payload.error_code.as_ref().map(Verified::as_str),
     );
 }
 
@@ -534,6 +577,185 @@ pub fn emit_mcp_discovery_source(payload: &crate::tengu::mcp::DiscoverySourcePay
         transport_type = payload.transport_type.as_str(),
         source = payload.source.as_str(),
         entry_age_ms = payload.entry_age_ms,
+    );
+}
+
+/// Emit [`crate::tengu::mcp::LIST_CHANGED`].
+pub fn emit_mcp_list_changed(payload: &crate::tengu::mcp::ListChangedPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::LIST_CHANGED,
+        kind = payload.kind.wire_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+        cause = payload.cause.as_str(),
+        previous_count = payload.previous_count,
+        new_count = payload.new_count,
+    );
+}
+
+/// Emit [`crate::tengu::mcp::RESOURCE_TEMPLATES_FETCHED`].
+pub fn emit_mcp_resource_templates_fetched(
+    payload: &crate::tengu::mcp::ResourceTemplatesFetchedPayload,
+) {
+    tracing::info!(
+        event = crate::tengu::mcp::RESOURCE_TEMPLATES_FETCHED,
+        template_count = payload.template_count,
+    );
+}
+
+/// Emit [`crate::tengu::mcp::LISTEN_REOPEN`].
+pub fn emit_mcp_listen_reopen(payload: &crate::tengu::mcp::ListenReopenPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::LISTEN_REOPEN,
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+        outcome = payload.outcome.wire_str(),
+        attempts = payload.attempts,
+        trigger = payload.trigger.wire_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::RESET_MCPJSON_CHOICES`].
+pub fn emit_mcp_reset_mcpjson_choices() {
+    tracing::info!(event = crate::tengu::mcp::RESET_MCPJSON_CHOICES);
+}
+
+/// Emit [`crate::tengu::mcp::AUTH_CONFIG_AUTHENTICATE`].
+pub fn emit_mcp_auth_config_authenticate(
+    payload: &crate::tengu::mcp::AuthConfigAuthenticatePayload,
+) {
+    tracing::info!(
+        event = crate::tengu::mcp::AUTH_CONFIG_AUTHENTICATE,
+        was_authenticated = payload.was_authenticated,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::AUTH_CONFIG_CLEAR`].
+pub fn emit_mcp_auth_config_clear(payload: &crate::tengu::mcp::AuthConfigClearPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::AUTH_CONFIG_CLEAR,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_BROWSER_OPEN`].
+pub fn emit_mcp_oauth_browser_open(payload: &crate::tengu::mcp::OAuthBrowserOpenPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::OAUTH_BROWSER_OPEN,
+        success = payload.success,
+        headless = payload.headless,
+        platform = payload.platform.as_str(),
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_FLOW_START`].
+pub fn emit_mcp_oauth_flow_start(payload: &crate::tengu::mcp::OAuthFlowStartPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::OAUTH_FLOW_START,
+        flow_attempt_id = payload.flow_attempt_id.as_str(),
+        is_oauth_flow = payload.is_oauth_flow,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_FLOW_SUCCESS`].
+pub fn emit_mcp_oauth_flow_success(payload: &crate::tengu::mcp::OAuthFlowSuccessPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::OAUTH_FLOW_SUCCESS,
+        flow_attempt_id = payload.flow_attempt_id.as_str(),
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_FLOW_ERROR`].
+pub fn emit_mcp_oauth_flow_error(payload: &crate::tengu::mcp::OAuthFlowErrorPayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::OAUTH_FLOW_ERROR,
+        flow_attempt_id = payload.flow_attempt_id.as_str(),
+        reason = payload.reason.as_str(),
+        error_code = payload.error_code.as_ref().map(Verified::as_str),
+        http_status = payload.http_status,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_REFRESH_SUCCESS`].
+pub fn emit_mcp_oauth_refresh_success(payload: &crate::tengu::mcp::OAuthRefreshSuccessPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::OAUTH_REFRESH_SUCCESS,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_REFRESH_FAILURE`].
+pub fn emit_mcp_oauth_refresh_failure(payload: &crate::tengu::mcp::OAuthRefreshFailurePayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::OAUTH_REFRESH_FAILURE,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+        reason = payload.reason.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_TOKEN_PERSIST_FAILED`].
+pub fn emit_mcp_oauth_token_persist_failed(
+    payload: &crate::tengu::mcp::OAuthTokenPersistFailedPayload,
+) {
+    tracing::warn!(
+        event = crate::tengu::mcp::OAUTH_TOKEN_PERSIST_FAILED,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+        reason = payload.reason.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::OAUTH_ISSUER_ECHO_MISMATCH`].
+pub fn emit_mcp_oauth_issuer_echo_mismatch(
+    payload: &crate::tengu::mcp::OAuthIssuerEchoMismatchPayload,
+) {
+    tracing::warn!(
+        event = crate::tengu::mcp::OAUTH_ISSUER_ECHO_MISMATCH,
+        site = payload.site.wire_str(),
+        mode = payload.mode.wire_str(),
+        origin_relation = payload.origin_relation.wire_str(),
+        outcome = payload.outcome.wire_str(),
+        mismatch_facets = ?payload
+            .mismatch_facets
+            .iter()
+            .map(Verified::as_str)
+            .collect::<Vec<_>>(),
+        expected_issuer_hash = payload.expected_issuer_hash.as_str(),
+        received_issuer_hash = payload.received_issuer_hash.as_ref().map(Verified::as_str),
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::SERVER_NEEDS_AUTH`].
+pub fn emit_mcp_server_needs_auth(payload: &crate::tengu::mcp::ServerNeedsAuthPayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::SERVER_NEEDS_AUTH,
+        transport_type = payload.transport_type.as_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
+        cause = payload.cause.as_ref().map(Verified::as_str),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::TOOL_CALL_AUTH_ERROR`].
+pub fn emit_mcp_tool_call_auth_error(payload: &crate::tengu::mcp::ToolCallAuthErrorPayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::TOOL_CALL_AUTH_ERROR,
+        error_code = payload.error_code.as_str(),
+        transport_type = payload.transport_type.as_str(),
+        auth_error_kind = payload.auth_error_kind.wire_str(),
+        mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
     );
 }
 

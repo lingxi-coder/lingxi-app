@@ -37,8 +37,8 @@ use serde::Deserialize;
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
-use platform_posix::PosixFileSystem;
 use platform_api::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
+use platform_posix::PosixFileSystem;
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
@@ -626,7 +626,8 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     let session_id = canonical_session_id(cfg.session_id_override.as_deref())?;
     cfg.session_id_override = Some(session_id.clone());
 
-    let dir = platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
+    let dir =
+        platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
     let pid = std::process::id();
     // Only live records/PIDs participate in writer ownership. The persisted
     // `<session-id>.jsonl` transcript is intentionally ignored here because a
@@ -655,8 +656,11 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.trim().is_empty());
-    let claim =
-        platform_api::live_sessions::install_process(dir.clone(), &session_id, display_name.as_deref());
+    let claim = platform_api::live_sessions::install_process(
+        dir.clone(),
+        &session_id,
+        display_name.as_deref(),
+    );
     if let Some(claim) = claim.as_ref() {
         if claim.notice.is_some() {
             tracing::debug!("bridge live-session display name was disambiguated");
@@ -1015,7 +1019,8 @@ pub async fn assemble_with_provider_keys(
         EngineCommandRouter::new(
             handle,
             runtime.auth.clone(),
-            runtime.task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            runtime.task_registry.clone()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
             Some(dispatcher),
             Some(runtime.shared_command_registry.clone()),
         )

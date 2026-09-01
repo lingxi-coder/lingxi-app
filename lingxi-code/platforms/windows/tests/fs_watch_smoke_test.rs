@@ -2,10 +2,10 @@
 //! at least one event arrives. Detailed parity tests live in posix/.
 
 use futures_util::StreamExt;
+use platform_api::FileSystem;
 use platform_windows::WindowsFileSystem;
 use std::time::Duration;
 use tempfile::tempdir;
-use platform_api::FileSystem;
 
 #[tokio::test]
 async fn create_modify_delete_emits_events() {

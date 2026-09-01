@@ -4270,7 +4270,6 @@ async fn build_mobile_inner_with_ask(
         local_workflow_handler.clone(),
     );
     let task_registry = Arc::new(task_registry_inner);
-
     let tool_ctx = BuiltinToolContext {
         // No session: this context never persists tool output.
         session_id: None,
@@ -6491,15 +6490,26 @@ impl MobileEngineHandle {
         self.inner.session_writer.retarget(path).await;
         // Keep the local-apps MCP origin-conversation source in lockstep with
         // the session every retarget (New/Resume/Clear).
+        let session_uuid = session_id.as_uuid().to_string();
         if let Ok(mut guard) = self.inner.active_session_uuid.lock() {
-            let session_uuid = session_id.as_uuid().to_string();
             *guard = session_uuid.clone();
             self.inner
                 .permission_gate
                 .set_session_id(Some(session_uuid.clone()));
             self.inner
                 .task_registry
-                .set_workflow_session_filter(Some(session_uuid));
+                .set_workflow_session_filter(Some(session_uuid.clone()));
+        }
+        if let Err(error) = self
+            .local_apps_host
+            .activate_managed_mcp_conversation(&session_uuid, cwd)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_uuid,
+                %error,
+                "failed to retarget managed Local App MCP tools"
+            );
         }
     }
 
@@ -7506,7 +7516,24 @@ impl MobileEngineHandle {
         }
         .await;
         match result {
-            Ok(details) => self.emit_app_event(AppEventDto::AppDetailsChanged { details }),
+            Ok(details) => {
+                self.emit_app_event(AppEventDto::AppDetailsChanged { details });
+                // Opening a Local App is the explicit, lazy discovery action
+                // for its per-app MCP. The connection is Host-owned and scoped
+                // to the live conversation; disabled/unconfigured apps remain
+                // ordinary Local Apps and simply expose no model tools.
+                if let Err(error) = self
+                    .local_apps_host
+                    .expose_managed_mcp_for_conversation(&self.active_session_id(), &app_id, false)
+                    .await
+                {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        %error,
+                        "Local App details loaded but MCP lazy exposure failed"
+                    );
+                }
+            }
             Err(error) => self.emit_app_failure(Some(app_id), &error).await,
         }
     }
@@ -8878,6 +8905,113 @@ impl MobileEngineHandle {
                     .emit_managed_mcp_inventory()
                     .await
                     .map_err(|message| ClientError::Rejected { message }),
+                PluginCommandDto::StartLocalAppMcpAuthoring { app_id, user_goal } => {
+                    let user_goal = user_goal.trim();
+                    if user_goal.is_empty() || user_goal.len() > 4_096 {
+                        return Err(ClientError::Rejected {
+                            message: "Local App MCP goal must be between 1 and 4096 bytes".into(),
+                        });
+                    }
+                    let service =
+                        self.local_apps
+                            .as_ref()
+                            .map_err(|error| ClientError::Rejected {
+                                message: error.to_string(),
+                            })?;
+                    let record =
+                        service
+                            .record(&app_id)
+                            .await
+                            .map_err(|error| ClientError::Rejected {
+                                message: error.to_string(),
+                            })?;
+                    if !record.scaffolded {
+                        return Err(ClientError::Rejected {
+                            message: "Local App must be scaffolded before MCP authoring starts"
+                                .into(),
+                        });
+                    }
+                    self.inner
+                        .workflow_launcher
+                        .launch(tool_workflow::WorkflowLaunchSpec {
+                            name: Some(
+                                crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID
+                                    .into(),
+                            ),
+                            args: Some(serde_json::json!({
+                                "app_id": app_id,
+                                "user_goal": user_goal,
+                            })),
+                            session_uuid: Some(self.active_session_id()),
+                            ..Default::default()
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| ClientError::Rejected {
+                            message: error.to_string(),
+                        })
+                }
+                PluginCommandDto::SetLocalAppMcpEnabled {
+                    app_id,
+                    enabled,
+                    expected_revision,
+                } => {
+                    self.local_apps_host
+                        .set_managed_mcp_enabled(&app_id, enabled, expected_revision)
+                        .await
+                        .map_err(|message| ClientError::Rejected { message })?;
+                    if enabled {
+                        self.local_apps_host
+                            .expose_managed_mcp_for_conversation(
+                                &self.active_session_id(),
+                                &app_id,
+                                false,
+                            )
+                            .await
+                            .map_err(|message| ClientError::Rejected { message })?;
+                    }
+                    Ok(())
+                }
+                PluginCommandDto::SetLocalAppMcpToolEnabled {
+                    app_id,
+                    tool_name,
+                    enabled,
+                    expected_revision,
+                } => {
+                    self.local_apps_host
+                        .set_managed_mcp_tool_enabled(
+                            &app_id,
+                            &tool_name,
+                            enabled,
+                            expected_revision,
+                        )
+                        .await
+                        .map_err(|message| ClientError::Rejected { message })?;
+                    let _ = self
+                        .local_apps_host
+                        .expose_managed_mcp_for_conversation(
+                            &self.active_session_id(),
+                            &app_id,
+                            false,
+                        )
+                        .await;
+                    Ok(())
+                }
+                PluginCommandDto::SetLocalAppMcpConversationPinned {
+                    conversation_id,
+                    app_id,
+                    pinned,
+                } => {
+                    if conversation_id != self.active_session_id() {
+                        return Err(ClientError::Rejected {
+                            message: "Local App MCP pin must target the active conversation".into(),
+                        });
+                    }
+                    self.local_apps_host
+                        .set_managed_mcp_conversation_pinned(&conversation_id, &app_id, pinned)
+                        .await
+                        .map_err(|message| ClientError::Rejected { message })
+                }
                 _ => Err(ClientError::Rejected {
                     message: "unsupported mobile plugin command".to_string(),
                 }),
@@ -10216,7 +10350,7 @@ const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::fr
 // Local-app build/install tools have their own multi-minute budgets. A 30s
 // MCP deadline can expire while the build is still progressing, causing the
 // caller to retry and duplicate the expensive work.
-const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
+pub(crate) const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 
 fn provider_models_endpoint(api_base: &str, provider_preset: &str) -> Result<String, &'static str> {
     let base = api_base.trim().trim_end_matches('/');

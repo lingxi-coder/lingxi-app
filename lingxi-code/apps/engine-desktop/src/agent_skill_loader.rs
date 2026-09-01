@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use command_api::{CommandRegistry, SlashCommand, SlashCommandKind};
+use platform_api::skill_loader::{SkillLoad, SkillLoader};
 use protocol::ContentBlock;
 use tokio::sync::RwLock;
-use platform_api::skill_loader::{SkillLoad, SkillLoader};
 
 /// [`SkillLoader`] backed by the shared desktop [`CommandRegistry`].
 pub struct AgentSkillLoader {

@@ -251,6 +251,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
         let requested_model = (!runtime.model.is_empty()).then(|| runtime.model.clone());
         self.reset_session_scoped_runtime().await;
+        // A hot resume must adopt a persisted prompt snapshot when present,
+        // but never create one if the transcript did not carry it.
+        self.prompt_runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
         s.history = history;
@@ -963,6 +969,49 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     // M5-11 additions:
+
+    async fn ide_status(&self) -> platform_api::IdeStatus {
+        match self.ide_handle.as_ref() {
+            Some(ide) => ide.status().await,
+            None => platform_api::IdeStatus::default(),
+        }
+    }
+
+    async fn ide_connect(&self, endpoint_id: &str) -> Result<platform_api::IdeStatus, HandleError> {
+        let Some(ide) = self.ide_handle.as_ref() else {
+            return Err(HandleError::Unimplemented("ide_connect".into()));
+        };
+        ide.connect(endpoint_id)
+            .await
+            .map_err(HandleError::ActionFailed)
+    }
+
+    async fn ide_disconnect(&self) -> Result<platform_api::IdeStatus, HandleError> {
+        let Some(ide) = self.ide_handle.as_ref() else {
+            return Err(HandleError::Unimplemented("ide_disconnect".into()));
+        };
+        ide.disconnect().await.map_err(HandleError::ActionFailed)
+    }
+
+    async fn ide_open(&self) -> Result<String, HandleError> {
+        let Some(ide) = self.ide_handle.as_ref() else {
+            return Err(HandleError::Unimplemented("ide_open".into()));
+        };
+        // Read the session CWD at invocation time. Worktree enter/exit and
+        // `/cd` mutate this exact cell, so an open request never uses boot cwd.
+        ide.open(self.session_cwd.cwd())
+            .await
+            .map_err(HandleError::ActionFailed)
+    }
+
+    async fn ide_auto_connect_if_single(&self) -> Result<bool, HandleError> {
+        let Some(ide) = self.ide_handle.as_ref() else {
+            return Ok(false);
+        };
+        ide.auto_connect_if_single()
+            .await
+            .map_err(HandleError::ActionFailed)
+    }
 
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
         // M6-07: read the wired McpRegistry (Task 7); falls back to
@@ -1786,6 +1835,65 @@ mod tests {
         }
     }
 
+    struct RecordingIdeHandle {
+        opened: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::IdeHandle for RecordingIdeHandle {
+        async fn status(&self) -> platform_api::IdeStatus {
+            platform_api::IdeStatus::default()
+        }
+
+        async fn connect(&self, _endpoint_id: &str) -> Result<platform_api::IdeStatus, String> {
+            Ok(platform_api::IdeStatus::default())
+        }
+
+        async fn disconnect(&self) -> Result<platform_api::IdeStatus, String> {
+            Ok(platform_api::IdeStatus::default())
+        }
+
+        async fn open(&self, cwd: std::path::PathBuf) -> Result<String, String> {
+            self.opened.lock().unwrap().push(cwd);
+            Ok("opened".to_string())
+        }
+
+        async fn auto_connect_if_single(&self) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn ide_open_uses_the_live_session_cwd() {
+        let boot_cwd = std::path::PathBuf::from("/workspace/boot");
+        let live_cwd = std::path::PathBuf::from("/workspace/worktree");
+        let session_cwd = tool_api::SessionCwd::new(boot_cwd.clone(), vec![boot_cwd.clone()]);
+        let opened = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            boot_cwd,
+        )
+        .with_session_cwd(session_cwd.clone())
+        .with_ide_handle(Arc::new(RecordingIdeHandle {
+            opened: opened.clone(),
+        }));
+
+        session_cwd.change_cwd(live_cwd.clone());
+        assert_eq!(
+            platform_api::OrchestratorHandle::ide_open(&orch).await,
+            Ok("opened".into())
+        );
+        let opened = opened.lock().unwrap();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0], live_cwd);
+    }
+
     #[tokio::test]
     async fn clear_invalidates_stale_session_memory_tasks_and_resets_progress() {
         let handle = Arc::new(crate::conversation::SessionMemoryHandle {
@@ -1795,6 +1903,9 @@ mod tests {
                         enabled: true,
                         initialization_threshold: 3,
                         update_threshold: 3,
+                        minimum_message_tokens_to_init: 0,
+                        minimum_tokens_between_update: 0,
+                        tool_calls_between_updates: 3,
                         extraction_model: "haiku".to_string(),
                     },
                 ),
@@ -2171,6 +2282,7 @@ mod tests {
                 consecutive_failures: 2,
                 consecutive_rapid_refills: 1,
                 deferred_tools: Vec::new(),
+                prompt_snapshot: None,
             },
         )
         .await

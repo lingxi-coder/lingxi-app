@@ -7,9 +7,9 @@
 //!
 //! See spec §25.2 (`LspConnectionState`).
 
+use platform_api::{LspServerCapabilities, LspServerConfig};
 use protocol::McpConnectionId;
 use std::time::SystemTime;
-use platform_api::{LspServerCapabilities, LspServerConfig};
 
 /// State of one LSP server's connection.
 #[derive(Debug, Clone)]

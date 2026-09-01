@@ -5,13 +5,13 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 108 built-in slash commands into `reg`.
+/// Register all current built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
 /// stub literal `"{name}: not implemented in v0.6.0 (M5)"`.
 ///
-/// The 18 core names listed in [`command_api::builtin_support::BUILTIN_CORE_NAMES`] are
+/// The 19 core names listed in [`command_api::builtin_support::BUILTIN_CORE_NAMES`] are
 /// **also** registered here against the shared unimplemented handler
 /// **first**, then immediately overwritten by [`register_core_placeholders`]
 /// (called at the end of this function) with their per-name placeholder
@@ -25,7 +25,8 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 108 with per-name unimplemented handler instances.
+    // Pass 1: register every advertised name with a per-name unimplemented
+    // handler instance.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -36,6 +37,12 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         ));
         reg.register_builtin_handler(h);
     }
+
+    // `/brief` is an interactive local-jsx command upstream, but its state
+    // transition is host-neutral. Register the live toggle for registry and
+    // headless dispatchers; the TUI path can resolve the same handler without
+    // taking a separate process-environment snapshot.
+    reg.register_builtin_handler(Arc::new(crate::BriefHandler::new()));
 
     // Pass 2: overwrite the 12 non-batch-1 core entries with their per-name
     // placeholders. (M5-10 removed the 6 batch-1 placeholders from this
@@ -77,6 +84,11 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // consumers get the same empty/unavailable copy until their composition
     // root overwrites this fallback with the live task-registry projection.
     reg.register_builtin_handler(Arc::new(crate::WorkflowsHandler::new()));
+
+    // `/powerup` is a local lesson view. The headless registry renders the
+    // list/detail text and persists completions; the same builtin name remains
+    // available to the TUI's registry-backed slash dispatcher.
+    reg.register_builtin_handler(Arc::new(crate::PowerupHandler::new()));
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -117,8 +129,8 @@ pub fn register_core_batch_1(
     reg.register_alias("quit".to_string(), "exit".to_string());
 }
 
-/// Overwrite the 11 batch-2 entries (`agents`, `config`, `doctor`, `hooks`,
-/// `login`, `logout`, `mcp`, `model`, `permissions`, `status`, `version`) with
+/// Overwrite the 12 batch-2 entries (`agents`, `config`, `doctor`, `hooks`,
+/// `ide`, `login`, `logout`, `mcp`, `model`, `permissions`, `status`, `version`) with
 /// their handle/auth-bound real handlers from M5-11.
 ///
 /// Call **after** [`register_all_builtin_commands`] and (optionally) after
@@ -138,14 +150,15 @@ pub fn register_core_batch_2(
     auth: Arc<dyn platform_api::AuthHandle>,
 ) {
     use crate::{
-        AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, LoginHandler, LogoutHandler,
-        McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
+        AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, IdeHandler, LoginHandler,
+        LogoutHandler, McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(DoctorHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(IdeHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(LoginHandler::new(auth.clone())));
     reg.register_builtin_handler(Arc::new(LogoutHandler::new(auth)));
     reg.register_builtin_handler(Arc::new(McpHandler::new(handle.clone())));
@@ -221,7 +234,7 @@ pub fn register_core_batch_4(
 /// longer registered here either; `command_core::review` is retained only as
 /// an unwired module.
 ///
-/// Deferred commands (e.g. `ant-trace`) are intentionally left on the shared
+/// Remaining faithful stubs (e.g. `teleport`) are intentionally left on the shared
 /// [`command_api::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::{
@@ -494,10 +507,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_108_names() {
+    fn register_all_registers_exactly_86_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
@@ -593,16 +606,16 @@ mod registry_tests {
 
         // Pick a definitely-not-in-the-18-core command.
         let h = reg
-            .get_handler("ant-trace")
-            .expect("ant-trace handler missing");
+            .get_handler("teleport")
+            .expect("teleport handler missing");
         let args = ParsedSlashCommand {
-            name: "ant-trace".to_string(),
+            name: "teleport".to_string(),
             raw_args: String::new(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "ant-trace: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -764,7 +777,7 @@ mod batch_3_tests {
         }
     }
 
-    /// Deferred commands stay on the unimplemented handler: `ant-trace` must
+    /// Faithful stubs stay on the unimplemented handler: `teleport` must
     /// still return the locked M5 stub literal after batch-3 wiring.
     #[tokio::test]
     async fn deferred_command_still_returns_stub_after_batch_3() {
@@ -772,11 +785,11 @@ mod batch_3_tests {
         register_all_builtin_commands(&mut reg);
 
         let h = reg
-            .get_handler("ant-trace")
-            .expect("ant-trace handler missing");
-        match h.handle(&args("ant-trace")).await {
+            .get_handler("teleport")
+            .expect("teleport handler missing");
+        match h.handle(&args("teleport")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "ant-trace: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Done, got {other:?}"),
         }

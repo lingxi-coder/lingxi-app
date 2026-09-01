@@ -172,6 +172,24 @@ pub trait ProcessRunner: Send + Sync {
     ) -> Result<ForegroundOutcome, ProcessError> {
         Ok(ForegroundOutcome::Completed(self.run(cmd).await?))
     }
+
+    /// Run a foreground command with an output spill limit.
+    ///
+    /// This is an additive seam for callers that need to distinguish a
+    /// completed command whose output was retained in a rooted task file from
+    /// one whose output stayed inline.  Existing runners keep their historical
+    /// behavior through the compatibility default; runners with a confined
+    /// output manager can override this method and return the file identity.
+    async fn run_foreground_with_output_limit(
+        &self,
+        cmd: &SandboxedCommand,
+        _max_output_bytes: Option<usize>,
+    ) -> Result<ForegroundRunResult, ProcessError> {
+        Ok(ForegroundRunResult {
+            outcome: self.run_foreground(cmd).await?,
+            output_file: None,
+        })
+    }
 }
 
 /// Outcome of [`ProcessRunner::run_foreground`].
@@ -184,6 +202,29 @@ pub enum ForegroundOutcome {
     /// streaming to the task file; the handle names the task so the caller can
     /// build the "moved to the background" note and the model can Read the file.
     MovedToBackground(ProcessHandle),
+}
+
+/// A foreground command outcome plus optional identity for a rooted output
+/// file used when the command's captured output exceeded the caller's inline
+/// limit.  The metadata is intentionally provider-neutral so tool and
+/// orchestration layers do not need to know which platform opened the file.
+#[derive(Debug)]
+pub struct ForegroundRunResult {
+    /// Whether the process completed inline or moved to the background.
+    pub outcome: ForegroundOutcome,
+    /// Metadata for a non-redundant, completed output spill, when one exists.
+    pub output_file: Option<ProcessOutputFile>,
+}
+
+/// Identity and size of a rooted process-output file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessOutputFile {
+    /// Stable task identifier associated with the output file.
+    pub task_id: String,
+    /// Absolute path to the rooted output file.
+    pub path: String,
+    /// Number of bytes written to the output file.
+    pub size: u64,
 }
 
 /// Outcome of [`ProcessRunner::run_hook_with_async_detection`].

@@ -121,6 +121,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_mcp,
     },
     SlashCommand {
+        name: "/ide",
+        aliases: &[],
+        description: "Manage local IDE integrations",
+        dynamic_description: None,
+        hint: "[status|open|connect|disconnect]",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_ide,
+    },
+    SlashCommand {
         name: "/web",
         aliases: &[],
         description: "Configure web search",
@@ -316,6 +326,32 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_diff,
     },
     SlashCommand {
+        // cc2.1.252 `local-jsx` command: the brief-only mode is a live
+        // session toggle, so the TUI must resolve it before the registry
+        // fallback (which would submit a model turn for registry commands).
+        name: "/brief",
+        aliases: &[],
+        description: "Toggle brief-only mode",
+        dynamic_description: None,
+        hint: "",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_brief,
+    },
+    SlashCommand {
+        // cc2.1.252 `local-jsx` lesson view. The list is interactive in the
+        // reference; this portable TUI bridge renders its list/detail output
+        // as a system cell and persists completion through command-core.
+        name: "/powerup",
+        aliases: &[],
+        description: "Discover LingXi features through quick interactive lessons",
+        dynamic_description: None,
+        hint: "[lesson-id | done <lesson-id>]",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_powerup,
+    },
+    SlashCommand {
         name: "/export",
         aliases: &[],
         description: "Export the current conversation to a file or clipboard",
@@ -397,15 +433,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     // so `/focus` gets its own advertised row below instead of hiding inside
     // `/tui`'s alias list, and the two surfaces finally agree.
     //
-    // RESIDUAL GAP (deliberate, deferred): both rows still dispatch to
-    // [`ChatWidget::cmd_tui`], whose only outcome is
-    // `ChatOutcome::ToggleFullscreen` — a pure toggle owned by `App`. So
-    // `/tui default|fullscreen` toggles rather than sets (observable only when
-    // the requested mode is already active), and `/focus` toggles the
-    // fullscreen renderer that upstream's focus view is built on rather than
-    // the focus view itself (LingXi's ratatui backend has no focus renderer).
-    // Both halves need `chat_widget`/`app` changes — a set-mode outcome and a
-    // focus view — which is why only the advertised metadata moved here.
+    // RESIDUAL GAP (deliberate, deferred): `/tui default|fullscreen` still
+    // toggles rather than setting an explicit renderer mode. `/focus` now owns
+    // its own filtered transcript view instead of piggybacking on fullscreen.
     SlashCommand {
         name: "/tui",
         aliases: &[],
@@ -424,7 +454,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         hint: "",
         args: ArgSpec::None,
         advertised: true,
-        run: ChatWidget::cmd_tui,
+        run: ChatWidget::cmd_focus,
     },
     SlashCommand {
         name: "/exit",
@@ -1184,6 +1214,23 @@ mod tests {
         assert_eq!(resolve("/new").expect("alias").0.name, "/clear");
         assert_eq!(resolve("/settings").expect("alias").0.name, "/config");
         assert_eq!(resolve("/name").expect("alias").0.name, "/rename");
+    }
+
+    #[test]
+    fn latest_local_lesson_commands_resolve_before_registry_fallback() {
+        let (brief, args) = resolve("/brief").expect("/brief registered");
+        assert_eq!(brief.name, "/brief");
+        assert_eq!(args, "");
+        assert!(resolve("/brief extra").is_none(), "/brief takes no args");
+
+        let (powerup, args) = resolve("/powerup done undo").expect("/powerup registered");
+        assert_eq!(powerup.name, "/powerup");
+        assert_eq!(
+            powerup.description,
+            "Discover LingXi features through quick interactive lessons"
+        );
+        assert_eq!(args, "done undo");
+        assert!(powerup.advertised);
     }
 
     #[test]

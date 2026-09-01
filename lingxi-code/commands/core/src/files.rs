@@ -16,9 +16,9 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use platform_api::OrchestratorHandle;
 
 /// `/files` handler — renders the read-file-state cache as a path listing.
 #[derive(Clone)]

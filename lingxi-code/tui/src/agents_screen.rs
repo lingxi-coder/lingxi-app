@@ -153,6 +153,8 @@ pub enum AgentsOutcome {
     Stay,
     /// Attach to the selected session (open its transcript / resume it).
     Attach(String),
+    /// Open the shared provider login flow (`/connect`) and then return here.
+    Login,
     /// Close the view (`q` / `Esc` / `Ctrl-C`).
     Exit,
     /// Delete the session (kill its live worker, then remove its job state) —
@@ -307,6 +309,7 @@ impl AgentsScreenState {
                 }
                 _ => AgentsOutcome::Stay,
             },
+            KeyCode::Char('l') | KeyCode::Char('L') => AgentsOutcome::Login,
             _ => AgentsOutcome::Stay,
         }
     }
@@ -388,7 +391,7 @@ impl AgentsScreenState {
         // hint; otherwise the base key legend (incl. the delete + stop-all
         // chords).
         let footer = self.pending_hint().map_or_else(
-            || "enter attach · ↑/↓ select · ctrl+x delete · q quit".to_string(),
+            || "enter attach · l connect · ↑/↓ select · ctrl+x delete · q quit".to_string(),
             std::string::ToString::to_string,
         );
         let block = Block::new()
@@ -552,6 +555,16 @@ mod tests {
             s.on_key(key(KeyCode::Enter)),
             AgentsOutcome::Attach("a".to_string())
         );
+    }
+
+    #[test]
+    fn login_key_routes_without_moving_selection() {
+        let mut s =
+            AgentsScreenState::new(vec![row("a", "one", "working"), row("b", "two", "working")]);
+        let _ = s.on_key(key(KeyCode::Down));
+        assert_eq!(s.selected(), Some(1));
+        assert_eq!(s.on_key(key(KeyCode::Char('l'))), AgentsOutcome::Login);
+        assert_eq!(s.selected(), Some(1));
     }
 
     #[test]

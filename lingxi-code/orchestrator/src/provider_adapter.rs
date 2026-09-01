@@ -409,12 +409,16 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// Anthropic in the catalog that special case is gone. Anthropic is listed first
 /// to keep the picker's Claude-first ordering for catalog-only (no live config)
 /// callers.
-fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> platform_api::ReasoningControlSpec {
+fn lower_reasoning_spec(
+    raw: llm_client::ReasoningControlSpec,
+) -> platform_api::ReasoningControlSpec {
     let mandatory = raw
         .mandatory_selection
         .as_ref()
         .map(|selection| match selection {
-            llm_client::ReasoningSelection::Automatic => platform_api::ReasoningSelection::Automatic,
+            llm_client::ReasoningSelection::Automatic => {
+                platform_api::ReasoningSelection::Automatic
+            }
             llm_client::ReasoningSelection::Disabled => platform_api::ReasoningSelection::Disabled,
             llm_client::ReasoningSelection::Enabled => platform_api::ReasoningSelection::Enabled,
             llm_client::ReasoningSelection::Level(id) => {
@@ -452,12 +456,14 @@ fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> platform_api::
     platform_api::ReasoningControlSpec {
         available,
         selections_persistable: mandatory.is_none(),
-        budget_range: raw.token_budget.map(|range| platform_api::ReasoningBudgetRange {
-            min_tokens: range.min,
-            max_tokens: range.max,
-            supports_dynamic: false,
-            supports_disabled: raw.can_disable,
-        }),
+        budget_range: raw
+            .token_budget
+            .map(|range| platform_api::ReasoningBudgetRange {
+                min_tokens: range.min,
+                max_tokens: range.max,
+                supports_dynamic: false,
+                supports_disabled: raw.can_disable,
+            }),
         provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
         forced: raw.mandatory_selection.is_some(),
         modifiable: raw.mandatory_selection.is_none() && !auto_only,

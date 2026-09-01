@@ -7,9 +7,9 @@ use command_core::agents::AgentsHandler;
 use command_core::hooks::HooksHandler;
 use command_core::mcp::McpHandler;
 use orchestrator::test_support::MockOrchestratorHandle;
+use platform_api::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 use serde_json::Value;
 use std::sync::Arc;
-use platform_api::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/tui_listings.json");
 

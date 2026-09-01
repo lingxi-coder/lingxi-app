@@ -22,6 +22,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use platform_api::team_spawn::TeamSpawnSeam;
 use protocol::AgentId;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::coordinator::TEAM_DELETED;
@@ -32,7 +33,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
-use platform_api::team_spawn::TeamSpawnSeam;
 
 use crate::mode::CoordinatorMode;
 use crate::team_file;
@@ -451,11 +451,16 @@ mod tests {
         ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
-        async fn kill(&self, task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+        async fn kill(
+            &self,
+            task_id: &str,
+        ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             self.kills.fetch_add(1, Ordering::SeqCst);
             *self.last_killed.lock().unwrap() = Some(task_id.to_string());
             match &self.kill_err {
-                Some(msg) => Err(platform_api::team_spawn::TeamSpawnError::NotFound(msg.clone())),
+                Some(msg) => Err(platform_api::team_spawn::TeamSpawnError::NotFound(
+                    msg.clone(),
+                )),
                 None => Ok(()),
             }
         }

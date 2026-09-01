@@ -347,6 +347,37 @@ pub struct DeferredToolReplay {
     pub traceparent: Option<String>,
 }
 
+/// The static prompt and inline tool descriptions captured by the optional
+/// carved-slate prompt-cache path.  The field names intentionally follow the
+/// transcript attachment schema (`systemPrompt` / `tools`); the aliases keep
+/// resume tolerant of older host snapshots that used Rust-style names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptToolDescription {
+    /// Tool name as advertised to the model.
+    pub name: String,
+    /// Description frozen when the tool first appeared inline.
+    pub description: String,
+}
+
+/// Persisted prompt snapshot used to keep the static prompt prefix stable
+/// across turns and process resumes. Dynamic system context is recomputed by
+/// the orchestrator and is deliberately not stored here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSnapshot {
+    /// Static system prompt members, joined by the provider adapter.
+    #[serde(rename = "systemPrompt", alias = "system_prompt", default)]
+    pub system_prompt: Vec<String>,
+    /// Non-deferred inline tool descriptions in first-seen order.
+    #[serde(
+        rename = "tools",
+        alias = "recordedToolDescriptions",
+        alias = "toolDescriptions",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tools: Vec<PromptToolDescription>,
+}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
@@ -402,6 +433,10 @@ pub struct ResumeRuntimeSnapshot {
     pub consecutive_rapid_refills: u32,
     /// Deferred hook tools persisted without a corresponding tool result.
     pub deferred_tools: Vec<DeferredToolReplay>,
+    /// Static prompt/tool-description snapshot recovered from the transcript.
+    /// Resume consumers must adopt it as-is and never create one while
+    /// replaying a session.
+    pub prompt_snapshot: Option<PromptSnapshot>,
 }
 
 /// One model's cumulative usage for the `/usage` "Usage by model" block
@@ -917,10 +952,41 @@ pub struct ModelCapabilities {
     pub structured_output: bool,
 }
 
+/// Provider-neutral source of a model's active/default selection.
+///
+/// Keeping this separate from provider identity avoids inferring organization
+/// ownership from a provider name or auth mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProvenance {
+    /// A managed policy supplied or forced the model selection.
+    ManagedAdministratorDefault,
+    /// A user, CLI, or environment setting supplied the selection.
+    UserOrEnv,
+    /// The built-in/provider catalog supplied the selection.
+    ProviderCatalogTier,
+}
+
+impl Default for ModelProvenance {
+    fn default() -> Self {
+        Self::ProviderCatalogTier
+    }
+}
+
+impl ModelProvenance {
+    /// Whether this provenance represents an administrator-managed model.
+    #[must_use]
+    pub const fn is_managed(self) -> bool {
+        matches!(self, Self::ManagedAdministratorDefault)
+    }
+}
+
 /// One model entry for the grouped `/model` picker. Sourced from the llm-client
 /// provider catalog: `display_model` is the human label, `request_model` is the
 /// wire id passed to `switch_model`, `provider_id` is the stable grouping key,
 /// and `provider_label` is the human provider header (e.g. "`GitHub` Copilot").
+/// The active/default row carries its selection provenance separately in the
+/// TUI model snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelListing {
     /// Human-facing model label (e.g. "`DeepSeek` Chat").
@@ -2002,6 +2068,34 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError>;
 
     // M5-11 additions:
+
+    /// Snapshot the local IDE endpoint inventory and connection selection.
+    /// The default is an empty inventory for hosts that do not expose local
+    /// IDE integration.
+    async fn ide_status(&self) -> crate::IdeStatus {
+        crate::IdeStatus::default()
+    }
+
+    /// Connect the local IDE endpoint identified by `endpoint_id`.
+    async fn ide_connect(&self, _endpoint_id: &str) -> Result<crate::IdeStatus, HandleError> {
+        Err(HandleError::Unimplemented("ide_connect".into()))
+    }
+
+    /// Disconnect the selected local IDE endpoint.
+    async fn ide_disconnect(&self) -> Result<crate::IdeStatus, HandleError> {
+        Err(HandleError::Unimplemented("ide_disconnect".into()))
+    }
+
+    /// Ask the selected local IDE to open the live session CWD.
+    async fn ide_open(&self) -> Result<String, HandleError> {
+        Err(HandleError::Unimplemented("ide_open".into()))
+    }
+
+    /// Connect the only valid local IDE endpoint, if discovery finds exactly
+    /// one. Returns `false` for zero or multiple endpoints.
+    async fn ide_auto_connect_if_single(&self) -> Result<bool, HandleError> {
+        Ok(false)
+    }
 
     /// Enumerate currently registered MCP servers + their connection state.
     /// Used by `/mcp` and `/status`. Returns an empty vector when no MCP

@@ -34,9 +34,9 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::computer_control::ComputerError;
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use platform_api::computer_control::ComputerError;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -1410,10 +1410,10 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
     use platform_api::computer_control::{
         AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot,
     };
+    use std::sync::Mutex as StdMutex;
 
     /// Configurable stand-in for a real backend. Every method not
     /// explicitly exercised by a test returns a cheap default rather than

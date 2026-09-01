@@ -21,10 +21,10 @@ use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
 use llm_client::{ContentDelta, LlmEvent};
 use local_apps::AppCapability;
+use platform_api::OutputStream;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::OutputStream;
 
 const MAX_CHAT_MESSAGES: usize = 20;
 const MAX_SYSTEM_BYTES: usize = 8 * 1024;
@@ -638,7 +638,9 @@ mod tests {
             })
         }
 
-        async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+        async fn pick_from_library(
+            &self,
+        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
             self.capture_photo(platform_api::CapturePhotoOpts {
                 position: platform_api::CameraPosition::Back,
                 allow_editing: false,

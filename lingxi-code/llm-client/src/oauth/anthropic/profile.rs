@@ -17,11 +17,11 @@
 //! (`services/oauth/client.ts:366-387`). Unknown fields are ignored.
 
 use crate::oauth::anthropic::limits::SubscriptionType;
+use platform_api::HttpTransport;
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::HttpTransport;
 
 /// `getOauthConfig().BASE_API_URL` — `constants/oauth.ts:85`. The profile
 /// endpoints are always first-party; staging/custom bases are an ant-only

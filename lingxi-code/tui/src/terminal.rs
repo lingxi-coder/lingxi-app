@@ -175,6 +175,48 @@ fn display_width(s: &str) -> usize {
     visible.width()
 }
 
+/// Display width of a ratatui line, ignoring raw OSC 8 sequences embedded in
+/// its spans. `Line::width()` counts those bytes as columns, which would make
+/// native-scrollback wrapping and continuation-row clearing drift when a
+/// hyperlink is enabled.
+fn line_display_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum()
+}
+
+/// Probe the host stdout and environment using the same backend-neutral OSC 8
+/// support matrix as the oracle. This belongs at the terminal boundary: cell
+/// rendering remains deterministic and alternate-screen buffers never receive
+/// raw escape bytes.
+pub(crate) fn hyperlinks_supported() -> bool {
+    use std::io::IsTerminal;
+
+    hyperlinks_supported_with(io::stdout().is_terminal(), |name| std::env::var(name).ok())
+}
+
+/// Evaluate the environment's `FORCE_HYPERLINK` value with the same
+/// nonzero/empty semantics as the oracle's JavaScript `parseInt` check, then
+/// delegate all ordinary terminal detection to the shared support matrix.
+fn hyperlinks_supported_with(stdout_supported: bool, env: impl Fn(&str) -> Option<String>) -> bool {
+    if let Some(force) = env("FORCE_HYPERLINK") {
+        return force_hyperlink_enabled(&force);
+    }
+    tui_core::render::osc8::supports_hyperlinks(stdout_supported, env)
+}
+
+fn force_hyperlink_enabled(value: &str) -> bool {
+    let mut digits = value.trim_start();
+    if let Some(rest) = digits.strip_prefix('+') {
+        digits = rest;
+    } else if let Some(rest) = digits.strip_prefix('-') {
+        digits = rest;
+    }
+    let leading_digits: String = digits.chars().take_while(char::is_ascii_digit).collect();
+    leading_digits.is_empty() || !leading_digits.trim_start_matches('0').is_empty()
+}
+
 /// A consistent view into the terminal state for one render pass. [`Self::area`]
 /// returns the absolute viewport rect; the buffer is sized to exactly that rect.
 pub struct Frame<'a> {
@@ -458,7 +500,7 @@ where
         let wrap_width = usize::from(area.width.max(1));
         let wrapped_rows: usize = lines
             .iter()
-            .map(|line| line.width().max(1).div_ceil(wrap_width))
+            .map(|line| line_display_width(line).max(1).div_ceil(wrap_width))
             .sum();
         let wrapped_lines = u16::try_from(wrapped_rows).unwrap_or(u16::MAX);
 
@@ -804,7 +846,8 @@ fn write_history_line<W: Write>(
     line: &Line<'_>,
     wrap_width: usize,
 ) -> io::Result<()> {
-    let physical_rows = u16::try_from(line.width().max(1).div_ceil(wrap_width)).unwrap_or(u16::MAX);
+    let physical_rows =
+        u16::try_from(line_display_width(line).max(1).div_ceil(wrap_width)).unwrap_or(u16::MAX);
     if physical_rows > 1 {
         queue!(writer, SavePosition)?;
         for _ in 1..physical_rows {
@@ -1358,6 +1401,13 @@ mod tests {
         assert_eq!(display_width("你"), 2, "wide glyphs keep their width");
         assert_eq!(display_width("plain"), 5);
 
+        let line = Line::from(Span::raw(osc_link));
+        assert_eq!(
+            line_display_width(&line),
+            1,
+            "native history width is visible width"
+        );
+
         // The buffer diff must not treat the escape bytes as display columns:
         // cells after an OSC-wrapped symbol still get their own Put commands
         // at consecutive x positions.
@@ -1386,6 +1436,20 @@ mod tests {
             ],
             "OSC escapes must not skip or shift subsequent cells"
         );
+    }
+
+    #[test]
+    fn force_hyperlink_override_uses_oracle_truthiness() {
+        let env = |value: &str| {
+            let value = value.to_string();
+            move |name: &str| (name == "FORCE_HYPERLINK").then(|| value.clone())
+        };
+
+        assert!(hyperlinks_supported_with(false, env("1")));
+        assert!(hyperlinks_supported_with(false, env("")));
+        assert!(!hyperlinks_supported_with(true, env("0")));
+        assert!(!hyperlinks_supported_with(false, env("00")));
+        assert!(hyperlinks_supported_with(false, env("yes")));
     }
 
     #[test]

@@ -362,6 +362,11 @@ pub fn build_session_memory_handle(
         enabled: true,
         initialization_threshold,
         update_threshold,
+        // The legacy threshold parameters are retained for compatibility,
+        // while new composition roots use Claude's token/activity gates.
+        minimum_message_tokens_to_init: 10_000,
+        minimum_tokens_between_update: 5_000,
+        tool_calls_between_updates: 3,
         extraction_model,
     };
     let config_home = memory::lingxi_md::user_config_dir(home);

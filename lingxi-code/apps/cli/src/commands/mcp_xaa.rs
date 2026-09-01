@@ -538,8 +538,13 @@ fn write_xaa_settings(value: Option<serde_json::Value>) -> Result<(), String> {
     std::fs::write(&path, next).map_err(|e| e.to_string())
 }
 
-async fn storage_and_clock(
-) -> Result<(Arc<dyn platform_api::SecureStorage>, Arc<dyn platform_api::Clock>), String> {
+async fn storage_and_clock() -> Result<
+    (
+        Arc<dyn platform_api::SecureStorage>,
+        Arc<dyn platform_api::Clock>,
+    ),
+    String,
+> {
     let home = crate::run::lingxi_home_dir();
     let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
     let storage = platform_posix::secure_storage_for_platform(

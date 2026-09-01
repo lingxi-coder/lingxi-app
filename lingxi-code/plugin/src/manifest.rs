@@ -15,11 +15,11 @@ use crate::PluginDependency;
 use hooks::HookDefinition;
 use indexmap::IndexMap;
 use mcp::McpServerConfig;
+use platform_api::LspServerConfig;
 use protocol::PluginId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use platform_api::LspServerConfig;
 
 fn default_plugin_enabled() -> bool {
     true
@@ -82,6 +82,11 @@ pub struct PluginManifest {
     pub channels: Vec<PluginChannel>,
     /// Free-form settings the plugin author wants to ship with the manifest.
     pub settings: HashMap<String, serde_json::Value>,
+    /// Whether the manifest declared a top-level `settings` key, even if it
+    /// normalized to an empty map. This preserves the oracle's
+    /// declaration-presence distinction for telemetry.
+    #[serde(default)]
+    pub settings_declared: bool,
     /// Discovery/categorization tags (`keywords` in `plugin.json`). Oracle:
     /// "Tags for plugin discovery and categorization." Not consumed by any
     /// engine surface today; carried for marketplace-search parity.
@@ -231,6 +236,16 @@ pub struct PluginMonitor {
 /// when its corresponding registry is wired by the composition root.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginComponents {
+    /// Number of manifest-declared skill paths (`skills`), before expansion.
+    #[serde(default)]
+    pub declared_skill_path_count: u32,
+    /// Number of manifest-declared command entries (`commands`), before
+    /// expansion/materialization.
+    #[serde(default)]
+    pub declared_command_path_count: u32,
+    /// Number of manifest-declared agent paths (`agents`), before expansion.
+    #[serde(default)]
+    pub declared_agent_path_count: u32,
     /// Markdown slash-command files.
     pub commands: Vec<ComponentPath>,
     /// Markdown agent files.
@@ -293,11 +308,23 @@ pub struct PluginComponents {
     pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
+    /// Whether `plugin.json` declared `hooks`, even if it normalized to zero
+    /// live hook definitions.
+    #[serde(default)]
+    pub hooks_declared: bool,
     /// MCP servers contributed by this plugin, keyed by logical name. Always
     /// empty when [`Self::skip_mcp_discovery`] is `true`.
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// Whether `plugin.json` declared `mcpServers`, even if it normalized to
+    /// an empty map.
+    #[serde(default)]
+    pub mcp_servers_declared: bool,
     /// LSP servers contributed by this plugin, keyed by logical name.
     pub lsp_servers: IndexMap<String, LspServerConfig>,
+    /// Whether `plugin.json` declared `lspServers`, even if it normalized to
+    /// an empty map.
+    #[serde(default)]
+    pub lsp_servers_declared: bool,
     /// Whether this load suppressed MCP server discovery for this plugin —
     /// neither the plugin-root `.mcp.json` nor the manifest's declared
     /// `mcpServers` was read, so [`Self::mcp_servers`] is empty regardless of

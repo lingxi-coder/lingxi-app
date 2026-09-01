@@ -189,6 +189,11 @@ impl ConversationOrchestrator {
             let s = self.session.lock().await;
             (s.history.clone(), s.session_id)
         };
+        // Keep the same context-size baseline Claude records after a
+        // successful extraction. The token count is computed from the
+        // immutable snapshot so later turns cannot move the watermark for an
+        // in-flight fork.
+        let extraction_token_count = memory::session_memory::token_count_with_estimation(&history);
         extend_session_memory_fork_context(&mut params.fork_context_messages, &history);
         let runtime = handle.runtime.clone();
         let generation = handle.generation.load(std::sync::atomic::Ordering::Acquire);
@@ -234,12 +239,17 @@ impl ConversationOrchestrator {
                     {
                         return;
                     }
-                    let _ = ex.commit_extraction(
-                        &content,
-                        &session_id.to_string(),
-                        covered_through,
-                        &task_handle.config_home,
-                    );
+                    if ex
+                        .commit_extraction(
+                            &content,
+                            &session_id.to_string(),
+                            covered_through,
+                            &task_handle.config_home,
+                        )
+                        .is_ok()
+                    {
+                        ex.record_extraction_token_count(extraction_token_count);
+                    }
                 }),
             )
             .await;

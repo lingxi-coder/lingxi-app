@@ -10,12 +10,12 @@
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
+use platform_api::{HttpError, HttpTransport, ResolvedAddressOverride};
 use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use platform_api::{HttpError, HttpTransport, ResolvedAddressOverride};
 
 /// A pre-recorded response that the mock transport hands back on the next call.
 #[derive(Debug, Clone)]
@@ -102,7 +102,10 @@ impl HttpTransport for MockHttpTransport {
         self.request(req).await
     }
 
-    async fn stream_sse(&self, req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         self.received.lock().unwrap().push(req);
         match self.queue.lock().unwrap().pop_front() {
             Some(ScriptedResponse::Stream(events)) => Ok(Box::pin(ScriptedSseStream {

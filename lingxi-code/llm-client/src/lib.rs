@@ -80,6 +80,7 @@ pub use error::{
     api_error_detail, api_error_status, error_display_text, LlmError, MediaDelegationAccounting,
 };
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
+pub use platform_api::ModelBillingMode;
 pub use protocol::{
     stream_provider_metadata_from_headers, validate_capabilities, CacheControl, CacheEdit,
     CacheScope, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse, Message,
@@ -108,7 +109,6 @@ pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
 pub use sse::SseFrameSplitter;
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
-pub use platform_api::ModelBillingMode;
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
 };

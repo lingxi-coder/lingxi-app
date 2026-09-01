@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{OrchestratorHandle, StatusSnapshot};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::{OrchestratorHandle, StatusSnapshot};
 
 /// `/status` handler — renders the locked 11-line panel.
 #[derive(Clone)]

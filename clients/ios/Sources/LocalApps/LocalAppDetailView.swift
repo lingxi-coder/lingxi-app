@@ -1,8 +1,14 @@
 import SwiftUI
 
+private func localAppMcpDigestSummary(_ value: String) -> String {
+    guard value.count > 12 else { return value }
+    return String(value.prefix(12))
+}
+
 private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
     case sessions
     case overview
+    case mcp
     case preview
     case data
     case code
@@ -15,6 +21,7 @@ private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
         switch self {
         case .sessions: String(localized: "local_apps_section_sessions")
         case .overview: String(localized: "local_apps_section_overview")
+        case .mcp: "MCP"
         case .preview: String(localized: "local_apps_section_preview")
         case .data: String(localized: "local_apps_section_data")
         case .code: String(localized: "local_apps_section_code")
@@ -29,6 +36,7 @@ struct LocalAppDetailView: View {
     @Bindable var store: LocalAppsStore
     let appID: String
     @Binding var path: [LocalAppsRoute]
+    var activeConversationID: String = ""
     /// `(appID, sessionUUID)` — RootView dismisses the cover and resumes the
     /// session inside the app's conversation scope.
     var onOpenAppSession: (String, String) -> Void = { _, _ in }
@@ -165,6 +173,12 @@ struct LocalAppDetailView: View {
                 distribution: store.distributionMode,
                 onOpenPreview: { path.append(.preview(appID)) }
             )
+        case .mcp:
+            LocalAppMcpSection(
+                store: store,
+                appID: appID,
+                activeConversationID: activeConversationID
+            )
         case .preview:
             LocalAppEmbeddedPreview(store: store, appID: appID)
         case .data:
@@ -176,6 +190,371 @@ struct LocalAppDetailView: View {
         case .permissions:
             LocalAppPermissionsSection(store: store, appID: appID)
         }
+    }
+}
+
+private struct LocalAppMcpSection: View {
+    @Bindable var store: LocalAppsStore
+    let appID: String
+    let activeConversationID: String
+
+    @State private var authoringGoal = ""
+    @State private var pendingServiceEnabled: Bool?
+    @State private var pendingToolEnabled: [String: Bool] = [:]
+
+    private var inventory: LocalAppManagedMcpInventory {
+        store.managedMcpInventory(appID: appID)
+    }
+
+    private var commandError: String? {
+        store.managedMcpCommandError(appID: appID)
+    }
+
+    private var isPending: Bool {
+        store.isManagedMcpPending(appID: appID)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                LocalAppMcpSummaryCard(inventory: inventory)
+                LocalAppMcpControlsCard(
+                    inventory: inventory,
+                    commandError: commandError,
+                    isPending: isPending,
+                    serviceEnabled: Binding(
+                        get: { pendingServiceEnabled ?? inventory.enabled },
+                        set: updateServiceEnabled
+                    ),
+                    conversationPinned: Binding(
+                        get: { inventory.pinnedToCurrentConversation },
+                        set: updateConversationPinned
+                    ),
+                    canPinConversation: inventory.enabled && !activeConversationID.isEmpty
+                )
+                LocalAppMcpAuthoringCard(
+                    goal: $authoringGoal,
+                    status: inventory.status,
+                    isPending: isPending,
+                    onStart: startAuthoring
+                )
+                LocalAppMcpToolsCard(
+                    inventory: inventory,
+                    isPending: isPending,
+                    pendingToolEnabled: $pendingToolEnabled,
+                    onToggle: updateToolEnabled
+                )
+            }
+            .padding()
+        }
+        .task {
+            if authoringGoal.isEmpty {
+                authoringGoal = store.app(id: appID)?.displayBrief ?? ""
+            }
+            await store.refreshManagedMcpInventory()
+        }
+        .onChange(of: inventory.enabled) { _, enabled in
+            if pendingServiceEnabled == enabled {
+                pendingServiceEnabled = nil
+            }
+        }
+        .onChange(of: inventory.enabledTools) { _, enabledTools in
+            pendingToolEnabled = pendingToolEnabled.filter { key, value in
+                enabledTools.contains(key) != value
+            }
+        }
+    }
+
+    private func updateServiceEnabled(_ enabled: Bool) {
+        pendingServiceEnabled = enabled
+        store.clearManagedMcpCommandError(appID: appID)
+        Task {
+            let sent = await store.setManagedMcpEnabled(appID: appID, enabled: enabled)
+            if !sent {
+                pendingServiceEnabled = nil
+            }
+        }
+    }
+
+    private func updateToolEnabled(_ toolName: String, enabled: Bool) {
+        pendingToolEnabled[toolName] = enabled
+        store.clearManagedMcpCommandError(appID: appID)
+        Task {
+            let sent = await store.setManagedMcpToolEnabled(
+                appID: appID,
+                toolName: toolName,
+                enabled: enabled
+            )
+            if !sent {
+                pendingToolEnabled.removeValue(forKey: toolName)
+            }
+        }
+    }
+
+    private func updateConversationPinned(_ pinned: Bool) {
+        guard !activeConversationID.isEmpty else { return }
+        store.clearManagedMcpCommandError(appID: appID)
+        Task {
+            _ = await store.setManagedMcpConversationPinned(
+                conversationID: activeConversationID,
+                appID: appID,
+                pinned: pinned
+            )
+        }
+    }
+
+    private func startAuthoring() {
+        let goal = authoringGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !goal.isEmpty else { return }
+        store.clearManagedMcpCommandError(appID: appID)
+        Task {
+            _ = await store.startManagedMcpAuthoring(appID: appID, userGoal: goal)
+        }
+    }
+}
+
+private struct LocalAppMcpSummaryCard: View {
+    @Environment(\.theme) private var theme
+    let inventory: LocalAppManagedMcpInventory
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.title2)
+                    .foregroundStyle(theme.accent)
+                    .frame(width: 52, height: 52)
+                    .background(theme.accent.opacity(0.12), in: .rect(cornerRadius: 14))
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text(inventory.serverName)
+                            .font(.headline)
+                            .textSelection(.enabled)
+                        LocalAppPublicationBadgeView(badge: inventory.statusBadge)
+                    }
+                    Text(inventory.status.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(theme.text3)
+                    HStack(spacing: 6) {
+                        LocalAppPublicationBadgeView(badge: inventory.publicationBadge)
+                        LocalAppPublicationBadgeView(badge: inventory.uiVerification.badge)
+                        LocalAppPublicationBadgeView(badge: inventory.mcpVerification.badge)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                LabeledContent("App", value: inventory.appName)
+                LabeledContent("Status", value: inventory.status.title)
+                LabeledContent("Tools") {
+                    Text("\(inventory.enabledTools.count) of \(inventory.toolCount)")
+                }
+                LabeledContent("Settings revision") {
+                    Text("\(inventory.settingsRevision)")
+                }
+                if !inventory.buildID.isEmpty {
+                    LabeledContent("Build", value: inventory.buildID)
+                }
+                if !inventory.catalogDigest.isEmpty {
+                    LabeledContent("Catalog", value: localAppMcpDigestSummary(inventory.catalogDigest))
+                }
+                if let widget = inventory.widget {
+                    LabeledContent("Widget") {
+                        Text(widget.title ?? widget.resourceURI ?? "Configured")
+                            .multilineTextAlignment(.trailing)
+                    }
+                } else {
+                    LabeledContent("Widget", value: "Not configured")
+                }
+            }
+        }
+        .padding()
+        .background(theme.surface, in: .rect(cornerRadius: 16))
+    }
+}
+
+private struct LocalAppMcpControlsCard: View {
+    @Environment(\.theme) private var theme
+    let inventory: LocalAppManagedMcpInventory
+    let commandError: String?
+    let isPending: Bool
+    let serviceEnabled: Binding<Bool>
+    let conversationPinned: Binding<Bool>
+    let canPinConversation: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Assistant Exposure")
+                        .font(.headline)
+                    Text("Expose this app's managed MCP server to the assistant in compatible conversations.")
+                        .font(.footnote)
+                        .foregroundStyle(theme.text3)
+                }
+                Spacer(minLength: 12)
+                Toggle("", isOn: serviceEnabled)
+                    .labelsHidden()
+                    .disabled(isPending || inventory.status == .needsSetup)
+            }
+
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Pin to current conversation")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Keep this app in the current conversation's bounded Local App MCP set.")
+                        .font(.footnote)
+                        .foregroundStyle(theme.text3)
+                }
+                Spacer(minLength: 12)
+                Toggle("", isOn: conversationPinned)
+                    .labelsHidden()
+                    .disabled(isPending || !canPinConversation)
+            }
+
+            if isPending {
+                Label("Waiting for the host to apply the MCP change…", systemImage: "clock")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+
+            if let commandError {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Last error")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.danger)
+                    Text(commandError)
+                        .font(.footnote)
+                        .foregroundStyle(theme.text3)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(theme.danger.opacity(0.08), in: .rect(cornerRadius: 12))
+            }
+        }
+        .padding()
+        .background(theme.surface, in: .rect(cornerRadius: 16))
+    }
+}
+
+private struct LocalAppMcpAuthoringCard: View {
+    @Environment(\.theme) private var theme
+    @Binding var goal: String
+    let status: LocalAppManagedMcpStatus
+    let isPending: Bool
+    let onStart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Customize MCP")
+                .font(.headline)
+            Text("Describe what the assistant should do inside this local app. The host will use that goal to author or revise the app-owned MCP surface.")
+                .font(.footnote)
+                .foregroundStyle(theme.text3)
+
+            TextEditor(text: $goal)
+                .frame(minHeight: 104)
+                .padding(8)
+                .background(theme.windowBg, in: .rect(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(theme.border, lineWidth: 1)
+                )
+
+            HStack {
+                Text(status == .needsSetup ? "MCP is off by default until a surface is authored." : status.summary)
+                    .font(.footnote)
+                    .foregroundStyle(theme.text3)
+                Spacer()
+                Button("Start Customizing", action: onStart)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isPending || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .background(theme.surface, in: .rect(cornerRadius: 16))
+    }
+}
+
+private struct LocalAppMcpToolsCard: View {
+    @Environment(\.theme) private var theme
+    let inventory: LocalAppManagedMcpInventory
+    let isPending: Bool
+    @Binding var pendingToolEnabled: [String: Bool]
+    let onToggle: (String, Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Tools")
+                    .font(.headline)
+                Spacer()
+                Text("\(inventory.toolCount)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.text3)
+            }
+
+            if inventory.tools.isEmpty {
+                ContentUnavailableView {
+                    Label("No managed MCP tools yet", systemImage: "wrench.and.screwdriver")
+                } description: {
+                    Text("Run MCP authoring to create an app-specific tool surface before exposing it to the assistant.")
+                }
+            } else {
+                LazyVStack(spacing: 10) {
+                    ForEach(inventory.tools) { tool in
+                        LocalAppMcpToolRow(
+                            tool: tool,
+                            isEnabled: Binding(
+                                get: { pendingToolEnabled[tool.name] ?? inventory.isToolEnabled(tool.name) },
+                                set: { onToggle(tool.name, $0) }
+                            ),
+                            isPending: isPending
+                        )
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(theme.surface, in: .rect(cornerRadius: 16))
+    }
+}
+
+private struct LocalAppMcpToolRow: View {
+    @Environment(\.theme) private var theme
+    let tool: LocalAppManagedMcpTool
+    let isEnabled: Binding<Bool>
+    let isPending: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(tool.name)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(tool.title ?? tool.description ?? "No description")
+                        .font(.footnote)
+                        .foregroundStyle(theme.text3)
+                }
+                Spacer(minLength: 12)
+                Toggle("", isOn: isEnabled)
+                    .labelsHidden()
+                    .disabled(isPending)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(tool.ceilingSummary)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.accent)
+                Text(tool.semanticFlowSummary)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(theme.text3)
+                    .lineLimit(4)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.windowBg, in: .rect(cornerRadius: 12))
     }
 }
 

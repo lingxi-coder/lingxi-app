@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{ModelListing, OrchestratorHandle};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::{ModelListing, OrchestratorHandle};
 
 fn provider_for_ref<'a>(
     model_ref: &str,

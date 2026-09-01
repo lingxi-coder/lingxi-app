@@ -19,9 +19,9 @@ use protocol::HttpResponse;
 
 const HISTORICAL_VERSION: &str = "2.1.207";
 
-/// The single source of truth (`platform_api::CLAUDE_CODE_VERSION`, R-V1) is bumped
-/// to the parity target. A drift here means an outward identifier (AI_AGENT,
-/// WebFetch UA, `<env>` stamp) is silently emitting the wrong version.
+/// The live single source of truth (`platform_api::CLAUDE_CODE_VERSION`, R-V1)
+/// is asserted by the current 2.1.252 fixture. This historical fixture keeps
+/// its own 2.1.207 literal so a target bump cannot rewrite old captures.
 #[test]
 fn historical_version_literal_is_2_1_207() {
     assert_eq!(

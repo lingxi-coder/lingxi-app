@@ -444,11 +444,36 @@ enum LocalAppsProtocolAdapter {
             catalogDigest: dto.catalogSha256,
             toolSurfaceDigest: dto.toolSurfaceSha256,
             authoringRevision: dto.authoringRevision,
+            enabled: dto.enabled,
+            status: managedMcpStatus(dto.status),
+            settingsRevision: dto.settingsRevision,
+            pinnedToCurrentConversation: dto.pinnedToCurrentConversation,
             publicationState: workflow(dto.publicationState),
             mcpVerification: verificationSummary(dto.mcpVerification),
             uiVerification: verificationSummary(dto.uiVerification),
+            enabledTools: Set(dto.enabledTools),
+            widget: dto.widget.map {
+                LocalAppManagedMcpWidget(
+                    title: nil,
+                    resourceURI: $0.resourceUri,
+                    mimeType: $0.mimeType
+                )
+            },
             tools: dto.tools.map(mcpToolSurface)
         )
+    }
+
+    private static func managedMcpStatus(
+        _ status: ManagedLocalAppMcpStatusDto
+    ) -> LocalAppManagedMcpStatus {
+        switch status {
+        case .disabled: .disabled
+        case .needsSetup: .needsSetup
+        case .authoring: .authoring
+        case .enabled: .enabled
+        case .needsRevalidation: .needsRevalidation
+        case .error: .error
+        }
     }
 }
 #endif

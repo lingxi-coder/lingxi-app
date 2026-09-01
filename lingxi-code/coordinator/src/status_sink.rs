@@ -16,10 +16,10 @@
 
 use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
+use platform_api::OutputStream;
 use std::sync::Arc;
 use tasks::handlers::TaskStatusSink;
 use tasks::state::TaskStatus;
-use platform_api::OutputStream;
 
 /// The fixed activity label used when a teammate transitions to `Running`.
 ///
@@ -122,9 +122,9 @@ impl TaskStatusSink for CoordinatorStatusSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::CostSnapshot;
     use protocol::AgentId;
     use std::sync::Mutex as StdMutex;
-    use platform_api::CostSnapshot;
 
     /// Spy [`OutputStream`] recording every `emit_coordinator_status` call as
     /// `(active_workers, team)`. All other emit methods are no-ops.

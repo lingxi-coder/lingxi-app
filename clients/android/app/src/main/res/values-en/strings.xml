@@ -1838,15 +1838,4 @@
     <string name="chat_live_activity_short_paused">Pause</string>
     <string name="chat_live_activity_short_completed">Done</string>
     <string name="chat_live_activity_short_failed">Fail</string>
-    <string name="settings_typescript_lsp_title">TypeScript LSP</string>
-    <string name="settings_typescript_lsp_sub">Live JavaScript / JSX diagnostics</string>
-    <string name="settings_typescript_lsp_auto">Auto (recommended)</string>
-    <string name="settings_typescript_lsp_auto_detail">Enable only in managed Local App workspaces.</string>
-    <string name="settings_typescript_lsp_off">Off</string>
-    <string name="settings_typescript_lsp_off_detail">Do not start the language server or expose the LSP tool.</string>
-    <string name="settings_typescript_lsp_on">Always on</string>
-    <string name="settings_typescript_lsp_on_detail">Also allow ordinary JavaScript / JSX workspaces.</string>
-    <string name="settings_typescript_lsp_footer">Uses the fixed built-in TypeScript 7 runtime; projects cannot change its command or path.</string>
-    <string name="settings_typescript_lsp_unavailable">The TypeScript runtime is unavailable on this device; effective mode is Off.</string>
-    <string name="settings_typescript_lsp_effective_fmt">Effective mode: %1$s</string>
 </resources>

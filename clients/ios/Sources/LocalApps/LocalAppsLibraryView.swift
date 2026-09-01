@@ -34,6 +34,7 @@ struct LocalAppPublicationBadgeView: View {
 struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
+    var activeConversationID: String = ""
     let onDismiss: () -> Void
     /// Called with `(appID, sessionUUID)` when the user taps a row of the
     /// app's session catalog. RootView dismisses this cover and switches the
@@ -115,6 +116,7 @@ struct LocalAppsRootView: View {
                 store: store,
                 appID: appID,
                 path: $path,
+                activeConversationID: activeConversationID,
                 onOpenAppSession: onOpenAppSession,
                 onNewAppSession: onNewAppSession
             )

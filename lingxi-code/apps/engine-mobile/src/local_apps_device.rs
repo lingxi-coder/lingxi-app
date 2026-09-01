@@ -9,13 +9,13 @@
 //! here would dispatch a fresh connection's capture into a torn-down engine's
 //! Swift object.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use platform_api::{
     CalendarProvider, CameraControl, Clipboard, ContactsProvider, DeepLinkOpener,
     DeviceStatusProvider, HapticService, LocationProvider, NotificationService, SharingService,
     SpeechToText, TextToSpeech, VoiceRecorder,
 };
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 /// Per-app cap on retained media. Two default-preset photos plus a long
 /// recording fit; past that the oldest handle is evicted.

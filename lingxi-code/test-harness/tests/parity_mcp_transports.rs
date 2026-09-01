@@ -6,27 +6,27 @@
 //! types in settings JSON: `stdio`, `sse`, `http`, `ws`. `InProcess` and
 //! `SdkControl` are internal-only and never round-trip through
 //! user/project/managed settings; `SseIde`/`WsIde` are members of the PLUGIN
-//! `mcpServers` union (`KY`) but are absent from the settings/`.mcp.json`
-//! config table (`ZGn`, mcp §10), so they never round-trip through
-//! user/project/managed settings either.
+//! `mcpServers` union (`KY`) and are managed by the local `/ide` controller,
+//! not by user/project/managed settings.
 //!
 //! The production [`platform_posix::PosixMcpTransport`] mirrors
 //! that split by:
 //!
-//! - claiming `Stdio | Sse | Http` in `supported_transports()`,
-//! - successfully dispatching `connect()` for `Stdio | Sse | Http`,
+//! - claiming `Stdio | Sse | Http | SseIde | WsIde` in
+//!   `supported_transports()`,
+//! - successfully dispatching `connect()` for those transport families,
 //! - returning [`McpError::UnsupportedTransport`] for `InProcess`,
-//!   `SdkControl`, `SseIde` and `WsIde`.
+//!   and `SdkControl`.
 //!
 //! `WebSocket` is wired through the dedicated `connect_ws` helper rather
 //! than the trait method in v0.3.0; the driver verifies the trait-level
-//! path returns `UnsupportedTransport` (matching the in-source TODO note in
-//! `platforms/posix/src/mcp.rs`).
+//! path returns `UnsupportedTransport` for generic WebSocket specs; IDE
+//! WebSockets use the typed `WsIde` path.
 
+use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use serde::Deserialize;
 use std::collections::HashMap;
 use test_harness::parity::load_fixture;
-use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -78,6 +78,7 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
         McpTransportKind::SseIde => McpTransportSpec::SseIde {
             url: "http://127.0.0.1:0/ide".into(),
             ide_name: "parity-ide".into(),
+            auth_token: None,
             ide_running_in_windows: false,
         },
         McpTransportKind::WsIde => McpTransportSpec::WsIde {

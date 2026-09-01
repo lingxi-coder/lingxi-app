@@ -13,10 +13,6 @@ use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
 use client_protocol::local_apps::AppCapabilityKindDto;
 use local_apps::AppCapability;
-use serde_json::{json, Value};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::Instant;
 use platform_api::{
     CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
     ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
@@ -24,6 +20,10 @@ use platform_api::{
     ShareResult, SttError, SttOpts, TtsError, TtsOpts, VoiceError, VoiceRecorder, VoiceRecording,
     VoiceRecordingOpts,
 };
+use serde_json::{json, Value};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Cap on the base64 body of one media response. A default-preset photo is
 /// ~400-700 KB base64 and a 5-minute 16 kHz AAC mono recording ~1.6 MB, both
@@ -1203,13 +1203,6 @@ mod tests {
         AppDependencyRecord, AppDependencyState, AppLayout, AppRuntimeProfile, AppService,
         AppSurface, NoopAppEventObserver, APPS_SCHEMA_VERSION,
     };
-    use serde_json::{json, Value};
-    use sha2::{Digest, Sha256};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex as StdMutex};
-    use std::time::Duration;
-    use tempfile::TempDir;
-    use tokio::time::timeout;
     use platform_api::{
         CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
         CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
@@ -1218,6 +1211,13 @@ mod tests {
         ShareResult, SharingService, TextToSpeech, TtsAudio, TtsError, TtsOpts, VoiceError,
         VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
     };
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tokio::time::timeout;
 
     // ---- fakes ------------------------------------------------------------
 
@@ -1506,7 +1506,7 @@ mod tests {
         let workspace = layout.root().join(layout.workspace_rel());
         crate::local_apps_build::scaffold_workspace_initialized(
             layout,
-            crate::local_apps_build::LocalAppBuildTarget::ReactDomR1,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR2,
             true,
         )
         .expect("scaffold workspace");
@@ -1557,6 +1557,16 @@ mod tests {
 
         let mut manifest = load_manifest(layout).expect("manifest");
         manifest.surface = Some(AppSurface::Dom);
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: format!(
+                "{}-r{}",
+                binding.family.as_str().replace('_', "-"),
+                binding.revision
+            ),
+            template_sha256: binding.contract_sha256.clone(),
+        });
         manifest.runtime_profile = Some(binding);
         manifest.dependency_snapshot = Some(snapshot.snapshot);
         save_manifest(layout, &manifest).expect("save runtime manifest");
@@ -1586,6 +1596,7 @@ mod tests {
         let output_sha256 = digest_tree(&output_root);
         let build_receipt = json!({
             "version": 3,
+            "buildId": output_sha256,
             "buildKey": "device-op-fixture",
             "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime hash"),
             "dependencySnapshotSha256": manifest

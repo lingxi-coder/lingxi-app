@@ -69,13 +69,13 @@ use crate::types::{
     AppDependencyRecord, AppDependencyState, AppRecord, AppRuntimeRecord, AppRuntimeState,
     APPS_SCHEMA_VERSION,
 };
+use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use platform_api::FsError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
-use platform_api::FsError;
 
 /// Upper bound on any single persisted document, enforced in BOTH directions:
 /// loads refuse to slurp a larger file (typed `storage_corrupt` — the file is

@@ -24,9 +24,9 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
 use platform_api::stt::{SttError, SttOpts};
 use platform_api::tts::{TtsError, TtsOpts};
+use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -223,9 +223,9 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use platform_api::stt::{SpeechToText, SttTranscript};
     use platform_api::tts::{TextToSpeech, TtsAudio};
+    use std::sync::Arc;
 
     struct FakeStt;
     #[async_trait]

@@ -27,6 +27,7 @@ use platform_posix::{self, PosixClock, PosixHttp};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use telemetry::{AnalyticsValue, LogEventMetadata};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -481,6 +482,7 @@ async fn run_serve(a: &ServeArgs) -> i32 {
     if a.debug || a.verbose {
         eprintln!("LingXi MCP stdio server initialized.");
     }
+    emit_mcp_start_after_runtime_init(Some(&runtime.analytics_bus)).await;
 
     match serve_stdio(runtime.orchestrator, output, writer).await {
         Ok(()) => SUCCESS,
@@ -489,6 +491,31 @@ async fn run_serve(a: &ServeArgs) -> i32 {
             RUNTIME_ERROR
         }
     }
+}
+
+fn mcp_start_payload() -> telemetry::tengu::mcp::StartPayload {
+    telemetry::tengu::mcp::StartPayload {
+        transport: telemetry::Verified::assert_safe("stdio".to_string()),
+    }
+}
+
+fn mcp_start_metadata(payload: &telemetry::tengu::mcp::StartPayload) -> LogEventMetadata {
+    let mut metadata = LogEventMetadata::default();
+    metadata.insert(
+        "transport".into(),
+        AnalyticsValue::String(payload.transport.as_str().to_string()),
+    );
+    metadata
+}
+
+async fn emit_mcp_start_after_runtime_init(bus: Option<&Arc<telemetry::AnalyticsBus>>) {
+    let Some(bus) = bus else {
+        return;
+    };
+    let payload = mcp_start_payload();
+    telemetry::emit_mcp_start(&payload);
+    bus.log_event(telemetry::tengu::mcp::START, mcp_start_metadata(&payload))
+        .await;
 }
 
 async fn serve_stdio(
@@ -775,7 +802,7 @@ async fn write_protocol_frame(
     stdout.flush().await
 }
 
-fn open_native_browser(url: &str) {
+fn open_native_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let command: Option<(&str, &[&str])> = Some(("open", &[]));
     #[cfg(target_os = "linux")]
@@ -785,14 +812,16 @@ fn open_native_browser(url: &str) {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let command: Option<(&str, &[&str])> = None;
     if let Some((program, prefix)) = command {
-        let _ = std::process::Command::new(program)
+        return std::process::Command::new(program)
             .args(prefix)
             .arg(url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+            .is_ok();
     }
+    false
 }
 
 /// Implement `mcp login <name>`.
@@ -827,16 +856,31 @@ async fn run_login(a: &LoginArgs) -> i32 {
     let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
 
     let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+    let telemetry = oauth::McpOAuthTelemetryContext::for_server(&cfg.name, &cfg.spec);
+    let was_authenticated = oauth::load_tokens(&storage, &server_key)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    oauth::emit_auth_config_authenticate(&telemetry, was_authenticated);
     let no_browser = a.no_browser;
+    let telemetry_for_url = telemetry.clone();
     let on_auth_url: oauth::OnAuthorizationUrl = Arc::new(move |url: &str| {
         if no_browser {
             println!("Open this URL in your browser to authenticate:");
             println!("{url}");
             println!("Paste the callback URL or authorization code, then press Enter:");
+            oauth::emit_oauth_browser_open(&telemetry_for_url, false, false, std::env::consts::OS);
         } else {
             println!("Opening this URL for authentication:");
             println!("{url}");
-            open_native_browser(url);
+            let success = open_native_browser(url);
+            oauth::emit_oauth_browser_open(
+                &telemetry_for_url,
+                success,
+                false,
+                std::env::consts::OS,
+            );
         }
     });
     let tokens = if no_browser {
@@ -848,6 +892,7 @@ async fn run_login(a: &LoginArgs) -> i32 {
             &cfg.name,
             server_url,
             &on_auth_url,
+            Some(&telemetry),
             None,
             &mut input,
         )
@@ -860,6 +905,7 @@ async fn run_login(a: &LoginArgs) -> i32 {
             &cfg.name,
             server_url,
             &on_auth_url,
+            Some(&telemetry),
             None,
         )
         .await
@@ -872,7 +918,15 @@ async fn run_login(a: &LoginArgs) -> i32 {
         }
     };
 
-    match oauth::save_tokens(&storage, &clock, &server_key, &tokens).await {
+    match oauth::save_tokens_with_telemetry(
+        &storage,
+        &clock,
+        &server_key,
+        &tokens,
+        Some(&telemetry),
+    )
+    .await
+    {
         Ok(()) => {
             println!("Successfully authenticated MCP server \"{}\".", a.name);
             SUCCESS
@@ -894,11 +948,18 @@ async fn run_logout(a: &LogoutArgs) -> i32 {
         }
     };
     let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
+    let logout_cfg = find_loaded_server(&a.name);
+    let telemetry = logout_cfg
+        .as_ref()
+        .map(|cfg| oauth::McpOAuthTelemetryContext::for_server(&cfg.name, &cfg.spec));
+    if let Some(telemetry) = telemetry.as_ref() {
+        oauth::emit_auth_config_clear(telemetry);
+    }
 
     // Remote revocation is best-effort and only possible while the server
     // configuration still exists. Local deletion is authoritative and runs for
     // every matching credential even when the server is missing/disconnected.
-    if let Some(cfg) = find_loaded_server(&a.name) {
+    if let Some(cfg) = logout_cfg {
         if let Some((server_url, oauth_cfg)) = extract_oauth_spec(&cfg) {
             let server_key = oauth::server_key(&cfg.name, &cfg.spec);
             oauth::revoke_server_tokens(&storage, &http, &server_key, server_url, oauth_cfg).await;
@@ -2180,7 +2241,12 @@ fn user_server_names() -> Vec<String> {
 fn local_server_names() -> Vec<String> {
     global_config_path()
         .zip(project_key())
-        .and_then(|(p, k)| migrations::global_config::get_project_config(&p, &k).ok())
+        .map_or_else(Vec::new, |(p, k)| local_server_names_at(&p, &k))
+}
+
+fn local_server_names_at(global_config_path: &Path, project_key: &str) -> Vec<String> {
+    migrations::global_config::get_project_config(global_config_path, project_key)
+        .ok()
         .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default()
@@ -2389,12 +2455,33 @@ struct ProjectServerApproval {
 /// `mcp get` not-found message omits from the list and flags with an
 /// awaiting-approval note; `rejected` ones are omitted without the note.
 fn project_server_approval() -> ProjectServerApproval {
-    let all: Vec<String> = project_mcp_json_read_path()
-        .filter(|p| p.exists())
-        .and_then(|p| read_json_object(&p).ok())
-        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
-        .map(|m| m.keys().cloned().collect())
+    let Some(project_dir) = std::env::current_dir().ok() else {
+        return ProjectServerApproval::default();
+    };
+    let Some(key) = project_key() else {
+        return ProjectServerApproval::default();
+    };
+    match global_config_path() {
+        Some(path) => project_server_approval_at(&path, &key, &project_dir),
+        None => project_server_approval_from_config(serde_json::Map::new(), &project_dir),
+    }
+}
+
+fn project_server_approval_at(
+    global_config_path: &Path,
+    project_key: &str,
+    project_dir: &Path,
+) -> ProjectServerApproval {
+    let cfg = migrations::global_config::get_project_config(global_config_path, project_key)
         .unwrap_or_default();
+    project_server_approval_from_config(cfg, project_dir)
+}
+
+fn project_server_approval_from_config(
+    cfg: serde_json::Map<String, serde_json::Value>,
+    project_dir: &Path,
+) -> ProjectServerApproval {
+    let all = project_mcp_server_names_at(project_dir);
     if all.is_empty() {
         return ProjectServerApproval::default();
     }
@@ -2408,19 +2495,12 @@ fn project_server_approval() -> ProjectServerApproval {
             })
             .unwrap_or_default()
     };
-    let (enable_all, enabled, disabled) = global_config_path()
-        .zip(project_key())
-        .and_then(|(p, k)| migrations::global_config::get_project_config(&p, &k).ok())
-        .map(|cfg| {
-            (
-                cfg.get("enableAllProjectMcpServers")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                str_array(&cfg, "enabledMcpjsonServers"),
-                str_array(&cfg, "disabledMcpjsonServers"),
-            )
-        })
-        .unwrap_or((false, Vec::new(), Vec::new()));
+    let enable_all = cfg
+        .get("enableAllProjectMcpServers")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let enabled = str_array(&cfg, "enabledMcpjsonServers");
+    let disabled = str_array(&cfg, "disabledMcpjsonServers");
     let mut out = ProjectServerApproval::default();
     for name in all {
         match classify_project_server(&name, enable_all, &enabled, &disabled) {
@@ -2430,6 +2510,16 @@ fn project_server_approval() -> ProjectServerApproval {
         }
     }
     out
+}
+
+fn project_mcp_server_names_at(project_dir: &Path) -> Vec<String> {
+    nearest_project_mcp_json(project_dir)
+        .exists()
+        .then_some(nearest_project_mcp_json(project_dir))
+        .and_then(|path| read_json_object(&path).ok())
+        .and_then(|map| map.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Three-way project-server state, 1:1 with claude's `SZr` classifier values
@@ -2640,6 +2730,7 @@ fn scope_flag_label(scope: ConfigScope) -> &'static str {
 /// `approvedMcpjsonServers`/`rejectedMcpjsonServers` keys do NOT exist in
 /// claude — an earlier port fabricated them.)
 fn run_reset_project_choices() -> i32 {
+    emit_mcp_reset_project_choices_entry();
     let Some(path) = global_config_path() else {
         eprintln!("Could not resolve home directory");
         return RUNTIME_ERROR;
@@ -2648,27 +2739,14 @@ fn run_reset_project_choices() -> i32 {
         eprintln!("Could not resolve project directory");
         return RUNTIME_ERROR;
     };
-    let result = migrations::global_config::save_project_config(&path, &key, |mut proj| {
-        proj.insert("enabledMcpjsonServers".into(), serde_json::json!([]));
-        proj.insert("disabledMcpjsonServers".into(), serde_json::json!([]));
-        proj.insert(
-            "enableAllProjectMcpServers".into(),
-            serde_json::json!(false),
-        );
-        proj
-    });
-    match result {
-        Ok(_) => {
-            println!(
-                "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset."
-            );
-            // The binary prints the "prompted next time" line ONLY when the
-            // project `.mcp.json` actually has servers to re-approve. Verified vs
-            // live 2.1.191: a missing / empty / `{}` / empty-`mcpServers` .mcp.json
-            // ⇒ first line only; ≥1 project server ⇒ both lines. (The approval
-            // keys cleared above in ~/.lingxi.json do NOT affect this.)
-            if project_mcp_json_has_servers() {
-                println!("You will be prompted for approval next time you start LingXi.");
+    let Some(project_dir) = std::env::current_dir().ok() else {
+        eprintln!("Could not resolve project directory");
+        return RUNTIME_ERROR;
+    };
+    match reset_mcpjson_choices_at(&path, &key, &project_dir) {
+        Ok(outcome) => {
+            for line in outcome.render_lines() {
+                println!("{line}");
             }
             SUCCESS
         }
@@ -2679,15 +2757,170 @@ fn run_reset_project_choices() -> i32 {
     }
 }
 
-/// Whether the project `.mcp.json` exists and declares at least one server.
-/// `mcp reset-project-choices` only prints its "prompted next time" follow-up
-/// line when there are project servers that will need re-approval.
-fn project_mcp_json_has_servers() -> bool {
-    project_mcp_json_read_path()
-        .filter(|p| p.exists())
-        .and_then(|p| read_json_object(&p).ok())
-        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
-        .is_some_and(|m| !m.is_empty())
+fn emit_mcp_reset_project_choices_entry() {
+    telemetry::emit_mcp_reset_mcpjson_choices();
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResetProjectChoicesSummary {
+    auto_approved_servers: Vec<String>,
+    still_rejected_servers: Vec<String>,
+    pending_count: usize,
+    gating_errors: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResetProjectChoicesOutcome {
+    headline: String,
+    summary: ResetProjectChoicesSummary,
+}
+
+impl ResetProjectChoicesOutcome {
+    fn render_lines(&self) -> Vec<String> {
+        vec![
+            self.headline.clone(),
+            format!(
+                "Auto-approved servers still effective: {}",
+                format_reset_server_list(&self.summary.auto_approved_servers)
+            ),
+            format!(
+                "Still rejected servers: {}",
+                format_reset_server_list(&self.summary.still_rejected_servers)
+            ),
+            format!("Pending approval count: {}", self.summary.pending_count),
+            format!("Config gating errors: {}", self.summary.gating_errors),
+        ]
+    }
+}
+
+fn mcpjson_choice_keys() -> [&'static str; 3] {
+    [
+        "enabledMcpjsonServers",
+        "disabledMcpjsonServers",
+        "enableAllProjectMcpServers",
+    ]
+}
+
+fn reset_mcpjson_choices_at(
+    global_config_path: &Path,
+    project_key: &str,
+    project_dir: &Path,
+) -> Result<ResetProjectChoicesOutcome, String> {
+    reset_mcpjson_choices_with(
+        global_config_path,
+        project_key,
+        project_dir,
+        || clear_legacy_project_mcpjson_choices(global_config_path, project_key),
+        clear_local_mcpjson_choices,
+    )
+}
+
+fn reset_mcpjson_choices_with<ClearGlobal, ClearLocal>(
+    global_config_path: &Path,
+    project_key: &str,
+    project_dir: &Path,
+    clear_global: ClearGlobal,
+    clear_local: ClearLocal,
+) -> Result<ResetProjectChoicesOutcome, String>
+where
+    ClearGlobal: FnOnce() -> Result<(), String>,
+    ClearLocal: FnOnce(&Path) -> Result<(), String>,
+{
+    let local_settings_path = migrations::settings_update::settings_path(
+        migrations::settings_update::SettingsSource::Local,
+        global_config_path
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+        project_dir,
+    );
+    clear_global().map_err(|error| {
+        format!(
+            "Nothing changed. Failed to clear legacy project-scoped MCP approval settings: {error}"
+        )
+    })?;
+    let local_error = clear_local(&local_settings_path).err();
+    let summary =
+        collect_reset_project_choices_summary(global_config_path, project_key, project_dir);
+    let headline = match local_error {
+        Some(error) => format!(
+            "Legacy project-scoped MCP approval settings in the global config were cleared, but local settings could not be updated: {error}"
+        ),
+        None => "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset.".to_string(),
+    };
+    Ok(ResetProjectChoicesOutcome { headline, summary })
+}
+
+fn clear_legacy_project_mcpjson_choices(
+    global_config_path: &Path,
+    project_key: &str,
+) -> Result<(), String> {
+    migrations::global_config::save_project_config(global_config_path, project_key, |mut proj| {
+        for key in mcpjson_choice_keys() {
+            proj.remove(key);
+        }
+        proj
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+fn clear_local_mcpjson_choices(local_settings_path: &Path) -> Result<(), String> {
+    let local_updates = mcpjson_choice_keys()
+        .into_iter()
+        .map(|key| (key.to_string(), None))
+        .collect();
+    migrations::settings_update::update_settings(local_settings_path, local_updates)
+}
+
+fn collect_reset_project_choices_summary(
+    global_config_path: &Path,
+    project_key: &str,
+    project_dir: &Path,
+) -> ResetProjectChoicesSummary {
+    let approval = project_server_approval_at(global_config_path, project_key, project_dir);
+    let local_names = local_server_names_at(global_config_path, project_key);
+    let project_mcp = nearest_project_mcp_json(project_dir);
+    let gating_errors = mcp::config_diagnostics::collect_all_mcp_config_warnings_at(
+        &project_mcp,
+        project_dir,
+        Some(global_config_path),
+    )
+    .into_iter()
+    .filter(|warning| warning.scope == ConfigScope::Project)
+    .filter(|warning| !warning.is_not_found())
+    .filter(|warning| diagnostic_row_survives(warning, false, &approval.approved, &local_names))
+    .count();
+    let mut auto_approved_servers: Vec<_> = approval
+        .approved
+        .into_iter()
+        .filter(|name| !local_names.contains(name))
+        .collect();
+    let mut still_rejected_servers: Vec<_> = approval
+        .rejected
+        .into_iter()
+        .filter(|name| !local_names.contains(name))
+        .collect();
+    auto_approved_servers.sort();
+    still_rejected_servers.sort();
+    let pending_count = approval
+        .pending
+        .into_iter()
+        .filter(|name| !local_names.contains(name))
+        .count();
+    ResetProjectChoicesSummary {
+        auto_approved_servers,
+        still_rejected_servers,
+        pending_count,
+        gating_errors,
+    }
+}
+
+fn format_reset_server_list(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3109,11 +3342,13 @@ mod pending_approval_tests {
     use super::{
         classify_project_server, diagnostic_row_survives, format_config_diagnostic_row,
         is_pending_project_server, is_rejected_project_server, listed_servers,
-        project_server_is_approved, unconnectable_status, ProjectServerState, NOT_CONFIGURED,
-        PENDING_APPROVAL, REJECTED,
+        project_server_is_approved, reset_mcpjson_choices_at, reset_mcpjson_choices_with,
+        unconnectable_status, ProjectServerState, NOT_CONFIGURED, PENDING_APPROVAL, REJECTED,
     };
     use mcp::connection::{ConfigScope, McpServerConfig};
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn stdio(name: &str, scope: ConfigScope) -> McpServerConfig {
         McpServerConfig {
@@ -3207,6 +3442,270 @@ mod pending_approval_tests {
         // And the loaded project server would now be flagged pending.
         let cfg = stdio("repo-srv", ConfigScope::Project);
         assert!(is_pending_project_server(&cfg, &["repo-srv".to_string()]));
+    }
+
+    #[test]
+    fn reset_mcpjson_choices_full_success_reports_pending_disclosure() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("repo");
+        std::fs::create_dir_all(project_dir.join(".lingxi")).unwrap();
+        let global_path = dir.path().join(".lingxi.json");
+        let project_key = migrations::global_config::project_path_for_config(&project_dir);
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "projects": {
+                    project_key.clone(): {
+                        "enabledMcpjsonServers": ["a"],
+                        "disabledMcpjsonServers": ["b"],
+                        "enableAllProjectMcpServers": true,
+                        "other": 7
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let local_path = project_dir.join(".lingxi").join("settings.local.json");
+        std::fs::write(
+            &local_path,
+            serde_json::json!({
+                "enabledMcpjsonServers": ["c"],
+                "disabledMcpjsonServers": ["d"],
+                "enableAllProjectMcpServers": true,
+                "theme": "dark"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join(".mcp.json"),
+            serde_json::json!({"mcpServers":{"repo-srv":{"type":"stdio","command":"srv"}}})
+                .to_string(),
+        )
+        .unwrap();
+
+        let outcome =
+            reset_mcpjson_choices_at(&global_path, &project_key, &project_dir).expect("reset");
+        assert_eq!(
+            outcome.render_lines(),
+            vec![
+                "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset.".to_string(),
+                "Auto-approved servers still effective: none".to_string(),
+                "Still rejected servers: none".to_string(),
+                "Pending approval count: 1".to_string(),
+                "Config gating errors: 0".to_string(),
+            ]
+        );
+
+        let global = migrations::global_config::get_project_config(&global_path, &project_key)
+            .expect("global project config");
+        assert_eq!(global.get("other"), Some(&serde_json::json!(7)));
+        assert!(!global.contains_key("enabledMcpjsonServers"));
+        assert!(!global.contains_key("disabledMcpjsonServers"));
+        assert!(!global.contains_key("enableAllProjectMcpServers"));
+
+        let local =
+            migrations::settings_update::read_settings_map(&local_path).expect("local settings");
+        assert_eq!(local.get("theme"), Some(&serde_json::json!("dark")));
+        assert!(!local.contains_key("enabledMcpjsonServers"));
+        assert!(!local.contains_key("disabledMcpjsonServers"));
+        assert!(!local.contains_key("enableAllProjectMcpServers"));
+    }
+
+    #[test]
+    fn reset_mcpjson_choices_reports_nothing_changed_on_global_failure() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("repo");
+        std::fs::create_dir_all(project_dir.join(".lingxi")).unwrap();
+        let global_path = dir.path().join(".lingxi.json");
+        let project_key = migrations::global_config::project_path_for_config(&project_dir);
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "projects": {
+                    project_key.clone(): {
+                        "enabledMcpjsonServers": ["a"],
+                        "other": 7
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let local_path = project_dir.join(".lingxi").join("settings.local.json");
+        std::fs::write(
+            &local_path,
+            serde_json::json!({
+                "enabledMcpjsonServers": ["c"],
+                "theme": "dark"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = reset_mcpjson_choices_with(
+            &global_path,
+            &project_key,
+            &project_dir,
+            || Err("global write failed".to_string()),
+            |_| panic!("local clear must not run after a global failure"),
+        )
+        .expect_err("global failure should stop before local rewrite");
+        assert_eq!(
+            error,
+            "Nothing changed. Failed to clear legacy project-scoped MCP approval settings: global write failed"
+        );
+
+        let global = migrations::global_config::get_project_config(&global_path, &project_key)
+            .expect("global project config");
+        assert_eq!(
+            global.get("enabledMcpjsonServers"),
+            Some(&serde_json::json!(["a"]))
+        );
+        let local =
+            migrations::settings_update::read_settings_map(&local_path).expect("local settings");
+        assert_eq!(local.get("theme"), Some(&serde_json::json!("dark")));
+        assert_eq!(
+            local.get("enabledMcpjsonServers"),
+            Some(&serde_json::json!(["c"]))
+        );
+    }
+
+    #[test]
+    fn reset_mcpjson_choices_reports_partial_success_for_malformed_local_settings() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("repo");
+        std::fs::create_dir_all(project_dir.join(".lingxi")).unwrap();
+        let global_path = dir.path().join(".lingxi.json");
+        let project_key = migrations::global_config::project_path_for_config(&project_dir);
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "projects": {
+                    project_key.clone(): {
+                        "enabledMcpjsonServers": ["a"],
+                        "other": 7
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let local_path = project_dir.join(".lingxi").join("settings.local.json");
+        std::fs::write(&local_path, "{ broken").unwrap();
+        std::fs::write(
+            project_dir.join(".mcp.json"),
+            serde_json::json!({"mcpServers":{"repo-srv":{"type":"stdio","command":"srv"}}})
+                .to_string(),
+        )
+        .unwrap();
+
+        let outcome =
+            reset_mcpjson_choices_at(&global_path, &project_key, &project_dir).expect("reset");
+        assert_eq!(
+            outcome.render_lines(),
+            vec![
+                format!(
+                    "Legacy project-scoped MCP approval settings in the global config were cleared, but local settings could not be updated: Invalid JSON syntax in settings file at {}",
+                    local_path.display()
+                ),
+                "Auto-approved servers still effective: none".to_string(),
+                "Still rejected servers: none".to_string(),
+                "Pending approval count: 1".to_string(),
+                "Config gating errors: 0".to_string(),
+            ]
+        );
+
+        let global = migrations::global_config::get_project_config(&global_path, &project_key)
+            .expect("global project config");
+        assert!(!global.contains_key("enabledMcpjsonServers"));
+        assert_eq!(std::fs::read_to_string(&local_path).unwrap(), "{ broken");
+    }
+
+    #[test]
+    fn reset_mcpjson_choices_reports_partial_success_for_local_write_failure() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("repo");
+        std::fs::create_dir_all(project_dir.join(".lingxi")).unwrap();
+        let global_path = dir.path().join(".lingxi.json");
+        let project_key = migrations::global_config::project_path_for_config(&project_dir);
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "projects": {
+                    project_key.clone(): {
+                        "disabledMcpjsonServers": ["repo-srv"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join(".mcp.json"),
+            serde_json::json!({"mcpServers":{"repo-srv":{"type":"stdio","command":"srv"}}})
+                .to_string(),
+        )
+        .unwrap();
+
+        let outcome = reset_mcpjson_choices_with(
+            &global_path,
+            &project_key,
+            &project_dir,
+            || super::clear_legacy_project_mcpjson_choices(&global_path, &project_key),
+            |_| Err("Failed to write settings.local.json".to_string()),
+        )
+        .expect("global clear should still succeed");
+        assert_eq!(
+            outcome.render_lines(),
+            vec![
+                "Legacy project-scoped MCP approval settings in the global config were cleared, but local settings could not be updated: Failed to write settings.local.json".to_string(),
+                "Auto-approved servers still effective: none".to_string(),
+                "Still rejected servers: none".to_string(),
+                "Pending approval count: 1".to_string(),
+                "Config gating errors: 0".to_string(),
+            ]
+        );
+
+        let global = migrations::global_config::get_project_config(&global_path, &project_key)
+            .expect("global project config");
+        assert!(!global.contains_key("disabledMcpjsonServers"));
+    }
+
+    #[test]
+    fn reset_mcpjson_choices_disclosure_reports_project_gating_errors() {
+        let dir = tempdir().expect("tempdir");
+        let project_dir = dir.path().join("repo");
+        std::fs::create_dir_all(project_dir.join(".lingxi")).unwrap();
+        let global_path = dir.path().join(".lingxi.json");
+        let project_key = migrations::global_config::project_path_for_config(&project_dir);
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "projects": {
+                    project_key.clone(): {
+                        "enabledMcpjsonServers": ["broken"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(project_dir.join(".mcp.json"), "{ broken").unwrap();
+
+        let outcome =
+            reset_mcpjson_choices_at(&global_path, &project_key, &project_dir).expect("reset");
+        assert_eq!(
+            outcome.render_lines(),
+            vec![
+                "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset.".to_string(),
+                "Auto-approved servers still effective: none".to_string(),
+                "Still rejected servers: none".to_string(),
+                "Pending approval count: 0".to_string(),
+                "Config gating errors: 1".to_string(),
+            ]
+        );
     }
 
     /// SECURITY NEIGHBOR: a same-named USER or LOCAL server (which take
@@ -3430,6 +3929,39 @@ mod pending_approval_tests {
         assert_eq!(
             err.to_string(),
             format!("connection failed: {}", cfg.config_error.unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_serve_start_event_emits_once_after_successful_runtime_init() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone() as Arc<dyn telemetry::AnalyticsSink>)
+            .await;
+
+        super::emit_mcp_start_after_runtime_init(Some(&bus)).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1, "exactly one startup event");
+        assert_eq!(events[0].name, telemetry::tengu::mcp::START);
+        assert!(matches!(
+            events[0].metadata.get("transport"),
+            Some(telemetry::AnalyticsValue::String(s)) if s == "stdio"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mcp_serve_start_event_is_not_emitted_without_a_runtime_bus() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone() as Arc<dyn telemetry::AnalyticsSink>)
+            .await;
+
+        super::emit_mcp_start_after_runtime_init(None).await;
+
+        assert!(
+            sink.events().await.is_empty(),
+            "failed runtime init must not emit tengu_mcp_start"
         );
     }
 }

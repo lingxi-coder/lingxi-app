@@ -6,8 +6,8 @@
 //! The aggregate [`DoctorReport`] is what the `/doctor` slash-command
 //! handler renders (one row per check) into the Summary text panel.
 
-use std::path::Path;
 use platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use std::path::Path;
 
 /// Run all doctor checks against the supplied config-dir root (the `tr()`-rooted
 /// config-home tree) plus the global config file (`~/.lingxi.json`, passed
@@ -284,7 +284,7 @@ fn check_telemetry_schema() -> DoctorCheck {
     //   4. HERE
     // Re-count against `mcp::NAMES.len()` / `plugin::NAMES.len()`; never paste
     // the number a failing assertion printed.
-    let expected = 365;
+    let expected = 395;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

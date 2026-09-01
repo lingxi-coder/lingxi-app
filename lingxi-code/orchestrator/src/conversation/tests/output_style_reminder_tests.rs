@@ -167,7 +167,8 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
 
     orch.run_turn("user prompt body").await.expect("turn");
 
-    // OUTGOING snapshot: [additionalContext(meta), user(prompt), reminder] —
+    // OUTGOING snapshot: [additionalContext(meta), user(prompt), reminder,
+    // total_tokens reminder] —
     // the leading additional-context meta message (R-P1c/d) prepends the
     // user prompt; the output-style reminder trails it (TS position).
     let outgoing = api.captured_msgs().await;
@@ -175,8 +176,8 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
     let sent = &outgoing[0];
     assert_eq!(
         sent.len(),
-        3,
-        "additionalContext + prompt + reminder; got {sent:?}"
+        4,
+        "additionalContext + prompt + reminder + total_tokens; got {sent:?}"
     );
     assert!(
         is_additional_context(&sent[0]),
@@ -186,8 +187,13 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
     assert_eq!(text_of(&sent[1]), "user prompt body");
     assert!(
         is_reminder(&sent[2], EXPLANATORY_REMINDER),
-        "trailing message must be the byte-exact reminder; got {:?}",
+        "style message must be the byte-exact reminder; got {:?}",
         sent[2]
+    );
+    assert!(
+        text_of(&sent[3]).contains("<total_tokens>"),
+        "total-tokens reminder trails the batch; got {:?}",
+        sent[3]
     );
 
     // STORED history: [user(prompt), assistant] — the reminder was NOT pushed.
@@ -237,12 +243,12 @@ async fn batched_default_style_sends_no_reminder() {
 
     let outgoing = api.captured_msgs().await;
     assert_eq!(outgoing.len(), 1);
-    // No output-style reminder; the only prepended message is the leading
-    // additional-context meta (always present via `# currentDate`).
+    // No output-style reminder; additional context leads and the stock
+    // total-tokens reminder trails the prompt.
     assert_eq!(
         outgoing[0].len(),
-        2,
-        "additionalContext + prompt; got {:?}",
+        3,
+        "additionalContext + prompt + total_tokens; got {:?}",
         outgoing[0]
     );
     assert!(
@@ -251,6 +257,7 @@ async fn batched_default_style_sends_no_reminder() {
         outgoing[0][0]
     );
     assert_eq!(text_of(&outgoing[0][1]), "just the prompt");
+    assert!(text_of(&outgoing[0][2]).contains("<total_tokens>"));
     assert!(
         !outgoing[0]
             .iter()

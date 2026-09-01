@@ -7,11 +7,11 @@
 use crate::conversation::OrchestratorApiClient;
 use async_trait::async_trait;
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 use protocol::ConversationMessage;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 
 // ============================================================================
 // MockApiClient (Task 6)
@@ -715,14 +715,14 @@ pub use crate::test_support_stream::{
 // slash-command handler tests. Captures every call as a flag/counter and
 // returns whatever the test pre-loaded via setter methods.
 
-use protocol::SessionId;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex as StdMutex;
 use platform_api::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo,
     McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
+use protocol::SessionId;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex as StdMutex;
 
 /// Test double for `OrchestratorHandle`.
 ///
@@ -830,8 +830,11 @@ impl MockOrchestratorHandle {
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
-            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(false, false),
-            workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState::default(),
+            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(
+                false, false,
+            ),
+            workflow_size_guideline:
+                platform_api::session_flags::WorkflowSizeGuidelineState::default(),
             permission_mode_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),

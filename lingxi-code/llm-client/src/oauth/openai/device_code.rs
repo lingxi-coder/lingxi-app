@@ -12,11 +12,11 @@
 
 use crate::oauth::openai::client::{OAuthError, OpenAiOAuthClient};
 use crate::oauth::openai::config::OpenAiOAuthConfig;
+use platform_api::{Clock, HttpTransport};
 use protocol::{HttpMethod, HttpRequest};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use platform_api::{Clock, HttpTransport};
 
 /// Maximum time to wait for the user to complete device-code login.
 const MAX_WAIT: Duration = Duration::from_secs(15 * 60);

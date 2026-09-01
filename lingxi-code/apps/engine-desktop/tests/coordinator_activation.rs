@@ -47,6 +47,9 @@ use async_trait::async_trait;
 use client_adapter::test_support::MockSink;
 use client_adapter::AdapterOutputStream;
 use client_protocol::events::ClientEvent;
+use platform_api::filesystem::FileSystem;
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 use platform_posix::{PosixFileSystem, PosixRuntime};
 use protocol::AgentId;
 use tasks::handlers::InProcessTeammateHandler;
@@ -54,9 +57,6 @@ use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
 use tasks::TaskType;
-use platform_api::filesystem::FileSystem;
-use platform_api::team_spawn::TeamSpawnSeam;
-use platform_api::{OutputStream, RuntimeSpawner};
 
 // ---------------------------------------------------------------------------
 // Scripted SubagentApiClient — one round-trip per `messages_create`, returning

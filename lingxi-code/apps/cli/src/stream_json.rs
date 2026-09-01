@@ -34,12 +34,12 @@
 
 use async_trait::async_trait;
 use llm_client::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+use platform_api::{CostSnapshot, OutputStream};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use platform_api::{CostSnapshot, OutputStream};
 
 // ── Wire-format helpers ─────────────────────────────────────────────────────
 

@@ -7,10 +7,12 @@
 
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use platform_api::{
+    NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy, SandboxedTag,
+};
 use platform_posix::sandbox::PosixSandbox;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy, SandboxedTag};
 
 #[test]
 fn prepare_emits_bwrap_or_sandbox_exec_invocation() {

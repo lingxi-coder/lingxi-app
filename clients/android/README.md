@@ -76,11 +76,15 @@ adb shell am start -n com.lingxi.code.debug/com.lingxi.code.MainActivity
 
 ### JVM unit tests — the CI gate (device-free)
 
-The headless CI gate is **`assembleDebug` + `testDebugUnitTest`**. The unit
-tests run on the plain JVM (no emulator) and cover the data/color invariants:
+The headless CI gate is **both distribution variants' assemble and unit-test
+tasks**. The flavor dimension makes the abbreviated `assembleDebug` and
+`testDebugUnitTest` task names ambiguous, so use the explicit variant names.
+These tests run on the plain JVM (no emulator) and cover the data/color
+invariants:
 
 ```bash
-./gradlew :app:assembleDebug && ./gradlew :app:testDebugUnitTest
+./gradlew :app:assembleDirectDebug :app:assemblePlayDebug \
+  :app:testDirectDebugUnitTest :app:testPlayDebugUnitTest
 ```
 
 What they assert:
@@ -98,7 +102,8 @@ What they assert:
   splits, preset catalog sizes, `ConnStatus` labels, `NotifConfig.enabledCount`,
   and the `newProvider` add-flow.
 
-HTML report: `app/build/reports/tests/testDebugUnitTest/index.html`.
+HTML reports: `app/build/reports/tests/testDirectDebugUnitTest/index.html` and
+`app/build/reports/tests/testPlayDebugUnitTest/index.html`.
 
 ### Instrumented Compose UI tests — require an emulator
 

@@ -67,7 +67,8 @@ impl ConversationOrchestrator {
             ),
             turn_gate: Arc::new(Mutex::new(())),
             dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::default(),
-            workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState::default(),
+            workflow_size_guideline:
+                platform_api::session_flags::WorkflowSizeGuidelineState::default(),
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             prompt_probe_cwd_resolver: None,
@@ -91,6 +92,7 @@ impl ConversationOrchestrator {
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_registry: None,
+            ide_handle: None,
             fork_spawner: None,
             fork_budget: None,
             bg_session_forker: None,
@@ -355,6 +357,13 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_mcp_registry(mut self, mcp: Arc<mcp::McpRegistry>) -> Self {
         self.mcp_registry = Some(mcp);
+        self
+    }
+
+    /// Attach the provider-neutral local IDE lifecycle handle.
+    #[must_use]
+    pub fn with_ide_handle(mut self, ide: Arc<dyn platform_api::IdeHandle>) -> Self {
+        self.ide_handle = Some(ide);
         self
     }
 
@@ -665,7 +674,10 @@ impl ConversationOrchestrator {
     /// Attach the composition-root catalog reconciler used by
     /// [`Self::register_repo_root`].
     #[must_use]
-    pub fn with_repo_root_reloader(mut self, reloader: Arc<dyn platform_api::RepoRootReloader>) -> Self {
+    pub fn with_repo_root_reloader(
+        mut self,
+        reloader: Arc<dyn platform_api::RepoRootReloader>,
+    ) -> Self {
         self.repo_root_reloader = Some(reloader);
         self
     }

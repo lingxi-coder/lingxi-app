@@ -26,7 +26,6 @@ fn mobile_tool_list_snapshot() {
         "PowerShell",
         "REPL",
         "MCP",
-        "LSP",
         "Agent",
         "TeamCreate",
         "TeamDelete",
@@ -44,8 +43,8 @@ fn mobile_tool_list_snapshot() {
             "mobile tool set must not include `{forbidden}`"
         );
     }
-    // Mobile-exclusive tools must be present.
-    for required in ["camera", "voice", "share"] {
+    // Mobile-exclusive tools and the mobile-safe LSP surface must be present.
+    for required in ["LSP", "camera", "voice", "share"] {
         assert!(
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"

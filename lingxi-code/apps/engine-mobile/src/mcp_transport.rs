@@ -5,17 +5,17 @@
 //! registry into the remote transport or infer a route from a server name.
 
 use async_trait::async_trait;
-use platform_common::RemoteMcpTransport;
-use protocol::McpConnectionId;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNotificationStream, McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
     McpTransportSpec, ServerCapabilitiesDto,
 };
+use platform_common::RemoteMcpTransport;
+use protocol::McpConnectionId;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::local_apps_mcp::LocalAppsMcpTransport;
 

@@ -11,6 +11,10 @@ mod invoked_skill_lifecycle_tests;
 #[path = "conversation/tests/session_memory_background_tests.rs"]
 mod session_memory_background_tests;
 
+#[cfg(test)]
+#[path = "conversation/tests/prompt_snapshot_tests.rs"]
+mod prompt_snapshot_tests;
+
 #[path = "conversation/tests/bounded_post_compact_read_tests.rs"]
 mod bounded_post_compact_read_tests;
 

@@ -1176,6 +1176,7 @@ async fn dispatch_control_request(
                         }
                     }
                     let dir = std::path::PathBuf::from(&directory);
+                    let previous = session_cwd.snapshot();
                     // The new cwd becomes the SOLE trusted directory, matching
                     // what `EnterWorktree` and the worktree restore already do.
                     // Any `--add-dir` extras are dropped rather than carried
@@ -1184,7 +1185,45 @@ async fn dispatch_control_request(
                     // directory the user has just been asked to trust would
                     // grant more than the prompt described.
                     let trusted = vec![dir.clone()];
-                    session_cwd.swap(dir, trusted);
+                    session_cwd.swap(dir.clone(), trusted);
+                    let transcript_path = match orchestrator.retarget_transcript_for_cwd(&dir).await
+                    {
+                        Ok(path) => path,
+                        Err(error) => {
+                            // Do not acknowledge a cwd move if its transcript could
+                            // not be rehomed. Restore both cwd and trusted roots so
+                            // a subsequent request cannot run against a different
+                            // directory while still reading the old session file.
+                            session_cwd.swap(previous.0, previous.1);
+                            tracing::warn!(%error, "failed to retarget transcript after set_cwd; rolled back cwd");
+                            writer.reply_error(
+                                request_id,
+                                &format!("Could not change directory: {error}"),
+                            );
+                            return;
+                        }
+                    };
+                    if let Some(path) = transcript_path {
+                        if let Err(error) =
+                            crate::background_launch::refresh_current_background_launch_identity(
+                                &dir, &path,
+                            )
+                        {
+                            let body = crate::mode::rollback_cd_after_launch_identity_failure(
+                                orchestrator,
+                                session_cwd,
+                                previous,
+                                &error.to_string(),
+                            )
+                            .await;
+                            tracing::warn!(
+                                %error,
+                                "rejected set_cwd because background launch identity is stale"
+                            );
+                            writer.reply_error(request_id, &body);
+                            return;
+                        }
+                    }
                     writer.reply_success(
                         request_id,
                         Some(json!({
@@ -3055,6 +3094,12 @@ async fn resume_resolved_session(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
+            // Prompt snapshots are generic attachments and may not be part of
+            // the resumable user/assistant chain used by the seed helper.
+            runtime
+                .orchestrator
+                .restore_resume_runtime_metadata(&entries)
+                .await;
             if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
                 &runtime.orchestrator,
                 orchestrator::deferred_tool_replays_from_messages(&entries),
@@ -3205,6 +3250,13 @@ async fn mount_resumed_tui_inner(
             return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
         }
     };
+    // Restore from the full routed entry set so an off-chain prompt_snapshot
+    // attachment survives the CLI's chain-only history seed.
+    tui_build
+        .runtime
+        .orchestrator
+        .restore_resume_runtime_metadata(&entries)
+        .await;
     if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
         &tui_build.runtime.orchestrator,
         orchestrator::deferred_tool_replays_from_messages(&entries),
@@ -3354,6 +3406,49 @@ async fn remount_tui(
     mount_resumed_tui_inner(argv, session_id, messages, state, registration, None, None).await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentOpenPlan {
+    StayOnCurrent,
+    RemountTarget,
+    QueueBackgroundResume {
+        short: String,
+        session_id: Option<String>,
+    },
+}
+
+fn plan_agent_open(
+    target: &tui::bottom_pane::view::AgentSessionTarget,
+    disposition: &crate::commands::attach::AttachDisposition,
+) -> AgentOpenPlan {
+    use crate::commands::attach::AttachDisposition;
+    match disposition {
+        AttachDisposition::Attached | AttachDisposition::LiveEndpointUnavailable { .. } => {
+            AgentOpenPlan::StayOnCurrent
+        }
+        AttachDisposition::NotFound if target.live => AgentOpenPlan::StayOnCurrent,
+        AttachDisposition::NotFound => AgentOpenPlan::RemountTarget,
+        AttachDisposition::NotRunning { short, session_id } if target.background => {
+            AgentOpenPlan::QueueBackgroundResume {
+                short: short.clone(),
+                session_id: session_id.clone(),
+            }
+        }
+        AttachDisposition::NotRunning { .. } if target.live => AgentOpenPlan::StayOnCurrent,
+        AttachDisposition::NotRunning { .. } => AgentOpenPlan::RemountTarget,
+    }
+}
+
+fn set_agent_open_notice(
+    state: &mut Option<crate::mode::RemountState>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if let Some(state) = state.as_mut() {
+        state.notice = Some(message.clone());
+    }
+    eprintln!("lingxi-cli: {message}");
+}
+
 async fn drive_tui_switch_loop_inner(
     argv: &Argv,
     first: crate::mode::RunOutcome,
@@ -3373,6 +3468,139 @@ async fn drive_tui_switch_loop_inner(
     loop {
         match outcome {
             crate::mode::RunOutcome::Exit(code) => return code,
+            crate::mode::RunOutcome::OpenAgentSession { target, mut state } => {
+                let home = lingxi_home_dir();
+                let selector = target.session_id.to_string();
+                let disposition = match crate::commands::attach::attach_target(&home, &selector) {
+                    Ok(disposition) => disposition,
+                    Err(error) => {
+                        set_agent_open_notice(
+                            &mut state,
+                            format!("couldn't attach to agent {selector}: {error}"),
+                        );
+                        let Some(current) = current else {
+                            return exit_codes::RUNTIME_ERROR;
+                        };
+                        outcome = crate::mode::RunOutcome::SwitchTo {
+                            target: current,
+                            state,
+                        };
+                        continue;
+                    }
+                };
+                let plan = plan_agent_open(&target, &disposition);
+                let mount_target = match plan {
+                    AgentOpenPlan::RemountTarget => target.session_id,
+                    AgentOpenPlan::StayOnCurrent => {
+                        if !matches!(
+                            disposition,
+                            crate::commands::attach::AttachDisposition::Attached
+                        ) {
+                            set_agent_open_notice(
+                                &mut state,
+                                format!(
+                                    "agent {selector} is still owned by another process; its transcript was not reopened"
+                                ),
+                            );
+                        }
+                        let Some(current) = current else {
+                            return exit_codes::RUNTIME_ERROR;
+                        };
+                        current
+                    }
+                    AgentOpenPlan::QueueBackgroundResume { short, session_id } => {
+                        let resolved_session = session_id.as_deref().unwrap_or(&selector);
+                        match crate::commands::respawn::queue_resume_for_short_if_safe(
+                            &home,
+                            &short,
+                            resolved_session,
+                        ) {
+                            Ok(true) => {
+                                crate::background_dispatch::ensure_daemon_for_control(&home);
+                                match crate::commands::agents::wait_for_auto_resumed_attach(
+                                    &home,
+                                    resolved_session,
+                                ) {
+                                    Ok(crate::commands::agents::OpenSessionDisposition::Attached) => {}
+                                    Ok(
+                                        crate::commands::agents::OpenSessionDisposition::LiveEndpointUnavailable {
+                                            ..
+                                        }
+                                        | crate::commands::agents::OpenSessionDisposition::NotRunning {
+                                            ..
+                                        },
+                                    ) => set_agent_open_notice(
+                                        &mut state,
+                                        format!(
+                                            "agent {selector} is restarting in the background; try opening it again in a moment"
+                                        ),
+                                    ),
+                                    Ok(crate::commands::agents::OpenSessionDisposition::ForegroundResume) => {
+                                        set_agent_open_notice(
+                                            &mut state,
+                                            format!(
+                                                "agent {selector} changed while its restart was being queued"
+                                            ),
+                                        );
+                                    }
+                                    Err(error) => set_agent_open_notice(
+                                        &mut state,
+                                        format!("couldn't attach to agent {selector}: {error}"),
+                                    ),
+                                }
+                                let Some(current) = current else {
+                                    return exit_codes::RUNTIME_ERROR;
+                                };
+                                current
+                            }
+                            // `false` can mean either a terminal row OR that a
+                            // concurrent daemon/delete/restart won the exact
+                            // state CAS. Only the former proves the transcript
+                            // may be mounted as a foreground writer.
+                            Ok(false) => {
+                                let safely_terminal = crate::agents_registry::read_job(
+                                    &home, &short,
+                                )
+                                .is_some_and(|job| {
+                                    crate::agents_registry::job_is_terminal(&job)
+                                        && job.phase.as_deref()
+                                            != Some(crate::commands::respawn::PHASE_DELETING)
+                                        && job.worker_pid.is_none()
+                                        && job.worker_proc_start.is_none()
+                                });
+                                if safely_terminal {
+                                    target.session_id
+                                } else {
+                                    set_agent_open_notice(
+                                        &mut state,
+                                        format!(
+                                            "agent {selector} changed while its restart was being queued"
+                                        ),
+                                    );
+                                    let Some(current) = current else {
+                                        return exit_codes::RUNTIME_ERROR;
+                                    };
+                                    current
+                                }
+                            }
+                            Err(error) => {
+                                set_agent_open_notice(
+                                    &mut state,
+                                    format!("couldn't restart agent {selector}: {error}"),
+                                );
+                                let Some(current) = current else {
+                                    return exit_codes::RUNTIME_ERROR;
+                                };
+                                current
+                            }
+                        }
+                    }
+                };
+                outcome = crate::mode::RunOutcome::SwitchTo {
+                    target: mount_target,
+                    state,
+                };
+            }
             crate::mode::RunOutcome::SwitchTo { target, state } => {
                 match load_resume_session(target).await {
                     Ok(messages) => {
@@ -4030,6 +4258,60 @@ mod tests {
             recover_from_failed_switch(None),
             SwitchRecovery::Exit(exit_codes::RUNTIME_ERROR),
             "only the no-session-at-all case exits"
+        );
+    }
+
+    #[test]
+    fn agents_open_plan_never_remounts_a_known_or_reported_live_writer() {
+        use crate::commands::attach::AttachDisposition;
+
+        let session_id = Uuid::new_v4();
+        let live_background = tui::bottom_pane::view::AgentSessionTarget {
+            session_id,
+            background: true,
+            live: true,
+        };
+        assert_eq!(
+            plan_agent_open(&live_background, &AttachDisposition::NotFound),
+            AgentOpenPlan::StayOnCurrent
+        );
+        assert_eq!(
+            plan_agent_open(
+                &live_background,
+                &AttachDisposition::LiveEndpointUnavailable {
+                    short: "abcd1234".into(),
+                    session_id: Some(session_id.to_string()),
+                },
+            ),
+            AgentOpenPlan::StayOnCurrent
+        );
+
+        let stopped_background = tui::bottom_pane::view::AgentSessionTarget {
+            live: false,
+            ..live_background.clone()
+        };
+        assert_eq!(
+            plan_agent_open(
+                &stopped_background,
+                &AttachDisposition::NotRunning {
+                    short: "abcd1234".into(),
+                    session_id: Some(session_id.to_string()),
+                },
+            ),
+            AgentOpenPlan::QueueBackgroundResume {
+                short: "abcd1234".into(),
+                session_id: Some(session_id.to_string()),
+            }
+        );
+
+        let stopped_interactive = tui::bottom_pane::view::AgentSessionTarget {
+            background: false,
+            live: false,
+            ..live_background
+        };
+        assert_eq!(
+            plan_agent_open(&stopped_interactive, &AttachDisposition::NotFound),
+            AgentOpenPlan::RemountTarget
         );
     }
 

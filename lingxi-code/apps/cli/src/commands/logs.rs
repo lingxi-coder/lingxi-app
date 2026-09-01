@@ -17,7 +17,6 @@ pub const LOGS_HELP: &str =
 /// Bare usage emitted when `<id>` is omitted.
 pub const LOGS_USAGE: &str = "Usage: claude logs <id>";
 
-const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LOG_LINES: usize = 500;
 
 /// `logs` accepts one background-job prefix.  The positional is optional so
@@ -90,8 +89,11 @@ fn tail_lines(bytes: &[u8], max_lines: usize) -> &[u8] {
 }
 
 fn read_output_log(home: &Path, short: &str) -> Result<Option<Vec<u8>>, String> {
-    match platform_api::rooted_fs::read_tail_bytes(home, &output_log_relative(short), MAX_LOG_BYTES)
-    {
+    match platform_api::rooted_fs::read_tail_bytes(
+        home,
+        &output_log_relative(short),
+        crate::background_launch::OUTPUT_LOG_MAX_BYTES,
+    ) {
         Ok(bytes) => Ok(Some(tail_lines(&bytes, MAX_LOG_LINES).to_vec())),
         Err(platform_api::FsError::NotFound(_)) => Ok(None),
         Err(error) => Err(error.to_string()),
@@ -182,7 +184,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let job = crate::agents_registry::jobs_dir(home.path()).join("abcd1234");
         std::fs::create_dir_all(&job).unwrap();
-        let mut body = vec![b'x'; usize::try_from(MAX_LOG_BYTES).unwrap() + 128];
+        let mut body = vec![
+            b'x';
+            usize::try_from(crate::background_launch::OUTPUT_LOG_MAX_BYTES).unwrap()
+                + 128
+        ];
         body.extend_from_slice(b"\nlatest\n");
         body.extend_from_slice(&[0xff, b'\n']);
         std::fs::write(job.join(crate::background_launch::OUTPUT_LOG_FILE), &body).unwrap();
@@ -190,7 +196,9 @@ mod tests {
         let tail = read_output_log(home.path(), "abcd1234")
             .unwrap()
             .expect("log exists");
-        assert!(tail.len() <= usize::try_from(MAX_LOG_BYTES).unwrap());
+        assert!(
+            tail.len() <= usize::try_from(crate::background_launch::OUTPUT_LOG_MAX_BYTES).unwrap()
+        );
         assert!(tail.ends_with(&[b'l', b'a', b't', b'e', b's', b't', b'\n', 0xff, b'\n']));
     }
 }

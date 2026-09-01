@@ -3,11 +3,11 @@
 //! Stale locks (whose holder PID has exited) are silently overridden so that
 //! a crashed scheduler does not block future ticks indefinitely.
 
+use platform_api::FileSystem;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use platform_api::FileSystem;
 
 /// Failure modes for [`try_acquire_lock`] / [`release_lock`].
 #[derive(Debug, Clone, Error)]

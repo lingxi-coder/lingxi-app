@@ -1,21 +1,28 @@
-//! `tengu_mcp_*` **analytics-event** schemas (2.1.251 byte-alignment §18/§20b,
-//! §11 discovery-cache).
+//! `tengu_mcp_*` **analytics-event** schemas (2.1.252 registry/catalog/connect
+//! slice, plus 2.1.251 §20a/§20b and §11 discovery-cache).
 //!
-//! ## Scope: 4 of the oracle's 53 `tengu_mcp_*` analytics events
+//! ## Scope: 10 of the 53 provider-neutral oracle MCP analytics events
 //!
 //! An earlier revision of this doc claimed the two originally-ported names
 //! were "the ONLY two confirmed real `tengu_mcp_*` ANALYTICS events at the
 //! oracle; everything else with that prefix is a Statsig feature-flag name".
 //! **That claim was false and has been retracted.** Scanning the 2.1.251
 //! image for the analytics-bus call shape
-//! `(?<![A-Za-z0-9_$])s\("tengu_mcp_[a-z0-9_]+"` returns **53 distinct event
-//! names**, among them `tengu_mcp_server_connection_succeeded` /
-//! `_failed`, `tengu_mcp_list_changed`, `tengu_mcp_listen_reopen`,
-//! `tengu_mcp_sdk_generation`, `tengu_mcp_oauth_flow_start`/`_success`/
-//! `_failure`/`_error`, `tengu_mcp_registry_fetch`,
-//! `tengu_mcp_elicitation_shown`/`_response`,
-//! and `tengu_mcp_first_party_auto_auth`. Several are independently
-//! corroborated by the oracle's own event allowlist array (@156122853).
+//! `(?<![A-Za-z0-9_$])s\("tengu_mcp_[a-z0-9_]+"` returns **63 distinct event
+//! names** in the local 2.1.252 oracle image. Of those, 10 are explicitly
+//! excluded from this provider-neutral registry slice:
+//!
+//! - 6 first-party / IDE names (`tengu_mcp_ide_server_connection_*` and the
+//!   other Anthropic- or IDE-specific families)
+//! - 4 `tengu_mcp_channel_*` names
+//!
+//! That leaves **53 provider-neutral events**, among them
+//! `tengu_mcp_server_connection_succeeded` / `_failed`,
+//! `tengu_mcp_list_changed`, `tengu_mcp_listen_reopen`,
+//! `tengu_mcp_sdk_generation`, `tengu_mcp_oauth_flow_start` / `_success` /
+//! `_failure` / `_error`, `tengu_mcp_registry_fetch`,
+//! `tengu_mcp_elicitation_shown` / `_response`,
+//! and `tengu_mcp_first_party_auto_auth`.
 //!
 //! It IS separately true that a full-binary grep for the bare prefix
 //! `tengu_mcp_` turns up 100+ hits of which many are **Statsig
@@ -29,19 +36,32 @@
 //! events", and conflating the two produced both the retracted claim below
 //! and an under-modelled [`DegradedReason`].
 //!
-//! **This module deliberately ports 4 of the 53.** The remaining 49 are an
-//! OPEN parity gap (§20b-remainder), not a closed one. Do not read
-//! `NAMES.len() == 4`, [`crate::tengu::ALL_EVENT_NAMES`], or the
+//! **This module deliberately ports 12 of the 53 provider-neutral names.** The
+//! remaining 41 are an OPEN parity gap, not a closed one. Do not read
+//! `NAMES.len()`, [`crate::tengu::ALL_EVENT_NAMES`], or the
 //! `tengu_events.json` parity fixture as evidence that MCP analytics is
 //! complete.
 //!
-//! ## The four ported events
+//! ## The twelve ported events
 //!
+//! - `tengu_mcp_start` — emitted by the `mcp serve` CLI path once the local
+//!   stdio server runtime is initialized and just before it enters the request
+//!   loop. Oracle 2.1.252 call site:
+//!   `s("tengu_mcp_start",{transport:c("stdio")})`.
 //! - `tengu_mcp_server_config_invalid` — `mcp/src/connection.rs`'s
 //!   `Transport::connect_time_url_error` / `config_error` paths already
 //!   compute the oracle's `INVALID_CONFIG` classification. Oracle call
 //!   site: `s("tengu_mcp_server_config_invalid",{transportType:c(t.type
 //!   ??"stdio"),field:w("url"),source:w(t.configError?"loader":"connect")})`.
+//! - `tengu_mcp_server_connection_succeeded` — emitted after a live connect
+//!   completes and its catalog is loaded. Oracle 2.1.252 carries
+//!   `connectionDurationMs`, `transportType`, `scope`, `isPlugin`, and, on the
+//!   modern path, negotiation/probe fields.
+//! - `tengu_mcp_server_connection_failed` — emitted on connect failure, from
+//!   early classified failures and the timed live-connect path. Oracle 2.1.252
+//!   carries `transportType`, `errorCode`, and on the timed path also
+//!   `connectionDurationMs`, `errorClassName`, `errorMessageHash`, and the
+//!   same connection-shape fields the success event carries.
 //! - `tengu_mcp_tools_listed` — emitted once per successful `tools/list`.
 //!   Oracle call site: `s("tengu_mcp_tools_listed",{transportType:c(e.config.type
 //!   ??"stdio"),listDurationMs:Date.now()-o,toolCount:L.length,
@@ -52,6 +72,22 @@
 //!   [`DiscoverySourcePayload`] for the two oracle call sites (a fresh/stale
 //!   HIT, and a MISS gated by `Ko`) and `mcp::discovery_cache`'s module doc
 //!   for what this port actually wires (today: the MISS side only).
+//! - `tengu_mcp_list_changed` — emitted after a successful
+//!   `tools/prompts/resources` refresh triggered by an inbound
+//!   `notifications/*/list_changed`. For `tools`, the oracle also carries
+//!   `newCount` and, when the prior list is known, `previousCount`.
+//! - `tengu_mcp_resource_templates_fetched` — emitted when
+//!   `resources/templates/list` succeeds, carrying `template_count`.
+//! - `tengu_mcp_listen_reopen` — emitted when the registry opens, reopens,
+//!   gives up, exhausts its reopen budget, or parks a modern
+//!   `subscriptions/listen` stream, carrying the privacy-safe server key hash
+//!   plus outcome/attempt count/trigger.
+//! - `tengu_mcp_reset_mcpjson_choices` — emitted at CLI command entry for
+//!   `mcp reset-project-choices`; empty payload.
+//! - `tengu_mcp_tool_auto_backgrounded` — emitted by the MCP tool dispatcher
+//!   when a long-running call is moved into the background. Its historical
+//!   constant remains in [`super::tool`], but the wire prefix makes this MCP
+//!   analytics block its registry home.
 //!
 //! ## `listDurationMs` measures `tools/list` ALONE
 //!
@@ -115,7 +151,15 @@ use serde::{Deserialize, Serialize};
 
 /// `tengu_mcp_server_config_invalid` — a server's config failed the
 /// connect-time (or loader-time) URL/shape re-validation.
+pub const START: &str = "tengu_mcp_start";
+/// `tengu_mcp_server_config_invalid` — a server's config failed the
+/// connect-time (or loader-time) URL/shape re-validation.
 pub const SERVER_CONFIG_INVALID: &str = "tengu_mcp_server_config_invalid";
+/// `tengu_mcp_server_connection_succeeded` — a live connect plus catalog load
+/// completed.
+pub const SERVER_CONNECTION_SUCCEEDED: &str = "tengu_mcp_server_connection_succeeded";
+/// `tengu_mcp_server_connection_failed` — a connect attempt failed.
+pub const SERVER_CONNECTION_FAILED: &str = "tengu_mcp_server_connection_failed";
 /// `tengu_mcp_tools_listed` — a `tools/list` round-trip completed and the
 /// tool set was bound.
 pub const TOOLS_LISTED: &str = "tengu_mcp_tools_listed";
@@ -125,15 +169,303 @@ pub const DEGRADED: &str = "tengu_mcp_degraded";
 /// `tengu_mcp_discovery_source` — §11 discovery-cache observability. See
 /// [`DiscoverySourcePayload`].
 pub const DISCOVERY_SOURCE: &str = "tengu_mcp_discovery_source";
+/// `tengu_mcp_list_changed` — a `list_changed` refresh completed.
+pub const LIST_CHANGED: &str = "tengu_mcp_list_changed";
+/// `tengu_mcp_resource_templates_fetched` — `resources/templates/list`
+/// succeeded.
+pub const RESOURCE_TEMPLATES_FETCHED: &str = "tengu_mcp_resource_templates_fetched";
+/// `tengu_mcp_listen_reopen` — a modern `subscriptions/listen` stream opened,
+/// reopened, gave up, exhausted budget, or parked.
+pub const LISTEN_REOPEN: &str = "tengu_mcp_listen_reopen";
+/// `tengu_mcp_reset_mcpjson_choices` — CLI `mcp reset-project-choices`
+/// command-entry event, empty payload.
+pub const RESET_MCPJSON_CHOICES: &str = "tengu_mcp_reset_mcpjson_choices";
+/// `tengu_mcp_auth_config_authenticate` — a user-triggered authenticate action
+/// started for an MCP server.
+pub const AUTH_CONFIG_AUTHENTICATE: &str = "tengu_mcp_auth_config_authenticate";
+/// `tengu_mcp_auth_config_clear` — a user-triggered credential-clear action
+/// started for an MCP server.
+pub const AUTH_CONFIG_CLEAR: &str = "tengu_mcp_auth_config_clear";
+/// `tengu_mcp_oauth_browser_open` — the authorization URL was surfaced and a
+/// browser open was attempted or skipped.
+pub const OAUTH_BROWSER_OPEN: &str = "tengu_mcp_oauth_browser_open";
+/// `tengu_mcp_oauth_flow_start` — standard MCP OAuth flow started.
+pub const OAUTH_FLOW_START: &str = "tengu_mcp_oauth_flow_start";
+/// `tengu_mcp_oauth_flow_success` — standard MCP OAuth flow completed.
+pub const OAUTH_FLOW_SUCCESS: &str = "tengu_mcp_oauth_flow_success";
+/// `tengu_mcp_oauth_flow_error` — standard MCP OAuth flow errored or was
+/// canceled.
+pub const OAUTH_FLOW_ERROR: &str = "tengu_mcp_oauth_flow_error";
+/// `tengu_mcp_oauth_refresh_success` — a standard MCP OAuth refresh
+/// succeeded.
+pub const OAUTH_REFRESH_SUCCESS: &str = "tengu_mcp_oauth_refresh_success";
+/// `tengu_mcp_oauth_refresh_failure` — a standard MCP OAuth refresh failed.
+pub const OAUTH_REFRESH_FAILURE: &str = "tengu_mcp_oauth_refresh_failure";
+/// `tengu_mcp_oauth_token_persist_failed` — token persistence failed.
+pub const OAUTH_TOKEN_PERSIST_FAILED: &str = "tengu_mcp_oauth_token_persist_failed";
+/// `tengu_mcp_oauth_issuer_echo_mismatch` — issuer echo validation observed a
+/// mismatch.
+pub const OAUTH_ISSUER_ECHO_MISMATCH: &str = "tengu_mcp_oauth_issuer_echo_mismatch";
+/// `tengu_mcp_server_needs_auth` — a server connect attempt concluded that the
+/// server needs authentication.
+pub const SERVER_NEEDS_AUTH: &str = "tengu_mcp_server_needs_auth";
+/// `tengu_mcp_tool_call_auth_error` — a tool call hit an auth failure after
+/// retry handling.
+pub const TOOL_CALL_AUTH_ERROR: &str = "tengu_mcp_tool_call_auth_error";
 
 /// Registry block — order is locked (append-only). Consumed by
 /// [`crate::tengu::ALL_EVENT_NAMES`].
 pub const NAMES: &[&str] = &[
     SERVER_CONFIG_INVALID,
+    SERVER_CONNECTION_SUCCEEDED,
+    SERVER_CONNECTION_FAILED,
     TOOLS_LISTED,
     DEGRADED,
     DISCOVERY_SOURCE,
+    LIST_CHANGED,
+    RESOURCE_TEMPLATES_FETCHED,
+    LISTEN_REOPEN,
+    RESET_MCPJSON_CHOICES,
+    super::tool::MCP_TOOL_AUTO_BACKGROUNDED,
+    START,
+    AUTH_CONFIG_AUTHENTICATE,
+    AUTH_CONFIG_CLEAR,
+    OAUTH_BROWSER_OPEN,
+    OAUTH_FLOW_START,
+    OAUTH_FLOW_SUCCESS,
+    OAUTH_FLOW_ERROR,
+    OAUTH_REFRESH_SUCCESS,
+    OAUTH_REFRESH_FAILURE,
+    OAUTH_TOKEN_PERSIST_FAILED,
+    OAUTH_ISSUER_ECHO_MISMATCH,
+    SERVER_NEEDS_AUTH,
+    TOOL_CALL_AUTH_ERROR,
 ];
+
+/// Payload for [`START`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartPayload {
+    /// Current local `mcp serve` transport. The oracle emits the bare
+    /// low-cardinality transport string under the key `transport`.
+    pub transport: Verified,
+}
+
+/// Payload for [`AUTH_CONFIG_AUTHENTICATE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfigAuthenticatePayload {
+    pub was_authenticated: bool,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`AUTH_CONFIG_CLEAR`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfigClearPayload {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_BROWSER_OPEN`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthBrowserOpenPayload {
+    pub success: bool,
+    pub headless: bool,
+    pub platform: Verified,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_FLOW_START`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthFlowStartPayload {
+    pub flow_attempt_id: Verified,
+    pub is_oauth_flow: bool,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_FLOW_SUCCESS`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthFlowSuccessPayload {
+    pub flow_attempt_id: Verified,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_FLOW_ERROR`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthFlowErrorPayload {
+    pub flow_attempt_id: Verified,
+    pub reason: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_REFRESH_SUCCESS`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthRefreshSuccessPayload {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`OAUTH_REFRESH_FAILURE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthRefreshFailurePayload {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+    pub reason: Verified,
+}
+
+/// Payload for [`OAUTH_TOKEN_PERSIST_FAILED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthTokenPersistFailedPayload {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+    pub reason: Verified,
+}
+
+/// `tengu_mcp_oauth_issuer_echo_mismatch`'s `site`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthIssuerEchoSite {
+    Rfc9728Chain,
+    RefreshRediscovery,
+}
+
+impl OAuthIssuerEchoSite {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Rfc9728Chain => "rfc9728_chain",
+            Self::RefreshRediscovery => "refresh_rediscovery",
+        }
+    }
+}
+
+/// `tengu_mcp_oauth_issuer_echo_mismatch`'s `mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthIssuerEchoMode {
+    Observe,
+    Enforce,
+}
+
+impl OAuthIssuerEchoMode {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// `tengu_mcp_oauth_issuer_echo_mismatch`'s `originRelation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthIssuerOriginRelation {
+    CrossOrigin,
+    SameOrigin,
+    Unparseable,
+}
+
+impl OAuthIssuerOriginRelation {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::CrossOrigin => "cross_origin",
+            Self::SameOrigin => "same_origin",
+            Self::Unparseable => "unparseable",
+        }
+    }
+}
+
+/// `tengu_mcp_oauth_issuer_echo_mismatch`'s `outcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthIssuerEchoOutcome {
+    Denied,
+    Proceeded,
+}
+
+impl OAuthIssuerEchoOutcome {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Proceeded => "proceeded",
+        }
+    }
+}
+
+/// Payload for [`OAUTH_ISSUER_ECHO_MISMATCH`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthIssuerEchoMismatchPayload {
+    pub site: OAuthIssuerEchoSite,
+    pub mode: OAuthIssuerEchoMode,
+    pub origin_relation: OAuthIssuerOriginRelation,
+    pub outcome: OAuthIssuerEchoOutcome,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub mismatch_facets: Vec<Verified>,
+    pub expected_issuer_hash: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_issuer_hash: Option<Verified>,
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`SERVER_NEEDS_AUTH`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerNeedsAuthPayload {
+    pub transport_type: Verified,
+    pub mcp_server_key_hash: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Verified>,
+}
+
+/// `tengu_mcp_tool_call_auth_error`'s `authErrorKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallAuthErrorKind {
+    NotConnected,
+    TokenExpired,
+}
+
+impl ToolCallAuthErrorKind {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::NotConnected => "not_connected",
+            Self::TokenExpired => "token_expired",
+        }
+    }
+}
+
+/// Payload for [`TOOL_CALL_AUTH_ERROR`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCallAuthErrorPayload {
+    pub error_code: Verified,
+    pub transport_type: Verified,
+    pub auth_error_kind: ToolCallAuthErrorKind,
+    pub mcp_server_key_hash: Verified,
+}
 
 /// Oracle `HT(name, config)` — decides whether `mcpServerName` is attached
 /// to `tengu_mcp_tools_listed` / `tengu_mcp_degraded` at all (see the module
@@ -210,6 +542,37 @@ pub struct ServerConfigInvalidPayload {
     pub source: ConfigInvalidSource,
 }
 
+/// Payload for [`SERVER_CONNECTION_SUCCEEDED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConnectionSucceededPayload {
+    pub connection_duration_ms: u64,
+    pub transport_type: Verified,
+    pub scope: Verified,
+    pub is_plugin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiation_mode: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_era: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiated_protocol_version: Option<Verified>,
+}
+
+/// Payload for [`SERVER_CONNECTION_FAILED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConnectionFailedPayload {
+    pub transport_type: Verified,
+    pub scope: Verified,
+    pub is_plugin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiation_mode: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<Verified>,
+}
+
 /// Payload for [`TOOLS_LISTED`]. See the module doc for the two fields the
 /// byte-alignment audit's guess did NOT hold for (`normalizedCount` /
 /// `keptCount`) — intentionally absent here.
@@ -270,6 +633,103 @@ pub struct DiscoverySourcePayload {
     pub entry_age_ms: Option<u64>,
 }
 
+/// `tengu_mcp_list_changed`'s `type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListChangedType {
+    Tools,
+    Prompts,
+    Resources,
+}
+
+impl ListChangedType {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::Prompts => "prompts",
+            Self::Resources => "resources",
+        }
+    }
+}
+
+/// Payload for [`LIST_CHANGED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListChangedPayload {
+    pub kind: ListChangedType,
+    /// Privacy-safe stable hash of the configured server key.
+    pub mcp_server_key_hash: Verified,
+    /// Refresh trigger (`notification` today; the oracle also uses a distinct
+    /// listen-reopen cause on the subscription recovery path).
+    pub cause: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_count: Option<u32>,
+}
+
+/// Payload for [`RESOURCE_TEMPLATES_FETCHED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceTemplatesFetchedPayload {
+    pub template_count: u32,
+}
+
+/// `tengu_mcp_listen_reopen`'s `outcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenReopenOutcome {
+    OpenedFromZero,
+    Reopened,
+    GaveUp,
+    BudgetExhausted,
+    Parked,
+}
+
+impl ListenReopenOutcome {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::OpenedFromZero => "opened_from_zero",
+            Self::Reopened => "reopened",
+            Self::GaveUp => "gave_up",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Parked => "parked",
+        }
+    }
+}
+
+/// `tengu_mcp_listen_reopen`'s `trigger`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenReopenTrigger {
+    Connect,
+    Remote,
+    Graceful,
+}
+
+impl ListenReopenTrigger {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Remote => "remote",
+            Self::Graceful => "graceful",
+        }
+    }
+}
+
+/// Payload for [`LISTEN_REOPEN`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenReopenPayload {
+    pub mcp_server_key_hash: Verified,
+    pub outcome: ListenReopenOutcome,
+    pub attempts: u32,
+    pub trigger: ListenReopenTrigger,
+}
+
 /// `tengu_mcp_degraded`'s `reason`.
 ///
 /// An earlier revision called the eight tool-schema values below "the eight
@@ -284,14 +744,13 @@ pub struct DiscoverySourcePayload {
 /// | `connected_zero_tools` | `yn` @182316780, its FIRST statement | ✅ |
 /// | `tool_schema_normalized` … `tool_property_key_invalid_gated` (7) | `yn` tail | ✅ |
 /// | `schema_validator_unavailable` | `qr()` @182172950 | ✅ |
-/// | `tools_list_failed` | @182328200 | ❌ open |
-/// | `resources_list_failed` / `prompts_list_failed` | `_n` @182328873 | ❌ open |
+/// | `tools_list_failed` | @182328200 | ✅ |
+/// | `resources_list_failed` / `prompts_list_failed` | `_n` @182328873 | ✅ |
 ///
 /// The missed `connected_zero_tools` sat 20 lines ABOVE the seven counters
 /// the module doc transcribed verbatim, inside the very function that doc
 /// claimed to have traced — which is exactly how a wrong completeness claim
-/// hides a gap. The three remaining reasons are list-RPC failure paths this
-/// port does not yet classify; they are an open gap, not a closed set.
+/// hid a gap.
 ///
 /// `#[non_exhaustive]` matches this module's established convention
 /// ([`ConfigInvalidSource`]).
@@ -311,6 +770,15 @@ pub enum DegradedReason {
     /// is NOT `connected_zero_tools`, it is one of the drop reasons below.
     /// Carries none of the count fields.
     ConnectedZeroTools,
+    /// `tools/list` failed after the transport initialized. Carries none of
+    /// the count fields.
+    ToolsListFailed,
+    /// `resources/list` failed after the transport initialized. Carries none
+    /// of the count fields.
+    ResourcesListFailed,
+    /// `prompts/list` failed after the transport initialized. Carries none of
+    /// the count fields.
+    PromptsListFailed,
     /// A root-combinator schema was flattened (the normalize gate was ON).
     /// Carries [`DegradedPayload::normalized_count`].
     ToolSchemaNormalized,
@@ -350,6 +818,9 @@ impl DegradedReason {
     pub fn wire_str(self) -> &'static str {
         match self {
             Self::ConnectedZeroTools => "connected_zero_tools",
+            Self::ToolsListFailed => "tools_list_failed",
+            Self::ResourcesListFailed => "resources_list_failed",
+            Self::PromptsListFailed => "prompts_list_failed",
             Self::ToolSchemaNormalized => "tool_schema_normalized",
             Self::ToolSchemaNormalizeGated => "tool_schema_normalize_gated",
             Self::ToolSchemaUnsupported => "tool_schema_unsupported",

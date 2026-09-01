@@ -379,7 +379,9 @@ impl Tool for FileWriteTool {
         // still requires a prior Read.
         let prior_snapshot = match write_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => None,
+            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
+                None
+            }
             Err(error @ platform_api::rooted_fs::RootedFsError::LeafSymlink)
             | Err(error @ platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged)
             | Err(error @ platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {

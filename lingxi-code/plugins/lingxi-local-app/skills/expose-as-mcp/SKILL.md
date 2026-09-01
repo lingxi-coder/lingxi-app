@@ -24,16 +24,18 @@ validation cannot produce a safe candidate, and never bypass Host authority.
 
 ## The three situations
 
-The Host-owned manifest field that settles this is schema v3's
+The Host-owned manifest field that settles this is schema v4's
 `active_mcp_catalog: Option<AppMcpCatalogRef>` (§16.1), alongside
 `runtime_profile` / `dependency_snapshot` / `surface`. Classify by this
 Host-reloaded field; do not infer catalog state from caller arguments:
 
-- **Initial** — the app has no active catalog yet (`active_mcp_catalog` is
-  `None`). The proposal folds into the single unified create-confirmation
-  receipt (§17.3) — there is no separate MCP approval sheet at create time.
-- **Update** — the app already has an active catalog, and the request came
-  from changing the app itself (source, data schema, Flow, dependencies).
+- **Initial** — the already-scaffolded app has no active catalog yet
+  (`active_mcp_catalog` is `None`). App creation never runs MCP authoring;
+  this explicit setup request uses its own MCP proposal approval sheet, then
+  QA/promotes the first catalog while leaving service exposure disabled.
+- **Update** — the app already has an active catalog, and the user explicitly
+  asked to reconcile MCP after changing the app itself (source, data schema,
+  Flow, dependencies). Ordinary app updates do not invoke this workflow.
   If the resulting `approval_contract_sha256` (§12.2 — full tool surface,
   semantic Flow references, permission ceiling) is unchanged from the
   active catalog, no new MCP approval is created at all; if it changed, the

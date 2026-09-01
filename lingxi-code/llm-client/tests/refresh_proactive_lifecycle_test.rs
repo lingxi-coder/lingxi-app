@@ -5,6 +5,10 @@
 use async_trait::async_trait;
 use llm_client::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
+use platform_api::http::SseStream;
+use platform_api::{
+    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
+};
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
 use std::pin::Pin;
@@ -13,8 +17,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsSink, LogEventMetadata};
 use tokio::sync::Mutex;
-use platform_api::http::SseStream;
-use platform_api::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct CountingTransport {
     calls: Arc<AtomicU32>,

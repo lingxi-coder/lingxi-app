@@ -35,6 +35,10 @@ struct CatalogTemplate {
     not_for: Vec<String>,
     contract_sha256: String,
     inventory_sha256: String,
+    #[serde(default)]
+    mcp_default_enabled: bool,
+    #[serde(default)]
+    mcp_suggestions: Vec<String>,
     available: bool,
 }
 
@@ -55,6 +59,10 @@ pub(crate) struct TemplateCatalogEntry {
     pub(crate) recommended_for: Vec<String>,
     #[serde(rename = "notFor")]
     pub(crate) not_for: Vec<String>,
+    #[serde(rename = "mcpDefaultEnabled")]
+    pub(crate) mcp_default_enabled: bool,
+    #[serde(rename = "mcpSuggestions")]
+    pub(crate) mcp_suggestions: Vec<String>,
 }
 
 /// Host-verified selection returned by `resolve_template_selection`.  This is
@@ -95,7 +103,7 @@ fn parse_catalog() -> Result<(CatalogFile, String), String> {
     let catalog_bytes = crate::builtin_bundle::compiled_plugin_catalog_bytes();
     let catalog: CatalogFile = serde_json::from_slice(catalog_bytes)
         .map_err(|error| format!("verified Local App catalog is malformed: {error}"))?;
-    if catalog.schema_version != 1 || catalog.toolchain_key.trim().is_empty() {
+    if !matches!(catalog.schema_version, 1 | 2) || catalog.toolchain_key.trim().is_empty() {
         return Err("verified Local App catalog has an unsupported schema or toolchain".into());
     }
     if catalog.templates.is_empty() {
@@ -118,6 +126,8 @@ pub(crate) fn catalog_view() -> Result<TemplateCatalogView, String> {
             summary: template.summary,
             recommended_for: template.recommended_for,
             not_for: template.not_for,
+            mcp_default_enabled: template.mcp_default_enabled,
+            mcp_suggestions: template.mcp_suggestions,
         })
         .collect();
     Ok(TemplateCatalogView {
@@ -459,22 +469,49 @@ mod tests {
 
     #[test]
     fn semantic_view_redacts_host_identity_and_unavailable_babylon() {
+        fn assert_no_host_only_keys(value: &Value) {
+            match value {
+                Value::Object(object) => {
+                    for forbidden in [
+                        "family",
+                        "revision",
+                        "contractSha256",
+                        "inventorySha256",
+                        "path",
+                    ] {
+                        assert!(
+                            !object.contains_key(forbidden),
+                            "semantic view leaked key {forbidden}"
+                        );
+                    }
+                    for child in object.values() {
+                        assert_no_host_only_keys(child);
+                    }
+                }
+                Value::Array(values) => {
+                    for child in values {
+                        assert_no_host_only_keys(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let view = catalog_view().expect("checked-in catalog");
         assert_eq!(view.templates.len(), 4);
-        let encoded = serde_json::to_string(&view).expect("view JSON");
-        for forbidden in [
-            "family",
-            "revision",
-            "contractSha256",
-            "inventorySha256",
-            "path",
-        ] {
-            assert!(
-                !encoded.contains(forbidden),
-                "semantic view leaked {forbidden}"
-            );
-        }
+        let value = serde_json::to_value(&view).expect("view JSON");
+        assert_no_host_only_keys(&value);
+        let encoded = value.to_string();
         assert!(!encoded.contains("babylon-3d-r1"));
+        assert!(encoded.contains("react-dom-r2"));
+        assert!(view
+            .templates
+            .iter()
+            .all(|template| !template.mcp_default_enabled));
+        assert!(view
+            .templates
+            .iter()
+            .all(|template| !template.mcp_suggestions.is_empty()));
     }
 
     #[test]
@@ -489,7 +526,7 @@ mod tests {
             "app_id": app_id,
             "workflow_run_id": run_id,
             "catalog_digest": view.catalog_digest,
-            "template_id": "react-dom-r1",
+            "template_id": "react-dom-r2",
             "reason": "ordinary form",
             "rejected": [],
             "selector_capability": capability.clone(),
@@ -528,7 +565,7 @@ mod tests {
                 "app_id": app_id,
                 "workflow_run_id": run_id,
                 "catalog_digest": view.catalog_digest,
-                "template_id": "react-dom-r1",
+                "template_id": "react-dom-r2",
                 "reason": "ordinary form",
                 "rejected": [],
                 "selector_capability": capability,

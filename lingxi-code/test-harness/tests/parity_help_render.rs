@@ -19,17 +19,18 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_81_lines() {
-    // 1 header + 80 VISIBLE commands = 81 lines (each `\n`-terminated).
+fn golden_has_79_lines() {
+    // 1 header + 78 VISIBLE commands = 79 lines (each `\n`-terminated).
     // The hidden/disabled commands (is_palette_hidden) are filtered out,
     // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
-    // (108 builtins − 28 hidden = 80, no DISABLE_*_COMMAND env set.)
+    // (86 builtins − 8 hidden = 78, no DISABLE_*_COMMAND env set.)
     // SLASH-06 moved `bug` into the visible set and dropped the phantom
     // `share`; SLASH-14 then moved `/version` OUT of it — both of its oracle
     // objects @296268759 carry `isEnabled:()=>!1`, so claude-code's own
-    // `!$te(c)` filter never lists it. SLASH-13 then raised the builtin total
-    // to 108 with the ungated `/powerup` object (@296124285).
-    assert_eq!(GOLDEN.matches('\n').count(), 81);
+    // `!$te(c)` filter never lists it. The current 2.1.252 audit removes the
+    // stale internal command objects while retaining the ungated `/powerup`
+    // object and its lesson handler.
+    assert_eq!(GOLDEN.matches('\n').count(), 79);
 }
 
 #[test]

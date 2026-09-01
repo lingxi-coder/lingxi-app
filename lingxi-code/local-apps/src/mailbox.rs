@@ -16,10 +16,10 @@
 use crate::error::AppError;
 use crate::manifest::AppLayout;
 use crate::types::APPS_SCHEMA_VERSION;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use platform_api::FsError;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Most events one app may retain. The oldest go first.
 pub const MAX_MAILBOX_EVENTS: usize = 64;

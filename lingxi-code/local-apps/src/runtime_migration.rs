@@ -4,10 +4,10 @@ use crate::error::AppError;
 use crate::ids;
 use crate::manifest::{AppLayout, AppRuntimeProfileBinding};
 use crate::types::APPS_SCHEMA_VERSION;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use platform_api::FsError;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const JOURNAL_FILE: &str = "runtime-profile-migration.json";
 const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
@@ -339,7 +339,10 @@ mod tests {
         let error = load_runtime_profile_migration_journal(&layout)
             .expect_err("old schema journal must be rejected");
         assert_eq!(error.code(), crate::error::AppErrorCode::StorageCorrupt);
-        assert!(error.to_string().contains("schemaVersion 2 is unsupported"));
+        assert!(error.to_string().contains(&format!(
+            "schemaVersion {} is unsupported",
+            APPS_SCHEMA_VERSION - 1
+        )));
     }
 
     #[test]

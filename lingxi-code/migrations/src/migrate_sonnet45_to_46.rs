@@ -91,7 +91,9 @@ pub async fn run(env: &MigrationEnv) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_update::{read_settings_map, settings_path, SettingsSource};
+    use crate::settings_update::{
+        force_rename_failure_for_test, read_settings_map, settings_path, SettingsSource,
+    };
     use crate::test_support::temp_config;
     use llm_client::oauth::anthropic::limits::SubscriptionType;
 
@@ -222,21 +224,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn settings_write_failure_skips_timestamp() {
-        use std::os::unix::fs::PermissionsExt;
         let t = temp_config();
         std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
         let sp = settings_path(SettingsSource::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
-        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o444)).unwrap();
-        // Skip when perms don't bite (e.g. running as root).
-        if std::fs::OpenOptions::new().append(true).open(&sp).is_ok() {
-            return;
-        }
+        let _failure = force_rename_failure_for_test(&sp);
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env).await;
-        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
         // write failed → model unchanged…
         assert_eq!(
             read_settings_map(&sp).unwrap()["model"],

@@ -24,6 +24,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
@@ -36,7 +37,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct UnusedHttp;
 #[async_trait]
@@ -44,7 +44,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

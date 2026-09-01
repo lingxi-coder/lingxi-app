@@ -65,7 +65,7 @@
 //!   timeout, blocking, priority) — §19.1's "parse behaviour", carried
 //!   unsubstituted at parse time;
 //! * the MCP servers' parsed [`McpSpec`] (command, args AND env — the args
-//!   are where `${LINGXI_PLUGIN_DATA}` / `${LINGXI_PROJECT_DIR}` appear, so
+//!   carry the plugin-data and project-dir placeholders, so
 //!   dropping them would leave only one of the five brand pairs load-bearing);
 //! * the LSP servers' parsed [`LspSpec`].
 //!
@@ -585,7 +585,7 @@ fn assert_carries_no_lingxi_token(field: &str, value: &str) {
 /// Guard against the ambient environment silently making a compared surface
 /// vacuous. The parsed hook / MCP / LSP strings are only load-bearing for a
 /// brand pair while they still SPELL it: if the process running the test
-/// happens to export `LINGXI_PLUGIN_DATA`, the parser substitutes it on both
+/// happens to export the plugin-data environment variable, the parser substitutes it on both
 /// sides and that pair quietly stops being compared at all. Asserting the
 /// token is present turns that into a named failure instead of lost coverage.
 fn assert_surface_spells(surface: &str, value: &str, tokens: &[&str]) {
@@ -765,11 +765,11 @@ async fn oracle_and_lingxi_agree_on_component_inventory() {
     //   output_styles = ["output-styles/concise.md"]
     //   workflows     = ["workflows/build.js"]
     //   component_files = the five bodies above, verbatim
-    //   hooks         = [PreToolUse "*" -> ${LINGXI_PLUGIN_ROOT}/hooks/run.sh]
-    //   mcp_servers   = {"sample": ${LINGXI_PLUGIN_ROOT}/bin/server
-    //                      + args referencing ${LINGXI_PLUGIN_DATA} and
-    //                        ${LINGXI_PROJECT_DIR}}
-    //   lsp_servers   = {"sample-lsp": ${LINGXI_PLUGIN_ROOT}/bin/sample-lsp}
+    //   hooks         = [PreToolUse "*" -> <plugin-root>/hooks/run.sh]
+    //   mcp_servers   = {"sample": <plugin-root>/bin/server
+    //                      + args referencing <plugin-data> and
+    //                        <project-dir>}
+    //   lsp_servers   = {"sample-lsp": <plugin-root>/bin/sample-lsp}
     assert_eq!(
         oracle_inventory, lingxi_inventory,
         "oracle-normalized inventory diverged from the LingXi inventory:\n\

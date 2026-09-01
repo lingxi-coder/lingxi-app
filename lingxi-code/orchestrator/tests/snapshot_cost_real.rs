@@ -11,11 +11,11 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use platform_api::OrchestratorHandle;
 use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
-use platform_api::OrchestratorHandle;
 
 fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
     LlmResponse {

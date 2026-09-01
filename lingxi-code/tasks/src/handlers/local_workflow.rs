@@ -38,8 +38,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
 use platform_api::filesystem::FileSystem;
 use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
@@ -47,6 +45,8 @@ use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use serde_json::Value;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -627,7 +627,9 @@ fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
 ///
 /// The binary projects opts to ONLY `["schema","model","effort","isolation","agentType"]`.
 /// LingXi additionally treats `modelProfile` as identity because its multi-provider
-/// routing allows two providers to expose the same wire model id. The snake-case
+/// routing allows two providers to expose the same wire model id, and
+/// `disallowedTools` because a plugin workflow may narrow one agent definition
+/// for a particular stage. The snake-case
 /// compatibility alias is canonicalized to `modelProfile`, then the projected value
 /// is serialized with a recursive key-sorter. In JSON there are no functions, so we
 /// skip null/absent.
@@ -648,6 +650,7 @@ fn normalize_opts_for_chain_key(opts: &Value) -> String {
         "effort",
         "isolation",
         "agentType",
+        "disallowedTools",
     ];
     let mut map = serde_json::Map::new();
     if let Some(obj) = opts.as_object() {
@@ -1333,12 +1336,23 @@ fn make_request(
         None
     };
 
-    let additional_disallowed_tools = if has_agent_type {
+    let mut additional_disallowed_tools = if has_agent_type {
         // Cases 3/4: union disallowed with {SendUserMessage, Agent, Workflow}
         agent::builtins::workflow_subagent_disallowed()
     } else {
         vec![]
     };
+    if let Some(stage_denies) = opts.get("disallowedTools").and_then(Value::as_array) {
+        for name in stage_denies.iter().filter_map(Value::as_str) {
+            if !name.is_empty()
+                && !additional_disallowed_tools
+                    .iter()
+                    .any(|value| value == name)
+            {
+                additional_disallowed_tools.push(name.to_string());
+            }
+        }
+    }
 
     SubagentSpawnRequest {
         subagent_type,

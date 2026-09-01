@@ -11,14 +11,14 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
-use std::sync::Arc;
 use platform_api::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidAudioListenRequest,
     AndroidAudioSpeakRequest, AndroidAutomationError, AndroidGlobalAction, AndroidNodeQuery,
     AndroidUiAutomation, AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS,
     MAX_ANDROID_AUDIO_SPEAK_CHARS, MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_WAIT_MS,
 };
+use serde_json::{json, Value};
+use std::sync::Arc;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -246,7 +246,9 @@ fn ephemeral_audio_result(mut data: Value) -> ToolCallResult {
     action_result(data)
 }
 
-fn screenshot_result(screenshot: platform_api::AndroidScreenshot) -> Result<ToolCallResult, ToolError> {
+fn screenshot_result(
+    screenshot: platform_api::AndroidScreenshot,
+) -> Result<ToolCallResult, ToolError> {
     let original_size = u64::try_from(screenshot.png_bytes.len()).unwrap_or(u64::MAX);
     let processed = tool_api::util::image_budget::process_image(screenshot.png_bytes)
         .map_err(ToolError::Internal)?;

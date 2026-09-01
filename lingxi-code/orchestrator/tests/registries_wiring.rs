@@ -9,15 +9,15 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use protocol::McpConnectionId as ConnId;
-use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use protocol::McpConnectionId as ConnId;
+use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 struct StubTransport;
 

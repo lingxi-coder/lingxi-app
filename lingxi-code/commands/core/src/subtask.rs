@@ -48,9 +48,9 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{ForkOutcome, OrchestratorHandle};
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use platform_api::{ForkOutcome, OrchestratorHandle};
 
 /// `${V9}` — the subagent-spawn success icon, U+2442 (OCR-FORK
 /// control-picture glyph). Byte-exact with the claude-code v2.1.212 binary

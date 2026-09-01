@@ -7,6 +7,11 @@
 
 use async_trait::async_trait;
 use local_apps::{AppError, AppService};
+use platform_api::{
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,15 +20,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
-use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
 
 pub const LOCAL_APPS_REGISTRY_KEY: &str = "local_apps";
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 const LOCAL_APP_CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const LOCAL_APP_WIDGET_MIME: &str = "text/html;profile=mcp-app";
+const LOCAL_APP_WIDGET_FILE: &str = "mcp-app.html";
+pub(crate) const LOCAL_APP_WIDGET_DIR: &str = "resources";
 
 /// Host operations that are deliberately outside the catalog state machine.
 ///
@@ -358,6 +361,35 @@ pub struct LocalAppAuditEntry {
 struct ExportConnectionScope {
     conversation_id: String,
     scope: mcp::registry::ConversationExport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportManagedState {
+    registry_attached: bool,
+    visible: bool,
+    enabled_tools: Option<HashSet<String>>,
+    resource: Option<mcp::registry::ManagedLocalAppResource>,
+}
+
+impl Default for ExportManagedState {
+    fn default() -> Self {
+        Self {
+            registry_attached: false,
+            visible: true,
+            enabled_tools: None,
+            resource: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalAppResourceHandle {
+    uri: String,
+    name: String,
+    description: Option<String>,
+    mime_type: String,
+    meta: Option<Value>,
+    resource_sha256: String,
 }
 
 struct LocalAppCallState {
@@ -800,6 +832,184 @@ impl LocalAppsMcpTransport {
             }))
     }
 
+    async fn export_managed_state(&self, app_id: &str) -> Result<ExportManagedState, McpError> {
+        let Some(registry) = self.registry.get().and_then(std::sync::Weak::upgrade) else {
+            return Ok(ExportManagedState::default());
+        };
+        let Some(_server) = registry.managed_local_app(app_id).await else {
+            return Ok(ExportManagedState {
+                registry_attached: true,
+                visible: false,
+                ..ExportManagedState::default()
+            });
+        };
+        let runtime = registry.managed_local_app_runtime(app_id).await;
+        Ok(ExportManagedState {
+            registry_attached: true,
+            visible: runtime.as_ref().is_none_or(|runtime| runtime.enabled),
+            enabled_tools: runtime
+                .as_ref()
+                .and_then(|runtime| runtime.enabled_tools.as_ref())
+                .map(|tools| tools.iter().cloned().collect()),
+            resource: runtime.and_then(|runtime| runtime.resource),
+        })
+    }
+
+    fn resource_sha_for_app_uri(app_id: &str, uri: &str) -> Option<String> {
+        let rest = uri.strip_prefix("ui://local-app/")?;
+        let mut parts = rest.split('/');
+        let uri_app_id = parts.next()?;
+        let resource_sha256 = parts.next()?;
+        let file = parts.next()?;
+        if parts.next().is_some()
+            || uri_app_id != app_id
+            || file != LOCAL_APP_WIDGET_FILE
+            || resource_sha256.len() != 64
+            || resource_sha256
+                .bytes()
+                .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        Some(resource_sha256.to_string())
+    }
+
+    fn tool_meta_resource_uri(definition: &platform_api::McpToolDefinitionDto) -> Option<String> {
+        let meta = definition.meta.as_ref()?;
+        meta.get("ui")
+            .and_then(Value::as_object)
+            .and_then(|ui| ui.get("resourceUri"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                meta.get("openai/outputTemplate")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+    }
+
+    fn active_catalog_resource_from_catalog(
+        app_id: &str,
+        app_name: &str,
+        catalog: &Value,
+    ) -> Result<Option<LocalAppResourceHandle>, McpError> {
+        if let Some(resources) = catalog.get("resources").and_then(Value::as_array) {
+            for resource in resources {
+                let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(resource_sha256) = Self::resource_sha_for_app_uri(app_id, uri) else {
+                    continue;
+                };
+                return Ok(Some(LocalAppResourceHandle {
+                    uri: uri.to_string(),
+                    name: resource
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(app_name)
+                        .to_string(),
+                    description: resource
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    mime_type: resource
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or(LOCAL_APP_WIDGET_MIME)
+                        .to_string(),
+                    meta: resource.get("_meta").cloned(),
+                    resource_sha256,
+                }));
+            }
+        }
+        let entries = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                McpError::Internal("active Local App catalog has no tools array".into())
+            })?;
+        for entry in entries {
+            let definition_value = entry.get("definition").unwrap_or(entry);
+            let definition: platform_api::McpToolDefinitionDto =
+                serde_json::from_value(definition_value.clone()).map_err(|error| {
+                    McpError::Internal(format!(
+                        "active Local App tool definition is invalid: {error}"
+                    ))
+                })?;
+            let Some(uri) = Self::tool_meta_resource_uri(&definition) else {
+                continue;
+            };
+            let Some(resource_sha256) = Self::resource_sha_for_app_uri(app_id, &uri) else {
+                continue;
+            };
+            let name = definition
+                .title
+                .clone()
+                .or_else(|| definition.description.clone())
+                .unwrap_or_else(|| format!("{app_name} widget"));
+            return Ok(Some(LocalAppResourceHandle {
+                uri,
+                name,
+                description: definition.description.clone(),
+                mime_type: LOCAL_APP_WIDGET_MIME.to_string(),
+                meta: None,
+                resource_sha256,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn active_catalog_resource(
+        &self,
+        managed: &ExportManagedState,
+        manifest: &local_apps::AppManifest,
+        layout: &local_apps::AppLayout,
+    ) -> Result<Option<LocalAppResourceHandle>, McpError> {
+        if !managed.visible {
+            return Ok(None);
+        }
+        if let Some(resource) = managed.resource.as_ref() {
+            let Some(resource_sha256) =
+                Self::resource_sha_for_app_uri(&manifest.app_id, &resource.uri)
+            else {
+                return Err(McpError::Internal(
+                    "managed Local App resource URI is invalid".into(),
+                ));
+            };
+            return Ok(Some(LocalAppResourceHandle {
+                uri: resource.uri.clone(),
+                name: resource.name.clone(),
+                description: resource.description.clone(),
+                mime_type: resource
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| LOCAL_APP_WIDGET_MIME.to_string()),
+                meta: resource.meta.clone(),
+                resource_sha256,
+            }));
+        }
+        let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+            return Ok(None);
+        };
+        let catalog = local_apps::load_mcp_catalog(layout, &active.catalog_sha256)
+            .map_err(|_| McpError::Internal("active Local App catalog unavailable".into()))?;
+        Self::active_catalog_resource_from_catalog(&manifest.app_id, &manifest.name, &catalog)
+    }
+
+    fn effective_listed_tool_surface_sha256(
+        managed: &ExportManagedState,
+        active: &local_apps::AppMcpCatalogRef,
+    ) -> Result<String, McpError> {
+        let Some(enabled_tools) = managed.enabled_tools.as_ref() else {
+            return Ok(active.tool_surface_sha256.clone());
+        };
+        let mut enabled_tools: Vec<String> = enabled_tools.iter().cloned().collect();
+        enabled_tools.sort();
+        local_apps::effective_tool_surface_sha256(&active.tool_surface_sha256, &enabled_tools)
+            .map_err(|error| McpError::Internal(error.to_string()))
+    }
+
     async fn wait_cancelled(cancelled: Arc<AtomicBool>) {
         while !cancelled.load(Ordering::Acquire) {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -981,6 +1191,10 @@ impl LocalAppsMcpTransport {
             tool_name: name.to_string(),
             description: description.to_string(),
             input_schema,
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: String::new(),
             search_hint: Some("local app".into()),
             always_load: Some(true),
@@ -1184,12 +1398,13 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "approve_mcp_proposal",
-                "Approve one prepared Local App MCP candidate and mint its one-shot promote receipt. Only the current app/run-bound prepared candidate can be approved.",
+                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
-                    "approval_contract_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
-                },"required":["app_id","workflow_run_id","approval_contract_sha256"],"additionalProperties":false}),
+                    "approval_contract_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "create_without_mcp":{"type":"boolean","description":"Initial-create-only path. The Host creates an empty approval candidate; MCP remains unconfigured and disabled."}
+                },"required":["app_id","workflow_run_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "qa_mcp_candidate",
@@ -1218,7 +1433,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the confirmed display name, one-line brief, and Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged template snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the confirmed display name, one-line brief, and Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed."},
@@ -1435,9 +1650,13 @@ impl LocalAppsMcpTransport {
     fn active_catalog_tools(
         &self,
         scope: &mcp::registry::ConversationExport,
+        managed: &ExportManagedState,
         manifest: &local_apps::AppManifest,
         layout: &local_apps::AppLayout,
     ) -> Result<Vec<McpToolDto>, McpError> {
+        if !managed.visible {
+            return Ok(Vec::new());
+        }
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Ok(Vec::new());
         };
@@ -1459,6 +1678,13 @@ impl LocalAppsMcpTransport {
                         "active Local App tool definition is invalid: {error}"
                     ))
                 })?;
+            if managed
+                .enabled_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.contains(&definition.name))
+            {
+                continue;
+            }
             definitions.push(definition.clone());
             let full_name = scope.tool_full_name(&definition.name)?;
             let Some(ceiling) = entry
@@ -1482,6 +1708,10 @@ impl LocalAppsMcpTransport {
                 tool_name: definition.name.clone(),
                 description: definition.description.clone().unwrap_or_default(),
                 input_schema: definition.input_schema.clone(),
+                output_schema: definition.output_schema.clone(),
+                annotations: definition.annotations.clone(),
+                icons: definition.icons.clone(),
+                meta: definition.meta.clone(),
                 full_name,
                 search_hint: Some("local app".into()),
                 always_load: None,
@@ -1500,10 +1730,14 @@ impl LocalAppsMcpTransport {
     fn active_catalog_entry(
         &self,
         scope: &mcp::registry::ConversationExport,
+        managed: &ExportManagedState,
         manifest: &local_apps::AppManifest,
         layout: &local_apps::AppLayout,
         tool_name: &str,
     ) -> Result<Option<Value>, McpError> {
+        if !managed.visible {
+            return Ok(None);
+        }
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Ok(None);
         };
@@ -1523,6 +1757,13 @@ impl LocalAppsMcpTransport {
                         "active Local App tool definition is invalid: {error}"
                     ))
                 })?;
+            if managed
+                .enabled_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.contains(&definition.name))
+            {
+                continue;
+            }
             if definition.name == tool_name {
                 // Calling the identity helper also rejects a catalog tool whose
                 // name cannot be represented without a separator collision.
@@ -1688,6 +1929,10 @@ impl LocalAppsMcpTransport {
             .record(&scope.app_id)
             .await
             .map_err(|error| McpError::Internal(error.to_string()))?;
+        let managed = self.export_managed_state(&scope.app_id).await?;
+        if managed.registry_attached && !managed.visible {
+            return Err(McpError::ToolNotFound(tool.into()));
+        }
         let layout = local_apps::AppLayout::new(self.root.clone(), scope.app_id.clone())
             .map_err(|error| McpError::Internal(error.to_string()))?;
         let manifest = local_apps::load_manifest(&layout)
@@ -1695,7 +1940,9 @@ impl LocalAppsMcpTransport {
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Err(McpError::ToolNotFound(tool.into()));
         };
-        if active.tool_surface_sha256 != scope.listed_tool_surface_sha256 {
+        let effective_tool_surface_sha256 =
+            Self::effective_listed_tool_surface_sha256(&managed, active)?;
+        if effective_tool_surface_sha256 != scope.listed_tool_surface_sha256 {
             return Ok(Self::tool_error(
                 "tool_surface_stale: refresh tools/list before calling this Local App",
             ));
@@ -1704,7 +1951,9 @@ impl LocalAppsMcpTransport {
             .strip_prefix("mcp__")
             .and_then(|value| value.strip_prefix(&format!("{}__", scope.server_name())))
             .unwrap_or(tool);
-        let Some(entry) = self.active_catalog_entry(&scope, &manifest, &layout, raw_name)? else {
+        let Some(entry) =
+            self.active_catalog_entry(&scope, &managed, &manifest, &layout, raw_name)?
+        else {
             return Err(McpError::ToolNotFound(tool.into()));
         };
         let definition_value = entry.get("definition").unwrap_or(&entry);
@@ -1731,6 +1980,12 @@ impl LocalAppsMcpTransport {
             Ok(guard) => guard,
             Err(result) => return Ok(result),
         };
+        // Resolve every fallible transport/host dependency before acquiring
+        // the exposure lease. Once `begin_local_app_call` succeeds, all exits
+        // below must pass through `end_local_app_call` so disconnect races do
+        // not strand an app at a non-zero in-flight count.
+        let cancellation = self.cancellation_for(conn.connection_id)?;
+        let host = Arc::clone(self.host()?);
         let registry = self.registry.get().and_then(std::sync::Weak::upgrade);
         if let Some(registry) = registry.as_ref() {
             registry
@@ -1753,11 +2008,10 @@ impl LocalAppsMcpTransport {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&request).unwrap_or_default())
         );
-        let cancellation = self.cancellation_for(conn.connection_id)?;
         let (result, cancelled) = tokio::select! {
             outcome = tokio::time::timeout(
                 LOCAL_APP_CALL_TIMEOUT,
-                self.host()?.execute_mcp_flow(request),
+                host.execute_mcp_flow(request),
             ) => {
                 match outcome {
                     Ok(Ok(value)) => {
@@ -2526,7 +2780,11 @@ impl LocalAppsMcpTransport {
                     .join(format!("{log}.log"));
                 let root = self.root.clone();
                 let body = match tokio::task::spawn_blocking(move || {
-                    platform_api::rooted_fs::read_to_string_limited(&root, &relative, 16 * 1024 * 1024)
+                    platform_api::rooted_fs::read_to_string_limited(
+                        &root,
+                        &relative,
+                        16 * 1024 * 1024,
+                    )
                 })
                 .await
                 .map_err(|error| McpError::Internal(format!("log reader failed: {error}")))?
@@ -2625,9 +2883,10 @@ impl McpTransport for LocalAppsMcpTransport {
 
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         self.ensure_connection(conn)?;
+        let export_scope = self.export_scope_for_connection(conn.connection_id)?;
         Ok(ServerCapabilitiesDto {
             tools: true,
-            resources: false,
+            resources: export_scope.is_some(),
             prompts: false,
             logging: false,
             directory_read: false,
@@ -2635,10 +2894,14 @@ impl McpTransport for LocalAppsMcpTransport {
             // does not yet expose a nested tools capability. Preserve the
             // standard listChanged bit in the experimental map until the
             // protocol DTO can grow that field without a major bump.
-            experimental: std::collections::HashMap::from([(
-                "tools.listChanged".into(),
-                Value::Bool(true),
-            )]),
+            experimental: [("tools.listChanged".into(), Value::Bool(true))]
+                .into_iter()
+                .chain(
+                    export_scope
+                        .is_some()
+                        .then_some(("resources.listChanged".into(), Value::Bool(true))),
+                )
+                .collect::<std::collections::HashMap<_, _>>(),
             extensions: std::collections::HashMap::new(),
         })
     }
@@ -2651,19 +2914,27 @@ impl McpTransport for LocalAppsMcpTransport {
                 .record(&export_scope.scope.app_id)
                 .await
                 .map_err(|error| McpError::Internal(error.to_string()))?;
+            let managed = self
+                .export_managed_state(&export_scope.scope.app_id)
+                .await?;
+            if managed.registry_attached && !managed.visible {
+                return Ok(Vec::new());
+            }
             let layout =
                 local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
                     .map_err(|error| McpError::Internal(error.to_string()))?;
             let manifest = local_apps::load_manifest(&layout)
                 .map_err(|error| McpError::Internal(error.to_string()))?;
             if let Some(active) = manifest.active_mcp_catalog.as_ref() {
+                let effective_tool_surface_sha256 =
+                    Self::effective_listed_tool_surface_sha256(&managed, active)?;
                 if let Ok(mut scopes) = self.export_scopes.lock() {
                     if let Some(scope) = scopes.get_mut(&conn.connection_id) {
-                        scope.scope.listed_tool_surface_sha256 = active.tool_surface_sha256.clone();
+                        scope.scope.listed_tool_surface_sha256 = effective_tool_surface_sha256;
                     }
                 }
             }
-            return self.active_catalog_tools(&export_scope.scope, &manifest, &layout);
+            return self.active_catalog_tools(&export_scope.scope, &managed, &manifest, &layout);
         }
         // The static host operations are BUILTIN tools (`LocalApp*`) now, so the
         // MCP surface advertises only the DYNAMIC per-app namespaces. Serving
@@ -2705,7 +2976,35 @@ impl McpTransport for LocalAppsMcpTransport {
         conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError> {
         self.ensure_connection(conn)?;
-        Ok(Vec::new())
+        let Some(export_scope) = self.export_scope_for_connection(conn.connection_id)? else {
+            return Ok(Vec::new());
+        };
+        let managed = self
+            .export_managed_state(&export_scope.scope.app_id)
+            .await?;
+        if managed.registry_attached && !managed.visible {
+            return Ok(Vec::new());
+        }
+        let service = self.service()?;
+        service
+            .record(&export_scope.scope.app_id)
+            .await
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let layout =
+            local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+        let manifest = local_apps::load_manifest(&layout)
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let Some(resource) = self.active_catalog_resource(&managed, &manifest, &layout)? else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![McpResourceDto {
+            uri: resource.uri,
+            name: resource.name,
+            description: resource.description,
+            mime_type: Some(resource.mime_type),
+            meta: resource.meta,
+        }])
     }
 
     async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
@@ -2720,7 +3019,10 @@ impl McpTransport for LocalAppsMcpTransport {
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         self.ensure_connection(conn)?;
-        if self.scope.export().is_some() {
+        if self
+            .export_scope_for_connection(conn.connection_id)?
+            .is_some()
+        {
             return self.call_conversation_export(conn, tool, input).await;
         }
         // MCP serves DYNAMIC per-app tools only. A static host operation
@@ -2735,12 +3037,65 @@ impl McpTransport for LocalAppsMcpTransport {
 
     async fn read_resource(
         &self,
-        _conn: &McpRawConnection,
-        _uri: &str,
+        conn: &McpRawConnection,
+        uri: &str,
     ) -> Result<McpResourceContentDto, McpError> {
-        Err(McpError::Internal(
-            "local apps exposes tools only; resources are disabled".into(),
-        ))
+        self.ensure_connection(conn)?;
+        let Some(export_scope) = self.export_scope_for_connection(conn.connection_id)? else {
+            return Err(McpError::Internal(
+                "local apps exposes widget resources only on conversation exports".into(),
+            ));
+        };
+        let managed = self
+            .export_managed_state(&export_scope.scope.app_id)
+            .await?;
+        if managed.registry_attached && !managed.visible {
+            return Err(McpError::Internal(
+                "Local App widget resource is no longer exposed".into(),
+            ));
+        }
+        let service = self.service()?;
+        service
+            .record(&export_scope.scope.app_id)
+            .await
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let layout =
+            local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+        let manifest = local_apps::load_manifest(&layout)
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let Some(resource) = self.active_catalog_resource(&managed, &manifest, &layout)? else {
+            return Err(McpError::Internal(
+                "Local App widget resource is unavailable".into(),
+            ));
+        };
+        if resource.uri != uri {
+            return Err(McpError::Internal(
+                "Local App widget resource was not found".into(),
+            ));
+        }
+        let relative = layout
+            .app_dir_rel()
+            .join(local_apps::manifest::MCP_DIR)
+            .join(LOCAL_APP_WIDGET_DIR)
+            .join(format!("{}.html", resource.resource_sha256));
+        let content =
+            platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 4 * 1024 * 1024)
+                .map_err(|error| {
+                    McpError::Internal(format!("failed to read Local App widget: {error}"))
+                })?;
+        let actual_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+        if actual_sha256 != resource.resource_sha256 {
+            return Err(McpError::Internal(
+                "Local App widget resource changed after approval".into(),
+            ));
+        }
+        Ok(McpResourceContentDto {
+            uri: resource.uri,
+            content,
+            mime_type: Some(resource.mime_type),
+            meta: resource.meta,
+        })
     }
 
     async fn ping(&self, connection_id: McpConnectionId) -> Result<(), McpError> {
@@ -3010,6 +3365,359 @@ mod tests {
             .expect("scoped connection");
         let caps = transport.initialize(&connection).await.expect("initialize");
         assert!(caps.tools);
+    }
+
+    #[tokio::test]
+    async fn scoped_registry_key_routes_list_and_call_through_the_connection_export() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (transport, service) = attached_transport(root.path()).await;
+        let active_tool_surface_sha256 = "1".repeat(64);
+        let tool = json!({
+            "definition": {
+                "name": "read_value",
+                "title": "Read value",
+                "description": "Read a value",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ok": {"type": "boolean"},
+                        "tool_name": {"type": "string"},
+                        "echo": {"type": "object"}
+                    },
+                    "required": ["ok", "tool_name", "echo"],
+                    "additionalProperties": false
+                }
+            },
+            "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
+            "ceiling": "allow"
+        });
+        let (record, _layout, catalog_sha256) = publish_export_app(
+            root.path(),
+            &service,
+            vec![tool],
+            None,
+            &active_tool_surface_sha256,
+        )
+        .await;
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
+            root.path().to_path_buf(),
+        ))));
+        registry
+            .register_managed_local_app(
+                mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap(),
+                catalog_sha256,
+                false,
+            )
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation-1", &record.id, false)
+            .await
+            .expect("expose app to the scoped conversation");
+        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+        assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
+
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap()
+                .scoped_registry_key("conversation-1")
+                .unwrap(),
+            })
+            .await
+            .expect("scoped export connection");
+        let tools = transport.list_tools(&connection).await.expect("list tools");
+        assert_eq!(tools.len(), 1);
+        let result = transport
+            .call_tool(&connection, &tools[0].full_name, json!({}))
+            .await
+            .expect("export call");
+        assert!(!result.is_error);
+        assert_eq!(structured(&result)["tool_name"], "read_value");
+    }
+
+    #[tokio::test]
+    async fn export_tools_follow_runtime_whitelist_and_refresh_to_the_effective_digest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (transport, service) = attached_transport(root.path()).await;
+        let active_tool_surface_sha256 = "2".repeat(64);
+        let tools = vec![
+            json!({
+                "definition": {
+                    "name": "read_value",
+                    "description": "Read",
+                    "inputSchema": {"type":"object","additionalProperties":false},
+                    "outputSchema": {
+                        "type":"object",
+                        "properties":{
+                            "ok":{"type":"boolean"},
+                            "tool_name":{"type":"string"},
+                            "echo":{"type":"object"}
+                        },
+                        "required":["ok","tool_name","echo"],
+                        "additionalProperties":false
+                    }
+                },
+                "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
+                "ceiling": "allow"
+            }),
+            json!({
+                "definition": {
+                    "name": "write_value",
+                    "description": "Write",
+                    "inputSchema": {"type":"object","additionalProperties":false},
+                    "outputSchema": {
+                        "type":"object",
+                        "properties":{
+                            "ok":{"type":"boolean"},
+                            "tool_name":{"type":"string"},
+                            "echo":{"type":"object"}
+                        },
+                        "required":["ok","tool_name","echo"],
+                        "additionalProperties":false
+                    }
+                },
+                "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
+                "ceiling": "allow"
+            }),
+        ];
+        let (record, _layout, catalog_sha256) = publish_export_app(
+            root.path(),
+            &service,
+            tools,
+            None,
+            &active_tool_surface_sha256,
+        )
+        .await;
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
+            root.path().to_path_buf(),
+        ))));
+        registry
+            .register_managed_local_app(
+                mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap(),
+                catalog_sha256,
+                false,
+            )
+            .await
+            .unwrap();
+        registry
+            .set_managed_local_app_runtime(&record.id, true, Some(vec!["read_value".into()]), None)
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation-1", &record.id, false)
+            .await
+            .expect("expose app to the scoped conversation");
+        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+        assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
+
+        let stale_connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap()
+                .scoped_registry_key("conversation-1")
+                .unwrap(),
+            })
+            .await
+            .expect("stale scoped connection");
+        let stale = transport
+            .call_tool(
+                &stale_connection,
+                &format!("mcp__local_app_{}__read_value", record.id),
+                json!({}),
+            )
+            .await
+            .expect("stale call should return tool error");
+        assert!(stale.is_error);
+        assert!(stale.content.to_string().contains("tool_surface_stale"));
+
+        let tools = transport
+            .list_tools(&stale_connection)
+            .await
+            .expect("whitelisted tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name(), "read_value");
+        let result = transport
+            .call_tool(&stale_connection, &tools[0].full_name, json!({}))
+            .await
+            .expect("call after tools/list refresh");
+        assert!(!result.is_error);
+
+        let hidden = transport
+            .call_tool(
+                &stale_connection,
+                &format!("mcp__local_app_{}__write_value", record.id),
+                json!({}),
+            )
+            .await
+            .expect_err("hidden tool must be rejected");
+        assert!(matches!(hidden, McpError::ToolNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn export_resources_list_and_read_the_widget_html() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (transport, service) = attached_transport(root.path()).await;
+        let active_tool_surface_sha256 = "3".repeat(64);
+        let widget_body = "<html><body>widget</body></html>";
+        let widget_sha256 = format!("{:x}", Sha256::digest(widget_body.as_bytes()));
+        let shell = service
+            .create_app(Some("Widget App"), "widget", None)
+            .await
+            .expect("create widget app");
+        let record = prepare_formed_runtime_fixture(&service, &shell, root.path()).await;
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .expect("active build id")
+            .expect("formed widget fixture has a build");
+        let widget_uri = format!(
+            "ui://local-app/{}/{}/{}",
+            record.id, widget_sha256, LOCAL_APP_WIDGET_FILE
+        );
+        let catalog = json!({
+            "appId": record.id,
+            "buildId": build_id,
+            "resources": [{
+                "uri": widget_uri,
+                "name": "Widget App",
+                "mimeType": LOCAL_APP_WIDGET_MIME,
+                "_meta": {"ui": {"csp": {"connectDomains": []}}}
+            }],
+            "tools": [{
+                "definition": {
+                    "name": "read_value",
+                    "title": "Widget tool",
+                    "description": "Opens a widget",
+                    "inputSchema": {"type":"object","additionalProperties":false},
+                    "_meta": {"ui": {"resourceUri": widget_uri}}
+                },
+                "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
+                "ceiling": "allow"
+            }]
+        });
+        let catalog_sha256 = local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog hash");
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.revision = manifest.revision.max(1);
+        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id,
+            manifest_revision: manifest.revision,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: active_tool_surface_sha256.clone(),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        save_manifest(&layout, &manifest).expect("publish resource catalog");
+        let widget_dir = root
+            .path()
+            .join(layout.app_dir_rel())
+            .join(local_apps::manifest::MCP_DIR)
+            .join(LOCAL_APP_WIDGET_DIR);
+        std::fs::create_dir_all(&widget_dir).expect("widget dir");
+        std::fs::write(
+            widget_dir.join(format!("{widget_sha256}.html")),
+            widget_body,
+        )
+        .expect("widget html");
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
+            root.path().to_path_buf(),
+        ))));
+        registry
+            .register_managed_local_app(
+                mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap(),
+                catalog_sha256,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: mcp::registry::ConversationExport::new(
+                    record.id.clone(),
+                    active_tool_surface_sha256.clone(),
+                )
+                .unwrap()
+                .scoped_registry_key("conversation-2")
+                .unwrap(),
+            })
+            .await
+            .expect("resource export connection");
+        let caps = transport.initialize(&connection).await.expect("initialize");
+        assert!(caps.resources);
+        assert_eq!(
+            caps.experimental.get("resources.listChanged"),
+            Some(&Value::Bool(true))
+        );
+        let resources = transport
+            .list_resources(&connection)
+            .await
+            .expect("list resources");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, widget_uri);
+        assert_eq!(
+            resources[0].mime_type.as_deref(),
+            Some(LOCAL_APP_WIDGET_MIME)
+        );
+        assert_eq!(
+            resources[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.pointer("/ui/csp/connectDomains"))
+                .cloned(),
+            Some(json!([]))
+        );
+        let content = transport
+            .read_resource(&connection, &widget_uri)
+            .await
+            .expect("read widget");
+        assert_eq!(content.uri, widget_uri);
+        assert!(content.content.contains("widget"));
+        assert_eq!(
+            content
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.pointer("/ui/csp/connectDomains"))
+                .cloned(),
+            Some(json!([]))
+        );
+
+        std::fs::write(
+            widget_dir.join(format!("{widget_sha256}.html")),
+            "<html><body>tampered</body></html>",
+        )
+        .expect("tamper widget html");
+        let error = transport
+            .read_resource(&connection, &widget_uri)
+            .await
+            .expect_err("mutable widget bytes must fail the content-addressed read gate");
+        assert!(error.to_string().contains("changed after approval"));
     }
 
     #[tokio::test]
@@ -3303,6 +4011,10 @@ mod tests {
                 "validate_template_selection",
                 "resolve_template_selection",
                 "stage_create",
+                "validate_mcp_proposal",
+                "approve_mcp_proposal",
+                "qa_mcp_candidate",
+                "promote_mcp_candidate",
                 "create",
                 "scaffold",
                 "manage_runtime",
@@ -3364,7 +4076,7 @@ mod tests {
             create.description().contains("does not scaffold source")
                 && create
                     .description()
-                    .contains("native runtime-profile confirmation plus `scaffold`"),
+                    .contains("unified native create confirmation plus `scaffold`"),
             "create must describe the deferred scaffold contract: {}",
             create.description()
         );
@@ -3899,6 +4611,71 @@ mod tests {
         (transport, service)
     }
 
+    struct ExportFlowHost;
+
+    #[async_trait]
+    impl LocalAppsMcpHost for ExportFlowHost {
+        fn create_next_step(&self) -> String {
+            unreachable!("not exercised by export tests")
+        }
+
+        async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn query_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn mutate_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn inspect_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn act_on_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn capture_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn build_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn install_dependencies(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn prepare_shell_app(&self, _record: local_apps::AppRecord) -> Result<(), String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn scaffold_app(
+            &self,
+            _record: local_apps::AppRecord,
+            _surface: local_apps::AppSurface,
+            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
+        ) -> Result<(), String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by export tests")
+        }
+        async fn execute_mcp_flow(&self, input: Value) -> Result<Value, String> {
+            Ok(json!({
+                "ok": true,
+                "tool_name": input["tool_name"],
+                "echo": input["input"],
+            }))
+        }
+        async fn emit_create_failure(&self, _error: &AppError) {}
+    }
+
     async fn reload_service(root: &std::path::Path) -> AppService {
         AppService::load(
             root,
@@ -3907,6 +4684,49 @@ mod tests {
         )
         .await
         .expect("reload app service")
+    }
+
+    async fn publish_export_app(
+        root: &Path,
+        service: &Arc<AppService>,
+        tools: Vec<Value>,
+        resources: Option<Vec<Value>>,
+        active_tool_surface_sha256: &str,
+    ) -> (local_apps::AppRecord, AppLayout, String) {
+        let shell = service
+            .create_app(Some("Export App"), "export", None)
+            .await
+            .expect("create export app");
+        let record = prepare_formed_runtime_fixture(service, &shell, root).await;
+        let layout = AppLayout::new(root.to_path_buf(), record.id.clone()).expect("layout");
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .expect("active build id")
+            .expect("formed export fixture has a build");
+        let mut catalog = json!({
+            "appId": record.id.clone(),
+            "buildId": build_id,
+            "tools": tools,
+        });
+        if let Some(resources) = resources {
+            catalog["resources"] = Value::Array(resources);
+        }
+        let catalog_sha256 = local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog hash");
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.revision = manifest.revision.max(1);
+        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id,
+            manifest_revision: manifest.revision,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: active_tool_surface_sha256.to_string(),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        save_manifest(&layout, &manifest).expect("publish catalog");
+        (record, layout, catalog_sha256)
     }
 
     /// PINS the truth Task 10 was required to confront: `create` now takes a
@@ -4561,7 +5381,7 @@ mod tests {
         let workspace = root.join(layout.workspace_rel());
         crate::local_apps_build::scaffold_workspace_initialized(
             &layout,
-            crate::local_apps_build::LocalAppBuildTarget::ReactDomR1,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR2,
             true,
         )
         .expect("scaffold workspace");
@@ -4613,7 +5433,7 @@ mod tests {
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
             plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
             plugin_version: "builtin".into(),
-            template_id: "react-dom-r1".into(),
+            template_id: "react-dom-r2".into(),
             template_sha256: binding.contract_sha256.clone(),
         });
         manifest.runtime_profile = Some(binding);
@@ -4644,14 +5464,16 @@ mod tests {
         let output_root = build_root.join(crate::local_apps_build::VITE_OUTPUT_DIR);
         std::fs::create_dir_all(&output_root).expect("dist");
         std::fs::write(output_root.join("index.html"), "<html>ok</html>").expect("index");
+        let output_sha256 = digest_tree(&output_root);
         let build_receipt = json!({
             "version": 3,
+            "buildId": output_sha256,
             "buildKey": "mcp-fixture",
             "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime hash"),
             "dependencySnapshotSha256": manifest
                 .dependency_snapshot_hash()
                 .expect("dependency hash"),
-            "outputSha256": digest_tree(&output_root),
+            "outputSha256": output_sha256,
         });
         std::fs::write(
             build_root.join("build.json"),

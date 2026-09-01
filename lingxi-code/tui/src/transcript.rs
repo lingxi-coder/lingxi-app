@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::io;
 use std::io::Write;
+use std::path::Path;
 
 use ratatui::backend::Backend;
 use ratatui::text::Line;
@@ -132,9 +133,52 @@ impl Transcript {
         width: u16,
         theme: &Theme,
     ) -> io::Result<()> {
+        self.flush_to_native_scrollback_with_hyperlinks_and_cwd(terminal, width, theme, false, None)
+    }
+
+    /// Insert finalized cells into native scrollback, optionally wrapping
+    /// visible markdown URLs and file attachment paths in OSC 8 links. The
+    /// caller owns terminal capability detection; keeping that decision out of
+    /// [`Transcript`] makes this state container deterministic in tests and
+    /// leaves alternate-screen rendering escape-free.
+    pub fn flush_to_native_scrollback_with_hyperlinks<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+        width: u16,
+        theme: &Theme,
+        hyperlinks_enabled: bool,
+    ) -> io::Result<()> {
+        self.flush_to_native_scrollback_with_hyperlinks_and_cwd(
+            terminal,
+            width,
+            theme,
+            hyperlinks_enabled,
+            None,
+        )
+    }
+
+    /// Variant of [`Self::flush_to_native_scrollback_with_hyperlinks`] that
+    /// resolves relative attachment paths against the owning session's
+    /// working directory. The process current directory is deliberately not
+    /// consulted here because multiple embedded sessions may have different
+    /// working directories.
+    pub fn flush_to_native_scrollback_with_hyperlinks_and_cwd<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+        width: u16,
+        theme: &Theme,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
+    ) -> io::Result<()> {
         while self.committed_to_terminal < self.committed.len() {
             let cell = &self.committed[self.committed_to_terminal];
-            let lines = cell.display_lines(width.max(1), theme, self.render_mode);
+            let lines = cell.scrollback_lines(
+                width.max(1),
+                theme,
+                self.render_mode,
+                hyperlinks_enabled,
+                hyperlink_cwd,
+            );
             let escape = if self.render_mode.raw {
                 None
             } else {
@@ -174,7 +218,41 @@ impl Transcript {
     /// redraws the committed cells plus active tail from this immutable view.
     #[must_use]
     pub fn visible_fullscreen_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        self.visible_fullscreen_lines_with_hyperlinks(width, theme, false, None)
+    }
+
+    /// Render the complete transcript for the alternate-screen surface,
+    /// optionally carrying OSC 8 metadata for URLs and file attachments.
+    ///
+    /// The plain path retains the cached cell-grid lines. Linked lines are
+    /// rebuilt from the cells on each call because the owning session cwd can
+    /// change after `/cd`; caching those lines would retain stale file targets.
+    #[must_use]
+    pub fn visible_fullscreen_lines_with_hyperlinks(
+        &self,
+        width: u16,
+        theme: &Theme,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
+    ) -> Vec<Line<'static>> {
         let width = width.max(1);
+        if hyperlinks_enabled {
+            let mut lines = Vec::new();
+            for cell in &self.committed {
+                lines.extend(wrap_to_width(
+                    cell.scrollback_lines(width, theme, self.render_mode, true, hyperlink_cwd),
+                    width,
+                ));
+            }
+            if let Some(active) = &self.active {
+                lines.extend(wrap_to_width(
+                    active.scrollback_lines(width, theme, self.render_mode, true, hyperlink_cwd),
+                    width,
+                ));
+            }
+            return lines;
+        }
+
         let committed_len = self.committed.len();
         let mut cache = self.wrap_cache.borrow_mut();
         let hit = cache.as_ref().is_some_and(|c| {
@@ -307,23 +385,48 @@ fn wrap_to_width(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
         let (style, alignment) = (line.style, line.alignment);
         let mut row: Vec<Span<'static>> = Vec::new();
         let mut row_width = 0usize;
+        let mut active_target = None;
         for span in line.spans {
             let span_style = span.style;
             let mut chunk = String::new();
-            for ch in span.content.chars() {
+            let mut cursor = 0;
+            while cursor < span.content.len() {
+                if let Some((next, next_target)) =
+                    crate::render::osc8_control_at(&span.content, cursor)
+                {
+                    chunk.push_str(&span.content[cursor..next]);
+                    active_target = next_target;
+                    cursor = next;
+                    continue;
+                }
+                let Some(ch) = span.content[cursor..].chars().next() else {
+                    break;
+                };
+                let next = cursor + ch.len_utf8();
                 let ch_width = ch.width().unwrap_or(0);
                 if row_width + ch_width > max && row_width > 0 {
                     if !chunk.is_empty() {
                         row.push(Span::styled(std::mem::take(&mut chunk), span_style));
+                    }
+                    if active_target.is_some() {
+                        if let Some(last) = row.last_mut() {
+                            last.content.to_mut().push_str("\x1b]8;;\x07");
+                        } else {
+                            chunk.push_str("\x1b]8;;\x07");
+                        }
                     }
                     let mut wrapped = Line::from(std::mem::take(&mut row));
                     wrapped.style = style;
                     wrapped.alignment = alignment;
                     out.push(wrapped);
                     row_width = 0;
+                    if let Some(target) = active_target.as_deref() {
+                        chunk.push_str(&format!("\x1b]8;;{target}\x07"));
+                    }
                 }
                 chunk.push(ch);
                 row_width += ch_width;
+                cursor = next;
             }
             if !chunk.is_empty() {
                 row.push(Span::styled(chunk, span_style));
@@ -346,6 +449,7 @@ mod tests {
     use crate::history_cell::message::AssistantTextCell;
     use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
+    use unicode_width::UnicodeWidthChar;
 
     /// An 80x24 bottom-anchored test terminal with a 4-row viewport plus the
     /// raw escape-byte capture handle (history inserts are raw writes).
@@ -582,6 +686,166 @@ mod tests {
             .unwrap();
         assert_eq!(transcript.committed_to_terminal(), 1);
         assert!(raw_string(&raw).contains("plain-raw-body"));
+    }
+
+    #[test]
+    fn native_scrollback_emits_osc8_for_markdown_urls_and_file_attachments() {
+        let mut transcript = Transcript::new();
+        transcript.push_message(RenderedMessage::AssistantText {
+            body: "See [docs](https://example.com/docs) or <https://example.com/>.".to_string(),
+            timestamp: 0,
+        });
+        transcript.push_message(RenderedMessage::Attachment {
+            attachment: tui_core::message::Attachment::File {
+                display_path: "src/report.txt".to_string(),
+                num_lines: 12,
+                truncated: false,
+            },
+        });
+        let (mut terminal, raw) = test_terminal();
+        transcript
+            .flush_to_native_scrollback_with_hyperlinks_and_cwd(
+                &mut terminal,
+                80,
+                &Theme::dark(),
+                true,
+                Some(std::path::Path::new("/workspace/project")),
+            )
+            .unwrap();
+        let out = raw_string(&raw);
+        assert!(out.contains(&tui_core::render::osc8::hyperlink(
+            "docs",
+            "https://example.com/docs",
+        )));
+        assert!(out.contains(&tui_core::render::osc8::hyperlink(
+            "https://example.com/",
+            "https://example.com/",
+        )));
+        assert!(out.contains(&tui_core::render::osc8::file_link(
+            "/workspace/project/src/report.txt",
+        )));
+        assert_eq!(
+            out.matches("\x1b]8;;").count(),
+            6,
+            "open + close per link: {out:?}"
+        );
+    }
+
+    #[test]
+    fn fullscreen_lines_emit_osc8_for_urls_and_relative_files_when_enabled() {
+        let transcript = Transcript::from_messages(vec![
+            RenderedMessage::AssistantText {
+                body: "See [docs](https://example.com/docs).".to_string(),
+                timestamp: 0,
+            },
+            RenderedMessage::Attachment {
+                attachment: tui_core::message::Attachment::File {
+                    display_path: "src/report.txt".to_string(),
+                    num_lines: 1,
+                    truncated: false,
+                },
+            },
+        ]);
+        let lines = transcript.visible_fullscreen_lines_with_hyperlinks(
+            80,
+            &Theme::dark(),
+            true,
+            Some(std::path::Path::new("/workspace/project")),
+        );
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains(&tui_core::render::osc8::hyperlink(
+            "docs",
+            "https://example.com/docs",
+        )));
+        assert!(rendered.contains(&tui_core::render::osc8::file_link(
+            "/workspace/project/src/report.txt",
+        )));
+
+        let plain = transcript.visible_fullscreen_lines(80, &Theme::dark());
+        let plain_rendered = plain
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!plain_rendered.contains("\x1b]8;;"));
+        assert!(plain_rendered.contains("docs"));
+    }
+
+    #[test]
+    fn fullscreen_linked_lines_reopen_links_when_wrapping() {
+        let transcript = Transcript::from_messages(vec![RenderedMessage::AssistantText {
+            body: "[abcdefgh](https://example.com/long)".to_string(),
+            timestamp: 0,
+        }]);
+        let lines =
+            transcript.visible_fullscreen_lines_with_hyperlinks(4, &Theme::dark(), true, None);
+        assert!(lines.len() >= 3, "marker plus wrapped label: {lines:?}");
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("\x1b]8;;https://example.com/long\x07"));
+        assert!(rendered.contains("\x1b]8;;\x07"));
+        fn visible_width(line: &Line<'_>) -> usize {
+            line.spans
+                .iter()
+                .map(|span| {
+                    let mut width = 0;
+                    let mut cursor = 0;
+                    while cursor < span.content.len() {
+                        if let Some((next, _)) =
+                            crate::render::osc8_control_at(&span.content, cursor)
+                        {
+                            cursor = next;
+                            continue;
+                        }
+                        let Some(ch) = span.content[cursor..].chars().next() else {
+                            break;
+                        };
+                        cursor += ch.len_utf8();
+                        width += ch.width().unwrap_or(0);
+                    }
+                    width
+                })
+                .sum()
+        }
+        assert!(
+            lines.iter().all(|line| visible_width(line) <= 4),
+            "visible lines must remain wrapped to width: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn native_scrollback_keeps_urls_and_file_attachments_plain_when_disabled() {
+        let mut transcript = Transcript::new();
+        transcript.push_message(RenderedMessage::AssistantText {
+            body: "See [docs](https://example.com/docs) or <https://example.com/>.".to_string(),
+            timestamp: 0,
+        });
+        transcript.push_message(RenderedMessage::Attachment {
+            attachment: tui_core::message::Attachment::File {
+                display_path: "src/report.txt".to_string(),
+                num_lines: 12,
+                truncated: false,
+            },
+        });
+        let (mut terminal, raw) = test_terminal();
+        transcript
+            .flush_to_native_scrollback_with_hyperlinks(&mut terminal, 80, &Theme::dark(), false)
+            .unwrap();
+        let out = raw_string(&raw);
+        assert!(out.contains("docs"));
+        assert!(out.contains("https://example.com/"));
+        assert!(out.contains("src/report.txt"));
+        assert!(
+            !out.contains("\x1b]8;;"),
+            "unsupported terminals stay plain: {out:?}"
+        );
     }
 
     #[test]

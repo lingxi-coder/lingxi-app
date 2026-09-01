@@ -12,6 +12,7 @@
 //! On any other OS, returns plaintext directly with the documented warning.
 
 use async_trait::async_trait;
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -20,7 +21,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::OnceCell;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 const FALLBACK_TOMBSTONE_KIND: &str = "lingxi_deleted_credential_tombstone";
 

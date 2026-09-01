@@ -22,12 +22,12 @@
 
 use crate::secure_storage::helpers::full_service_name;
 use async_trait::async_trait;
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use protocol::SecureStorageData;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Linux Secret Service backend (`GNOME` Keyring / `KWallet` via
 /// `libsecret`).

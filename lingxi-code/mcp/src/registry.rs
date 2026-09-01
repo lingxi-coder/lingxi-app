@@ -13,15 +13,18 @@ use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
 use futures_util::FutureExt as _;
 use indexmap::IndexMap;
-use protocol::{AgentId, McpConnectionId};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime};
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use platform_api::{
     Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpTransport,
     McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
+use protocol::{AgentId, McpConnectionId};
+use rand::Rng as _;
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
 /// OAuth seam injected into the registry for remote (SSE/HTTP) MCP servers that
 /// declare an `oauth` config. When unset, OAuth-configured servers fall back to
@@ -150,6 +153,11 @@ pub struct McpCatalogChanged {
     pub retired_connection_id: Option<McpConnectionId>,
     /// Catalog to refresh.
     pub kind: McpCatalogKind,
+    /// Present only when this refresh came from a real inbound
+    /// `notifications/*/list_changed` producer whose telemetry should be
+    /// emitted after a successful re-fetch. Recovery snapshots, connect
+    /// publishes, and retire notifications leave this `None`.
+    pub telemetry_cause: Option<&'static str>,
 }
 
 /// Scope for a Local App conversation-export connection. The scope is bound
@@ -281,6 +289,17 @@ fn is_conversation_scope_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+fn is_local_app_tool_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('_')
+        && !value.ends_with('_')
+        && !value.contains("__")
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'_' && index > 0)
+        })
+}
+
 /// Host-managed logical Local App server metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedLocalAppServer {
@@ -290,6 +309,45 @@ pub struct ManagedLocalAppServer {
     pub catalog_sha256: String,
     /// Generation of the exposed tool surface.
     pub surface_generation: u64,
+}
+
+/// Optional widget resource exposed by one managed Local App server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLocalAppResource {
+    /// Concrete resource URI advertised to the model.
+    pub uri: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Optional MIME type.
+    pub mime_type: Option<String>,
+    /// MCP Apps resource metadata, including CSP/domain hints.
+    pub meta: Option<serde_json::Value>,
+}
+
+/// Host-owned runtime overlay for one managed Local App server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLocalAppRuntime {
+    /// Whether the logical server is currently visible/callable.
+    pub enabled: bool,
+    /// Optional allowlist of raw tool names from the active catalog.
+    pub enabled_tools: Option<Vec<String>>,
+    /// Optional widget resource advertised through `resources/list`.
+    pub resource: Option<ManagedLocalAppResource>,
+    /// Monotonic generation for resource metadata changes.
+    pub resource_generation: u64,
+}
+
+impl Default for ManagedLocalAppRuntime {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enabled_tools: None,
+            resource: None,
+            resource_generation: 0,
+        }
+    }
 }
 
 /// One lazily exposed Local App in a conversation.
@@ -305,6 +363,15 @@ pub struct LocalAppExposure {
     pub last_used: u64,
     /// Generation of the exposure metadata.
     pub exposure_generation: u64,
+}
+
+/// Result of exposing one logical Local App server in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppExposureUpdate {
+    /// The new or refreshed exposure entry.
+    pub exposure: LocalAppExposure,
+    /// Unpinned idle app evicted by the bounded LRU policy, if any.
+    pub evicted_app_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -463,6 +530,7 @@ impl LazyUpgradeSlot {
 #[derive(Clone)]
 struct LiveDiscovery {
     connection_id: McpConnectionId,
+    connection_duration_ms: u64,
     /// Immutable resolver result used for this entire connect attempt.
     negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     /// Immutable grant identity captured alongside the successful connect
@@ -474,9 +542,17 @@ struct LiveDiscovery {
     resources: Vec<platform_api::McpResourceDto>,
     resource_templates: Vec<platform_api::McpResourceTemplateDto>,
     prompts: Vec<platform_api::McpPromptDto>,
+    catalog_failures: CatalogFetchFailures,
     discovery_cache_partition: Option<DiscoveryCachePartition>,
     client: Option<Arc<McpClient>>,
     listener_connection: Option<Arc<jsonrpc::Connection>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CatalogFetchFailures {
+    tools: bool,
+    resources: bool,
+    prompts: bool,
 }
 
 enum BackgroundInstallOutcome {
@@ -487,6 +563,20 @@ enum BackgroundInstallOutcome {
 #[derive(Debug, Clone)]
 struct PendingTransportCleanup {
     retrying: bool,
+}
+
+#[derive(Clone, Default)]
+struct ListenerReopenState {
+    delay_index: usize,
+    opened_at: Option<tokio::time::Instant>,
+    reopened_at: Vec<tokio::time::Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct ModernListenOpenTelemetry {
+    outcome: telemetry::tengu::mcp::ListenReopenOutcome,
+    attempts: u32,
+    trigger: telemetry::tengu::mcp::ListenReopenTrigger,
 }
 
 #[derive(Clone)]
@@ -536,6 +626,8 @@ pub struct McpRegistry {
     /// Host-managed Local App logical servers. This is metadata only; all
     /// entries share the registry's physical transport substrate.
     managed_local_apps: Arc<RwLock<HashMap<String, ManagedLocalAppServer>>>,
+    /// Host-managed runtime overlays for Local App logical servers.
+    managed_local_app_runtime: Arc<RwLock<HashMap<String, ManagedLocalAppRuntime>>>,
     /// Per-conversation bounded, lazy Local App exposure state.
     local_app_exposures: Arc<RwLock<HashMap<String, ConversationExposureState>>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
@@ -644,6 +736,9 @@ pub struct McpRegistry {
     /// failure leaves an observable pending entry that later lifecycle activity
     /// can kick again.
     pending_transport_cleanups: Arc<RwLock<HashMap<McpConnectionId, PendingTransportCleanup>>>,
+    /// Modern `subscriptions/listen` reopen bookkeeping keyed by shared
+    /// server name.
+    listener_reopen_state: Arc<RwLock<HashMap<String, ListenerReopenState>>>,
     /// Detached single-flight owners for cached->live upgrades. Waiters hold a
     /// cloned slot handle, so removing the map entry invalidates future joins
     /// without racing already-waiting callers.
@@ -664,6 +759,18 @@ pub struct McpRegistry {
 /// Message for a remote server with no usable URL (oracle
 /// `"No URL configured for this server"`).
 pub const UNCONFIGURED_MESSAGE: &str = "No URL configured for this server";
+const LISTEN_REOPEN_CAUSE: &str = "listen_reopen";
+const LISTENER_REOPEN_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+const LISTENER_REOPEN_STABLE_RESET: Duration = Duration::from_secs(10);
+const LISTENER_REOPEN_GRACEFUL_DELAY: Duration = Duration::from_secs(5);
+const LISTENER_REOPEN_WINDOW: Duration = Duration::from_secs(60 * 60);
+const LISTENER_REOPEN_PARK: Duration = Duration::from_secs(6 * 60 * 60);
+const LISTENER_REOPEN_MAX_ATTEMPTS_PER_WINDOW: usize = 5;
+const LISTENER_REOPEN_PARK_POLL: Duration = Duration::from_secs(5);
 
 fn negotiated_protocol_from_cache_entry(
     entry: &crate::discovery_cache::DiscoveryCacheEntry,
@@ -737,16 +844,51 @@ pub fn is_unconfigured_remote(spec: &McpTransportSpec) -> bool {
     match spec {
         McpTransportSpec::Sse { url, .. }
         | McpTransportSpec::Http { url, .. }
-        | McpTransportSpec::WebSocket { url, .. } => url.trim().is_empty(),
+        | McpTransportSpec::WebSocket { url, .. }
+        | McpTransportSpec::SseIde { url, .. }
+        | McpTransportSpec::WsIde { url, .. } => url.trim().is_empty(),
         _ => false,
     }
 }
 
 impl McpRegistry {
+    async fn managed_local_app_connection_id(&self, server_name: &str) -> McpConnectionId {
+        let connections = self.connections.read().await;
+        match connections.get(server_name) {
+            Some(McpConnectionState::Connected { connection_id, .. })
+            | Some(McpConnectionState::Cached { connection_id, .. })
+            | Some(McpConnectionState::HealthChecking { connection_id, .. }) => *connection_id,
+            _ => McpConnectionId::new(),
+        }
+    }
+
+    fn managed_local_app_runtime_changed(
+        previous: &ManagedLocalAppRuntime,
+        current: &ManagedLocalAppRuntime,
+    ) -> (bool, bool) {
+        (
+            previous.enabled != current.enabled || previous.enabled_tools != current.enabled_tools,
+            previous.enabled != current.enabled || previous.resource != current.resource,
+        )
+    }
+
+    async fn remove_local_app_exposures(&self, app_id: &str) -> bool {
+        let mut conversations = self.local_app_exposures.write().await;
+        let mut removed = false;
+        for state in conversations.values_mut() {
+            if state.entries.remove(app_id).is_some() {
+                state.next_generation = state.next_generation.saturating_add(1);
+                removed = true;
+            }
+        }
+        removed
+    }
+
     fn clone_for_background(&self) -> Self {
         Self {
             connections: Arc::clone(&self.connections),
             managed_local_apps: Arc::clone(&self.managed_local_apps),
+            managed_local_app_runtime: Arc::clone(&self.managed_local_app_runtime),
             local_app_exposures: Arc::clone(&self.local_app_exposures),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
@@ -765,6 +907,7 @@ impl McpRegistry {
             max_retry_count: self.max_retry_count,
             discovery_cache_store: self.discovery_cache_store.clone(),
             pending_transport_cleanups: Arc::clone(&self.pending_transport_cleanups),
+            listener_reopen_state: Arc::clone(&self.listener_reopen_state),
             lazy_upgrade_slots: Arc::clone(&self.lazy_upgrade_slots),
             prompt_predecessors: Arc::clone(&self.prompt_predecessors),
             configuration_frozen: Arc::clone(&self.configuration_frozen),
@@ -785,6 +928,7 @@ impl McpRegistry {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             managed_local_apps: Arc::new(RwLock::new(HashMap::new())),
+            managed_local_app_runtime: Arc::new(RwLock::new(HashMap::new())),
             local_app_exposures: Arc::new(RwLock::new(HashMap::new())),
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -804,6 +948,7 @@ impl McpRegistry {
             max_retry_count: 5,
             discovery_cache_store: None,
             pending_transport_cleanups: Arc::new(RwLock::new(HashMap::new())),
+            listener_reopen_state: Arc::new(RwLock::new(HashMap::new())),
             lazy_upgrade_slots: Arc::new(RwLock::new(HashMap::new())),
             prompt_predecessors: Arc::new(RwLock::new(HashMap::new())),
             configuration_frozen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -944,9 +1089,10 @@ impl McpRegistry {
         // A platform transport may not implement the optional notification
         // seam yet. Keep that failure local to the caller (usually a monitor)
         // and avoid allowing an implementation panic to take down the task.
-        std::panic::AssertUnwindSafe(self.transport.notifications(&McpRawConnection {
-            connection_id,
-        }))
+        std::panic::AssertUnwindSafe(
+            self.transport
+                .notifications(&McpRawConnection { connection_id }),
+        )
         .catch_unwind()
         .await
         .map_err(|_| {
@@ -979,8 +1125,12 @@ impl McpRegistry {
         let actual_surface_changed = apps.get(&scope.app_id).is_none_or(|server| {
             server.scope.listed_tool_surface_sha256 != scope.listed_tool_surface_sha256
         });
-        let generation = apps
-            .get(&scope.app_id)
+        let previous = apps.get(&scope.app_id).cloned();
+        let actual_catalog_changed = previous
+            .as_ref()
+            .is_some_and(|server| server.catalog_sha256 != catalog_sha256);
+        let generation = previous
+            .as_ref()
             .map(|server| server.surface_generation + u64::from(actual_surface_changed))
             .unwrap_or(1);
         let server = ManagedLocalAppServer {
@@ -990,12 +1140,33 @@ impl McpRegistry {
         };
         apps.insert(scope.app_id.clone(), server.clone());
         drop(apps);
+        self.managed_local_app_runtime
+            .write()
+            .await
+            .entry(scope.app_id.clone())
+            .or_insert_with(ManagedLocalAppRuntime::default);
         if actual_surface_changed {
+            let connection_id = self
+                .managed_local_app_connection_id(&scope.server_name())
+                .await;
             let _ = self.catalog_changes.send(McpCatalogChanged {
                 server_name: scope.server_name(),
-                connection_id: McpConnectionId::new(),
+                connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
+            });
+        }
+        if previous.is_some() && actual_catalog_changed {
+            let connection_id = self
+                .managed_local_app_connection_id(&scope.server_name())
+                .await;
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: scope.server_name(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Resources,
+                telemetry_cause: None,
             });
         }
         Ok(server)
@@ -1009,20 +1180,24 @@ impl McpRegistry {
         }
         let removed = self.managed_local_apps.write().await.remove(app_id);
         if removed.is_some() {
+            self.managed_local_app_runtime.write().await.remove(app_id);
             // A deleted app can no longer be selected or called. Remove its
             // logical exposure from every conversation in the same commit
             // boundary; no stale FQN survives deletion.
-            let mut conversations = self.local_app_exposures.write().await;
-            for state in conversations.values_mut() {
-                if state.entries.remove(app_id).is_some() {
-                    state.next_generation = state.next_generation.saturating_add(1);
-                }
-            }
+            self.remove_local_app_exposures(app_id).await;
             let _ = self.catalog_changes.send(McpCatalogChanged {
                 server_name: format!("local_app_{app_id}"),
                 connection_id: McpConnectionId::new(),
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
+            });
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: format!("local_app_{app_id}"),
+                connection_id: McpConnectionId::new(),
+                retired_connection_id: None,
+                kind: McpCatalogKind::Resources,
+                telemetry_cause: None,
             });
         }
         Ok(removed.is_some())
@@ -1032,6 +1207,19 @@ impl McpRegistry {
     /// registry's one physical transport substrate.
     pub async fn managed_local_app_count(&self) -> usize {
         self.managed_local_apps.read().await.len()
+    }
+
+    /// Snapshot every published Local App logical server.
+    pub async fn managed_local_apps(&self) -> Vec<ManagedLocalAppServer> {
+        let mut apps: Vec<ManagedLocalAppServer> = self
+            .managed_local_apps
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        apps.sort_by(|left, right| left.scope.app_id.cmp(&right.scope.app_id));
+        apps
     }
 
     /// There is exactly one physical transport owned by this registry.
@@ -1044,23 +1232,122 @@ impl McpRegistry {
         self.managed_local_apps.read().await.get(app_id).cloned()
     }
 
+    /// Snapshot the Host-owned runtime overlay for one managed Local App.
+    pub async fn managed_local_app_runtime(&self, app_id: &str) -> Option<ManagedLocalAppRuntime> {
+        self.managed_local_app_runtime
+            .read()
+            .await
+            .get(app_id)
+            .cloned()
+    }
+
+    /// Update the Host-owned runtime overlay for one managed Local App.
+    ///
+    /// This is the intended seam for service enable/disable, per-tool
+    /// allowlists, and per-app widget resource publication without changing
+    /// the immutable published catalog record.
+    pub async fn set_managed_local_app_runtime(
+        &self,
+        app_id: &str,
+        enabled: bool,
+        enabled_tools: Option<Vec<String>>,
+        resource: Option<ManagedLocalAppResource>,
+    ) -> Result<ManagedLocalAppRuntime, McpError> {
+        if !is_local_app_id(app_id) {
+            return Err(McpError::Internal("invalid Local App identity".into()));
+        }
+        let Some(server) = self.managed_local_app(app_id).await else {
+            return Err(McpError::ToolNotFound(app_id.into()));
+        };
+        let enabled_tools = enabled_tools
+            .map(|tools| {
+                let mut normalized = Vec::with_capacity(tools.len());
+                for tool in tools {
+                    if !is_local_app_tool_name(&tool) {
+                        return Err(McpError::ToolNotFound(tool));
+                    }
+                    let _ = server.scope.tool_full_name(&tool)?;
+                    if !normalized.iter().any(|existing| existing == &tool) {
+                        normalized.push(tool);
+                    }
+                }
+                normalized.sort();
+                Ok(normalized)
+            })
+            .transpose()?;
+        if let Some(resource) = resource.as_ref() {
+            if resource.uri.trim().is_empty() || resource.name.trim().is_empty() {
+                return Err(McpError::Internal(
+                    "managed Local App resource metadata is incomplete".into(),
+                ));
+            }
+        }
+        let mut runtimes = self.managed_local_app_runtime.write().await;
+        let previous = runtimes.get(app_id).cloned().unwrap_or_default();
+        let resource_generation_changed =
+            previous.resource != resource || previous.enabled != enabled;
+        let runtime = ManagedLocalAppRuntime {
+            enabled,
+            enabled_tools,
+            resource,
+            resource_generation: previous.resource_generation
+                + u64::from(resource_generation_changed),
+        };
+        let (tools_changed, resources_changed) =
+            Self::managed_local_app_runtime_changed(&previous, &runtime);
+        runtimes.insert(app_id.to_string(), runtime.clone());
+        drop(runtimes);
+        if !enabled {
+            self.remove_local_app_exposures(app_id).await;
+        }
+        let connection_id = self
+            .managed_local_app_connection_id(&server.scope.server_name())
+            .await;
+        if tools_changed {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: server.scope.server_name(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
+            });
+        }
+        if resources_changed {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: server.scope.server_name(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Resources,
+                telemetry_cause: None,
+            });
+        }
+        Ok(runtime)
+    }
+
     /// Expose a published Local App in one conversation. Exposure is lazy and
     /// bounded: at most eight logical apps are retained, with unpinned,
     /// idle least-recently-used entries evicted first. A pinned entry is the
     /// only hard pin; merely listing or calling an app keeps it recent but
     /// does not make it ineligible for eviction.
-    pub async fn expose_managed_local_app(
+    pub async fn expose_managed_local_app_with_diff(
         &self,
         conversation_id: &str,
         app_id: &str,
         pin: bool,
-    ) -> Result<LocalAppExposure, McpError> {
+    ) -> Result<LocalAppExposureUpdate, McpError> {
         if conversation_id.is_empty() || !is_local_app_id(app_id) {
             return Err(McpError::Internal(
                 "invalid Local App exposure scope".into(),
             ));
         }
         if self.managed_local_app(app_id).await.is_none() {
+            return Err(McpError::ToolNotFound(app_id.into()));
+        }
+        if self
+            .managed_local_app_runtime(app_id)
+            .await
+            .is_some_and(|runtime| !runtime.enabled)
+        {
             return Err(McpError::ToolNotFound(app_id.into()));
         }
 
@@ -1076,9 +1363,13 @@ impl McpRegistry {
                 entry.pinned = true;
                 entry.exposure_generation = state.next_generation;
             }
-            return Ok(entry.clone());
+            return Ok(LocalAppExposureUpdate {
+                exposure: entry.clone(),
+                evicted_app_id: None,
+            });
         }
 
+        let mut evicted_app_id = None;
         if state.entries.len() >= LOCAL_APP_MAX_EXPOSED {
             let evict = state
                 .entries
@@ -1100,6 +1391,7 @@ impl McpRegistry {
                 )));
             };
             state.entries.remove(&evict);
+            evicted_app_id = Some(evict);
         }
 
         state.next_generation = state.next_generation.saturating_add(1);
@@ -1111,7 +1403,22 @@ impl McpRegistry {
             exposure_generation: state.next_generation,
         };
         state.entries.insert(app_id.to_string(), entry.clone());
-        Ok(entry)
+        Ok(LocalAppExposureUpdate {
+            exposure: entry,
+            evicted_app_id,
+        })
+    }
+
+    pub async fn expose_managed_local_app(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pin: bool,
+    ) -> Result<LocalAppExposure, McpError> {
+        Ok(self
+            .expose_managed_local_app_with_diff(conversation_id, app_id, pin)
+            .await?
+            .exposure)
     }
 
     /// Mark an already exposed app as recently used without hard-pinning it.
@@ -1252,6 +1559,39 @@ impl McpRegistry {
         changes
     }
 
+    async fn current_catalog_snapshot_for_connection(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+    ) -> Vec<McpCatalogChanged> {
+        let conns = self.connections.read().await;
+        let Some(state) = conns.get(server_name) else {
+            return Vec::new();
+        };
+        if state.config().name != server_name {
+            return Vec::new();
+        }
+        Self::active_catalog_snapshot(server_name, state)
+            .into_iter()
+            .filter(|change| change.connection_id == connection_id)
+            .collect()
+    }
+
+    async fn publish_catalog_snapshot_for_connection(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        telemetry_cause: Option<&'static str>,
+    ) {
+        for mut change in self
+            .current_catalog_snapshot_for_connection(server_name, connection_id)
+            .await
+        {
+            change.telemetry_cause = telemetry_cause;
+            let _ = self.catalog_changes.send(change);
+        }
+    }
+
     fn active_catalog_snapshot(
         server_name: &str,
         state: &McpConnectionState,
@@ -1281,6 +1621,7 @@ impl McpRegistry {
                     connection_id,
                     retired_connection_id: None,
                     kind,
+                    telemetry_cause: None,
                 });
             }
         }
@@ -1294,15 +1635,28 @@ impl McpRegistry {
         &self,
         change: &McpCatalogChanged,
     ) -> Result<Option<McpConnectionId>, McpError> {
-        let (current_id, supports_tools) = {
+        let (current_id, supports_kind, previous_count) = {
             let conns = self.connections.read().await;
             match conns.get(&change.server_name) {
                 Some(McpConnectionState::Connected {
                     connection_id,
                     capabilities,
+                    tools,
+                    prompts,
+                    resources,
                     ..
                 }) if *connection_id == change.connection_id => {
-                    (*connection_id, capabilities.tools)
+                    let previous_count = match change.kind {
+                        McpCatalogKind::Tools => Some(tools.len()),
+                        McpCatalogKind::Prompts => Some(prompts.len()),
+                        McpCatalogKind::Resources => Some(resources.len()),
+                    };
+                    let supports_kind = match change.kind {
+                        McpCatalogKind::Tools => capabilities.tools,
+                        McpCatalogKind::Prompts => capabilities.prompts,
+                        McpCatalogKind::Resources => capabilities.resources,
+                    };
+                    (*connection_id, supports_kind, previous_count)
                 }
                 Some(McpConnectionState::Cached { connection_id, .. })
                     if *connection_id == change.connection_id =>
@@ -1317,7 +1671,7 @@ impl McpRegistry {
                 _ => return Ok(None),
             }
         };
-        if change.kind == McpCatalogKind::Tools && !supports_tools {
+        if !supports_kind {
             return Ok(Some(current_id));
         }
         let Some(client) = self.get_client(&change.server_name).await else {
@@ -1364,10 +1718,31 @@ impl McpRegistry {
         if *connection_id != current_id {
             return Ok(None);
         }
-        match refreshed {
-            Refreshed::Tools(next) => *tools = next,
-            Refreshed::Prompts(next) => *prompts = next,
-            Refreshed::Resources(next) => *resources = next,
+        let new_count = match refreshed {
+            Refreshed::Tools(next) => {
+                let new_count = next.len();
+                *tools = next;
+                new_count
+            }
+            Refreshed::Prompts(next) => {
+                let new_count = next.len();
+                *prompts = next;
+                new_count
+            }
+            Refreshed::Resources(next) => {
+                let new_count = next.len();
+                *resources = next;
+                new_count
+            }
+        };
+        if let Some(cause) = change.telemetry_cause {
+            emit_list_changed(&list_changed_payload(
+                &change.server_name,
+                change.kind,
+                cause,
+                previous_count,
+                Some(new_count),
+            ));
         }
         Ok(Some(current_id))
     }
@@ -1377,30 +1752,492 @@ impl McpRegistry {
         server_name: String,
         connection_id: McpConnectionId,
         connection: Arc<jsonrpc::Connection>,
+        negotiated: platform_api::McpNegotiatedProtocol,
+        capabilities: ServerCapabilitiesDto,
+        open_telemetry: Option<ModernListenOpenTelemetry>,
     ) {
-        let mut notifications = connection.notifications();
-        let changes = self.catalog_changes.clone();
+        let registry = self.clone_for_background();
+        let notifications = connection.notifications();
         tokio::spawn(async move {
+            #[cfg(test)]
+            maybe_pause_catalog_change_listener_for_test().await;
+            if negotiated.era == platform_api::McpProtocolEra::Modern {
+                registry
+                    .run_modern_catalog_change_listener(
+                        server_name,
+                        connection_id,
+                        connection,
+                        notifications,
+                        capabilities,
+                        negotiated,
+                        open_telemetry.unwrap_or(ModernListenOpenTelemetry {
+                            outcome: telemetry::tengu::mcp::ListenReopenOutcome::OpenedFromZero,
+                            attempts: 0,
+                            trigger: telemetry::tengu::mcp::ListenReopenTrigger::Connect,
+                        }),
+                    )
+                    .await;
+                return;
+            }
+
+            let mut notifications = notifications;
             loop {
                 let notification = match notifications.recv().await {
                     Ok(notification) => notification,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        notifications = connection.notifications();
+                        registry
+                            .publish_catalog_snapshot_for_connection(
+                                &server_name,
+                                connection_id,
+                                Some(LISTEN_REOPEN_CAUSE),
+                            )
+                            .await;
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
                 };
-                let kind = match notification.method.as_str() {
-                    "notifications/tools/list_changed" => McpCatalogKind::Tools,
-                    "notifications/prompts/list_changed" => McpCatalogKind::Prompts,
-                    "notifications/resources/list_changed" => McpCatalogKind::Resources,
-                    _ => continue,
-                };
-                let _ = changes.send(McpCatalogChanged {
-                    server_name: server_name.clone(),
+                forward_catalog_change(
+                    &registry.catalog_changes,
+                    &server_name,
                     connection_id,
-                    retired_connection_id: None,
-                    kind,
-                });
+                    &notification.method,
+                    Some("notification"),
+                );
             }
         });
+    }
+
+    async fn run_modern_catalog_change_listener(
+        &self,
+        server_name: String,
+        connection_id: McpConnectionId,
+        connection: Arc<jsonrpc::Connection>,
+        mut notifications: broadcast::Receiver<jsonrpc::Notification>,
+        capabilities: ServerCapabilitiesDto,
+        negotiated: platform_api::McpNegotiatedProtocol,
+        open_telemetry: ModernListenOpenTelemetry,
+    ) {
+        let Some(filter) = modern_listen_notifications_filter(&capabilities) else {
+            return;
+        };
+        let listen = match connection.start_call_unbounded(
+            "subscriptions/listen",
+            modern_listen_request_params(&negotiated.version, filter),
+        ) {
+            Ok(listen) => listen,
+            Err(_) => {
+                #[cfg(test)]
+                notify_catalog_change_listener_closed_for_test();
+                self.handle_modern_catalog_listener_end(
+                    &server_name,
+                    connection_id,
+                    telemetry::tengu::mcp::ListenReopenTrigger::Remote,
+                )
+                .await;
+                return;
+            }
+        };
+        let subscription_id = listen.id().clone();
+        let completion = listen.wait_value();
+        tokio::pin!(completion);
+
+        loop {
+            tokio::select! {
+                completion = &mut completion => {
+                    #[cfg(test)]
+                    notify_catalog_change_listener_closed_for_test();
+                    let trigger = if completion.is_ok() {
+                        telemetry::tengu::mcp::ListenReopenTrigger::Graceful
+                    } else {
+                        telemetry::tengu::mcp::ListenReopenTrigger::Remote
+                    };
+                    self.handle_modern_catalog_listener_end(&server_name, connection_id, trigger)
+                        .await;
+                    return;
+                }
+                notification = notifications.recv() => {
+                    match notification {
+                        Ok(notification) => {
+                            if !notification_matches_subscription(&notification, &subscription_id) {
+                                continue;
+                            }
+                            if notification.method == "notifications/subscriptions/acknowledged" {
+                                self.record_listener_open(&server_name, open_telemetry)
+                                    .await;
+                                emit_listen_reopen(&listen_reopen_payload(
+                                    &server_name,
+                                    open_telemetry.outcome,
+                                    open_telemetry.attempts,
+                                    open_telemetry.trigger,
+                                ));
+                                continue;
+                            }
+                            forward_catalog_change(
+                                &self.catalog_changes,
+                                &server_name,
+                                connection_id,
+                                &notification.method,
+                                Some("notification"),
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            self.publish_catalog_snapshot_for_connection(
+                                &server_name,
+                                connection_id,
+                                Some(LISTEN_REOPEN_CAUSE),
+                            )
+                            .await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            #[cfg(test)]
+                            notify_catalog_change_listener_closed_for_test();
+                            self.handle_modern_catalog_listener_end(
+                                &server_name,
+                                connection_id,
+                                telemetry::tengu::mcp::ListenReopenTrigger::Remote,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_modern_catalog_listener_end(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        trigger: telemetry::tengu::mcp::ListenReopenTrigger,
+    ) {
+        let (mut delay_index, reopen_count) = self.prepare_modern_reopen_cycle(server_name).await;
+        if reopen_count >= LISTENER_REOPEN_MAX_ATTEMPTS_PER_WINDOW {
+            emit_listen_reopen(&listen_reopen_payload(
+                server_name,
+                telemetry::tengu::mcp::ListenReopenOutcome::BudgetExhausted,
+                reopen_count as u32,
+                trigger,
+            ));
+            emit_listen_reopen(&listen_reopen_payload(
+                server_name,
+                telemetry::tengu::mcp::ListenReopenOutcome::Parked,
+                reopen_count as u32,
+                trigger,
+            ));
+            if !self
+                .wait_listener_reopen_park(server_name, connection_id)
+                .await
+            {
+                emit_listen_reopen(&listen_reopen_payload(
+                    server_name,
+                    telemetry::tengu::mcp::ListenReopenOutcome::GaveUp,
+                    0,
+                    trigger,
+                ));
+                return;
+            }
+            delay_index = 0;
+        }
+
+        let mut last_error = None;
+        for attempt in 1..=LISTENER_REOPEN_RETRY_DELAYS.len() {
+            let capped_index = delay_index
+                .saturating_add(attempt - 1)
+                .min(LISTENER_REOPEN_RETRY_DELAYS.len() - 1);
+            let mut delay = LISTENER_REOPEN_RETRY_DELAYS[capped_index];
+            if attempt == 1 && trigger == telemetry::tengu::mcp::ListenReopenTrigger::Graceful {
+                delay += LISTENER_REOPEN_GRACEFUL_DELAY;
+            }
+            if !self
+                .wait_listener_reopen_delay(server_name, connection_id, delay)
+                .await
+            {
+                emit_listen_reopen(&listen_reopen_payload(
+                    server_name,
+                    telemetry::tengu::mcp::ListenReopenOutcome::GaveUp,
+                    (attempt - 1) as u32,
+                    trigger,
+                ));
+                return;
+            }
+            match self
+                .reopen_catalog_listener_generation(
+                    server_name,
+                    connection_id,
+                    trigger,
+                    attempt as u32,
+                    capped_index,
+                )
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {
+                    emit_listen_reopen(&listen_reopen_payload(
+                        server_name,
+                        telemetry::tengu::mcp::ListenReopenOutcome::GaveUp,
+                        attempt as u32,
+                        trigger,
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let reason =
+            last_error.unwrap_or_else(|| McpError::Connection("listen reopen failed".into()));
+        self.mark_listener_generation_disconnected(server_name, connection_id, &reason)
+            .await;
+        emit_listen_reopen(&listen_reopen_payload(
+            server_name,
+            telemetry::tengu::mcp::ListenReopenOutcome::GaveUp,
+            LISTENER_REOPEN_RETRY_DELAYS.len() as u32,
+            trigger,
+        ));
+    }
+
+    async fn prepare_modern_reopen_cycle(&self, server_name: &str) -> (usize, usize) {
+        let now = tokio::time::Instant::now();
+        let mut states = self.listener_reopen_state.write().await;
+        let state = states.entry(server_name.to_string()).or_default();
+        if state.opened_at.take().is_some_and(|opened| {
+            now.saturating_duration_since(opened) >= LISTENER_REOPEN_STABLE_RESET
+        }) {
+            state.delay_index = 0;
+        }
+        state
+            .reopened_at
+            .retain(|reopened| now.saturating_duration_since(*reopened) < LISTENER_REOPEN_WINDOW);
+        (state.delay_index, state.reopened_at.len())
+    }
+
+    async fn record_listener_open(
+        &self,
+        server_name: &str,
+        open_telemetry: ModernListenOpenTelemetry,
+    ) {
+        let now = tokio::time::Instant::now();
+        let mut states = self.listener_reopen_state.write().await;
+        let state = states.entry(server_name.to_string()).or_default();
+        state.opened_at = Some(now);
+        match open_telemetry.outcome {
+            telemetry::tengu::mcp::ListenReopenOutcome::OpenedFromZero => {
+                state.delay_index = 0;
+            }
+            telemetry::tengu::mcp::ListenReopenOutcome::Reopened => {
+                state.delay_index = state
+                    .delay_index
+                    .saturating_add(1)
+                    .min(LISTENER_REOPEN_RETRY_DELAYS.len().saturating_sub(1));
+                state.reopened_at.retain(|reopened| {
+                    now.saturating_duration_since(*reopened) < LISTENER_REOPEN_WINDOW
+                });
+                state.reopened_at.push(now);
+            }
+            telemetry::tengu::mcp::ListenReopenOutcome::GaveUp
+            | telemetry::tengu::mcp::ListenReopenOutcome::BudgetExhausted
+            | telemetry::tengu::mcp::ListenReopenOutcome::Parked => {}
+        }
+    }
+
+    async fn wait_listener_reopen_delay(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        delay: Duration,
+    ) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => true,
+            _ = self.wait_until_listener_cancelled(server_name, connection_id) => false,
+        }
+    }
+
+    async fn wait_listener_reopen_park(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+    ) -> bool {
+        let jitter = listener_reopen_park_jitter();
+        let park = LISTENER_REOPEN_PARK.mul_f64(jitter);
+        let deadline = tokio::time::Instant::now() + park;
+        loop {
+            if !self
+                .is_listener_generation_current(server_name, connection_id)
+                .await
+            {
+                return false;
+            }
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return true;
+            };
+            tokio::time::sleep(std::cmp::min(remaining, LISTENER_REOPEN_PARK_POLL)).await;
+        }
+    }
+
+    async fn wait_until_listener_cancelled(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+    ) {
+        loop {
+            if !self
+                .is_listener_generation_current(server_name, connection_id)
+                .await
+            {
+                return;
+            }
+            tokio::time::sleep(LISTENER_REOPEN_PARK_POLL).await;
+        }
+    }
+
+    async fn is_listener_generation_current(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+    ) -> bool {
+        let conns = self.connections.read().await;
+        matches!(
+            conns.get(server_name),
+            Some(McpConnectionState::Connected {
+                connection_id: current,
+                config,
+                ..
+            }) if *current == connection_id && config.name == server_name && !config.disabled
+        )
+    }
+
+    async fn reopen_catalog_listener_generation(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        trigger: telemetry::tengu::mcp::ListenReopenTrigger,
+        attempts: u32,
+        delay_index: usize,
+    ) -> Result<bool, McpError> {
+        let lifecycle = self.lifecycle_lock(server_name);
+        let _guard = lifecycle.lock().await;
+        let Some(config) = ({
+            let conns = self.connections.read().await;
+            match conns.get(server_name) {
+                Some(McpConnectionState::Connected {
+                    connection_id: current,
+                    config,
+                    ..
+                }) if *current == connection_id
+                    && config.name == server_name
+                    && !config.disabled =>
+                {
+                    Some(config.clone())
+                }
+                _ => None,
+            }
+        }) else {
+            return Ok(false);
+        };
+
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &config.spec,
+            config.metadata.transport.as_deref(),
+            mcp_connection_timeout().as_millis() as u64,
+        );
+        let discovery = self
+            .discover_live_connection(&config, negotiation_mode)
+            .await?;
+        let new_connection_id = self
+            .install_live_discovery(
+                server_name.to_string(),
+                config,
+                discovery,
+                Some(connection_id),
+                None,
+                Some(ModernListenOpenTelemetry {
+                    outcome: telemetry::tengu::mcp::ListenReopenOutcome::Reopened,
+                    attempts,
+                    trigger,
+                }),
+            )
+            .await?;
+        self.set_listener_reopen_delay_index(server_name, delay_index)
+            .await;
+        self.disconnect_or_schedule_cleanup(connection_id).await;
+        let _ = new_connection_id;
+        Ok(true)
+    }
+
+    async fn set_listener_reopen_delay_index(&self, server_name: &str, delay_index: usize) {
+        let mut states = self.listener_reopen_state.write().await;
+        let state = states.entry(server_name.to_string()).or_default();
+        state.delay_index = delay_index;
+        state.opened_at = None;
+    }
+
+    async fn mark_listener_generation_disconnected(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        error: &McpError,
+    ) {
+        let Some(config) = ({
+            let conns = self.connections.read().await;
+            match conns.get(server_name) {
+                Some(McpConnectionState::Connected {
+                    connection_id: current,
+                    config,
+                    ..
+                }) if *current == connection_id => Some(config.clone()),
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        self.connections.write().await.insert(
+            server_name.to_string(),
+            McpConnectionState::Disconnected {
+                config: config.clone(),
+                last_error: Some(error.to_string()),
+            },
+        );
+        self.clients.write().await.shift_remove(server_name);
+        self.clear_prompt_predecessors_for_key(server_name).await;
+        self.emit_retire_event_if_shared(&config, server_name, connection_id)
+            .await;
+    }
+
+    async fn publish_listener_reopen_catalog_changes(
+        &self,
+        server_name: &str,
+        connection_id: McpConnectionId,
+        retired_connection_id: Option<McpConnectionId>,
+        capabilities: &ServerCapabilitiesDto,
+    ) {
+        for kind in [
+            McpCatalogKind::Tools,
+            McpCatalogKind::Prompts,
+            McpCatalogKind::Resources,
+        ] {
+            let supported = match kind {
+                McpCatalogKind::Tools => capabilities.tools,
+                McpCatalogKind::Prompts => capabilities.prompts,
+                McpCatalogKind::Resources => capabilities.resources,
+            };
+            if !supported {
+                continue;
+            }
+            self.publish_catalog_change(McpCatalogChanged {
+                server_name: server_name.to_string(),
+                connection_id,
+                retired_connection_id: retired_connection_id
+                    .filter(|_| kind == McpCatalogKind::Tools),
+                kind,
+                telemetry_cause: Some(LISTEN_REOPEN_CAUSE),
+            })
+            .await;
+        }
     }
 
     /// Build a registry bound to a platform transport AND a bridge to its live
@@ -1916,9 +2753,21 @@ impl McpRegistry {
                 "MCP server \"{server}\" did not publish a client after authentication refresh"
             ))
         })?;
-        refreshed
+        let second = refreshed
             .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
-            .await
+            .await;
+        if let Err(error) = &second {
+            if error.is_auth_response() {
+                if let Some(config) = self.get_config(&raw_name).await {
+                    emit_tool_call_auth_error_for_config(
+                        &config,
+                        tool_call_auth_error_code(error),
+                        telemetry::tengu::mcp::ToolCallAuthErrorKind::TokenExpired,
+                    );
+                }
+            }
+        }
+        second
     }
 
     /// Test-only helper that registers a config (`Disconnected` state) and
@@ -1963,6 +2812,12 @@ impl McpRegistry {
         // health-probes approved servers, so without it a typo'd config would
         // become a live connect attempt against an empty URL.
         if is_unconfigured_remote(&config.spec) {
+            emit_server_connection_failed(&server_connection_failed_payload(
+                &config,
+                None,
+                None,
+                Some("UNCONFIGURED"),
+            ));
             return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
         }
         let lifecycle = self.lifecycle_lock(&config.name);
@@ -1983,6 +2838,12 @@ impl McpRegistry {
     ) -> Result<Option<McpConnectionId>, McpError> {
         self.freeze_configuration();
         if is_unconfigured_remote(&config.spec) {
+            emit_server_connection_failed(&server_connection_failed_payload(
+                &config,
+                None,
+                None,
+                Some("UNCONFIGURED"),
+            ));
             return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
         }
         let key = config.name.clone();
@@ -2127,6 +2988,12 @@ impl McpRegistry {
     ) -> Result<(McpConnectionId, String), McpError> {
         self.freeze_configuration();
         if is_unconfigured_remote(&config.spec) {
+            emit_server_connection_failed(&server_connection_failed_payload(
+                &config,
+                None,
+                None,
+                Some("UNCONFIGURED"),
+            ));
             return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
         }
         let table_key = agent_scope_table_key(agent_id, &config.name);
@@ -2313,25 +3180,54 @@ impl McpRegistry {
             },
         );
         drop(connections);
-        let discovery = self
+        let discovery = match self
             .discover_live_connection(&config, negotiation_mode)
-            .await?;
-        self.install_live_discovery(key, config, discovery, None, operation_guard)
+            .await
+        {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                if error_is_auth_response(&error) {
+                    emit_server_needs_auth_for_config(&config, None);
+                } else if matches!(error, McpError::OAuth(_)) {
+                    emit_server_needs_auth_for_config(&config, Some("discovery_schema"));
+                }
+                return Err(error);
+            }
+        };
+        self.install_live_discovery(key, config, discovery, None, operation_guard, None)
             .await
     }
 
     fn validate_connectable_config(config: &McpServerConfig) -> Result<(), McpError> {
         if config.is_unconfigured() {
+            emit_server_connection_failed(&server_connection_failed_payload(
+                config,
+                None,
+                None,
+                Some("UNCONFIGURED"),
+            ));
             return Err(McpError::Connection(
                 crate::connection::UNCONFIGURED_ERROR.to_string(),
             ));
         }
         if let Some(err) = &config.config_error {
             emit_server_config_invalid(config, telemetry::tengu::mcp::ConfigInvalidSource::Loader);
+            emit_server_connection_failed(&server_connection_failed_payload(
+                config,
+                None,
+                None,
+                Some("INVALID_CONFIG"),
+            ));
             return Err(McpError::Connection(err.clone()));
         }
         if let Some(err) = config.connect_time_url_error() {
             emit_server_config_invalid(config, telemetry::tengu::mcp::ConfigInvalidSource::Connect);
+            emit_server_connection_failed(&server_connection_failed_payload(
+                config,
+                None,
+                None,
+                Some("INVALID_CONFIG"),
+            ));
             return Err(McpError::Connection(err.to_string()));
         }
         Ok(())
@@ -2529,6 +3425,41 @@ impl McpRegistry {
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
         }
+        let (tools, resources, prompts) = match conns.get(key) {
+            Some(McpConnectionState::Connected {
+                tools,
+                resources,
+                prompts,
+                ..
+            })
+            | Some(McpConnectionState::Cached {
+                tools,
+                resources,
+                prompts,
+                ..
+            }) => (
+                if discovery.catalog_failures.tools {
+                    tools.clone()
+                } else {
+                    discovery.tools.clone()
+                },
+                if discovery.catalog_failures.resources {
+                    resources.clone()
+                } else {
+                    discovery.resources.clone()
+                },
+                if discovery.catalog_failures.prompts {
+                    prompts.clone()
+                } else {
+                    discovery.prompts.clone()
+                },
+            ),
+            _ => (
+                discovery.tools.clone(),
+                discovery.resources.clone(),
+                discovery.prompts.clone(),
+            ),
+        };
         conns.insert(
             key.to_string(),
             McpConnectionState::Connected {
@@ -2536,10 +3467,10 @@ impl McpRegistry {
                 connection_id: discovery.connection_id,
                 capabilities: discovery.capabilities.clone(),
                 negotiated: discovery.negotiated.clone(),
-                tools: discovery.tools.clone(),
-                resources: discovery.resources.clone(),
+                tools,
+                resources,
                 resource_templates: discovery.resource_templates.clone(),
-                prompts: discovery.prompts.clone(),
+                prompts,
                 connected_at: SystemTime::now(),
             },
         );
@@ -2572,6 +3503,7 @@ impl McpRegistry {
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<LiveDiscovery, McpError> {
         let connect_timeout = mcp_connection_timeout();
+        let connect_started = std::time::Instant::now();
         let has_user_auth_header = crate::negotiation::spec_has_authorization(&config.spec);
         let helper_enabled = crate::headers_helper::has_headers_helper(&config.spec);
         let mut resolved_config = config.clone();
@@ -2698,59 +3630,94 @@ impl McpRegistry {
         } else {
             None
         };
+        let connection_duration_ms = connect_started.elapsed().as_millis() as u64;
+        emit_server_connection_succeeded(&server_connection_succeeded_payload(
+            config,
+            connection_duration_ms,
+            negotiation_mode,
+            &negotiated,
+        ));
         match std::panic::AssertUnwindSafe(async {
             let mut tools_list_elapsed = std::time::Duration::ZERO;
-            let catalog = async {
-                let tools = if caps.tools {
-                    let started = std::time::Instant::now();
-                    let listed = self.transport.list_tools(&conn).await?;
-                    tools_list_elapsed = started.elapsed();
-                    listed
-                } else {
-                    Vec::new()
-                };
-                let resources = if caps.resources {
-                    self.transport.list_resources(&conn).await?
-                } else {
-                    Vec::new()
-                };
-                let templates_eligible = crate::discovery_cache::cache_gate_with_metadata(
-                    &config.spec,
-                    config.discovery_cache,
-                    crate::discovery_cache::feature_enabled(),
-                    &config.metadata,
-                )
-                .is_none();
-                let resource_templates = if caps.resources && templates_eligible {
-                    match self.transport.list_resource_templates(&conn).await {
-                        Ok(templates) => templates,
-                        Err(error) => {
-                            tracing::warn!(
-                                server = %config.name,
-                                %error,
-                                "Failed to fetch resource templates"
-                            );
-                            Vec::new()
-                        }
+            let mut catalog_failures = CatalogFetchFailures::default();
+            let mut tools = if caps.tools {
+                let started = std::time::Instant::now();
+                match self.transport.list_tools(&conn).await {
+                    Ok(listed) => {
+                        tools_list_elapsed = started.elapsed();
+                        listed
                     }
-                } else {
-                    Vec::new()
-                };
-                let prompts = if caps.prompts {
-                    self.transport.list_prompts(&conn).await?
-                } else {
-                    Vec::new()
-                };
-                Ok::<_, McpError>((tools, resources, resource_templates, prompts))
-            }
-            .await;
-            let (mut tools, resources, resource_templates, prompts) = match catalog {
-                Ok(catalog) => catalog,
-                Err(error) => {
-                    self.disconnect_or_schedule_cleanup(conn.connection_id)
-                        .await;
-                    return Err(error);
+                    Err(error) => {
+                        catalog_failures.tools = true;
+                        tracing::warn!(
+                            server = %config.name,
+                            %error,
+                            "Failed to fetch tools catalog"
+                        );
+                        Vec::new()
+                    }
                 }
+            } else {
+                Vec::new()
+            };
+            let resources = if caps.resources {
+                match self.transport.list_resources(&conn).await {
+                    Ok(listed) => listed,
+                    Err(error) => {
+                        catalog_failures.resources = true;
+                        tracing::warn!(
+                            server = %config.name,
+                            %error,
+                            "Failed to fetch resources catalog"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let templates_eligible = crate::discovery_cache::cache_gate_with_metadata(
+                &config.spec,
+                config.discovery_cache,
+                crate::discovery_cache::feature_enabled(),
+                &config.metadata,
+            )
+            .is_none();
+            let resource_templates = if caps.resources && templates_eligible {
+                match self.transport.list_resource_templates(&conn).await {
+                    Ok(templates) => {
+                        emit_resource_templates_fetched(&resource_templates_fetched_payload(
+                            &templates,
+                        ));
+                        templates
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            server = %config.name,
+                            %error,
+                            "Failed to fetch resource templates"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let prompts = if caps.prompts {
+                match self.transport.list_prompts(&conn).await {
+                    Ok(listed) => listed,
+                    Err(error) => {
+                        catalog_failures.prompts = true;
+                        tracing::warn!(
+                            server = %config.name,
+                            %error,
+                            "Failed to fetch prompts catalog"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
             };
 
             let normalized_server = normalize_name_for_mcp(&config.name);
@@ -2763,7 +3730,22 @@ impl McpRegistry {
                 telemetry::tengu::mcp::DegradedReason,
                 u32,
             > = std::collections::HashMap::new();
-            if connected_zero_tools_fires(caps.tools, tools.len()) {
+            if catalog_failures.tools {
+                degraded_counts.insert(telemetry::tengu::mcp::DegradedReason::ToolsListFailed, 1);
+            }
+            if catalog_failures.resources {
+                degraded_counts.insert(
+                    telemetry::tengu::mcp::DegradedReason::ResourcesListFailed,
+                    1,
+                );
+            }
+            if catalog_failures.prompts {
+                degraded_counts.insert(
+                    telemetry::tengu::mcp::DegradedReason::PromptsListFailed,
+                    1,
+                );
+            }
+            if !catalog_failures.tools && connected_zero_tools_fires(caps.tools, tools.len()) {
                 degraded_counts.insert(
                     telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools,
                     1,
@@ -2816,8 +3798,8 @@ impl McpRegistry {
                 true
             });
 
-            if caps.tools {
-                telemetry::emit_mcp_tools_listed(&tools_listed_payload(
+            if caps.tools && !catalog_failures.tools {
+                emit_tools_listed(&tools_listed_payload(
                     config.spec.kind(),
                     tools_list_elapsed,
                     &tools,
@@ -2827,7 +3809,7 @@ impl McpRegistry {
             for payload in
                 degraded_payloads_for_server(&degraded_counts, config.spec.kind(), &server_display)
             {
-                telemetry::emit_mcp_degraded(&payload);
+                emit_degraded(&payload);
             }
 
             let connection_id = conn.connection_id;
@@ -2855,18 +3837,13 @@ impl McpRegistry {
                         .with_negotiated_protocol(negotiated.clone())
                         .with_server_url(gate_url.clone()),
                     ));
-                    // Modern connections deliberately do not install the
-                    // unsolicited custom-notification catalog handler. The
-                    // legacy protocol retains the established list_changed
-                    // listener behavior.
-                    if negotiated.era == platform_api::McpProtocolEra::Legacy {
-                        listener_connection = Some(connection);
-                    }
+                    listener_connection = Some(connection);
                 }
             }
 
-            Ok(LiveDiscovery {
+            LiveDiscovery {
                 connection_id,
+                connection_duration_ms,
                 negotiated,
                 negotiation_mode,
                 grant_provenance,
@@ -2875,16 +3852,16 @@ impl McpRegistry {
                 resources,
                 resource_templates,
                 prompts,
+                catalog_failures,
                 discovery_cache_partition,
                 client,
                 listener_connection,
-            })
+            }
         })
         .catch_unwind()
         .await
         {
-            Ok(Ok(discovery)) => Ok(discovery),
-            Ok(Err(error)) => Err(error),
+            Ok(discovery) => Ok(discovery),
             Err(_) => {
                 self.disconnect_or_schedule_cleanup(conn.connection_id)
                     .await;
@@ -2971,15 +3948,12 @@ impl McpRegistry {
         discovery: LiveDiscovery,
         retired_connection_id: Option<McpConnectionId>,
         operation_guard: Option<&McpOperationGuard>,
+        modern_open_telemetry: Option<ModernListenOpenTelemetry>,
     ) -> Result<McpConnectionId, McpError> {
         let server_name = config.name.clone();
         let connection_id = discovery.connection_id;
         let shared_server = key == server_name;
         let capabilities = discovery.capabilities.clone();
-        let tools = discovery.tools.clone();
-        let resources = discovery.resources.clone();
-        let resource_templates = discovery.resource_templates.clone();
-        let prompts = discovery.prompts.clone();
         let listener_connection = discovery.listener_connection.clone();
         if let Err(error) = self
             .publish_connected_state_with_guard(
@@ -2994,6 +3968,9 @@ impl McpRegistry {
             self.discard_live_discovery(discovery).await;
             return Err(error);
         }
+        let (tools, resources, resource_templates, prompts) = self
+            .published_catalogs_for_connection(&key, connection_id, &discovery)
+            .await;
         self.persist_or_purge_discovery_cache(
             &config,
             discovery.discovery_cache_partition.as_ref(),
@@ -3009,17 +3986,35 @@ impl McpRegistry {
         .await;
         if let Some(connection) = listener_connection {
             if shared_server {
-                self.spawn_catalog_change_listener(server_name.clone(), connection_id, connection);
+                self.spawn_catalog_change_listener(
+                    server_name.clone(),
+                    connection_id,
+                    connection,
+                    discovery.negotiated.clone(),
+                    capabilities.clone(),
+                    modern_open_telemetry,
+                );
             }
         }
         if shared_server {
-            self.publish_catalog_change(McpCatalogChanged {
-                server_name,
-                connection_id,
-                retired_connection_id,
-                kind: McpCatalogKind::Tools,
-            })
-            .await;
+            if modern_open_telemetry.is_some() {
+                self.publish_listener_reopen_catalog_changes(
+                    &server_name,
+                    connection_id,
+                    retired_connection_id,
+                    &capabilities,
+                )
+                .await;
+            } else {
+                self.publish_catalog_change(McpCatalogChanged {
+                    server_name,
+                    connection_id,
+                    retired_connection_id,
+                    kind: McpCatalogKind::Tools,
+                    telemetry_cause: None,
+                })
+                .await;
+            }
         }
         Ok(connection_id)
     }
@@ -3033,10 +4028,6 @@ impl McpRegistry {
         let server_name = slot.expected_config.name.clone();
         let shared_server = key == server_name;
         let capabilities = discovery.capabilities.clone();
-        let tools = discovery.tools.clone();
-        let resources = discovery.resources.clone();
-        let resource_templates = discovery.resource_templates.clone();
-        let prompts = discovery.prompts.clone();
         let listener_connection = discovery.listener_connection.clone();
         let current_slot = self.lazy_upgrade_slots.read().await.get(key).cloned();
         let installed = {
@@ -3112,6 +4103,9 @@ impl McpRegistry {
         if !installed {
             return BackgroundInstallOutcome::Rejected(discovery);
         }
+        let (tools, resources, resource_templates, prompts) = self
+            .published_catalogs_for_connection(key, discovery.connection_id, &discovery)
+            .await;
         self.persist_or_purge_discovery_cache(
             &slot.expected_config,
             discovery.discovery_cache_partition.as_ref(),
@@ -3131,6 +4125,9 @@ impl McpRegistry {
                     server_name.clone(),
                     discovery.connection_id,
                     connection,
+                    discovery.negotiated.clone(),
+                    capabilities.clone(),
+                    None,
                 );
             }
         }
@@ -3140,10 +4137,46 @@ impl McpRegistry {
                 connection_id: discovery.connection_id,
                 retired_connection_id: Some(slot.cached_connection_id),
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             })
             .await;
         }
         BackgroundInstallOutcome::Installed(discovery.connection_id)
+    }
+
+    async fn published_catalogs_for_connection(
+        &self,
+        key: &str,
+        connection_id: McpConnectionId,
+        discovery: &LiveDiscovery,
+    ) -> (
+        Vec<platform_api::McpToolDto>,
+        Vec<platform_api::McpResourceDto>,
+        Vec<platform_api::McpResourceTemplateDto>,
+        Vec<platform_api::McpPromptDto>,
+    ) {
+        let conns = self.connections.read().await;
+        match conns.get(key) {
+            Some(McpConnectionState::Connected {
+                connection_id: current,
+                tools,
+                resources,
+                resource_templates,
+                prompts,
+                ..
+            }) if *current == connection_id => (
+                tools.clone(),
+                resources.clone(),
+                resource_templates.clone(),
+                prompts.clone(),
+            ),
+            _ => (
+                discovery.tools.clone(),
+                discovery.resources.clone(),
+                discovery.resource_templates.clone(),
+                discovery.prompts.clone(),
+            ),
+        }
     }
 
     async fn finish_lazy_upgrade_failure_locked(
@@ -3214,6 +4247,7 @@ impl McpRegistry {
             connection_id,
             retired_connection_id: Some(connection_id),
             kind: McpCatalogKind::Tools,
+            telemetry_cause: None,
         })
         .await;
     }
@@ -3512,29 +4546,30 @@ impl McpRegistry {
                 }
             }
         };
-        let maybe_push_headers = |candidates: &mut Vec<String>, headers: &platform_api::McpHeaders| {
-            for (name, value) in headers {
-                let lower_name = name.to_ascii_lowercase();
-                let lower_value = value.trim().to_ascii_lowercase();
-                let suspicious_name = [
-                    "auth", "token", "key", "secret", "cookie", "session", "sig", "pass", "cred",
-                    "bearer",
-                ]
-                .iter()
-                .any(|needle| lower_name.contains(needle));
-                let suspicious_value =
-                    lower_value.starts_with("bearer ") || lower_value.starts_with("basic ");
-                let exempt_name = matches!(
-                    lower_name.as_str(),
-                    "origin" | "referer" | "host" | "user-agent"
-                ) || lower_name.ends_with("-id")
-                    || lower_name.ends_with("-version")
-                    || lower_name.ends_with("-name");
-                if suspicious_name || suspicious_value || !exempt_name {
-                    push_secret_variants(candidates, value);
+        let maybe_push_headers =
+            |candidates: &mut Vec<String>, headers: &platform_api::McpHeaders| {
+                for (name, value) in headers {
+                    let lower_name = name.to_ascii_lowercase();
+                    let lower_value = value.trim().to_ascii_lowercase();
+                    let suspicious_name = [
+                        "auth", "token", "key", "secret", "cookie", "session", "sig", "pass",
+                        "cred", "bearer",
+                    ]
+                    .iter()
+                    .any(|needle| lower_name.contains(needle));
+                    let suspicious_value =
+                        lower_value.starts_with("bearer ") || lower_value.starts_with("basic ");
+                    let exempt_name = matches!(
+                        lower_name.as_str(),
+                        "origin" | "referer" | "host" | "user-agent"
+                    ) || lower_name.ends_with("-id")
+                        || lower_name.ends_with("-version")
+                        || lower_name.ends_with("-name");
+                    if suspicious_name || suspicious_value || !exempt_name {
+                        push_secret_variants(candidates, value);
+                    }
                 }
-            }
-        };
+            };
         match &config.spec {
             McpTransportSpec::Sse { url, headers, .. }
             | McpTransportSpec::Http { url, headers, .. }
@@ -3550,8 +4585,13 @@ impl McpRegistry {
                     push_secret(&mut candidates, auth_token);
                 }
             }
-            McpTransportSpec::SseIde { url, .. } => {
+            McpTransportSpec::SseIde {
+                url, auth_token, ..
+            } => {
                 maybe_push_url_credentials(&mut candidates, url);
+                if let Some(auth_token) = auth_token {
+                    push_secret(&mut candidates, auth_token);
+                }
             }
             McpTransportSpec::Stdio { env, .. } => {
                 for value in env.values() {
@@ -3750,6 +4790,7 @@ impl McpRegistry {
                 connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             })
             .await;
         }
@@ -3938,7 +4979,9 @@ impl McpRegistry {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
                 platform_api::McpProtocolEra::Modern
             }
-            crate::protocol_negotiation::NegotiationMode::Legacy => platform_api::McpProtocolEra::Legacy,
+            crate::protocol_negotiation::NegotiationMode::Legacy => {
+                platform_api::McpProtocolEra::Legacy
+            }
         };
         let probe_timeout_ms = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
@@ -3997,6 +5040,7 @@ impl McpRegistry {
             return Ok((config.spec.clone(), None, None));
         };
         let key = oauth::server_key(&config.name, &config.spec);
+        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
 
         // XAA (cross-app-access, SEP-990): when `oauth.xaa` is set, XAA is the
         // ONLY auth path — never fall through to the consent flow (auth.ts:857-
@@ -4023,13 +5067,23 @@ impl McpRegistry {
                     Some(refresh) => {
                         // Proactive (pre-connect) refresh: no live challenge
                         // exists yet, so discovery uses the well-known guess.
-                        let meta = oauth::discover_auth_server_metadata(
+                        let meta = match oauth::discover_auth_server_metadata(
                             &deps.http,
                             spec_url(&config.spec),
                             oauth_cfg.auth_server_metadata_url.as_deref(),
                             None,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(meta) => meta,
+                            Err(error) => {
+                                oauth::emit_oauth_refresh_failure(
+                                    &telemetry_ctx,
+                                    oauth_refresh_failure_reason(&error),
+                                );
+                                return Err(error.into());
+                            }
+                        };
                         // Prefer the client_id the stored tokens were minted
                         // with (DCR-issued OR configured) so silent refresh
                         // re-sends it; fall back to the configured id, then ""
@@ -4039,7 +5093,7 @@ impl McpRegistry {
                             .clone()
                             .or_else(|| oauth_cfg.client_id.clone())
                             .unwrap_or_default();
-                        let refreshed = oauth::refresh_tokens(
+                        let refreshed = match oauth::refresh_tokens(
                             &deps.http,
                             &deps.clock,
                             &meta,
@@ -4047,8 +5101,26 @@ impl McpRegistry {
                             None, // public client — no confidential secret to send
                             &refresh,
                         )
+                        .await
+                        {
+                            Ok(refreshed) => refreshed,
+                            Err(error) => {
+                                oauth::emit_oauth_refresh_failure(
+                                    &telemetry_ctx,
+                                    oauth_refresh_failure_reason(&error),
+                                );
+                                return Err(error.into());
+                            }
+                        };
+                        oauth::save_tokens_with_telemetry(
+                            &deps.storage,
+                            &deps.clock,
+                            &key,
+                            &refreshed,
+                            Some(&telemetry_ctx),
+                        )
                         .await?;
-                        oauth::save_tokens(&deps.storage, &deps.clock, &key, &refreshed).await?;
+                        oauth::emit_oauth_refresh_success(&telemetry_ctx);
                         refreshed
                     }
                     None => {
@@ -4088,6 +5160,7 @@ impl McpRegistry {
         let oauth_cfg = spec_oauth(&config.spec)
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
         let key = oauth::server_key(&config.name, &config.spec);
+        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
 
         // §26b delta 3: an XAA-flagged server's 401 must stay on the XAA
         // path — never fall through to the refresh-or-interactive-consent
@@ -4110,13 +5183,23 @@ impl McpRegistry {
         let stored = oauth::load_tokens(&deps.storage, &key).await?;
         let token = match stored.as_ref().and_then(|t| t.refresh_token.clone()) {
             Some(refresh) => {
-                let meta = oauth::discover_auth_server_metadata(
+                let meta = match oauth::discover_auth_server_metadata(
                     &deps.http,
                     spec_url(&config.spec),
                     oauth_cfg.auth_server_metadata_url.as_deref(),
                     resource_metadata_url,
                 )
-                .await?;
+                .await
+                {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        oauth::emit_oauth_refresh_failure(
+                            &telemetry_ctx,
+                            oauth_refresh_failure_reason(&error),
+                        );
+                        return Err(error.into());
+                    }
+                };
                 // Prefer the persisted (DCR-issued or configured) client_id so
                 // refresh re-sends it (auth.ts clientInformation(), 1482-1506).
                 let client_id = stored
@@ -4135,11 +5218,20 @@ impl McpRegistry {
                 .await
                 {
                     Ok(t) => {
-                        oauth::save_tokens(&deps.storage, &deps.clock, &key, &t).await?;
+                        oauth::save_tokens_with_telemetry(
+                            &deps.storage,
+                            &deps.clock,
+                            &key,
+                            &t,
+                            Some(&telemetry_ctx),
+                        )
+                        .await?;
+                        oauth::emit_oauth_refresh_success(&telemetry_ctx);
                         t
                     }
                     // Refresh token rejected → fall back to a fresh flow.
                     Err(oauth::OAuthError::RefreshRejected(_)) => {
+                        oauth::emit_oauth_refresh_failure(&telemetry_ctx, "invalid_grant");
                         self.run_interactive_oauth(
                             config,
                             oauth_cfg,
@@ -4150,7 +5242,13 @@ impl McpRegistry {
                         )
                         .await?
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        oauth::emit_oauth_refresh_failure(
+                            &telemetry_ctx,
+                            oauth_refresh_failure_reason(&e),
+                        );
+                        return Err(e.into());
+                    }
                 }
             }
             None => {
@@ -4194,6 +5292,7 @@ impl McpRegistry {
         let oauth_cfg = spec_oauth(&config.spec)
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
         let key = oauth::server_key(&config.name, &config.spec);
+        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
 
         // §26b delta 3, second arm: an XAA-flagged server's 403 must stay on
         // the XAA path exactly as its 401 does (`reauth_oauth_spec` above).
@@ -4222,7 +5321,14 @@ impl McpRegistry {
         // entry). Best-effort: a storage failure must not block the step-up.
         if let Ok(Some(mut stored)) = oauth::load_tokens(&deps.storage, &key).await {
             stored.step_up_scope = Some(scope.to_string());
-            let _ = oauth::store_tokens(&deps.storage, &deps.clock, &key, &stored).await;
+            let _ = oauth::store_tokens_with_telemetry(
+                &deps.storage,
+                &deps.clock,
+                &key,
+                &stored,
+                Some(&telemetry_ctx),
+            )
+            .await;
         }
 
         let token = self
@@ -4532,6 +5638,7 @@ impl McpRegistry {
                 callback_port,
             },
         );
+        let telemetry_ctx = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
         let tokens = oauth::perform_oauth_flow_for_reauth(
             &deps.http,
             &deps.clock,
@@ -4539,13 +5646,21 @@ impl McpRegistry {
             &config.name,
             spec_url(&config.spec),
             &deps.on_authorization_url,
+            Some(&telemetry_ctx),
             cached_scope.as_deref(),
             resource_metadata_url,
         )
         .await?;
         // A fresh grant clears any pending step-up scope (auth.ts:1705): the new
         // tokens carry the elevated scope, so the cache must not linger.
-        oauth::save_tokens(&deps.storage, &deps.clock, key, &tokens).await?;
+        oauth::save_tokens_with_telemetry(
+            &deps.storage,
+            &deps.clock,
+            key,
+            &tokens,
+            Some(&telemetry_ctx),
+        )
+        .await?;
         Ok(tokens)
     }
 
@@ -5388,7 +6503,11 @@ impl McpRegistry {
     /// command list is deterministic.
     pub async fn connected_prompts(
         &self,
-    ) -> Vec<(String, protocol::McpConnectionId, platform_api::McpPromptDto)> {
+    ) -> Vec<(
+        String,
+        protocol::McpConnectionId,
+        platform_api::McpPromptDto,
+    )> {
         let conns = self.connections.read().await;
         let mut servers: Vec<&String> = conns.keys().collect();
         servers.sort();
@@ -6162,6 +7281,464 @@ fn server_config_invalid_payload(
     }
 }
 
+fn config_scope_wire(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Local => "local",
+        ConfigScope::User => "user",
+        ConfigScope::Project => "project",
+        ConfigScope::Dynamic => "dynamic",
+        ConfigScope::Enterprise => "enterprise",
+        ConfigScope::ClaudeAi => "claudeai",
+        ConfigScope::Managed => "managed",
+        ConfigScope::Agent => "agent",
+    }
+}
+
+fn negotiation_mode_wire(
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+) -> &'static str {
+    match negotiation_mode {
+        crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
+        crate::protocol_negotiation::NegotiationMode::Auto { .. } => "auto",
+    }
+}
+
+fn protocol_era_wire(era: platform_api::McpProtocolEra) -> &'static str {
+    match era {
+        platform_api::McpProtocolEra::Legacy => "legacy",
+        platform_api::McpProtocolEra::Modern => "modern",
+    }
+}
+
+fn is_plugin_mcp_config(config: &McpServerConfig) -> bool {
+    matches!(
+        config.metadata.agent_source,
+        Some(crate::connection::McpAgentSource::Plugin)
+    )
+}
+
+fn server_connection_succeeded_payload(
+    config: &McpServerConfig,
+    connection_duration_ms: u64,
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+    negotiated: &platform_api::McpNegotiatedProtocol,
+) -> telemetry::tengu::mcp::ServerConnectionSucceededPayload {
+    use telemetry::pii::Verified;
+    telemetry::tengu::mcp::ServerConnectionSucceededPayload {
+        connection_duration_ms,
+        transport_type: Verified::assert_safe(config.spec.kind().to_string()),
+        scope: Verified::assert_safe(config_scope_wire(config.scope).to_string()),
+        is_plugin: is_plugin_mcp_config(config),
+        negotiation_mode: Some(Verified::assert_safe(
+            negotiation_mode_wire(negotiation_mode).to_string(),
+        )),
+        protocol_era: Some(Verified::assert_safe(
+            protocol_era_wire(negotiated.era).to_string(),
+        )),
+        negotiated_protocol_version: Some(Verified::assert_safe(negotiated.version.clone())),
+    }
+}
+
+fn server_connection_failed_payload(
+    config: &McpServerConfig,
+    negotiation_mode: Option<crate::protocol_negotiation::NegotiationMode>,
+    connection_duration_ms: Option<u64>,
+    error_code: Option<&'static str>,
+) -> telemetry::tengu::mcp::ServerConnectionFailedPayload {
+    use telemetry::pii::Verified;
+    telemetry::tengu::mcp::ServerConnectionFailedPayload {
+        transport_type: Verified::assert_safe(config.spec.kind().to_string()),
+        scope: Verified::assert_safe(config_scope_wire(config.scope).to_string()),
+        is_plugin: is_plugin_mcp_config(config),
+        connection_duration_ms,
+        negotiation_mode: negotiation_mode
+            .map(negotiation_mode_wire)
+            .map(|mode| Verified::assert_safe(mode.to_string())),
+        error_code: error_code.map(|code| Verified::assert_safe(code.to_string())),
+    }
+}
+
+fn list_changed_payload(
+    server_name: &str,
+    kind: McpCatalogKind,
+    cause: &'static str,
+    previous_count: Option<usize>,
+    new_count: Option<usize>,
+) -> telemetry::tengu::mcp::ListChangedPayload {
+    use telemetry::pii::Verified;
+    telemetry::tengu::mcp::ListChangedPayload {
+        kind: match kind {
+            McpCatalogKind::Tools => telemetry::tengu::mcp::ListChangedType::Tools,
+            McpCatalogKind::Prompts => telemetry::tengu::mcp::ListChangedType::Prompts,
+            McpCatalogKind::Resources => telemetry::tengu::mcp::ListChangedType::Resources,
+        },
+        mcp_server_key_hash: mcp_server_key_hash(server_name),
+        cause: Verified::assert_safe(cause.to_string()),
+        previous_count: previous_count
+            .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
+            .filter(|_| kind == McpCatalogKind::Tools),
+        new_count: new_count
+            .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
+            .filter(|_| kind == McpCatalogKind::Tools),
+    }
+}
+
+fn modern_listen_request_params(
+    version: &str,
+    notifications: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "_meta": crate::client::modern_meta(version),
+        "notifications": notifications,
+    })
+}
+
+fn modern_listen_notifications_filter(
+    capabilities: &ServerCapabilitiesDto,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut notifications = serde_json::Map::new();
+    if capabilities.tools {
+        notifications.insert(
+            "toolsListChanged".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if capabilities.prompts {
+        notifications.insert(
+            "promptsListChanged".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if capabilities.resources {
+        notifications.insert(
+            "resourcesListChanged".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    (!notifications.is_empty()).then_some(notifications)
+}
+
+fn notification_matches_subscription(
+    notification: &jsonrpc::Notification,
+    subscription_id: &jsonrpc::Id,
+) -> bool {
+    let Some(params) = notification.params.as_ref() else {
+        return false;
+    };
+    let Some(meta) = params.get("_meta").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let Some(observed) = meta.get("io.modelcontextprotocol/subscriptionId") else {
+        return false;
+    };
+    match subscription_id {
+        jsonrpc::Id::Number(expected) => observed.as_i64() == Some(*expected),
+        jsonrpc::Id::String(expected) => observed.as_str() == Some(expected),
+    }
+}
+
+fn listener_reopen_park_jitter() -> f64 {
+    #[cfg(test)]
+    if let Some(jitter) = test_listener_reopen_park_jitter() {
+        return jitter;
+    }
+    rand::rng().random_range(0.8_f64..=1.2_f64)
+}
+
+fn resource_templates_fetched_payload(
+    templates: &[platform_api::McpResourceTemplateDto],
+) -> telemetry::tengu::mcp::ResourceTemplatesFetchedPayload {
+    telemetry::tengu::mcp::ResourceTemplatesFetchedPayload {
+        template_count: u32::try_from(templates.len()).unwrap_or(u32::MAX),
+    }
+}
+
+fn mcp_server_key_hash(server_name: &str) -> telemetry::pii::Verified {
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(server_name.as_bytes());
+    let mut short = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut short, "{byte:02x}");
+    }
+    telemetry::pii::Verified::assert_safe(short)
+}
+
+fn emit_server_needs_auth_for_config(config: &McpServerConfig, cause: Option<&str>) {
+    let telemetry = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+    let payload = telemetry::tengu::mcp::ServerNeedsAuthPayload {
+        transport_type: telemetry.transport_type,
+        mcp_server_key_hash: telemetry.mcp_server_key_hash,
+        cause: cause.map(|value| telemetry::Verified::assert_safe(value.to_string())),
+    };
+    telemetry::emit_mcp_server_needs_auth(&payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::SERVER_NEEDS_AUTH,
+        serde_json::to_value(payload).unwrap(),
+    );
+}
+
+fn emit_tool_call_auth_error_for_config(
+    config: &McpServerConfig,
+    error_code: &str,
+    auth_error_kind: telemetry::tengu::mcp::ToolCallAuthErrorKind,
+) {
+    let telemetry = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+    let payload = telemetry::tengu::mcp::ToolCallAuthErrorPayload {
+        error_code: telemetry::Verified::assert_safe(error_code.to_string()),
+        transport_type: telemetry.transport_type,
+        auth_error_kind,
+        mcp_server_key_hash: telemetry.mcp_server_key_hash,
+    };
+    telemetry::emit_mcp_tool_call_auth_error(&payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::TOOL_CALL_AUTH_ERROR,
+        serde_json::to_value(payload).unwrap(),
+    );
+}
+
+fn oauth_refresh_failure_reason(error: &oauth::OAuthError) -> &'static str {
+    match error {
+        oauth::OAuthError::Discovery(_) => "metadata_discovery_failed",
+        oauth::OAuthError::RefreshRejected(_) => "invalid_grant",
+        oauth::OAuthError::Token(message) if message.contains("invalid_client") => "invalid_client",
+        oauth::OAuthError::Token(message) if message.contains("unauthorized_client") => {
+            "unauthorized_client"
+        }
+        oauth::OAuthError::Token(message) if message.contains("decode") => {
+            "token_response_schema_rejected"
+        }
+        oauth::OAuthError::Token(_) => "request_failed",
+        oauth::OAuthError::Callback(_) => "request_failed",
+        oauth::OAuthError::Registration(_) => "request_failed",
+    }
+}
+
+fn tool_call_auth_error_code(error: &crate::client::McpClientError) -> &'static str {
+    match error {
+        crate::client::McpClientError::HttpResponse { status, .. } if *status == 403 => "403",
+        crate::client::McpClientError::HttpResponse { .. } => "401",
+        _ => "401",
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct CapturedMcpTelemetryEvent {
+    name: &'static str,
+    payload: serde_json::Value,
+}
+
+#[cfg(test)]
+fn test_telemetry_events() -> &'static StdMutex<Vec<CapturedMcpTelemetryEvent>> {
+    static EVENTS: OnceLock<StdMutex<Vec<CapturedMcpTelemetryEvent>>> = OnceLock::new();
+    EVENTS.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn test_telemetry_capture_lock() -> &'static StdMutex<()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+}
+
+#[cfg(test)]
+fn clear_test_telemetry_events() {
+    test_telemetry_events().lock().unwrap().clear();
+}
+
+#[cfg(test)]
+fn take_test_telemetry_events() -> Vec<CapturedMcpTelemetryEvent> {
+    std::mem::take(&mut *test_telemetry_events().lock().unwrap())
+}
+
+#[cfg(test)]
+fn record_test_telemetry_event(name: &'static str, payload: serde_json::Value) {
+    test_telemetry_events()
+        .lock()
+        .unwrap()
+        .push(CapturedMcpTelemetryEvent { name, payload });
+}
+
+#[cfg(test)]
+fn catalog_change_listener_pause_slot() -> &'static StdMutex<Option<Arc<Notify>>> {
+    static SLOT: OnceLock<StdMutex<Option<Arc<Notify>>>> = OnceLock::new();
+    SLOT.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn set_catalog_change_listener_pause_for_test(hook: Option<Arc<Notify>>) {
+    *catalog_change_listener_pause_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(test)]
+fn catalog_change_listener_closed_slot() -> &'static StdMutex<Option<Arc<Notify>>> {
+    static SLOT: OnceLock<StdMutex<Option<Arc<Notify>>>> = OnceLock::new();
+    SLOT.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn set_catalog_change_listener_closed_for_test(hook: Option<Arc<Notify>>) {
+    *catalog_change_listener_closed_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(test)]
+fn listener_reopen_park_jitter_slot() -> &'static StdMutex<Option<f64>> {
+    static SLOT: OnceLock<StdMutex<Option<f64>>> = OnceLock::new();
+    SLOT.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn set_listener_reopen_park_jitter_for_test(jitter: Option<f64>) {
+    *listener_reopen_park_jitter_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = jitter;
+}
+
+#[cfg(test)]
+fn test_listener_reopen_park_jitter() -> Option<f64> {
+    *listener_reopen_park_jitter_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+async fn maybe_pause_catalog_change_listener_for_test() {
+    let hook = catalog_change_listener_pause_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn notify_catalog_change_listener_closed_for_test() {
+    let hook = catalog_change_listener_closed_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook.notify_waiters();
+    }
+}
+
+fn emit_server_connection_succeeded(
+    payload: &telemetry::tengu::mcp::ServerConnectionSucceededPayload,
+) {
+    telemetry::emit_mcp_server_connection_succeeded(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::SERVER_CONNECTION_SUCCEEDED,
+        serde_json::to_value(payload).expect("serialize test success payload"),
+    );
+}
+
+fn emit_server_connection_failed(payload: &telemetry::tengu::mcp::ServerConnectionFailedPayload) {
+    telemetry::emit_mcp_server_connection_failed(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::SERVER_CONNECTION_FAILED,
+        serde_json::to_value(payload).expect("serialize test failure payload"),
+    );
+}
+
+fn emit_tools_listed(payload: &telemetry::tengu::mcp::ToolsListedPayload) {
+    telemetry::emit_mcp_tools_listed(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::TOOLS_LISTED,
+        serde_json::to_value(payload).expect("serialize test tools_listed payload"),
+    );
+}
+
+fn emit_degraded(payload: &telemetry::tengu::mcp::DegradedPayload) {
+    telemetry::emit_mcp_degraded(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::DEGRADED,
+        serde_json::to_value(payload).expect("serialize test degraded payload"),
+    );
+}
+
+fn emit_list_changed(payload: &telemetry::tengu::mcp::ListChangedPayload) {
+    telemetry::emit_mcp_list_changed(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::LIST_CHANGED,
+        serde_json::to_value(payload).expect("serialize test list_changed payload"),
+    );
+}
+
+fn emit_listen_reopen(payload: &telemetry::tengu::mcp::ListenReopenPayload) {
+    telemetry::emit_mcp_listen_reopen(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::LISTEN_REOPEN,
+        serde_json::to_value(payload).expect("serialize test listen_reopen payload"),
+    );
+}
+
+fn emit_resource_templates_fetched(
+    payload: &telemetry::tengu::mcp::ResourceTemplatesFetchedPayload,
+) {
+    telemetry::emit_mcp_resource_templates_fetched(payload);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::RESOURCE_TEMPLATES_FETCHED,
+        serde_json::to_value(payload).expect("serialize test resource_templates payload"),
+    );
+}
+
+fn listen_reopen_payload(
+    server_name: &str,
+    outcome: telemetry::tengu::mcp::ListenReopenOutcome,
+    attempts: u32,
+    trigger: telemetry::tengu::mcp::ListenReopenTrigger,
+) -> telemetry::tengu::mcp::ListenReopenPayload {
+    telemetry::tengu::mcp::ListenReopenPayload {
+        mcp_server_key_hash: mcp_server_key_hash(server_name),
+        outcome,
+        attempts,
+        trigger,
+    }
+}
+
+fn notification_kind(method: &str) -> Option<McpCatalogKind> {
+    match method {
+        "notifications/tools/list_changed" => Some(McpCatalogKind::Tools),
+        "notifications/prompts/list_changed" => Some(McpCatalogKind::Prompts),
+        "notifications/resources/list_changed" => Some(McpCatalogKind::Resources),
+        _ => None,
+    }
+}
+
+fn forward_catalog_change(
+    changes: &broadcast::Sender<McpCatalogChanged>,
+    server_name: &str,
+    connection_id: McpConnectionId,
+    method: &str,
+    telemetry_cause: Option<&'static str>,
+) {
+    let Some(kind) = notification_kind(method) else {
+        return;
+    };
+    let _ = changes.send(McpCatalogChanged {
+        server_name: server_name.to_string(),
+        connection_id,
+        retired_connection_id: None,
+        kind,
+        telemetry_cause,
+    });
+}
+
 /// §20b — build the `tengu_mcp_degraded` payload for every NONZERO bucket in
 /// one server's tallied tool-schema classification counts. Pure and
 /// deterministic (no telemetry emission, no tracing) so the aggregation
@@ -6191,7 +7768,10 @@ fn degraded_payloads_for_server(
         let (normalized_count, skipped_count, kept_count) = match reason {
             // Oracle's `connected_zero_tools` payload is
             // `{reason,transportType,mcpServerName,..._}` — no count field.
-            DegradedReason::ConnectedZeroTools => (None, None, None),
+            DegradedReason::ConnectedZeroTools
+            | DegradedReason::ToolsListFailed
+            | DegradedReason::ResourcesListFailed
+            | DegradedReason::PromptsListFailed => (None, None, None),
             DegradedReason::ToolSchemaNormalized => (Some(*count), None, None),
             DegradedReason::ToolSchemaNormalizeGated
             | DegradedReason::ToolSchemaUnsupported
@@ -6289,6 +7869,11 @@ mod tests {
     use bytes::Bytes;
     use futures_util::StreamExt;
     use jsonrpc::{Connection, Mode};
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+        McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
     use std::future::Future;
@@ -6296,11 +7881,6 @@ mod tests {
     use std::sync::Mutex as TestMutex;
     use std::task::{Context, Poll, Wake, Waker};
     use tokio::sync::{mpsc, Notify};
-    use platform_api::{
-        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-        McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-    };
 
     /// Build a `Connection` over a fresh pair of `mpsc<Bytes>` channels (the
     /// `paired_connection` pattern from `client.rs:536`); the peer ends are
@@ -6340,13 +7920,19 @@ mod tests {
     /// transport emits, so the registry's rewrite is exercised).
     struct BridgeMock {
         tools: Vec<McpToolDto>,
+        resources: Vec<McpResourceDto>,
+        prompts: Vec<McpPromptDto>,
         // §26a — canned `resources/templates/list` rows and the capability
         // presence bit that gates whether `connect` fetches them at all
         // (`initialize` reports `resources: true` only when this is set).
         resource_templates: Vec<platform_api::McpResourceTemplateDto>,
         resources_capability: AtomicBool,
+        prompts_capability: AtomicBool,
         list_resource_templates_fails: AtomicBool,
+        list_resources_fails: AtomicBool,
+        list_prompts_fails: AtomicBool,
         drivable_calls: bool,
+        modern_connect: bool,
         /// How many times `resources/templates/list` was actually issued. The
         /// parity claim is ZERO RPCs when the discovery cache is ineligible —
         /// an empty `resource_templates` field would also pass if we fetched
@@ -6354,6 +7940,9 @@ mod tests {
         templates_calls: AtomicUsize,
         conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
         list_tools_fails: AtomicBool,
+        block_list_tools: AtomicBool,
+        list_tools_started: Notify,
+        list_tools_release: Notify,
         disconnect_fails: AtomicBool,
         block_disconnect: AtomicBool,
         hang_disconnect: AtomicBool,
@@ -6377,6 +7966,8 @@ mod tests {
         resource_templates_release: Notify,
         inbound_txs: TestMutex<HashMap<ConnId, mpsc::Sender<Bytes>>>,
         tool_call_peers: TestMutex<HashMap<ConnId, mpsc::Receiver<Bytes>>>,
+        listen_writer_failures_remaining: AtomicUsize,
+        connect_failures_remaining: AtomicUsize,
         disconnect_failures_remaining: AtomicUsize,
         /// §11 Stage 2 — how many times `McpTransport::disconnect` actually
         /// ran, so a test can prove a `Cached` server's teardown does NOT
@@ -6396,6 +7987,10 @@ mod tests {
                     tool_name: (*t).to_string(),
                     description: format!("{t} tool"),
                     input_schema: serde_json::json!({"type": "object"}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
                     search_hint: None,
                     always_load: None,
                     requires_user_interaction: false,
@@ -6403,13 +7998,22 @@ mod tests {
                 .collect();
             Self {
                 tools,
+                resources: Vec::new(),
+                prompts: Vec::new(),
                 resource_templates: Vec::new(),
                 resources_capability: AtomicBool::new(false),
+                prompts_capability: AtomicBool::new(false),
                 list_resource_templates_fails: AtomicBool::new(false),
+                list_resources_fails: AtomicBool::new(false),
+                list_prompts_fails: AtomicBool::new(false),
                 drivable_calls: false,
+                modern_connect: false,
                 templates_calls: AtomicUsize::new(0),
                 conns: TestMutex::new(HashMap::new()),
                 list_tools_fails: AtomicBool::new(false),
+                block_list_tools: AtomicBool::new(false),
+                list_tools_started: Notify::new(),
+                list_tools_release: Notify::new(),
                 disconnect_fails: AtomicBool::new(false),
                 block_disconnect: AtomicBool::new(false),
                 hang_disconnect: AtomicBool::new(false),
@@ -6427,6 +8031,8 @@ mod tests {
                 resource_templates_release: Notify::new(),
                 inbound_txs: TestMutex::new(HashMap::new()),
                 tool_call_peers: TestMutex::new(HashMap::new()),
+                listen_writer_failures_remaining: AtomicUsize::new(0),
+                connect_failures_remaining: AtomicUsize::new(0),
                 disconnect_failures_remaining: AtomicUsize::new(0),
                 disconnect_calls: AtomicUsize::new(0),
             }
@@ -6439,6 +8045,14 @@ mod tests {
             }
         }
 
+        fn with_modern_drivable_calls(tool_names: &[&str]) -> Self {
+            Self {
+                drivable_calls: true,
+                modern_connect: true,
+                ..Self::new(tool_names)
+            }
+        }
+
         /// A mock whose server advertises the `resources` capability and
         /// answers `resources/templates/list` with `templates` (§26a).
         fn with_resource_templates(templates: Vec<platform_api::McpResourceTemplateDto>) -> Self {
@@ -6446,6 +8060,23 @@ mod tests {
             mock.resources_capability.store(true, Ordering::SeqCst);
             Self {
                 resource_templates: templates,
+                ..mock
+            }
+        }
+
+        fn with_catalogs(
+            tool_names: &[&str],
+            resources: Vec<McpResourceDto>,
+            prompts: Vec<McpPromptDto>,
+        ) -> Self {
+            let mock = Self::new(tool_names);
+            mock.resources_capability
+                .store(!resources.is_empty(), Ordering::SeqCst);
+            mock.prompts_capability
+                .store(!prompts.is_empty(), Ordering::SeqCst);
+            Self {
+                resources,
+                prompts,
                 ..mock
             }
         }
@@ -6462,6 +8093,10 @@ mod tests {
                     tool_name: (*name).to_string(),
                     description: format!("{name} tool"),
                     input_schema: schema.clone(),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
                     search_hint: None,
                     always_load: None,
                     requires_user_interaction: false,
@@ -6492,16 +8127,71 @@ mod tests {
                 !self.panic_connect.load(Ordering::SeqCst),
                 "bridge mock forced panic in connect"
             );
+            if self.connect_failures_remaining.load(Ordering::SeqCst) > 0 {
+                let _ = self.connect_failures_remaining.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |remaining| (remaining > 0).then_some(remaining - 1),
+                );
+                return Err(McpError::Connection(
+                    "bridge mock forced connect failure".into(),
+                ));
+            }
             let id = ConnId::new();
             if self.drivable_calls {
                 let (connection, inbound_tx, peer_rx) = drivable_connection();
                 self.inbound_txs.lock().unwrap().insert(id, inbound_tx);
-                self.tool_call_peers.lock().unwrap().insert(id, peer_rx);
+                if self.listen_writer_failures_remaining.load(Ordering::SeqCst) > 0 {
+                    let _ = self.listen_writer_failures_remaining.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |remaining| (remaining > 0).then_some(remaining - 1),
+                    );
+                } else {
+                    self.tool_call_peers.lock().unwrap().insert(id, peer_rx);
+                }
                 self.conns.lock().unwrap().insert(id, connection);
             } else {
                 self.conns.lock().unwrap().insert(id, paired_connection());
             }
             Ok(McpRawConnection { connection_id: id })
+        }
+        async fn connect_and_initialize(
+            &self,
+            spec: &McpTransportSpec,
+            _options: platform_api::McpConnectOptions,
+        ) -> Result<platform_api::McpConnectResult, McpError> {
+            let connection = self.connect(spec).await?;
+            let capabilities = match std::panic::AssertUnwindSafe(self.initialize(&connection))
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(capabilities)) => capabilities,
+                Ok(Err(error)) => {
+                    let _ = self.disconnect(connection.connection_id).await;
+                    return Err(error);
+                }
+                Err(payload) => {
+                    let _ = self.disconnect(connection.connection_id).await;
+                    std::panic::resume_unwind(payload);
+                }
+            };
+            let negotiated = if self.modern_connect {
+                platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Modern,
+                    version: "2026-07-28".into(),
+                }
+            } else {
+                platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                }
+            };
+            Ok(platform_api::McpConnectResult {
+                connection,
+                capabilities,
+                negotiated,
+            })
         }
         async fn initialize(
             &self,
@@ -6514,7 +8204,7 @@ mod tests {
             Ok(ServerCapabilitiesDto {
                 tools: true,
                 resources: self.resources_capability.load(Ordering::SeqCst),
-                prompts: false,
+                prompts: self.prompts_capability.load(Ordering::SeqCst),
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
@@ -6541,6 +8231,10 @@ mod tests {
             Ok(self.resource_templates.clone())
         }
         async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            self.list_tools_started.notify_one();
+            if self.block_list_tools.load(Ordering::SeqCst) {
+                self.list_tools_release.notified().await;
+            }
             assert!(
                 !self.panic_list_tools.load(Ordering::SeqCst),
                 "bridge mock forced panic in list_tools"
@@ -6554,10 +8248,16 @@ mod tests {
             &self,
             _c: &McpRawConnection,
         ) -> Result<Vec<McpResourceDto>, McpError> {
-            Ok(Vec::new())
+            if self.list_resources_fails.load(Ordering::SeqCst) {
+                return Err(McpError::Internal("list resources failed".into()));
+            }
+            Ok(self.resources.clone())
         }
         async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
-            Ok(Vec::new())
+            if self.list_prompts_fails.load(Ordering::SeqCst) {
+                return Err(McpError::Internal("list prompts failed".into()));
+            }
+            Ok(self.prompts.clone())
         }
         async fn call_tool(
             &self,
@@ -6685,6 +8385,10 @@ mod tests {
                 tool_name: "list".into(),
                 description: "list local apps".into(),
                 input_schema: serde_json::json!({"type":"object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 full_name: String::new(),
                 search_hint: None,
                 always_load: Some(true),
@@ -6942,6 +8646,110 @@ mod tests {
         })
     }
 
+    fn spawn_tool_call_auth_then_auth(
+        mock: Arc<BridgeMock>,
+        first_connection_id: Option<ConnId>,
+        tool_name: &'static str,
+        input: Value,
+        auth_status: u16,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let first_connection_id = if let Some(id) = first_connection_id {
+                id
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Some(id) = mock.conns.lock().unwrap().keys().next().copied() {
+                            break id;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("first live connection appears")
+            };
+            let (first_tx, mut first_rx) = mock
+                .take_tool_call_peer(first_connection_id)
+                .expect("first tool-call peer");
+            let first_input = input.clone();
+            let first_request = tokio::time::timeout(Duration::from_secs(2), async move {
+                let request_frame = first_rx.recv().await.expect("first tools/call frame");
+                let request: Value =
+                    serde_json::from_slice(&request_frame).expect("first tools/call json");
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], tool_name);
+                assert_eq!(request["params"]["arguments"], first_input);
+                request
+            })
+            .await
+            .expect("first tools/call request");
+            let mut first_response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": first_request["id"].clone(),
+                "error": {
+                    "code": -32000,
+                    "message": format!(
+                        "MCP_HTTP_STATUS={auth_status};WWW_AUTHENTICATE=Bearer realm=\"mcp\""
+                    )
+                }
+            }))
+            .expect("first auth error response");
+            first_response.push(b'\n');
+            first_tx
+                .send(Bytes::from(first_response))
+                .await
+                .expect("send first auth error response");
+
+            let second_connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(id) = mock
+                        .conns
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .copied()
+                        .find(|id| *id != first_connection_id)
+                    {
+                        break id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reconnect publishes a second live connection");
+            let (second_tx, mut second_rx) = mock
+                .take_tool_call_peer(second_connection_id)
+                .expect("second tool-call peer");
+            let second_request = tokio::time::timeout(Duration::from_secs(2), async move {
+                let request_frame = second_rx.recv().await.expect("second tools/call frame");
+                let request: Value =
+                    serde_json::from_slice(&request_frame).expect("second tools/call json");
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], tool_name);
+                assert_eq!(request["params"]["arguments"], input);
+                request
+            })
+            .await
+            .expect("second tools/call request");
+            let mut second_response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": second_request["id"].clone(),
+                "error": {
+                    "code": -32000,
+                    "message": format!(
+                        "MCP_HTTP_STATUS={auth_status};WWW_AUTHENTICATE=Bearer realm=\"mcp\""
+                    )
+                }
+            }))
+            .expect("second auth error response");
+            second_response.push(b'\n');
+            second_tx
+                .send(Bytes::from(second_response))
+                .await
+                .expect("send second auth error response");
+        })
+    }
+
     fn cfg(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.into(),
@@ -6976,11 +8784,57 @@ mod tests {
         }
     }
 
+    fn resource(name: &str, uri: &str) -> McpResourceDto {
+        McpResourceDto {
+            uri: uri.into(),
+            name: name.into(),
+            description: None,
+            mime_type: None,
+            meta: None,
+        }
+    }
+
+    fn prompt(name: &str) -> McpPromptDto {
+        McpPromptDto {
+            name: name.into(),
+            description: None,
+            arguments: Vec::new(),
+        }
+    }
+
+    fn legacy_negotiated() -> platform_api::McpNegotiatedProtocol {
+        platform_api::McpNegotiatedProtocol {
+            era: platform_api::McpProtocolEra::Legacy,
+            version: "2025-11-25".into(),
+        }
+    }
+
+    fn modern_negotiated() -> platform_api::McpNegotiatedProtocol {
+        platform_api::McpNegotiatedProtocol {
+            era: platform_api::McpProtocolEra::Modern,
+            version: "2026-07-28".into(),
+        }
+    }
+
+    fn caps(tools: bool, resources: bool, prompts: bool) -> ServerCapabilitiesDto {
+        ServerCapabilitiesDto {
+            tools,
+            resources,
+            prompts,
+            directory_read: false,
+            logging: false,
+            experimental: HashMap::new(),
+            extensions: HashMap::new(),
+        }
+    }
+
     // ---- Batch 1: client bridge --------------------------------------------
 
     #[tokio::test]
     async fn connect_registers_client_when_raw_conn_present() {
-        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let tool_names: Vec<String> = (0..17).map(|index| format!("blocked-{index}")).collect();
+        let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
+        let mock = Arc::new(BridgeMock::new(&tool_name_refs));
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
             mock as Arc<dyn RawConnectionProvider>,
@@ -7235,25 +9089,328 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_failure_disconnects_transport_and_records_retryable_state() {
+    async fn tools_list_failure_keeps_transport_connected_and_emits_success_before_catalogs_finish()
+    {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
         let mock = Arc::new(BridgeMock::new(&["read"]));
         mock.list_tools_fails.store(true, Ordering::SeqCst);
+        mock.block_list_tools.store(true, Ordering::SeqCst);
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+
+        let connect = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.connect(cfg("mock")).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), mock.list_tools_started.notified())
+            .await
+            .expect("connect must reach list_tools");
+
+        let midflight = take_test_telemetry_events();
+        assert!(
+            midflight
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::SERVER_CONNECTION_SUCCEEDED),
+            "initialize success must emit before catalog completion"
+        );
+        assert!(
+            !midflight
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::TOOLS_LISTED
+                    && event.payload.get("tool_count") == Some(&serde_json::json!(17))),
+            "tools/list event must wait for the catalog result"
+        );
+
+        mock.list_tools_release.notify_one();
+        let connection_id = connect.await.expect("join").expect("connect succeeds");
+        let tail_events = take_test_telemetry_events();
+        let mut events = midflight.clone();
+        events.extend(tail_events);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::SERVER_CONNECTION_SUCCEEDED),
+            "successful initialize must be recorded"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::SERVER_CONNECTION_FAILED),
+            "catalog failure must not be reported as a connection failure"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.name == telemetry::tengu::mcp::DEGRADED
+                    && event.payload.get("reason") == Some(&serde_json::json!("tools_list_failed"))
+            }),
+            "tools/list failure must emit the exact degraded reason"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::TOOLS_LISTED
+                    && event.payload.get("tool_count") == Some(&serde_json::json!(17))),
+            "failed tools/list must not emit tools_listed"
+        );
+        let states = registry.connections.read().await;
+        let Some(McpConnectionState::Connected {
+            connection_id: current,
+            tools,
+            ..
+        }) = states.get("mock")
+        else {
+            panic!("expected Connected state after partial catalog failure");
+        };
+        assert_eq!(*current, connection_id);
+        assert!(tools.is_empty(), "failed tools catalog falls back to empty");
+        assert!(
+            mock.conns.lock().unwrap().contains_key(&connection_id),
+            "the initialized transport must remain live"
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_list_failure_keeps_tools_and_marks_only_resources_failed() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mock = Arc::new(BridgeMock::with_catalogs(
+            &["read"],
+            vec![resource("guide", "file:///guide.md")],
+            Vec::new(),
+        ));
+        mock.resources_capability.store(true, Ordering::SeqCst);
+        mock.list_resources_fails.store(true, Ordering::SeqCst);
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
             mock.clone() as Arc<dyn RawConnectionProvider>,
         );
 
-        let error = registry.connect(cfg("mock")).await.unwrap_err();
-        assert!(error.to_string().contains("list tools failed"));
-        assert!(mock.conns.lock().unwrap().is_empty());
+        registry
+            .connect(cfg("mock"))
+            .await
+            .expect("connect succeeds");
+
         let states = registry.connections.read().await;
-        assert!(matches!(
-            states.get("mock"),
-            Some(McpConnectionState::Disconnected {
-                last_error: Some(message),
-                ..
-            }) if message.contains("list tools failed")
+        let Some(McpConnectionState::Connected {
+            tools, resources, ..
+        }) = states.get("mock")
+        else {
+            panic!("expected Connected state");
+        };
+        assert_eq!(tools.len(), 1, "successful tools catalog is retained");
+        assert!(
+            resources.is_empty(),
+            "failed resources catalog falls back to empty on first connect"
+        );
+        drop(states);
+
+        let events = take_test_telemetry_events();
+        assert!(
+            events.iter().any(|event| {
+                event.name == telemetry::tengu::mcp::DEGRADED
+                    && event.payload.get("reason")
+                        == Some(&serde_json::json!("resources_list_failed"))
+            }),
+            "resources/list failure must emit the exact degraded reason"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::TOOLS_LISTED),
+            "successful tools/list must still emit tools_listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompts_list_failure_keeps_other_catalogs_live() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mock = Arc::new(BridgeMock::with_catalogs(
+            &["read"],
+            vec![resource("guide", "file:///guide.md")],
+            vec![prompt("draft")],
         ));
+        mock.list_prompts_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+
+        registry
+            .connect(cfg("mock"))
+            .await
+            .expect("connect succeeds");
+
+        let states = registry.connections.read().await;
+        let Some(McpConnectionState::Connected {
+            tools,
+            resources,
+            prompts,
+            ..
+        }) = states.get("mock")
+        else {
+            panic!("expected Connected state");
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(resources.len(), 1);
+        assert!(
+            prompts.is_empty(),
+            "failed prompts catalog falls back to empty"
+        );
+        drop(states);
+
+        let events = take_test_telemetry_events();
+        assert!(
+            events.iter().any(|event| {
+                event.name == telemetry::tengu::mcp::DEGRADED
+                    && event.payload.get("reason")
+                        == Some(&serde_json::json!("prompts_list_failed"))
+            }),
+            "prompts/list failure must emit the exact degraded reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_failed_slices() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            1_000_000,
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: true,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            },
+            vec![McpToolDto {
+                server_name: "srv".into(),
+                tool_name: "cached_tool".into(),
+                description: "cached tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
+                full_name: "mcp__srv__cached_tool".into(),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            }],
+            vec![resource("cached_guide", "file:///cached.md")],
+            vec![prompt("cached_prompt")],
+        );
+
+        let mock = Arc::new(BridgeMock::with_catalogs(
+            &["live_tool"],
+            vec![resource("live_guide", "file:///live.md")],
+            vec![prompt("live_prompt")],
+        ));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        mock.list_prompts_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry
+            .connect(cfg.clone())
+            .await
+            .expect("cache hit connect");
+        let live_id = registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect("partial live discovery still succeeds");
+        assert_ne!(live_id, cached_id);
+
+        let states = registry.connections.read().await;
+        let Some(McpConnectionState::Connected {
+            connection_id,
+            tools,
+            resources,
+            prompts,
+            ..
+        }) = states.get("srv")
+        else {
+            panic!("expected Connected state after lazy dial");
+        };
+        assert_eq!(*connection_id, live_id);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cached_tool"],
+            "failed tools/list must preserve the cached safe catalog"
+        );
+        assert_eq!(
+            resources
+                .iter()
+                .map(|resource| resource.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live_guide"],
+            "successful resources/list must replace the cached catalog"
+        );
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|prompt| prompt.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cached_prompt"],
+            "failed prompts/list must preserve the cached safe catalog"
+        );
+        drop(states);
+        drop(env);
+
+        let events = take_test_telemetry_events();
+        let degraded_reasons: Vec<&str> = events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::mcp::DEGRADED)
+            .filter_map(|event| {
+                event
+                    .payload
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert!(degraded_reasons.contains(&"tools_list_failed"));
+        assert!(degraded_reasons.contains(&"prompts_list_failed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.name == telemetry::tengu::mcp::SERVER_CONNECTION_FAILED),
+            "partial live discovery must not demote the initialized connection to a failure"
+        );
     }
 
     #[tokio::test]
@@ -7277,6 +9434,7 @@ mod tests {
                 connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
 
@@ -7292,6 +9450,7 @@ mod tests {
                 connection_id,
                 retired_connection_id: Some(connection_id),
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
     }
@@ -7327,6 +9486,7 @@ mod tests {
                 connection_id: cached_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
 
@@ -7342,6 +9502,7 @@ mod tests {
                 connection_id: live_id,
                 retired_connection_id: Some(cached_id),
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
 
@@ -7354,13 +9515,14 @@ mod tests {
                 connection_id: live_id,
                 retired_connection_id: Some(live_id),
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
         drop(env);
     }
 
     #[tokio::test]
-    async fn lazy_dial_failure_retires_cached_partition_and_leaves_no_zombie_partition() {
+    async fn lazy_dial_partial_catalog_failure_replaces_cached_partition_without_zombies() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7384,23 +9546,26 @@ mod tests {
 
         let cached_id = registry.connect(cfg).await.expect("cache hit connect");
         let _ = changes.recv().await.expect("cached connect event");
-        let error = registry.ensure_dialed_from_cache("srv").await.unwrap_err();
-        assert!(error.to_string().contains("list tools failed"));
-        let retired = changes.recv().await.expect("cached retire event");
+        let live_id = registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect("partial catalog failure must still promote the live transport");
+        let replaced = changes.recv().await.expect("live replacement event");
         assert_eq!(
-            retired,
+            replaced,
             McpCatalogChanged {
                 server_name: "srv".into(),
-                connection_id: cached_id,
+                connection_id: live_id,
                 retired_connection_id: Some(cached_id),
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: None,
             }
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(50), changes.recv())
                 .await
                 .is_err(),
-            "lazy-dial failure must retire the cached partition once, with no zombie follow-up"
+            "partial lazy-dial replacement must publish exactly one follow-up event"
         );
         drop(env);
     }
@@ -8037,7 +10202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabling_a_server_that_fails_to_connect_settles_as_failed_not_error() {
+    async fn enabling_a_server_that_with_a_catalog_failure_still_settles_connected() {
         let mock = Arc::new(BridgeMock::new(&["read"]));
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
@@ -8049,20 +10214,23 @@ mod tests {
             registry.set_disabled("mock", true).await.unwrap(),
             Some(platform_api::McpActionState::Disabled)
         );
-        // The next connect will fail (the catalog fetch errors out).
+        // The next connect still succeeds: the transport/initialize path is
+        // authoritative, while tools/list now degrades in place.
         mock.list_tools_fails.store(true, Ordering::SeqCst);
-        // Re-enabling must NOT return `Err` — claude's `u(name)` fulfills with
-        // `{type:"failed"}` rather than rejecting. The registry flips the server
-        // on but reads it back as `Failed` ("not connected"), so the /mcp handler
-        // can render "Enabled …, but it isn't connected yet." instead of erroring.
+        // Re-enabling must still NOT return `Err`, and with independent
+        // catalog fetches it now settles `Connected` with an empty tools slice.
         assert_eq!(
             registry.set_disabled("mock", false).await.unwrap(),
-            Some(platform_api::McpActionState::Failed)
+            Some(platform_api::McpActionState::Connected)
         );
         assert_eq!(
             registry.action_states().await,
-            vec![("mock".to_string(), platform_api::McpActionState::Failed)]
+            vec![("mock".to_string(), platform_api::McpActionState::Connected)]
         );
+        assert!(matches!(
+            registry.connections.read().await.get("mock"),
+            Some(McpConnectionState::Connected { tools, .. }) if tools.is_empty()
+        ));
     }
 
     #[tokio::test]
@@ -8206,7 +10374,25 @@ mod tests {
         let (connection, peer_tx, _peer_rx) = drivable_connection();
         let connection_id = ConnId::new();
         let mut changes = registry.subscribe_catalog_changes();
-        registry.spawn_catalog_change_listener("srv".into(), connection_id, connection);
+        registry.spawn_catalog_change_listener(
+            "srv".into(),
+            connection_id,
+            connection,
+            platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            },
+            None,
+        );
 
         let mut frame = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -8228,6 +10414,7 @@ mod tests {
                 connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
+                telemetry_cause: Some("notification"),
             }
         );
     }
@@ -8239,7 +10426,25 @@ mod tests {
         let (connection, peer_tx, _peer_rx) = drivable_connection();
         let connection_id = ConnId::new();
         let mut changes = registry.subscribe_catalog_changes();
-        registry.spawn_catalog_change_listener("srv".into(), connection_id, connection);
+        registry.spawn_catalog_change_listener(
+            "srv".into(),
+            connection_id,
+            connection,
+            platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            ServerCapabilitiesDto {
+                tools: false,
+                resources: true,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            },
+            None,
+        );
 
         let mut frame = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -8261,8 +10466,741 @@ mod tests {
                 connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Resources,
+                telemetry_cause: Some("notification"),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_generation() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        let pause = Arc::new(Notify::new());
+        set_catalog_change_listener_pause_for_test(Some(pause.clone()));
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
+        let (connection, peer_tx, mut peer_rx) = drivable_connection();
+        let connection_id = ConnId::new();
+        let client = Arc::new(
+            McpClient::new(
+                "srv",
+                std::path::PathBuf::from("/tmp/work"),
+                connection.clone(),
+            )
+            .await,
+        );
+        registry.clients.write().await.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(connection_id),
+                client,
+            },
+        );
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: true,
+                    prompts: true,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![McpToolDto {
+                    server_name: "srv".into(),
+                    tool_name: "old".into(),
+                    description: "old".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
+                    full_name: "mcp__srv__old".into(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                }],
+                resources: vec![resource("old-resource", "file:///old.md")],
+                resource_templates: Vec::new(),
+                prompts: vec![prompt("old-prompt")],
+                connected_at: SystemTime::now(),
+            },
+        );
+        let mut changes = registry.subscribe_catalog_changes();
+        registry.spawn_catalog_change_listener(
+            "srv".into(),
+            connection_id,
+            connection,
+            platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: true,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            },
+            None,
+        );
+
+        for _ in 0..300 {
+            let mut frame = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+                "params": {}
+            }))
+            .unwrap();
+            frame.push(b'\n');
+            peer_tx.send(Bytes::from(frame)).await.unwrap();
+        }
+        set_catalog_change_listener_pause_for_test(None);
+        pause.notify_waiters();
+
+        let refresh_registry = registry.clone();
+        let refresh = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let change = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+                    .await
+                    .expect("lag recovery change within timeout")
+                    .expect("catalog change sender remains live");
+                assert_eq!(change.connection_id, connection_id);
+                assert_eq!(change.telemetry_cause, Some(LISTEN_REOPEN_CAUSE));
+                refresh_registry
+                    .refresh_catalog(&change)
+                    .await
+                    .expect("refresh succeeds");
+                seen.push(change.kind);
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), changes.recv())
+                    .await
+                    .is_err(),
+                "lag recovery must coalesce buffered notifications into one authoritative refresh set"
+            );
+            seen
+        });
+
+        for _ in 0..3 {
+            let request_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("catalog refresh request within timeout")
+                .expect("catalog refresh frame");
+            let request: Value = serde_json::from_slice(&request_frame).unwrap();
+            let method = request["method"].as_str().expect("request method");
+            let result = match method {
+                "tools/list" => serde_json::json!({
+                    "tools": [{
+                        "name": "fresh-tool",
+                        "description": "fresh",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }),
+                "prompts/list" => serde_json::json!({
+                    "prompts": [{
+                        "name": "fresh-prompt",
+                        "description": "fresh",
+                        "arguments": []
+                    }]
+                }),
+                "resources/list" => serde_json::json!({
+                    "resources": [{
+                        "uri": "file:///fresh.md",
+                        "name": "fresh-resource"
+                    }]
+                }),
+                other => panic!("unexpected lag recovery request {other}"),
+            };
+            let mut response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": result
+            }))
+            .unwrap();
+            response.push(b'\n');
+            peer_tx.send(Bytes::from(response)).await.unwrap();
+        }
+
+        let mut seen: Vec<&'static str> = refresh
+            .await
+            .expect("lag refresh join")
+            .into_iter()
+            .map(|kind| match kind {
+                McpCatalogKind::Tools => "tools",
+                McpCatalogKind::Prompts => "prompts",
+                McpCatalogKind::Resources => "resources",
+            })
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec!["prompts", "resources", "tools"]);
+        let conns = registry.connections.read().await;
+        let Some(McpConnectionState::Connected {
+            tools,
+            prompts,
+            resources,
+            ..
+        }) = conns.get("srv")
+        else {
+            panic!("server must remain connected");
+        };
+        assert_eq!(tools[0].tool_name, "fresh-tool");
+        assert_eq!(prompts[0].name, "fresh-prompt");
+        assert_eq!(resources[0].name, "fresh-resource");
+    }
+
+    #[tokio::test]
+    async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
+        let pause = Arc::new(Notify::new());
+        set_catalog_change_listener_pause_for_test(Some(pause.clone()));
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let (connection, peer_tx, _peer_rx) = drivable_connection();
+        let old_connection_id = ConnId::new();
+        let new_connection_id = ConnId::new();
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id: old_connection_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: true,
+                    prompts: true,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                connected_at: SystemTime::now(),
+            },
+        );
+        let mut changes = registry.subscribe_catalog_changes();
+        registry.spawn_catalog_change_listener(
+            "srv".into(),
+            old_connection_id,
+            connection,
+            platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: true,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            },
+            None,
+        );
+
+        for _ in 0..300 {
+            let mut frame = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+                "params": {}
+            }))
+            .unwrap();
+            frame.push(b'\n');
+            peer_tx.send(Bytes::from(frame)).await.unwrap();
+        }
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id: new_connection_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: true,
+                    prompts: true,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                connected_at: SystemTime::now(),
+            },
+        );
+        set_catalog_change_listener_pause_for_test(None);
+        pause.notify_waiters();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), changes.recv())
+                .await
+                .is_err(),
+            "lag recovery must not publish authoritative refreshes for a replaced generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_listen_request_is_filtered_and_ack_opens_from_zero() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let (connection, peer_tx, mut peer_rx) = drivable_connection();
+        let connection_id = ConnId::new();
+        let mut changes = registry.subscribe_catalog_changes();
+        registry.spawn_catalog_change_listener(
+            "srv".into(),
+            connection_id,
+            connection,
+            modern_negotiated(),
+            caps(true, true, false),
+            Some(ModernListenOpenTelemetry {
+                outcome: telemetry::tengu::mcp::ListenReopenOutcome::OpenedFromZero,
+                attempts: 0,
+                trigger: telemetry::tengu::mcp::ListenReopenTrigger::Connect,
+            }),
+        );
+
+        let request_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("listen request within timeout")
+            .expect("listen request frame");
+        let request: Value = serde_json::from_slice(&request_frame).unwrap();
+        assert_eq!(request["method"], serde_json::json!("subscriptions/listen"));
+        assert_eq!(
+            request["params"]["notifications"],
+            serde_json::json!({
+                "toolsListChanged": true,
+                "resourcesListChanged": true,
+            })
+        );
+
+        let mut ack = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": request["id"].clone(),
+                }
+            }
+        }))
+        .unwrap();
+        ack.push(b'\n');
+        peer_tx.send(Bytes::from(ack)).await.unwrap();
+
+        let mut tool_change = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": request["id"].clone(),
+                }
+            }
+        }))
+        .unwrap();
+        tool_change.push(b'\n');
+        peer_tx.send(Bytes::from(tool_change)).await.unwrap();
+
+        let change = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+            .await
+            .expect("matching modern list_changed")
+            .expect("catalog sender remains live");
+        assert_eq!(change.connection_id, connection_id);
+        assert_eq!(change.kind, McpCatalogKind::Tools);
+        assert_eq!(change.telemetry_cause, Some("notification"));
+
+        let events = take_test_telemetry_events();
+        assert!(events.iter().any(|event| {
+            event.name == telemetry::tengu::mcp::LISTEN_REOPEN
+                && event.payload.get("outcome") == Some(&serde_json::json!("opened_from_zero"))
+                && event.payload.get("attempts") == Some(&serde_json::json!(0))
+                && event.payload.get("trigger") == Some(&serde_json::json!("connect"))
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn modern_graceful_close_reopens_after_extra_delay_and_publishes_refresh_snapshot() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mut mock = BridgeMock::with_modern_drivable_calls(&["fresh-tool"]);
+        mock.resources_capability.store(true, Ordering::SeqCst);
+        mock.prompts_capability.store(true, Ordering::SeqCst);
+        mock.resources = vec![resource("fresh-resource", "file:///fresh.md")];
+        mock.prompts = vec![prompt("fresh-prompt")];
+        let mock = Arc::new(mock);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        let first_connection_id = registry.connect(cfg("srv")).await.unwrap();
+        let (first_tx, mut first_rx) = mock
+            .take_tool_call_peer(first_connection_id)
+            .expect("first listen peer");
+
+        let first_listen = first_rx.recv().await.expect("first listen request");
+        let first_request: Value = serde_json::from_slice(&first_listen).unwrap();
+        assert_eq!(
+            first_request["method"],
+            serde_json::json!("subscriptions/listen")
+        );
+        let mut first_ack = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": first_request["id"].clone(),
+                }
+            }
+        }))
+        .unwrap();
+        first_ack.push(b'\n');
+        first_tx.send(Bytes::from(first_ack)).await.unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut changes = registry.subscribe_catalog_changes();
+        let mut graceful = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": first_request["id"].clone(),
+            "result": { "resultType": "complete" }
+        }))
+        .unwrap();
+        graceful.push(b'\n');
+        first_tx.send(Bytes::from(graceful)).await.unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let epsilon = Duration::from_millis(1);
+        tokio::time::advance(Duration::from_secs(6) - epsilon).await;
+        tokio::task::yield_now().await;
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(epsilon).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 2);
+
+        let second_connection_id = {
+            let conns = registry.connections.read().await;
+            match conns.get("srv") {
+                Some(McpConnectionState::Connected { connection_id, .. }) => *connection_id,
+                other => panic!("expected reopened connected state, got {other:?}"),
+            }
+        };
+        assert_ne!(second_connection_id, first_connection_id);
+
+        let (second_tx, mut second_rx) = mock
+            .take_tool_call_peer(second_connection_id)
+            .expect("second listen peer");
+        let second_listen = second_rx.recv().await.expect("second listen request");
+        let second_request: Value = serde_json::from_slice(&second_listen).unwrap();
+        assert_eq!(
+            second_request["method"],
+            serde_json::json!("subscriptions/listen")
+        );
+        let mut second_ack = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": second_request["id"].clone(),
+                }
+            }
+        }))
+        .unwrap();
+        second_ack.push(b'\n');
+        second_tx.send(Bytes::from(second_ack)).await.unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let change = tokio::time::timeout(Duration::from_secs(1), changes.recv())
+                .await
+                .expect("reopen snapshot change")
+                .expect("catalog changes remain live");
+            seen.push(change);
+        }
+        assert!(seen.iter().any(|change| {
+            change.kind == McpCatalogKind::Tools
+                && change.connection_id == second_connection_id
+                && change.retired_connection_id == Some(first_connection_id)
+                && change.telemetry_cause == Some(LISTEN_REOPEN_CAUSE)
+        }));
+        assert!(seen.iter().any(|change| {
+            change.kind == McpCatalogKind::Prompts
+                && change.connection_id == second_connection_id
+                && change.telemetry_cause == Some(LISTEN_REOPEN_CAUSE)
+        }));
+        assert!(seen.iter().any(|change| {
+            change.kind == McpCatalogKind::Resources
+                && change.connection_id == second_connection_id
+                && change.telemetry_cause == Some(LISTEN_REOPEN_CAUSE)
+        }));
+
+        let events = take_test_telemetry_events();
+        assert!(events.iter().any(|event| {
+            event.name == telemetry::tengu::mcp::LISTEN_REOPEN
+                && event.payload.get("outcome") == Some(&serde_json::json!("opened_from_zero"))
+                && event.payload.get("trigger") == Some(&serde_json::json!("connect"))
+        }));
+        assert!(events.iter().any(|event| {
+            event.name == telemetry::tengu::mcp::LISTEN_REOPEN
+                && event.payload.get("outcome") == Some(&serde_json::json!("reopened"))
+                && event.payload.get("attempts") == Some(&serde_json::json!(1))
+                && event.payload.get("trigger") == Some(&serde_json::json!("graceful"))
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn modern_listen_start_send_failure_reopens_on_remote_path() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mock = BridgeMock::with_modern_drivable_calls(&["fresh-tool"]);
+        mock.listen_writer_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let mock = Arc::new(mock);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+
+        let first_connection_id = registry.connect(cfg("srv")).await.unwrap();
+        assert!(
+            mock.take_tool_call_peer(first_connection_id).is_none(),
+            "the first generation's listen writer should be closed before any peer can observe it"
+        );
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 2);
+
+        let second_connection_id = {
+            let conns = registry.connections.read().await;
+            match conns.get("srv") {
+                Some(McpConnectionState::Connected { connection_id, .. }) => *connection_id,
+                other => panic!("expected reopened connected state, got {other:?}"),
+            }
+        };
+        assert_ne!(second_connection_id, first_connection_id);
+
+        let (second_tx, mut second_rx) = mock
+            .take_tool_call_peer(second_connection_id)
+            .expect("second listen peer");
+        let second_listen = second_rx.recv().await.expect("second listen request");
+        let second_request: Value = serde_json::from_slice(&second_listen).unwrap();
+        assert_eq!(
+            second_request["method"],
+            serde_json::json!("subscriptions/listen")
+        );
+        let mut second_ack = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": second_request["id"].clone(),
+                }
+            }
+        }))
+        .unwrap();
+        second_ack.push(b'\n');
+        second_tx.send(Bytes::from(second_ack)).await.unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let events = take_test_telemetry_events();
+        assert!(events.iter().any(|event| {
+            event.name == telemetry::tengu::mcp::LISTEN_REOPEN
+                && event.payload.get("outcome") == Some(&serde_json::json!("reopened"))
+                && event.payload.get("attempts") == Some(&serde_json::json!(1))
+                && event.payload.get("trigger") == Some(&serde_json::json!("remote"))
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn modern_listen_start_send_failure_marks_generation_disconnected_after_retry_budget() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let mock = BridgeMock::with_modern_drivable_calls(&["fresh-tool"]);
+        mock.listen_writer_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let mock = Arc::new(mock);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+
+        let first_connection_id = registry.connect(cfg("srv")).await.unwrap();
+        assert!(
+            mock.take_tool_call_peer(first_connection_id).is_none(),
+            "the first generation's listen writer should be closed before any peer can observe it"
+        );
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        mock.connect_failures_remaining.store(3, Ordering::SeqCst);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 4);
+
+        let conns = registry.connections.read().await;
+        match conns.get("srv") {
+            Some(McpConnectionState::Disconnected {
+                last_error: Some(error),
+                ..
+            }) => {
+                assert!(
+                    error.contains("bridge mock forced connect failure"),
+                    "unexpected terminal error: {error}"
+                );
+            }
+            other => panic!("expected disconnected terminal state, got {other:?}"),
+        }
+        drop(conns);
+
+        let events = take_test_telemetry_events();
+        assert!(events.iter().any(|event| {
+            event.name == telemetry::tengu::mcp::LISTEN_REOPEN
+                && event.payload.get("outcome") == Some(&serde_json::json!("gave_up"))
+                && event.payload.get("attempts") == Some(&serde_json::json!(3))
+                && event.payload.get("trigger") == Some(&serde_json::json!("remote"))
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn modern_listener_budget_exhaustion_parks_and_cancellation_gives_up() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        set_listener_reopen_park_jitter_for_test(Some(1.0));
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let connection_id = ConnId::new();
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id,
+                capabilities: caps(true, false, false),
+                negotiated: modern_negotiated(),
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                connected_at: SystemTime::now(),
+            },
+        );
+        registry.listener_reopen_state.write().await.insert(
+            "srv".into(),
+            ListenerReopenState {
+                delay_index: 0,
+                opened_at: Some(tokio::time::Instant::now()),
+                reopened_at: vec![
+                    tokio::time::Instant::now();
+                    LISTENER_REOPEN_MAX_ATTEMPTS_PER_WINDOW
+                ],
+            },
+        );
+
+        let task = tokio::spawn({
+            let registry = registry.clone_for_background();
+            async move {
+                registry
+                    .handle_modern_catalog_listener_end(
+                        "srv",
+                        connection_id,
+                        telemetry::tengu::mcp::ListenReopenTrigger::Remote,
+                    )
+                    .await;
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        registry.connections.write().await.remove("srv");
+        tokio::time::advance(LISTENER_REOPEN_PARK_POLL).await;
+        task.await.expect("budget exhaustion task joins");
+        set_listener_reopen_park_jitter_for_test(None);
+
+        let events: Vec<_> = take_test_telemetry_events()
+            .into_iter()
+            .filter(|event| event.name == telemetry::tengu::mcp::LISTEN_REOPEN)
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.payload.get("outcome").cloned())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(serde_json::json!("budget_exhausted")),
+                Some(serde_json::json!("parked")),
+                Some(serde_json::json!("gave_up")),
+            ]
+        );
+        assert!(events
+            .iter()
+            .all(|event| { event.payload.get("trigger") == Some(&serde_json::json!("remote")) }));
     }
 
     #[tokio::test]
@@ -8288,13 +11226,10 @@ mod tests {
         frame.push(b'\n');
         peer_tx.send(Bytes::from(frame)).await.unwrap();
 
-        let notification = tokio::time::timeout(
-            Duration::from_secs(2),
-            notifications.next(),
-        )
-        .await
-        .expect("registry subscription must receive a server push")
-        .expect("the live connection must remain open");
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.next())
+            .await
+            .expect("registry subscription must receive a server push")
+            .expect("the live connection must remain open");
         assert_eq!(notification.method, "notifications/resources/list_changed");
         assert_eq!(notification.params, serde_json::json!({"cursor": "next"}));
     }
@@ -8346,6 +11281,7 @@ mod tests {
             connection_id,
             retired_connection_id: None,
             kind: McpCatalogKind::Tools,
+            telemetry_cause: None,
         };
         let refresh_registry = registry.clone();
         let refresh = tokio::spawn(async move { refresh_registry.refresh_catalog(&change).await });
@@ -9083,6 +12019,8 @@ mod tests {
                 name: "file-template".into(),
                 description: Some("A file on disk".into()),
                 mime_type: Some("text/plain".into()),
+                annotations: None,
+                meta: None,
             },
         ]));
         let registry = McpRegistry::with_raw_conn(
@@ -9124,6 +12062,8 @@ mod tests {
             name: "unreachable".into(),
             description: None,
             mime_type: None,
+            annotations: None,
+            meta: None,
         }];
         let mock = Arc::new(mock);
         let registry = McpRegistry::with_raw_conn(
@@ -9416,6 +12356,10 @@ mod tests {
                 tool_name: name.into(),
                 description: name.into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 full_name: format!("mcp__{}__{name}", cfg.name),
                 search_hint: None,
                 always_load: None,
@@ -9891,10 +12835,11 @@ mod tests {
         );
     }
 
-    /// Oracle `_6e` strikes belong only to stale background revalidation. A
-    /// failed ordinary connect must leave an existing cache entry untouched.
+    /// Oracle `_6e` strikes belong only to stale background revalidation that
+    /// actually fails the connection. A catalog failure after successful
+    /// initialize must not strike an existing cache entry.
     #[tokio::test]
-    async fn an_ordinary_failed_connect_does_not_strike_an_existing_entry() {
+    async fn an_ordinary_partial_connect_does_not_strike_an_existing_entry() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9926,20 +12871,24 @@ mod tests {
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
-        let result = registry.connect(cfg).await;
+        let connection_id = registry
+            .connect(cfg)
+            .await
+            .expect("transport initialize succeeds despite tools/list failure");
         drop(env);
 
-        assert!(
-            result.is_err(),
-            "a tools/list failure must fail the connect"
-        );
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Connected { connection_id: current, tools, .. })
+                if *current == connection_id && tools.is_empty()
+        ));
         let entry = match load_test_entry(&store, &cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("expected the seeded entry to survive, got {other:?}"),
         };
         assert_eq!(
             entry.consecutive_refresh_failures, 0,
-            "ordinary connect failure must not record a stale-refresh strike"
+            "ordinary partial connect must not record a stale-refresh strike"
         );
     }
 
@@ -10069,6 +13018,7 @@ mod tests {
 
         let discovery = LiveDiscovery {
             connection_id: McpConnectionId::new(),
+            connection_duration_ms: 1,
             grant_provenance: Some(GrantProvenance::unbound()),
             negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
             negotiated: platform_api::McpNegotiatedProtocol {
@@ -10080,6 +13030,7 @@ mod tests {
             resources: vec![],
             resource_templates: vec![],
             prompts: vec![],
+            catalog_failures: CatalogFetchFailures::default(),
             discovery_cache_partition: Some(partition.clone()),
             client: None,
             listener_connection: None,
@@ -10162,6 +13113,7 @@ mod tests {
 
         let discovery = LiveDiscovery {
             connection_id: McpConnectionId::new(),
+            connection_duration_ms: 1,
             grant_provenance: Some(GrantProvenance::unbound()),
             // The live handshake actually stayed legacy, but its immutable
             // resolver mode changed. That is enough to reject the stale hit.
@@ -10177,6 +13129,7 @@ mod tests {
             resources: vec![],
             resource_templates: vec![],
             prompts: vec![],
+            catalog_failures: CatalogFetchFailures::default(),
             discovery_cache_partition: Some(partition.clone()),
             client: None,
             listener_connection: None,
@@ -10200,11 +13153,12 @@ mod tests {
         assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
     }
 
-    /// A connect failure for a server with NO existing entry records
-    /// nothing — there is nothing to strike, and this port never fabricates
-    /// an entry purely to hold a failure count.
+    /// A server with no prior cache entry still persists the connected
+    /// generation when transport initialize succeeds and only `tools/list`
+    /// fails. The stored entry must remain strike-free and carry the empty
+    /// degraded tools slice.
     #[tokio::test]
-    async fn a_failed_connect_with_no_existing_entry_writes_nothing() {
+    async fn a_partial_connect_with_no_existing_entry_persists_a_strike_free_empty_catalog() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10212,6 +13166,9 @@ mod tests {
         env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
         mock.list_tools_fails.store(true, Ordering::SeqCst);
         let registry = McpRegistry::with_raw_conn(
@@ -10220,17 +13177,32 @@ mod tests {
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
-        let result = registry
-            .connect(http_cfg("srv", "https://mcp.example.com/v1"))
-            .await;
+        let connection_id = registry.connect(cfg.clone()).await;
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &cfg.spec,
+            cfg.metadata.transport.as_deref(),
+            mcp_connection_timeout().as_millis() as u64,
+        );
+        let partition = registry
+            .discovery_cache_partition_for(&cfg, negotiation_mode)
+            .await
+            .expect("eligible config gets a partition");
         drop(env);
 
-        assert!(result.is_err());
+        let connection_id = connection_id.expect("partial connect still succeeds");
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Connected { connection_id: current, tools, .. })
+                if *current == connection_id && tools.is_empty()
+        ));
+        let entry = match store.load_partitioned(&cache_key, &partition.partition_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected a newly persisted entry, got {other:?}"),
+        };
+        assert_eq!(entry.consecutive_refresh_failures, 0);
         assert!(
-            std::fs::read_dir(dir.path())
-                .map(|mut it| it.next().is_none())
-                .unwrap_or(true),
-            "no prior entry means no strike file must ever be created"
+            entry.tools.is_empty(),
+            "failed tools/list persists the degraded empty tools slice on first connect"
         );
     }
 
@@ -10308,6 +13280,10 @@ mod tests {
                 tool_name: "alpha".into(),
                 description: "alpha tool".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 full_name: "mcp__srv__alpha".into(),
                 search_hint: None,
                 always_load: None,
@@ -10541,7 +13517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_cache_hit_background_failure_keeps_cached_state_and_records_a_strike() {
+    async fn a_stale_cache_hit_background_tools_failure_preserves_cached_tools_without_a_strike() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -10572,28 +13548,40 @@ mod tests {
                     crate::discovery_cache::EntryLookup::Found(entry) => entry,
                     other => panic!("expected seeded entry, got {other:?}"),
                 };
-                if entry.consecutive_refresh_failures == 1 {
+                let upgraded = matches!(
+                    registry.connections.read().await.get("srv"),
+                    Some(McpConnectionState::Connected { connection_id, tools, .. })
+                        if *connection_id != cached_id
+                            && tools.iter().any(|tool| tool.tool_name == "alpha")
+                );
+                if upgraded && entry.consecutive_refresh_failures == 0 {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("background refresh failure recorded");
+        .expect("background partial refresh installs a live connection");
         drop(env);
 
         assert_eq!(
             mock.connect_calls.load(Ordering::SeqCst),
             1,
-            "the failed background refresh must still attempt one dial"
+            "the background partial refresh must still attempt one dial"
         );
-        let conns = registry.connections.read().await;
-        assert!(
-            matches!(
-                conns.get("srv"),
-                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
-            ),
-            "a failed background refresh must leave the Cached generation in place"
+        let entry = match load_test_entry(&store, &cache_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected refreshed cache entry, got {other:?}"),
+        };
+        assert_eq!(entry.consecutive_refresh_failures, 0);
+        assert_eq!(
+            entry
+                .tools
+                .iter()
+                .map(|tool| tool.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "previous-safe tools must be preserved in the refreshed cache entry"
         );
     }
 
@@ -11005,6 +13993,10 @@ mod tests {
                     tool_name: "replacement".into(),
                     description: "replacement".into(),
                     input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
                     full_name: "mcp__srv__replacement".into(),
                     search_hint: None,
                     always_load: None,
@@ -11035,6 +14027,10 @@ mod tests {
                 tool_name: "replacement".into(),
                 description: "replacement".into(),
                 input_schema: serde_json::json!({"type":"object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 full_name: "mcp__srv__replacement".into(),
                 search_hint: None,
                 always_load: None,
@@ -11306,6 +14302,10 @@ mod tests {
                     tool_name: "scoped".into(),
                     description: "scoped".into(),
                     input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
                     full_name: "mcp__srv__scoped".into(),
                     search_hint: None,
                     always_load: None,
@@ -11378,7 +14378,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_refresh_snapshot_recovers_missed_cached_retirement_after_lazy_dial_failure() {
+    async fn catalog_refresh_snapshot_recovers_missed_cached_retirement_after_lazy_dial_partial_failure(
+    ) {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11391,27 +14392,33 @@ mod tests {
         let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
-        let mock = Arc::new(BridgeMock::new(&["live"]));
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["live"]));
         mock.list_tools_fails.store(true, Ordering::SeqCst);
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
-            mock as Arc<dyn RawConnectionProvider>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
         let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
-        registry
+        let live_id = registry
             .ensure_dialed_from_cache("srv")
             .await
-            .expect_err("lazy dial fails");
+            .expect("lazy dial keeps the transport live on tools/list failure");
+        let (peer_tx, peer_rx) = mock
+            .take_tool_call_peer(live_id)
+            .expect("live generation must expose a drivable client");
+        let responder = spawn_tools_list_response(peer_tx, peer_rx, "live");
         let mut active = std::collections::HashSet::from([cached_id]);
         apply_lagged_tool_recovery(&registry, &mut active)
             .await
             .expect("snapshot recovery");
+        responder.await.expect("tools/list responder");
 
-        assert!(
-            active.is_empty(),
-            "retired cached generation must be cleared"
+        assert_eq!(
+            active,
+            std::collections::HashSet::from([live_id]),
+            "snapshot recovery must retire the cached generation and keep the live one"
         );
         drop(env);
     }
@@ -11537,6 +14544,10 @@ mod tests {
                     tool_name: "old".into(),
                     description: "old tool".into(),
                     input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    annotations: None,
+                    icons: Vec::new(),
+                    meta: None,
                     full_name: "mcp__srv__old".into(),
                     search_hint: None,
                     always_load: None,
@@ -12057,6 +15068,7 @@ mod tests {
                     connection_id,
                     retired_connection_id: None,
                     kind: McpCatalogKind::Tools,
+                    telemetry_cause: None,
                 })
                 .await
                 .expect("resource-only tools refresh should short-circuit"),
@@ -12079,6 +15091,8 @@ mod tests {
                 name: "tmpl".into(),
                 description: None,
                 mime_type: None,
+                annotations: None,
+                meta: None,
             },
         ]));
         mock.block_resource_templates.store(true, Ordering::SeqCst);
@@ -12570,6 +15584,150 @@ mod tests {
             mock.conns.lock().unwrap().contains_key(&refreshed_id),
             "the post-retry client must point at the refreshed generation"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        struct DiscoveryFailHttp;
+
+        #[async_trait]
+        impl platform_api::HttpTransport for DiscoveryFailHttp {
+            async fn request(
+                &self,
+                req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+                let status = if req.url.contains("oauth-protected-resource")
+                    || req.url.contains("oauth-authorization-server")
+                {
+                    404
+                } else {
+                    500
+                };
+                Ok(protocol::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body: String::new(),
+                    body_bytes: Vec::new(),
+                })
+            }
+
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+
+        clear_test_telemetry_events();
+
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
+            unreachable!()
+        };
+        *oauth = Some(platform_api::McpOAuthConfigDto {
+            client_id: Some("client-id".into()),
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+
+        let storage = Arc::new(XaaMemStorage::default());
+        let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
+        let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+        oauth::store_tokens(
+            &storage_dyn,
+            &clock,
+            &server_key,
+            &oauth::StoredTokens {
+                access_token: "expired".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at_unix: 0,
+                client_id: Some("client-id".into()),
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store expired tokens");
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_oauth(OAuthDeps {
+            http: Arc::new(DiscoveryFailHttp),
+            clock,
+            storage: storage_dyn,
+            on_authorization_url: Arc::new(|_| {}),
+            xaa_config: None,
+        });
+
+        let error = registry.connect(cfg).await.expect_err("connect must fail");
+        assert!(
+            matches!(error, McpError::OAuth(_) | McpError::Connection(_)),
+            "expected oauth/path failure, got {error:?}"
+        );
+
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::SERVER_NEEDS_AUTH)
+            .expect("server needs auth telemetry");
+        assert_eq!(
+            event.payload["cause"],
+            serde_json::json!("discovery_schema")
+        );
+        assert_eq!(event.payload["transport_type"], serde_json::json!("http"));
+        assert!(event.payload["mcp_server_key_hash"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn second_auth_failure_emits_tool_call_auth_error() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg).await.expect("connect");
+
+        let input = serde_json::json!({"city": "sf"});
+        let responder =
+            spawn_tool_call_auth_then_auth(mock.clone(), None, "alpha", input.clone(), 403);
+        let error = registry
+            .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+            .await
+            .expect_err("second auth failure must surface");
+        responder.await.expect("double-auth responder");
+
+        assert!(
+            error.is_auth_response(),
+            "expected auth-shaped error, got {error:?}"
+        );
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::TOOL_CALL_AUTH_ERROR)
+            .expect("tool call auth error telemetry");
+        assert_eq!(event.payload["error_code"], serde_json::json!("403"));
+        assert_eq!(
+            event.payload["auth_error_kind"],
+            serde_json::json!("token_expired")
+        );
+        assert_eq!(event.payload["transport_type"], serde_json::json!("http"));
+        assert!(event.payload["mcp_server_key_hash"].as_str().is_some());
     }
 
     /// Single-flight: two CONCURRENT tool calls against the same `Cached`
@@ -13072,6 +16230,10 @@ mod tests {
                 server_name: "srv".into(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 search_hint: None,
                 always_load: Some(true),
                 requires_user_interaction: false,
@@ -13082,6 +16244,10 @@ mod tests {
                 server_name: "srv".into(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 search_hint: None,
                 always_load: Some(false),
                 requires_user_interaction: false,
@@ -13092,6 +16258,10 @@ mod tests {
                 server_name: "srv".into(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 search_hint: None,
                 always_load: None,
                 requires_user_interaction: false,
@@ -13726,7 +16896,10 @@ mod tests {
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -13923,15 +17096,15 @@ mod snapshot_tests {
     use super::*;
     use crate::connection::{ConfigScope, McpServerConfig};
     use async_trait::async_trait;
-    use protocol::McpConnectionId as ConnId;
-    use serde_json::Value;
-    use std::sync::Arc;
     use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
         ServerCapabilitiesDto,
     };
+    use protocol::McpConnectionId as ConnId;
+    use serde_json::Value;
+    use std::sync::Arc;
 
     /// Minimal in-crate stub transport — only `connections` matters for
     /// `snapshot`, so every method panics if called.
@@ -14017,6 +17190,52 @@ mod snapshot_tests {
             config_error: None,
             metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn server_connection_payloads_only_mark_plugin_agent_source_as_plugin() {
+        let mut plugin_cfg = stdio_cfg("plugin:demo:srv");
+        plugin_cfg.scope = ConfigScope::Dynamic;
+        plugin_cfg.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+        let plugin_succeeded = server_connection_succeeded_payload(
+            &plugin_cfg,
+            12,
+            crate::protocol_negotiation::NegotiationMode::Legacy,
+            &platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+        );
+        let plugin_failed = server_connection_failed_payload(
+            &plugin_cfg,
+            Some(crate::protocol_negotiation::NegotiationMode::Legacy),
+            Some(12),
+            Some("INVALID_CONFIG"),
+        );
+        assert!(plugin_succeeded.is_plugin);
+        assert!(plugin_failed.is_plugin);
+
+        let dynamic_cfg = McpServerConfig {
+            scope: ConfigScope::Dynamic,
+            ..stdio_cfg("dynamic")
+        };
+        let dynamic_succeeded = server_connection_succeeded_payload(
+            &dynamic_cfg,
+            8,
+            crate::protocol_negotiation::NegotiationMode::Legacy,
+            &platform_api::McpNegotiatedProtocol {
+                era: platform_api::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+        );
+        let dynamic_failed = server_connection_failed_payload(
+            &dynamic_cfg,
+            Some(crate::protocol_negotiation::NegotiationMode::Legacy),
+            Some(8),
+            Some("INVALID_CONFIG"),
+        );
+        assert!(!dynamic_succeeded.is_plugin);
+        assert!(!dynamic_failed.is_plugin);
     }
 
     #[tokio::test]
@@ -14243,7 +17462,7 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn managed_local_apps_share_one_physical_hub_and_only_surface_changes_notify() {
+    async fn managed_local_apps_share_one_physical_hub_and_notify_changed_catalog_partitions() {
         let registry = McpRegistry::new(Arc::new(StubTransport));
         let mut events = registry.subscribe_catalog_changes();
         for index in 0..100 {
@@ -14262,11 +17481,7 @@ mod snapshot_tests {
             .register_managed_local_app(scope, "2".repeat(64), false)
             .await
             .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), events.recv())
-                .await
-                .is_err()
-        );
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
         // A bad `surface_changed=true` hint cannot duplicate the event when
         // the committed surface digest is unchanged.
         let same_surface = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
@@ -14275,22 +17490,45 @@ mod snapshot_tests {
             .await
             .unwrap();
         assert_eq!(refreshed.surface_generation, 1);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), events.recv())
-                .await
-                .is_err()
-        );
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
         let changed_surface = ConversationExport::new("app-0", "f".repeat(64)).unwrap();
         let changed = registry
             .register_managed_local_app(changed_surface, "4".repeat(64), false)
             .await
             .unwrap();
         assert_eq!(changed.surface_generation, 2);
-        assert_eq!(events.recv().await.unwrap().server_name, "local_app_app-0");
+        let tools = events.recv().await.unwrap();
+        assert_eq!(tools.server_name, "local_app_app-0");
+        assert_eq!(tools.kind, McpCatalogKind::Tools);
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
         assert!(registry
             .unregister_managed_local_app("app-0")
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn managed_local_app_catalog_refresh_notifies_resources_only() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let mut events = registry.subscribe_catalog_changes();
+        let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+        registry
+            .register_managed_local_app(scope.clone(), "1".repeat(64), false)
+            .await
+            .unwrap();
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Tools);
+        registry
+            .register_managed_local_app(scope, "2".repeat(64), false)
+            .await
+            .unwrap();
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.server_name, "local_app_app-0");
+        assert_eq!(event.kind, McpCatalogKind::Resources);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -14457,5 +17695,100 @@ mod snapshot_tests {
             .local_app_exposures("conversation")
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabling_managed_local_app_clears_exposure_and_emits_changes() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let mut events = registry.subscribe_catalog_changes();
+        registry
+            .register_managed_local_app(
+                ConversationExport::new("toggle-me", "0".repeat(64)).unwrap(),
+                "1".repeat(64),
+                false,
+            )
+            .await
+            .unwrap();
+        let _ = events.recv().await.unwrap();
+        registry
+            .expose_managed_local_app("conversation", "toggle-me", true)
+            .await
+            .unwrap();
+        let runtime = registry
+            .set_managed_local_app_runtime(
+                "toggle-me",
+                false,
+                Some(vec!["read_value".into()]),
+                Some(ManagedLocalAppResource {
+                    uri: "ui://local-app/toggle-me/0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/mcp-app.html".into(),
+                    name: "Toggle".into(),
+                    description: None,
+                    mime_type: Some("text/html;profile=mcp-app".into()),
+                    meta: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!runtime.enabled);
+        assert!(registry
+            .local_app_exposures("conversation")
+            .await
+            .is_empty());
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Tools);
+        assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
+        let err = registry
+            .expose_managed_local_app("conversation", "toggle-me", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::ToolNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn expose_managed_local_app_reports_the_evicted_entry() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..9 {
+            registry
+                .register_managed_local_app(
+                    ConversationExport::new(format!("diff-{index}"), "0".repeat(64)).unwrap(),
+                    "1".repeat(64),
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("diff-{index}"), false)
+                .await
+                .unwrap();
+        }
+        let update = registry
+            .expose_managed_local_app_with_diff("conversation", "diff-8", false)
+            .await
+            .unwrap();
+        assert_eq!(update.exposure.app_id, "diff-8");
+        assert_eq!(update.evicted_app_id.as_deref(), Some("diff-0"));
+    }
+
+    #[tokio::test]
+    async fn managed_local_apps_snapshot_is_sorted() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for app_id in ["b-app", "a-app"] {
+            registry
+                .register_managed_local_app(
+                    ConversationExport::new(app_id, "0".repeat(64)).unwrap(),
+                    "1".repeat(64),
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        let apps = registry.managed_local_apps().await;
+        assert_eq!(
+            apps.iter()
+                .map(|server| server.scope.app_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-app", "b-app"]
+        );
     }
 }

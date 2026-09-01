@@ -14,13 +14,13 @@
 //! line, so it must not run beside other `append` tests. Everything is one
 //! sequential test function for the same reason.
 
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::{JsonlMessage, SESSION_KIND_ENV};
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::TempDir;
-use platform_api::FileSystem;
 
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 

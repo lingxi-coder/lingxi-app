@@ -40,10 +40,10 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use platform_api::OrchestratorHandle;
 
 /// The `${nyn}` model-family interpolation used by the `xhigh` Usage/description
 /// lines: `getEffortHelpText` (`XVn`) and `getEffortLevelDescription` (`NXu`)
@@ -268,7 +268,8 @@ pub fn persist_reasoning_default_selection_at(
         platform_api::ReasoningSelection::TokenBudget { tokens } => {
             Some(json!({ "type": "token_budget", "tokens": tokens }))
         }
-        platform_api::ReasoningSelection::Automatic | platform_api::ReasoningSelection::Level { .. } => None,
+        platform_api::ReasoningSelection::Automatic
+        | platform_api::ReasoningSelection::Level { .. } => None,
     });
 
     if let Some(value) = persisted {
@@ -312,7 +313,9 @@ pub fn persist_reasoning_default_selection_at(
 /// Read the structured reasoning default, with a compatibility fallback for
 /// the legacy root `effortLevel` setting.  Unrepresentable/session-only values
 /// (notably `max`) are ignored so they cannot become a new-session default.
-pub fn load_reasoning_default_selection_at(path: &Path) -> Option<platform_api::ReasoningSelection> {
+pub fn load_reasoning_default_selection_at(
+    path: &Path,
+) -> Option<platform_api::ReasoningSelection> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&content).ok()?;
     if let Some(default) = value
@@ -320,7 +323,8 @@ pub fn load_reasoning_default_selection_at(path: &Path) -> Option<platform_api::
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("defaultSelection"))
     {
-        if let Ok(selection) = serde_json::from_value::<platform_api::ReasoningSelection>(default.clone())
+        if let Ok(selection) =
+            serde_json::from_value::<platform_api::ReasoningSelection>(default.clone())
         {
             return Some(selection);
         }
@@ -863,8 +867,11 @@ Effort levels:\n\
             Some(platform_api::ReasoningSelection::TokenBudget { tokens: 12_345 })
         );
 
-        persist_reasoning_default_selection_at(&path, Some(&platform_api::ReasoningSelection::Automatic))
-            .unwrap();
+        persist_reasoning_default_selection_at(
+            &path,
+            Some(&platform_api::ReasoningSelection::Automatic),
+        )
+        .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(value.get("reasoning").is_none());
         assert!(value.get("effortLevel").is_none());

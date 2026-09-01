@@ -1,4 +1,4 @@
-//! Per-name placeholder handler stubs for the M5-09 18-core-command surface.
+//! Per-name placeholder handler stubs for the M5-09 19-core-command surface.
 //!
 //! M5-10 removed the 6 batch-1 placeholders; their real handlers ship under
 //! `builtin::{clear, compact, exit, help, init, memory}`.
@@ -8,7 +8,7 @@
 //! mcp, model, permissions, status, version}`.
 //!
 //! Until [`command_api::registry::register_core_batch_1`] /
-//! [`command_api::registry::register_core_batch_2`] are called, the 18 core names
+//! [`command_api::registry::register_core_batch_2`] are called, the 19 core names
 //! resolve to the shared [`super::unimplemented::UnimplementedCommandHandler`]
 //! that returns the locked literal `"{name}: not implemented in v0.6.0 (M5)"`.
 //!

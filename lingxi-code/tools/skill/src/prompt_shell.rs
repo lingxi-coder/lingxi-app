@@ -267,8 +267,8 @@ impl ShellRunner for PromptShellRunner {
         command: &str,
         _shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
-        use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use platform_api::sandbox::ProcessCommand;
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         if self.mobile_shell && !self.shell_enabled {
             return Err(ShellRunError {
@@ -493,9 +493,9 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
                 platform_api::permission_gate::NonInteractivePermissionDecision::Allow => {
                     ShellPermissionDecision::Allow
                 }
-                platform_api::permission_gate::NonInteractivePermissionDecision::Deny { reason } => {
-                    ShellPermissionDecision::Deny { message: reason }
-                }
+                platform_api::permission_gate::NonInteractivePermissionDecision::Deny {
+                    reason,
+                } => ShellPermissionDecision::Deny { message: reason },
             };
         }
         match self
@@ -659,16 +659,16 @@ pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExp
 mod tests {
     use super::*;
     use permission::filesystem::FsRoots;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use telemetry::AnalyticsBus;
-    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
     use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
     use platform_api::sandbox::{
         Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
         SandboxedCommand, SandboxedTag,
     };
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use telemetry::AnalyticsBus;
+    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
 
     fn test_ctx() -> BuiltinToolContext {
         ctx_for_file_tools(
@@ -962,7 +962,8 @@ mod tests {
                 tool_name: &str,
                 _input: &serde_json::Value,
                 _allow_rules: &[String],
-            ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision> {
+            ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision>
+            {
                 self.0.lock().unwrap().push(tool_name.to_string());
                 Some(platform_api::permission_gate::NonInteractivePermissionDecision::Allow)
             }

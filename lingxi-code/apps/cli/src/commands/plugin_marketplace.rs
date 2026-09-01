@@ -1203,7 +1203,9 @@ fn restore_registry_snapshot(plugins_dir: &Path, snapshot: Option<&[u8]>) {
             bytes,
             platform_api::AtomicWriteOptions::default(),
         ),
-        None => platform_api::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json")),
+        None => {
+            platform_api::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json"))
+        }
     };
     if let Err(error) = result {
         tracing::warn!(%error, "failed to restore marketplace registry");

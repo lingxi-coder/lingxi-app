@@ -16,8 +16,9 @@
 //! the caller (a session/tool-results dir in production, a `tempfile::TempDir`
 //! in tests) so no real home directory is ever written during tests.
 
-use std::path::{Path, PathBuf};
 use platform_api::McpResourceContentsRich;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// One element of a `resources/read` `contents[]` array as decoded off the
 /// wire, before blob persistence. `text` and `blob` are mutually exclusive in
@@ -30,6 +31,8 @@ pub struct RawResourceContent {
     pub uri: String,
     /// MIME type as advertised by the server.
     pub mime_type: Option<String>,
+    /// Opaque vendor metadata preserved from the wire.
+    pub meta: Option<Value>,
     /// UTF-8 text body, for text content blocks.
     pub text: Option<String>,
     /// base64-encoded body, for binary blob content blocks.
@@ -68,6 +71,7 @@ pub fn map_resource_contents(
                 return McpResourceContentsRich {
                     uri: c.uri,
                     mime_type: c.mime_type,
+                    meta: c.meta,
                     text: Some(text),
                     blob_saved_to: None,
                 };
@@ -77,6 +81,7 @@ pub fn map_resource_contents(
                 return McpResourceContentsRich {
                     uri: c.uri,
                     mime_type: c.mime_type,
+                    meta: c.meta,
                     text: None,
                     blob_saved_to: None,
                 };
@@ -91,6 +96,7 @@ pub fn map_resource_contents(
                     return McpResourceContentsRich {
                         uri: c.uri,
                         mime_type: c.mime_type,
+                        meta: c.meta,
                         text: Some(format!("Binary content could not be saved to disk: {e}")),
                         blob_saved_to: None,
                     };
@@ -107,6 +113,7 @@ pub fn map_resource_contents(
                     McpResourceContentsRich {
                         uri: c.uri,
                         mime_type: c.mime_type,
+                        meta: c.meta,
                         text: Some(text),
                         blob_saved_to: Some(filepath),
                     }
@@ -114,6 +121,7 @@ pub fn map_resource_contents(
                 PersistBinaryResult::Err { error } => McpResourceContentsRich {
                     uri: c.uri,
                     mime_type: c.mime_type,
+                    meta: c.meta,
                     text: Some(format!(
                         "Binary content could not be saved to disk: {error}"
                     )),
@@ -477,6 +485,7 @@ mod tests {
             vec![RawResourceContent {
                 uri: "mock://readme".into(),
                 mime_type: Some("text/plain".into()),
+                meta: Some(serde_json::json!({"openai/widgetDescription":"Readme"})),
                 text: Some("hello from mock resource".into()),
                 blob: None,
             }],
@@ -488,6 +497,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].uri, "mock://readme");
         assert_eq!(out[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            out[0].meta,
+            Some(serde_json::json!({"openai/widgetDescription":"Readme"}))
+        );
         assert_eq!(out[0].text.as_deref(), Some("hello from mock resource"));
         assert_eq!(out[0].blob_saved_to, None);
         // Nothing should have been written to disk for a pure text block.
@@ -503,6 +516,7 @@ mod tests {
             vec![RawResourceContent {
                 uri: "mock://image".into(),
                 mime_type: Some("image/png".into()),
+                meta: None,
                 text: None,
                 blob: Some(b64),
             }],
@@ -537,6 +551,7 @@ mod tests {
             vec![RawResourceContent {
                 uri: "mock://bad".into(),
                 mime_type: Some("application/pdf".into()),
+                meta: None,
                 text: None,
                 blob: Some("!!not-base64!!".into()),
             }],
@@ -560,6 +575,7 @@ mod tests {
             vec![RawResourceContent {
                 uri: "mock://opaque".into(),
                 mime_type: Some("application/octet-stream".into()),
+                meta: None,
                 text: None,
                 blob: None,
             }],
@@ -585,12 +601,14 @@ mod tests {
                 RawResourceContent {
                     uri: "mock://a".into(),
                     mime_type: Some("text/markdown".into()),
+                    meta: None,
                     text: Some("# title".into()),
                     blob: None,
                 },
                 RawResourceContent {
                     uri: "mock://b".into(),
                     mime_type: Some("application/pdf".into()),
+                    meta: None,
                     text: None,
                     blob: Some(encode_for_test(b"%PDF-1.4 body")),
                 },

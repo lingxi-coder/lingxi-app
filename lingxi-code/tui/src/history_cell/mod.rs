@@ -25,6 +25,7 @@ pub mod team;
 pub mod tool;
 
 use std::any::Any;
+use std::path::Path;
 use std::time::Instant;
 
 use ratatui::text::{Line, Text};
@@ -60,6 +61,22 @@ pub trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// The styled lines for the chat surface at `width` columns, colored by
     /// `theme`, rendered per `mode` (rich/raw + verbose expansion).
     fn display_lines(&self, width: u16, theme: &Theme, mode: RenderMode) -> Vec<Line<'static>>;
+
+    /// Lines written to native scrollback. Native scrollback can carry raw
+    /// terminal control sequences that the ratatui cell buffer cannot, so
+    /// concrete cells may add terminal hyperlinks here without changing the
+    /// alternate-screen rendering path. The default keeps custom cells
+    /// identical to [`Self::display_lines`].
+    fn scrollback_lines(
+        &self,
+        width: u16,
+        theme: &Theme,
+        mode: RenderMode,
+        _hyperlinks_enabled: bool,
+        _hyperlink_cwd: Option<&Path>,
+    ) -> Vec<Line<'static>> {
+        self.display_lines(width, theme, mode)
+    }
 
     /// Copy-friendly plain (unstyled) logical lines for raw scrollback mode.
     fn raw_lines(&self) -> Vec<Line<'static>>;
@@ -134,6 +151,20 @@ pub(crate) trait StyledCell: std::fmt::Debug + Send + Sync + Any {
     /// with collapsible content expanded per `verbose`.
     fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine>;
 
+    /// Rich lines for native scrollback. The default is the same neutral
+    /// content used by the cell-grid renderer; URL/file cells override this
+    /// narrow seam when the host terminal supports OSC 8.
+    fn styled_lines_for_scrollback(
+        &self,
+        width: usize,
+        theme: &Theme,
+        verbose: bool,
+        _hyperlinks_enabled: bool,
+        _hyperlink_cwd: Option<&Path>,
+    ) -> Vec<StyledLine> {
+        self.styled_lines(width, theme, verbose)
+    }
+
     /// See [`HistoryCell::scrollback_escape`] (forwarded by the blanket
     /// impl); `None` (the default) for text-only cells.
     fn scrollback_escape(&self) -> Option<ScrollbackEscape> {
@@ -155,6 +186,34 @@ impl<T: StyledCell> HistoryCell for T {
             .iter()
             .map(crate::render::styled_line_to_ratatui)
             .collect()
+    }
+
+    fn scrollback_lines(
+        &self,
+        width: u16,
+        theme: &Theme,
+        mode: RenderMode,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
+    ) -> Vec<Line<'static>> {
+        if mode.raw {
+            return self.raw_lines();
+        }
+        let width = if width == 0 {
+            DEFAULT_WIDTH
+        } else {
+            usize::from(width)
+        };
+        self.styled_lines_for_scrollback(
+            width,
+            theme,
+            mode.verbose,
+            hyperlinks_enabled,
+            hyperlink_cwd,
+        )
+        .iter()
+        .map(crate::render::styled_line_to_ratatui)
+        .collect()
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {

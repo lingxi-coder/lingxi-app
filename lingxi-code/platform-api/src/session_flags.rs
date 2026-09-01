@@ -27,6 +27,28 @@ static SHOW_THINKING_SUMMARIES: AtomicBool = AtomicBool::new(false);
 /// project / local / managed setting value.
 static AGENT_PUSH_NOTIF_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Session-scoped Brief-only mode. The CLI and `/brief` command publish the
+/// live value here; tool registration reads it when deciding whether
+/// `SendUserMessage` is available. Keeping this in the shared session flag
+/// layer avoids stale process-environment snapshots when a user toggles the
+/// mode during an interactive session.
+static BRIEF_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// One-shot model-facing reminder queued by the interactive `/brief` toggle.
+///
+/// The command's visible status line is not enough for the next model call:
+/// Claude Code also attaches a transient `<system-reminder>` explaining which
+/// output channel is now authoritative. Keep the pending state separate from
+/// [`BRIEF_MODE_ENABLED`] so startup `--brief` enables the tool without
+/// fabricating a command-toggle reminder.
+static BRIEF_MODE_REMINDER: AtomicU8 = AtomicU8::new(0);
+
+/// Model-facing reminder emitted after `/brief` enables Brief-only mode.
+pub const BRIEF_MODE_ENABLED_REMINDER: &str = "<system-reminder>\nBrief mode is now enabled. Use the SendUserMessage tool for all user-facing output — plain text outside it is hidden from the user's view.\n</system-reminder>";
+
+/// Model-facing reminder emitted after `/brief` disables Brief-only mode.
+pub const BRIEF_MODE_DISABLED_REMINDER: &str = "<system-reminder>\nBrief mode is now disabled. The SendUserMessage tool is no longer available — reply with plain text.\n</system-reminder>";
+
 /// `$U()` (the "optimistic" tool-search gate) analog. SESSION-scoped in Claude
 /// Code: `$U()` reads the tool-search MODE (`ENABLE_TOOL_SEARCH` env /
 /// experimental-betas kill switch) and the active PROVIDER — never the current
@@ -308,6 +330,39 @@ pub fn agent_push_notif_enabled() -> bool {
     AGENT_PUSH_NOTIF_ENABLED.load(Ordering::Relaxed)
 }
 
+/// Publish the current session's Brief-only mode.
+pub fn set_brief_mode_enabled(enabled: bool) {
+    BRIEF_MODE_ENABLED.store(enabled, Ordering::Relaxed);
+    // Startup publication (`--brief`) and test setup establish state directly;
+    // only the interactive toggle should queue a model-facing reminder.
+    BRIEF_MODE_REMINDER.store(0, Ordering::Relaxed);
+}
+
+/// Whether Brief-only mode is currently enabled for this session.
+#[must_use]
+pub fn brief_mode_enabled() -> bool {
+    BRIEF_MODE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Flip the current session's Brief-only mode and return the new value.
+pub fn toggle_brief_mode_enabled() -> bool {
+    let enabled = !BRIEF_MODE_ENABLED.fetch_xor(true, Ordering::Relaxed);
+    BRIEF_MODE_REMINDER.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+    enabled
+}
+
+/// Consume the pending model-facing reminder from the interactive `/brief`
+/// toggle, if any. The value is transient and therefore emitted at most once
+/// even when a request is rebuilt for retries.
+#[must_use]
+pub fn take_brief_mode_reminder() -> Option<&'static str> {
+    match BRIEF_MODE_REMINDER.swap(0, Ordering::Relaxed) {
+        1 => Some(BRIEF_MODE_ENABLED_REMINDER),
+        2 => Some(BRIEF_MODE_DISABLED_REMINDER),
+        _ => None,
+    }
+}
+
 /// Publish the session-scoped tool-search gate (Claude Code `$U()`) for the
 /// request builder's `tool_reference` normalization branch. Set by the
 /// orchestrator from the session mode + resolved provider support; the value is
@@ -411,6 +466,47 @@ mod tests {
         set_agent_push_notif_enabled(false);
         assert!(!agent_push_notif_enabled());
         set_agent_push_notif_enabled(prior);
+    }
+
+    #[test]
+    fn brief_mode_round_trips() {
+        let prior = brief_mode_enabled();
+        set_brief_mode_enabled(true);
+        assert!(brief_mode_enabled());
+        set_brief_mode_enabled(false);
+        assert!(!brief_mode_enabled());
+        set_brief_mode_enabled(prior);
+    }
+
+    #[test]
+    fn brief_mode_toggle_returns_new_value() {
+        let prior = brief_mode_enabled();
+        set_brief_mode_enabled(false);
+        assert!(toggle_brief_mode_enabled());
+        assert!(!toggle_brief_mode_enabled());
+        set_brief_mode_enabled(prior);
+    }
+
+    #[test]
+    fn brief_toggle_queues_one_shot_model_reminder() {
+        let prior = brief_mode_enabled();
+        set_brief_mode_enabled(false);
+
+        assert!(toggle_brief_mode_enabled());
+        assert_eq!(
+            take_brief_mode_reminder(),
+            Some(BRIEF_MODE_ENABLED_REMINDER)
+        );
+        assert_eq!(take_brief_mode_reminder(), None);
+
+        assert!(!toggle_brief_mode_enabled());
+        assert_eq!(
+            take_brief_mode_reminder(),
+            Some(BRIEF_MODE_DISABLED_REMINDER)
+        );
+        assert_eq!(take_brief_mode_reminder(), None);
+
+        set_brief_mode_enabled(prior);
     }
 
     #[test]

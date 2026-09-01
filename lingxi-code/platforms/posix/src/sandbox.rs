@@ -11,6 +11,10 @@
 //! string, and the `bwrap` / `sandbox-exec` argv shape.
 
 use async_trait::async_trait;
+use platform_api::{
+    NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
+    SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+};
 use sandbox::dependency_check::{
     check_dependencies, sandbox_unavailable_reason, SandboxDependencyCheck,
 };
@@ -18,10 +22,6 @@ use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
 use sandbox::wrap::wrap_with_sandbox;
-use platform_api::{
-    NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
-    SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
-};
 
 use crate::wsl_detect::{detect as detect_wsl, WslKind};
 

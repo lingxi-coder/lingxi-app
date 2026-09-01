@@ -886,8 +886,8 @@ impl Tool for AskUserQuestionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_ctx_cancelled, fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
+    use tool_api::test_support::{fresh_ctx, fresh_ctx_cancelled, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1475,8 +1475,10 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_prompt_reports_aborted_not_internal() {
-        let tool =
-            AskUserQuestionTool::with_resolver(shell_test_ctx(dummy_out()), Arc::new(NeverResolves));
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(NeverResolves),
+        );
         let err = tool
             .call(one_question(), fresh_ctx_cancelled(), fresh_tx())
             .await

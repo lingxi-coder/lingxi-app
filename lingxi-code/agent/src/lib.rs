@@ -73,11 +73,11 @@ pub use observer::{
     build_observer_launch, propagation_for_spawn, validate_observer_graph, ObserverLaunchPlan,
     ObserverPropagation, ObserverValidationError, DEFAULT_OBSERVER_FANOUT_DEPTH,
 };
-pub use tool_resolver::{augment_teammate_tool_policy, resolve_subagent_tools};
 pub use platform_api::fork_subagent::{
     build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
     is_in_fork_child, FORK_SUBAGENT_TYPE,
 };
+pub use tool_resolver::{augment_teammate_tool_policy, resolve_subagent_tools};
 // Re-export `ToolRegistry` (from `tool_api`, an existing `agent` dep) so the
 // `tasks` in-process-teammate handler can hold one for per-spawn tool resolution
 // without widening its own dep graph.

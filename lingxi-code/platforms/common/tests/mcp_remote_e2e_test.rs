@@ -7,13 +7,13 @@ use axum::{
     Json, Router,
 };
 use futures::{stream, Stream, StreamExt};
+use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_common::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 fn spec(kind: &str, url: String) -> McpTransportSpec {
     let headers = platform_api::McpHeaders::new();

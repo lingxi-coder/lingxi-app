@@ -4,11 +4,11 @@
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::{HookEvent, HookEventType};
 use crate::matcher::{is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with};
+use platform_api::SubagentInheritance;
 use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use telemetry::otel::SerializedTraceContext;
-use platform_api::SubagentInheritance;
 
 /// Per-call context handed to hooks alongside the event payload.
 ///
@@ -1563,7 +1563,10 @@ mod match_event_matcher_tests {
             estimated_cache_write_usd: 0.0,
             pricing: "default".into(),
         };
-        assert_eq!(matched_names(&reg, &event("claude-opus-4-6")), vec!["opus-only"]);
+        assert_eq!(
+            matched_names(&reg, &event("claude-opus-4-6")),
+            vec!["opus-only"]
+        );
         assert!(matched_names(&reg, &event("claude-haiku-4-5")).is_empty());
     }
 

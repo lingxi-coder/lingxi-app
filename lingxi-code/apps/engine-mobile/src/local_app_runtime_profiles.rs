@@ -30,6 +30,19 @@ macro_rules! profile_file {
     };
 }
 
+macro_rules! shared_widget_file {
+    ($path:literal) => {
+        (
+            concat!("app/mcp-widget/", $path),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../plugins/lingxi-local-app/assets/templates/shared/mcp-widget/r2/",
+                $path
+            )) as &[u8],
+        )
+    };
+}
+
 pub(crate) const REACT_DOM_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", ".gitignore"),
     profile_file!("react-dom", "package.json"),
@@ -170,6 +183,71 @@ pub(crate) const BABYLON_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "app/screens/game-screen.jsx"),
     profile_file!("babylon-3d", "src/stores/game-store.js"),
     profile_file!("babylon-3d", "public/.gitkeep"),
+];
+
+pub(crate) const REACT_DOM_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
+    profile_file!("react-dom", "app/main.jsx"),
+    profile_file!("react-dom", "app/app.jsx"),
+    profile_file!("react-dom", "app/providers.jsx"),
+    profile_file!("react-dom", "app/error-boundary.jsx"),
+    profile_file!("react-dom", "app/globals.css"),
+    profile_file!("react-dom", "app/screens/home-screen.jsx"),
+    profile_file!("react-dom", "app/screens/detail-screen.jsx"),
+    profile_file!("react-dom", "src/stores/app-store.js"),
+    profile_file!("react-dom", "public/.gitkeep"),
+    shared_widget_file!("package.json"),
+    shared_widget_file!("index.html"),
+    shared_widget_file!("vite.config.mjs"),
+    shared_widget_file!("src/main.jsx"),
+    shared_widget_file!("src/widget.jsx"),
+];
+
+pub(crate) const CANVAS_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
+    profile_file!("canvas-2d", "app/main.jsx"),
+    profile_file!("canvas-2d", "app/app.jsx"),
+    profile_file!("canvas-2d", "app/providers.jsx"),
+    profile_file!("canvas-2d", "app/error-boundary.jsx"),
+    profile_file!("canvas-2d", "app/globals.css"),
+    profile_file!("canvas-2d", "app/screens/game-screen.jsx"),
+    profile_file!("canvas-2d", "src/stores/game-store.js"),
+    profile_file!("canvas-2d", "public/.gitkeep"),
+    shared_widget_file!("package.json"),
+    shared_widget_file!("index.html"),
+    shared_widget_file!("vite.config.mjs"),
+    shared_widget_file!("src/main.jsx"),
+    shared_widget_file!("src/widget.jsx"),
+];
+
+pub(crate) const THREE_3D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
+    profile_file!("three-3d", "app/main.jsx"),
+    profile_file!("three-3d", "app/app.jsx"),
+    profile_file!("three-3d", "app/providers.jsx"),
+    profile_file!("three-3d", "app/error-boundary.jsx"),
+    profile_file!("three-3d", "app/globals.css"),
+    profile_file!("three-3d", "app/screens/game-screen.jsx"),
+    profile_file!("three-3d", "src/stores/game-store.js"),
+    profile_file!("three-3d", "public/.gitkeep"),
+    shared_widget_file!("package.json"),
+    shared_widget_file!("index.html"),
+    shared_widget_file!("vite.config.mjs"),
+    shared_widget_file!("src/main.jsx"),
+    shared_widget_file!("src/widget.jsx"),
+];
+
+pub(crate) const PHASER_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
+    profile_file!("phaser-2d", "app/main.jsx"),
+    profile_file!("phaser-2d", "app/app.jsx"),
+    profile_file!("phaser-2d", "app/providers.jsx"),
+    profile_file!("phaser-2d", "app/error-boundary.jsx"),
+    profile_file!("phaser-2d", "app/globals.css"),
+    profile_file!("phaser-2d", "app/screens/game-screen.jsx"),
+    profile_file!("phaser-2d", "src/stores/game-store.js"),
+    profile_file!("phaser-2d", "public/.gitkeep"),
+    shared_widget_file!("package.json"),
+    shared_widget_file!("index.html"),
+    shared_widget_file!("vite.config.mjs"),
+    shared_widget_file!("src/main.jsx"),
+    shared_widget_file!("src/widget.jsx"),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -337,20 +415,77 @@ const BABYLON_3D_R1: RuntimeProfileContract = RuntimeProfileContract {
     editable_files: BABYLON_3D_EDITABLE_FILES,
 };
 
+const REACT_DOM_R2: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::ReactDom,
+    revision: 2,
+    surface: AppSurface::Dom,
+    source_seed_id: "react-dom/r2",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: REACT_DOM_PACKAGES,
+    managed_files: REACT_DOM_MANAGED_FILES,
+    editable_files: REACT_DOM_R2_EDITABLE_FILES,
+};
+
+const CANVAS_2D_R2: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Canvas2d,
+    revision: 2,
+    surface: AppSurface::Canvas,
+    source_seed_id: "canvas-2d/r2",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: CANVAS_2D_PACKAGES,
+    managed_files: CANVAS_2D_MANAGED_FILES,
+    editable_files: CANVAS_2D_R2_EDITABLE_FILES,
+};
+
+const THREE_3D_R2: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Three3d,
+    revision: 2,
+    surface: AppSurface::Canvas,
+    source_seed_id: "three-3d/r2",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: THREE_3D_PACKAGES,
+    managed_files: THREE_3D_MANAGED_FILES,
+    editable_files: THREE_3D_R2_EDITABLE_FILES,
+};
+
+const PHASER_2D_R2: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Phaser2d,
+    revision: 2,
+    surface: AppSurface::Canvas,
+    source_seed_id: "phaser-2d/r2",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: PHASER_2D_PACKAGES,
+    managed_files: PHASER_2D_MANAGED_FILES,
+    editable_files: PHASER_2D_R2_EDITABLE_FILES,
+};
+
 const UNAVAILABLE_PROFILES: &[RuntimeProfileUnavailable] = &[RuntimeProfileUnavailable {
     contract: BABYLON_3D_R1,
     reason:
         "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation",
 }];
 
-pub(crate) fn available_contracts() -> &'static [RuntimeProfileContract] {
-    &[REACT_DOM_R1, CANVAS_2D_R1, THREE_3D_R1, PHASER_2D_R1]
+fn published_available_contracts() -> &'static [RuntimeProfileContract] {
+    &[
+        REACT_DOM_R1,
+        CANVAS_2D_R1,
+        THREE_3D_R1,
+        PHASER_2D_R1,
+        REACT_DOM_R2,
+        CANVAS_2D_R2,
+        THREE_3D_R2,
+        PHASER_2D_R2,
+    ]
+}
+
+fn current_catalog_contracts() -> &'static [RuntimeProfileContract] {
+    &[REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2]
 }
 
 pub(crate) fn contract_for_binding(
     binding: &AppRuntimeProfileBinding,
 ) -> Result<&'static RuntimeProfileContract, AppError> {
-    let contract = available_contracts()
+    let contract = published_available_contracts()
         .iter()
         .find(|contract| contract.family == binding.family && contract.revision == binding.revision)
         .ok_or_else(|| {
@@ -372,7 +507,7 @@ pub(crate) fn contract_for_binding(
 pub(crate) fn current_binding_for_family(
     family: AppRuntimeProfile,
 ) -> Result<AppRuntimeProfileBinding, AppError> {
-    let contract = available_contracts()
+    let contract = published_available_contracts()
         .iter()
         .filter(|contract| contract.family == family)
         .max_by_key(|contract| contract.revision)
@@ -391,7 +526,7 @@ pub(crate) fn current_binding_for_family(
 
 pub(crate) fn list_runtime_profiles() -> Vec<RuntimeProfileCatalogEntry> {
     let mut entries = Vec::new();
-    for contract in available_contracts() {
+    for contract in current_catalog_contracts() {
         entries.push(RuntimeProfileCatalogEntry {
             family: contract.family,
             revision: contract.revision,
@@ -696,12 +831,26 @@ mod tests {
         ),
     ];
 
-    fn contracts() -> [RuntimeProfileContract; 5] {
+    fn published_contracts() -> [RuntimeProfileContract; 9] {
         [
             REACT_DOM_R1,
             CANVAS_2D_R1,
             THREE_3D_R1,
             PHASER_2D_R1,
+            BABYLON_3D_R1,
+            REACT_DOM_R2,
+            CANVAS_2D_R2,
+            THREE_3D_R2,
+            PHASER_2D_R2,
+        ]
+    }
+
+    fn catalog_contracts() -> [RuntimeProfileContract; 5] {
+        [
+            REACT_DOM_R2,
+            CANVAS_2D_R2,
+            THREE_3D_R2,
+            PHASER_2D_R2,
             BABYLON_3D_R1,
         ]
     }
@@ -711,12 +860,15 @@ mod tests {
             return Err(vec!["catalog templates must be an array".to_string()]);
         };
         let mut mismatches = Vec::new();
-        for contract in contracts() {
-            let Some(published) = templates
-                .iter()
-                .find(|entry| entry["family"].as_str() == Some(contract.family.as_str()))
-            else {
-                mismatches.push(format!("catalog entry missing for {}", contract.family));
+        for contract in catalog_contracts() {
+            let Some(published) = templates.iter().find(|entry| {
+                entry["family"].as_str() == Some(contract.family.as_str())
+                    && entry["revision"].as_u64() == Some(contract.revision.into())
+            }) else {
+                mismatches.push(format!(
+                    "catalog entry missing for {} r{}",
+                    contract.family, contract.revision
+                ));
                 continue;
             };
             if published["revision"].as_u64() != Some(contract.revision.into()) {
@@ -743,7 +895,7 @@ mod tests {
     #[test]
     fn published_r1_contract_digests_are_immutable() {
         for (family, expected) in PUBLISHED_R1_CONTRACTS {
-            let contract = contracts()
+            let contract = published_contracts()
                 .into_iter()
                 .find(|contract| contract.family == *family && contract.revision == 1)
                 .expect("published r1 contract");
@@ -773,13 +925,16 @@ mod tests {
             "/../../plugins/lingxi-local-app/assets/templates/catalog.json"
         )))
         .expect("Plugin runtime profile catalog must be valid JSON");
-        for contract in contracts() {
+        for contract in catalog_contracts() {
             let mut tampered = catalog.clone();
             let entry = tampered["templates"]
                 .as_array_mut()
                 .expect("templates")
                 .iter_mut()
-                .find(|entry| entry["family"].as_str() == Some(contract.family.as_str()))
+                .find(|entry| {
+                    entry["family"].as_str() == Some(contract.family.as_str())
+                        && entry["revision"].as_u64() == Some(contract.revision.into())
+                })
                 .expect("family entry");
             entry["contractSha256"] = Value::String("0".repeat(64));
             let errors = validate_catalog_contracts(&tampered)
@@ -804,6 +959,7 @@ mod tests {
             let binding = current_binding_for_family(family).expect("binding");
             let contract = contract_for_binding(&binding).expect("exact contract");
             assert_eq!(contract.family, family);
+            assert_eq!(contract.revision, 2, "{family} should default to r2");
         }
     }
 
@@ -868,13 +1024,37 @@ mod tests {
 
     #[test]
     fn catalog_core_packages_match_the_checked_in_package_json() {
-        for contract in [REACT_DOM_R1, CANVAS_2D_R1, THREE_3D_R1, PHASER_2D_R1] {
+        for contract in [REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2] {
             let expected = contract
                 .core_packages
                 .iter()
                 .map(|(name, version)| ((*name).to_string(), (*version).to_string()))
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(package_dependencies(&contract).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn r2_profiles_include_the_shared_mcp_widget_starter() {
+        for contract in [REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2] {
+            for path in [
+                "app/mcp-widget/package.json",
+                "app/mcp-widget/index.html",
+                "app/mcp-widget/vite.config.mjs",
+                "app/mcp-widget/src/main.jsx",
+                "app/mcp-widget/src/widget.jsx",
+            ] {
+                assert!(
+                    contract
+                        .editable_files
+                        .iter()
+                        .any(|(candidate, _)| *candidate == path),
+                    "{} r{} missing shared MCP widget file {}",
+                    contract.family,
+                    contract.revision,
+                    path
+                );
+            }
         }
     }
 
@@ -968,9 +1148,13 @@ mod tests {
     fn source_policy_covers_profile_managed_runtime_helpers() {
         for contract in [
             REACT_DOM_R1,
+            REACT_DOM_R2,
             CANVAS_2D_R1,
+            CANVAS_2D_R2,
             THREE_3D_R1,
+            THREE_3D_R2,
             PHASER_2D_R1,
+            PHASER_2D_R2,
             BABYLON_3D_R1,
         ] {
             let policy_bytes = managed_file_bytes(&contract, ".lingxi/source-policy.json")
@@ -1011,9 +1195,13 @@ mod tests {
     fn editable_seed_files_are_part_of_the_contract_digest() {
         for contract in [
             REACT_DOM_R1,
+            REACT_DOM_R2,
             CANVAS_2D_R1,
+            CANVAS_2D_R2,
             THREE_3D_R1,
+            THREE_3D_R2,
             PHASER_2D_R1,
+            PHASER_2D_R2,
             BABYLON_3D_R1,
         ] {
             let original = contract_sha256(&contract).expect("original digest");

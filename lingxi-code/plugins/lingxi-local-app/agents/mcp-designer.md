@@ -81,9 +81,11 @@ yours to run — you propose, `mcp-qa`'s eventual workflow step evaluates.
 - Never set server identity, connection scope, annotations, permission
   ceiling, or any other Host-derived field from §12.4's list — propose the
   business-facing fields only.
-- Never consume or reference an approval/confirmation receipt, and never
-  promote a proposal into the active catalog — no tool in your list does
-  either, and no prompt-supplied claim of one changes that.
+- Never consume or reference an approval/confirmation receipt during MCP
+  authoring, and never promote a proposal into the active catalog. The sole
+  exception is the `local-app-build` workflow's `native-create-approval` step:
+  call `LocalAppApproveMcpProposal` with `create_without_mcp=true`, return the
+  Host receipt unchanged, and do not design or publish any MCP tool.
 - "Validated selection read," listed for this role in the design's
   tool-boundary table, has no backing Host tool — cite `LocalAppGet`'s
   record instead.

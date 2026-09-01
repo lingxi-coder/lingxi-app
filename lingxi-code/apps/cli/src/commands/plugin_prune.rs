@@ -37,9 +37,11 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use migrations::settings_update::{read_settings_map, update_settings};
+use migrations::settings_update::read_settings_map;
 use serde_json::{Map, Value};
+use telemetry::AnalyticsBus;
 
 use crate::commands::plugin_settings::Scope;
 
@@ -53,11 +55,6 @@ fn installed_path(plugins_dir: &Path) -> PathBuf {
 /// a fresh empty v2 doc.
 fn load_installed(plugins_dir: &Path) -> Value {
     super::plugin_install::load_installed(plugins_dir)
-}
-
-/// Write the installed DB (pretty, no trailing newline).
-fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
-    super::plugin_install::write_installed(plugins_dir, doc)
 }
 
 /// Parse the prune `--scope` (default `user`); invalid-scope wording matches the
@@ -322,56 +319,36 @@ fn read_enabled(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Delete an `enabledPlugins` entry at a scope (prune drops the key, matching
-/// the oracle's `u[id] = void 0`).
-fn delete_enabled(scope: Scope, home: &Path, cwd: &Path, id: &str) -> Result<(), String> {
-    let path = scope.path(home, cwd);
-    let mut map = read_enabled(&path);
-    if map.remove(id).is_none() {
-        return Ok(());
-    }
-    update_settings(
-        &path,
-        vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
-    )
-}
-
-/// Remove the orphan records at the scope, delete their `enabledPlugins` keys,
-/// and delete their materialized `installPath` (and per-id data) directories
-/// (mirrors the oracle's `ZWl` with `deleteDataDir: true`).
-fn remove_orphans(
+/// Remove the orphan records at the scope in-memory; the caller persists first,
+/// then applies any on-disk cleanup only after the new references are durable.
+fn collect_scoped_orphan_records(
+    db: &Value,
     orphans: &[String],
     scope: Scope,
     project_path: &Option<String>,
-    plugins_dir: &Path,
-    home: &Path,
-    cwd: &Path,
-) -> Result<(), String> {
-    let mut db = load_installed(plugins_dir);
-
+) -> Vec<(String, Value)> {
+    let mut removed = Vec::new();
     for id in orphans {
-        // Delete the on-disk versioned dir (and data dir) for the scoped record.
-        if let Some(arr) = db
+        if let Some(record) = db
             .get("plugins")
             .and_then(|p| p.get(id))
             .and_then(Value::as_array)
+            .and_then(|arr| scoped_record(arr, scope, project_path))
+            .cloned()
         {
-            if let Some(rec) = scoped_record(arr, scope, project_path) {
-                if let Some(path) = rec.get("installPath").and_then(Value::as_str) {
-                    if let Some(path) = super::plugin_install::confined_cache_record_path(
-                        plugins_dir,
-                        Path::new(path),
-                    ) {
-                        let _ = std::fs::remove_dir_all(path);
-                    }
-                }
-            }
+            removed.push((id.clone(), record));
         }
-        if let Some(path) = super::plugin_install::confined_plugin_data_path(plugins_dir, id) {
-            let _ = std::fs::remove_dir_all(path);
-        }
+    }
+    removed
+}
 
-        // Drop the scope+projectPath record; remove the key if none remain.
+fn drop_orphan_records(
+    db: &mut Value,
+    orphans: &[String],
+    scope: Scope,
+    project_path: &Option<String>,
+) {
+    for id in orphans {
         if let Some(plugins) = db.get_mut("plugins").and_then(Value::as_object_mut) {
             if let Some(Value::Array(arr)) = plugins.get_mut(id) {
                 arr.retain(|r| {
@@ -382,11 +359,7 @@ fn remove_orphans(
                 }
             }
         }
-
-        let _ = delete_enabled(scope, home, cwd, id);
     }
-
-    write_installed(plugins_dir, &db)
 }
 
 /// Read a `y`/`yes` (case-insensitive) confirmation line from stdin.
@@ -396,6 +369,20 @@ fn read_yes_from_stdin() -> bool {
         return false;
     }
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn registry_error_kind(error: &str) -> &'static str {
+    if error.contains("expected value")
+        || error.contains("EOF while parsing")
+        || error.contains("trailing characters")
+        || error.contains("key must be a string")
+    {
+        "parse"
+    } else if error.contains("lock") {
+        "lock"
+    } else {
+        "io"
+    }
 }
 
 /// `plugin prune [--dry-run] [-y] [--scope S]`.
@@ -409,8 +396,28 @@ pub fn run_prune(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    super::plugin::current_thread_runtime().block_on(run_prune_with_bus(
+        dry_run,
+        yes,
+        scope,
+        plugins_dir,
+        home,
+        cwd,
+        None,
+    ))
+}
+
+pub async fn run_prune_with_bus(
+    dry_run: bool,
+    yes: bool,
+    scope: &str,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    run_prune_inner(
+    run_prune_inner_with_bus(
         dry_run,
         yes,
         scope,
@@ -419,7 +426,9 @@ pub fn run_prune(
         cwd,
         is_tty,
         &mut read_yes_from_stdin,
+        analytics_bus,
     )
+    .await
 }
 
 /// Testable core: `is_tty` and the confirmation reader are injected so the
@@ -435,11 +444,50 @@ fn run_prune_inner(
     is_tty: bool,
     confirm: &mut dyn FnMut() -> bool,
 ) -> Result<String, String> {
+    super::plugin::current_thread_runtime().block_on(run_prune_inner_with_bus(
+        dry_run,
+        yes,
+        scope_str,
+        plugins_dir,
+        home,
+        cwd,
+        is_tty,
+        confirm,
+        None,
+    ))
+}
+
+async fn run_prune_inner_with_bus(
+    dry_run: bool,
+    yes: bool,
+    scope_str: &str,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    is_tty: bool,
+    confirm: &mut dyn FnMut() -> bool,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
     let scope = parse_scope(scope_str)?;
     let label = scope.label();
     let project_path = scope_project_path(scope, cwd);
-    let db = load_installed(plugins_dir);
-    let result = scan(&db, scope, &project_path);
+    let settings_path = scope.path(home, cwd);
+    let previous_settings = std::fs::read(&settings_path).ok();
+    let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
+    {
+        Ok(tx) => tx,
+        Err(error) => {
+            super::plugin::emit_plugin_state_file_error(
+                analytics_bus,
+                "prune",
+                "transaction_begin",
+                registry_error_kind(&error),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let result = scan(installed_tx.document(), scope, &project_path);
 
     // Unresolvable graph — cannot safely determine orphans.
     if !result.unloadable.is_empty() {
@@ -464,7 +512,7 @@ fn run_prune_inner(
     }
 
     // Build the orphan listing (2-space indent; version from the scoped record).
-    let plugins = plugins_obj(&db);
+    let plugins = plugins_obj(installed_tx.document());
     let lines: Vec<String> = result
         .orphans
         .iter()
@@ -510,26 +558,76 @@ fn run_prune_inner(
         }
     }
 
-    remove_orphans(
-        &result.orphans,
-        scope,
-        &project_path,
-        plugins_dir,
-        home,
-        cwd,
-    )?;
+    let result = async {
+        if !result.unloadable.is_empty() {
+            return Ok(format!(
+            "Skipped \u{2014} cannot determine orphans: {} failed to load. Fix or uninstall, then retry.",
+            result.unloadable.join(", ")
+        ));
+        }
+        if result.orphans.is_empty() {
+            if result.auto_count == 0 {
+                return Ok(format!(
+                    "Nothing to prune (no auto-installed plugins at {label} scope)."
+                ));
+            }
+            return Ok(format!(
+                "Nothing to prune ({} auto-installed {} at {label} scope, all still needed).",
+                result.auto_count,
+                plural(result.auto_count, "plugin", "plugins"),
+            ));
+        }
 
-    Ok(format!(
-        "Removed {} auto-installed {}: {}",
-        result.orphans.len(),
-        plural(result.orphans.len(), "plugin", "plugins"),
-        result
-            .orphans
+        let removed = result.orphans.clone();
+        let removed_records =
+            collect_scoped_orphan_records(installed_tx.document(), &removed, scope, &project_path);
+        drop_orphan_records(installed_tx.document_mut(), &removed, scope, &project_path);
+        installed_tx.persist()?;
+        for id in &removed {
+            super::plugin_install::edit_enabled_strict(scope, home, cwd, id, None)?;
+        }
+
+        let orphaned_paths = removed_records
             .iter()
-            .map(|id| name_of(id).to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>();
+        for path in super::plugin_install::unreferenced_removed_record_paths(
+            plugins_dir,
+            installed_tx.document(),
+            &orphaned_paths,
+        ) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        for id in &removed {
+            if !super::plugin_install::plugin_has_records(installed_tx.document(), id) {
+                if let Some(path) =
+                    super::plugin_install::confined_plugin_data_path(plugins_dir, id)
+                {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+
+        super::plugin::emit_plugin_prune_cli(analytics_bus, scope.label(), removed.len() as u64)
+            .await;
+
+        Ok(format!(
+            "Removed {} auto-installed {}: {}",
+            removed.len(),
+            plural(removed.len(), "plugin", "plugins"),
+            removed
+                .iter()
+                .map(|id| name_of(id).to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))
+    }
+    .await;
+    if result.is_err() {
+        super::plugin_install::restore_file(&settings_path, previous_settings.as_deref());
+        super::plugin_install::rollback_installed_registry(&installed_tx);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -604,6 +702,14 @@ mod tests {
 
     fn db_json(e: &Env) -> Value {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
+    }
+
+    fn write_legacy_only_db(e: &Env, doc: &Value) {
+        std::fs::write(
+            e.plugins.join("installed_plugins_v2.json"),
+            serde_json::to_string(doc).unwrap(),
+        )
+        .unwrap();
     }
 
     fn never() -> bool {
@@ -827,6 +933,121 @@ mod tests {
         assert_eq!(
             settings["enabledPlugins"],
             serde_json::json!({"keep@mkt": true})
+        );
+    }
+
+    #[test]
+    fn prune_keeps_shared_cache_and_data_when_another_scope_still_references_it() {
+        let e = env();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        let data_dir = e.plugins.join("data").join("dep-mkt");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("sentinel"), "keep").unwrap();
+        std::fs::write(
+            installed_path(&e.plugins),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "dep@mkt": [
+                        {
+                            "scope": "user",
+                            "installPath": dep,
+                            "version": "1.0.0",
+                            "installedAt": "2026-01-01T00:00:00.000Z",
+                            "lastUpdated": "2026-01-01T00:00:00.000Z",
+                            "auto": true
+                        },
+                        {
+                            "scope": "project",
+                            "projectPath": e.cwd.display().to_string(),
+                            "installPath": dep,
+                            "version": "1.0.0",
+                            "installedAt": "2026-01-01T00:00:00.000Z",
+                            "lastUpdated": "2026-01-01T00:00:00.000Z",
+                            "auto": true
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run_prune_inner(
+            false, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
+
+        let records = db_json(&e)["plugins"]["dep@mkt"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["scope"], "project");
+        assert!(Path::new(&dep).exists());
+        assert!(data_dir.join("sentinel").exists());
+    }
+
+    #[test]
+    fn prune_settings_failure_restores_registry_and_skips_cleanup() {
+        let e = env();
+        std::fs::write(
+            e.home.join("settings.json"),
+            r#"{"enabledPlugins":{"dep@mkt":true}}"#,
+        )
+        .unwrap();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        let data_dir = e.plugins.join("data").join("dep-mkt");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("sentinel"), "keep").unwrap();
+        write_db(&e, &[("dep@mkt", "1.0.0", &dep, true)]);
+        std::fs::remove_file(e.home.join("settings.json")).unwrap();
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+
+        let err = run_prune_inner(
+            false, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap_err();
+
+        assert!(!err.is_empty());
+        assert!(db_json(&e)["plugins"].get("dep@mkt").is_some());
+        assert!(Path::new(&dep).exists());
+        assert!(data_dir.join("sentinel").exists());
+    }
+
+    #[test]
+    fn prune_failure_restores_legacy_only_registry() {
+        let e = env();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        let legacy = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "dep@mkt": [{
+                    "scope": "user",
+                    "installPath": dep,
+                    "version": "1.0.0",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                    "auto": true
+                }]
+            }
+        });
+        write_legacy_only_db(&e, &legacy);
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+
+        let err = run_prune_inner(
+            false, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap_err();
+
+        assert!(!err.is_empty());
+        assert!(!installed_path(&e.plugins).exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
+            )
+            .unwrap(),
+            legacy
         );
     }
 

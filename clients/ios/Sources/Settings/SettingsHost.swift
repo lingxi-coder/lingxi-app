@@ -214,6 +214,7 @@ struct SettingsHost: View {
                                 .frame(width: 34, height: 34)
                         }
                         .accessibilityLabel(String(localized: "settings_close_accessibility"))
+                        .accessibilityIdentifier("settings.close")
                     } else if case .providerEdit(let box, _) = page,
                               box.kind == .llm {
                         // The provider editor is now a self-contained draft

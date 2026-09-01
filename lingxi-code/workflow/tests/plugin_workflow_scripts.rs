@@ -144,8 +144,6 @@ fn phase4_and_phase6_workflows_use_real_orchestration() {
 fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
         .expect("read build workflow");
-    let nested_calls = Arc::new(AtomicUsize::new(0));
-    let nested_calls_for_run = Arc::clone(&nested_calls);
     let args = serde_json::json!({
         "operation": "create",
         "app_id": "aaaa1111",
@@ -158,7 +156,7 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
             "workflow_run_id": "wf_hermetic1",
             "selector_capability": "sel_00000000000000000000000000000000",
             "invocation_capability": "mcpv_00000000000000000000000000000000",
-            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r1"]},
+            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
             "staging": {"isolated": true, "final_publish": false}
         }
     });
@@ -176,20 +174,23 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     });
     let stage = serde_json::json!({"ok": true, "dependency_input_sha256": "a".repeat(64), "summary": "staged"});
     let build = serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "summary": "built"});
-    let promote = serde_json::json!({"ok": true, "verification_sha256": "b".repeat(64), "catalog_sha256": "c".repeat(64), "publication_state": "published_unverified", "summary": "promoted"});
     let outcome = workflow::run_with_progress(
         &source,
         move |prompts, options| {
             prompts
                 .iter()
                 .zip(options.iter())
-                .map(|(prompt, options)| {
-                    if options.contains("__wf_resolve") {
-                        nested_calls_for_run.fetch_add(1, Ordering::SeqCst);
-                        return "return { status: 'create_approved', approval: { receipt_id: 'mcp-create-receipt' } };".to_string();
-                    }
+                .map(|(_prompt, options)| {
                     if options.contains("template-selector") {
-                        return serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r1","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string();
+                        return serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r2","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string();
+                    }
+                    if options.contains("native-create-approval") {
+                        return serde_json::json!({
+                            "approved": true,
+                            "receipt_id": "mcp-create-receipt",
+                            "status": "create_approved_no_mcp"
+                        })
+                        .to_string();
                     }
                     if options.contains("designer") {
                         return serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string();
@@ -199,9 +200,6 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
                     }
                     if options.contains("builder-build") || options.contains("repair-") {
                         return build.to_string();
-                    }
-                    if prompt.contains("LocalAppQaMcpCandidate") && prompt.contains("LocalAppPromoteMcpCandidate") {
-                        return promote.to_string();
                     }
                     report.to_string()
                 })
@@ -217,8 +215,8 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     let result = outcome.result.expect("workflow result");
     assert!(result.contains("lingxi-local-app:local-app-build"));
     assert!(result.contains("\"repair_rounds\":0"));
-    assert!(result.contains("\"publication_state\":\"published_unverified\""));
-    assert_eq!(nested_calls.load(Ordering::SeqCst), 1);
+    assert!(result.contains("\"status\":\"create_approved_no_mcp\""));
+    assert!(result.contains("\"promotion\":null"));
 }
 
 #[test]
@@ -242,7 +240,7 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
             },
             "template_catalog": {
                 "catalog_digest": "catalog",
-                "available_template_ids": ["react-dom-r1"]
+                "available_template_ids": ["react-dom-r2"]
             },
             "expected_writable_collections": [],
             "dependency_snapshot": {"verified": true}
@@ -322,7 +320,7 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
             },
             "template_catalog": {
                 "catalog_digest": "catalog",
-                "available_template_ids": ["canvas-2d-r1"]
+                "available_template_ids": ["canvas-2d-r2"]
             },
             "expected_writable_collections": [],
             "dependency_snapshot": {"verified": true}
@@ -345,7 +343,7 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
 }
 
 #[test]
-fn unified_build_update_runs_the_per_app_mcp_impact_check() {
+fn unified_build_update_keeps_mcp_authoring_explicit() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
         .expect("read build workflow");
     let args = serde_json::json!({
@@ -367,7 +365,7 @@ fn unified_build_update_runs_the_per_app_mcp_impact_check() {
             },
             "template_catalog": {
                 "catalog_digest": "catalog",
-                "available_template_ids": ["react-dom-r1"]
+                "available_template_ids": ["react-dom-r2"]
             },
             "expected_writable_collections": ["items"],
             "dependency_snapshot": {"verified": true},
@@ -418,11 +416,11 @@ fn unified_build_update_runs_the_per_app_mcp_impact_check() {
     )
     .expect("update workflow should execute");
     let result = outcome.result.expect("update result");
-    assert!(result.contains("\"mcp_update\":{\"status\":\"promoted\""));
+    assert!(result.contains("\"mcp_update\":null"));
     assert_eq!(
         nested_calls.load(Ordering::SeqCst),
-        1,
-        "every update must run exactly one per-App MCP impact-check"
+        0,
+        "ordinary app updates must not run MCP authoring without an explicit user request"
     );
 }
 
@@ -439,7 +437,7 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_mcp_authoring1",
             "invocation_capability": "mcpv_00000000000000000000000000000000",
-            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r1"]},
+            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
             "expected_writable_collections": ["recipes"],
             "dependency_snapshot": {"verified": true},
             "active_catalog": null
@@ -454,7 +452,7 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_mcp_authoring2",
             "invocation_capability": "mcpv_00000000000000000000000000000000",
-            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r1"]},
+            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
             "expected_writable_collections": ["recipes"],
             "dependency_snapshot": {"verified": true},
             "active_catalog": {"build_id":"build-a","manifest_revision":3,"authoring_revision":1,"catalog_sha256":"9".repeat(64),"approval_contract_sha256":"a".repeat(64),"tool_surface_sha256":"b".repeat(64)}
@@ -552,7 +550,7 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     )
     .expect("mcp authoring workflow should execute");
     let result = outcome.result.expect("workflow result");
-    assert!(result.contains("\"status\":\"create_approved\""));
+    assert!(result.contains("\"status\":\"promoted\""));
     assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
 
     let evidence_for_zero_tools = evidence_for_promote.clone();

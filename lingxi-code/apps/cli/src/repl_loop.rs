@@ -8,11 +8,11 @@ use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
+use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Outcome returned by [`step`] — tells the outer loop what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,10 +286,10 @@ mod tests {
     use crate::output::PlainSink;
     use futures::future::BoxFuture;
     use orchestrator::test_support::MockOrchestratorHandle;
+    use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{duplex, AsyncBufRead, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;
-    use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
     /// Wrap a duplex client end in the shared `Arc<Mutex<BufReader<_>>>` the
     /// refactored `step` expects (upcast to the `dyn AsyncBufRead` trait object).

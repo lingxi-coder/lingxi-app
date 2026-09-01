@@ -4,10 +4,10 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+use platform_api::OutputEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use platform_api::OutputEvent;
 
 // `LlmEvent` has no Ping variant — this test verifies that non-content events
 // (no pings to inject) do not disturb the output stream.

@@ -29,6 +29,7 @@ use lingxi_core::TodoState;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::task_registry::TaskRegistryError;
 use serde_json::{json, Map, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -40,7 +41,6 @@ use telemetry::tengu::tool::{
     TASK_UPDATE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use platform_api::task_registry::TaskRegistryError;
 
 use crate::todo_store::{TodoStore, TodoTask};
 use tool_api::context::ToolUseContext;

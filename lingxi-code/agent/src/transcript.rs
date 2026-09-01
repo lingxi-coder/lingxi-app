@@ -4,12 +4,12 @@
 //! [`ConversationMessage`] to a transcript file under the agent's transcript
 //! subdir.
 
+use platform_api::FileSystem;
 use protocol::{AgentId, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use platform_api::FileSystem;
 
 /// One line in the agent transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]

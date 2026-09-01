@@ -48,7 +48,7 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
     // `ClientEvent` and forwards it here.
     let sink = MockSink::arc();
     let output: Arc<dyn platform_api::OutputStream> = Arc::new(AdapterOutputStream::new(
-        sink.clone() as Arc<dyn client_adapter::ClientEventSink>
+        sink.clone() as Arc<dyn client_adapter::ClientEventSink>,
     ));
 
     let tools = Arc::new(tool_api::registry::ToolRegistry::new());

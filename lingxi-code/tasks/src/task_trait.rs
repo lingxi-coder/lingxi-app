@@ -1,9 +1,9 @@
 //! Generic `Task` trait — implemented per [`TaskType`](crate::id::TaskType).
 
 use async_trait::async_trait;
+use platform_api::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
 use std::sync::Arc;
 use thiserror::Error;
-use platform_api::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
 
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]

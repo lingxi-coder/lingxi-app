@@ -1,11 +1,13 @@
 use jsonrpc::Connection;
 use lsp::LspRegistry;
+use platform_api::{
+    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 struct CaptureTransport {
     id: protocol::McpConnectionId,

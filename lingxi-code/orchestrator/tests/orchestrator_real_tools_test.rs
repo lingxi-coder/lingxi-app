@@ -13,6 +13,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::OutputEvent;
 use protocol::ToolUseId;
 use serde_json::json;
 use std::io::Write;
@@ -23,7 +24,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::OutputEvent;
 
 /// Real-fs tool: reads a UTF-8 file from the path argument, returns its
 /// content as a JSON `{"content": "..."}` payload. Exercises the orchestrator

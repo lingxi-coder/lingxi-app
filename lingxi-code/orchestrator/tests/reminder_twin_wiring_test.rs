@@ -24,6 +24,10 @@ const TWIN_REMINDERS: &[&str] = &[
     "new_diagnostics_reminder_message",
     "skill_listing_reminder_message",
     "agent_listing_reminder_message",
+    "changed_files_reminder_messages",
+    "memory_update_reminder_messages",
+    "silent_turn_reminder_message",
+    "total_tokens_reminder_message",
 ];
 
 /// Count DRIVER call sites only. The receiver disambiguates: the streaming
@@ -46,6 +50,19 @@ fn every_per_turn_reminder_is_injected_by_both_drivers() {
             "{name} must be invoked exactly once by the STREAMING driver \
              (conversation/drivers/mod.rs). A reminder wired into only the batched driver \
              is a streaming-only regression that no unit test will catch."
+        );
+    }
+}
+
+#[test]
+fn deferred_tool_reminder_is_injected_by_both_drivers() {
+    for (name, source) in [("BATCHED", BATCHED), ("STREAMING", STREAMING)] {
+        assert_eq!(
+            source
+                .matches("tool_search_usage_reminder_message(")
+                .count(),
+            1,
+            "{name} driver must invoke the deferred-tool reminder exactly once"
         );
     }
 }

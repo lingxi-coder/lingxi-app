@@ -41,7 +41,9 @@ use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_L
 use tool_api::BuiltinToolContext;
 
 use platform_api::process::ProcessError;
-use platform_api::sandbox::{NetworkPolicy, ProcessCommand, ResourceLimits, SandboxError, SandboxPolicy};
+use platform_api::sandbox::{
+    NetworkPolicy, ProcessCommand, ResourceLimits, SandboxError, SandboxPolicy,
+};
 
 /// Tool name byte-lock — the model-facing name for the mobile shell.
 pub const TOOL_NAME: &str = "Shell";
@@ -493,14 +495,14 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use tool_api::AndroidShellToolCtx;
     use platform_api::process::{ProcessHandle, ProcessOutput, ProcessRunner};
     use platform_api::sandbox::{
         Sandbox, SandboxBackend, SandboxCapability, SandboxFeatures, SandboxedCommand, SandboxedTag,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::AndroidShellToolCtx;
 
     /// A `Sandbox` that records the policy handed to `prepare()` and admits the
     /// command (wrapped as `AndroidMinijail`) so the runner is reachable.

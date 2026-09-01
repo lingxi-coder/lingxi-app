@@ -18,14 +18,22 @@ use client_protocol::local_apps::{
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
     LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
-    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
+    McpAppWidgetDto,
 };
 use futures_util::StreamExt;
 use local_apps::{
-    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
-    AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeProfile,
-    AppRuntimeState, AppService, BackgroundTaskStatus, DataMigrationPreview, DataMutation,
-    DataQuery, DataSortDirection, DataSortKey, PermissionDecision, SessionPermissions,
+    derive_mcp_status, effective_tool_surface_sha256, load_manifest, load_mcp_settings,
+    load_permissions, mcp_catalog_tool_names, save_mcp_settings, save_permissions, AppCapability,
+    AppDataStore, AppDependencyState, AppLayout, AppMcpSettings, AppMcpStatus, AppPermissions,
+    AppRuntimeMode, AppRuntimeProfile, AppRuntimeState, AppService, BackgroundTaskStatus,
+    DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
+    PermissionDecision, SessionPermissions,
+};
+use platform_api::mobile_linux::guest_paths;
+use platform_api::{
+    LinuxCommandRequest, McpError, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
+    ResourceLimits,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -40,14 +48,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex, Semaphore};
 use tokio::time::{sleep, timeout, Duration};
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{
-    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
-};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const APPROVAL_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const LOCAL_APP_WIDGET_MIME: &str = "text/html;profile=mcp-app";
+const LOCAL_APP_WIDGET_FILE: &str = "mcp-app.html";
+const LOCAL_APP_WIDGET_DIR: &str = "resources";
 const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const STATIC_REQUEST_CONCURRENCY: usize = 8;
@@ -1043,6 +1050,14 @@ pub(crate) struct LocalAppsHostBroker {
     /// replacement alone cannot prevent concurrent creates/updates from
     /// overwriting a stale catalog snapshot.
     agent_session_writes: Mutex<()>,
+    /// Serializes the per-app MCP settings CAS read/modify/write transaction.
+    /// Atomic replacement protects readers from partial JSON, but without this
+    /// lock two commands could both validate the same expected revision and
+    /// silently overwrite each other.
+    mcp_settings_writes: Mutex<()>,
+    /// Conversation whose Local App exposure/pin state should be reflected in
+    /// native inventory snapshots.
+    active_mcp_conversation: Mutex<Option<String>>,
     /// Stable native host facts, attached by the mobile composition root from
     /// the same `MobileConfig` that renders the mobile runtime reminder.
     ///
@@ -1203,6 +1218,8 @@ impl LocalAppsHostBroker {
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
             agent_session_writes: Mutex::new(()),
+            mcp_settings_writes: Mutex::new(()),
+            active_mcp_conversation: Mutex::new(None),
             host_environment: OnceLock::new(),
             agent_executor: OnceLock::new(),
             agent_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1266,6 +1283,285 @@ impl LocalAppsHostBroker {
         self.lsp_registry.get().and_then(std::sync::Weak::upgrade)
     }
 
+    fn managed_mcp_config(
+        scope: &mcp::registry::ConversationExport,
+        conversation_id: &str,
+    ) -> Result<mcp::McpServerConfig, String> {
+        Ok(mcp::McpServerConfig {
+            name: scope.server_name(),
+            spec: platform_api::McpTransportSpec::InProcess {
+                registry_key: scope
+                    .scoped_registry_key(conversation_id)
+                    .map_err(|error| error.to_string())?,
+            },
+            scope: mcp::ConfigScope::Managed,
+            disabled: false,
+            timeout_ms: Some(crate::host::LOCAL_APPS_MCP_TIMEOUT_MS),
+            always_load: true,
+            discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: BTreeMap::new(),
+            config_error: None,
+            metadata: Default::default(),
+        })
+    }
+
+    /// Make one enabled Local App MCP visible to one conversation and create
+    /// the real logical MCP connection whose discovered tools are registered
+    /// into that conversation's shared ToolRegistry.
+    pub(crate) async fn expose_managed_mcp_for_conversation(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pin: bool,
+    ) -> Result<bool, String> {
+        let Some(registry) = self.upgraded_mcp_registry() else {
+            return Ok(false);
+        };
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+            return Ok(false);
+        };
+        let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+            .map_err(|error| error.to_string())?;
+        let settings = load_mcp_settings(&layout)
+            .map_err(|error| error.to_string())?
+            .reconcile_with_catalog(&catalog, false)
+            .map_err(|error| error.to_string())?;
+        if !settings.enabled || settings.enabled_tools.is_empty() {
+            return Ok(false);
+        }
+        let effective_surface =
+            effective_tool_surface_sha256(&active.tool_surface_sha256, &settings.enabled_tools)
+                .map_err(|error| error.to_string())?;
+        let scope = mcp::registry::ConversationExport::new(app_id, effective_surface)
+            .map_err(|error| error.to_string())?;
+        registry
+            .register_managed_local_app(scope.clone(), active.catalog_sha256.clone(), false)
+            .await
+            .map_err(|error| error.to_string())?;
+        registry
+            .set_managed_local_app_runtime(
+                app_id,
+                true,
+                Some(settings.enabled_tools.clone()),
+                managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
+                    .map(|(_, resource)| resource),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let update = registry
+            .expose_managed_local_app_with_diff(conversation_id, app_id, pin)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(evicted_app_id) = update.evicted_app_id {
+            registry
+                .disconnect(&format!("local_app_{evicted_app_id}"))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        let desired = Self::managed_mcp_config(&scope, conversation_id)?;
+        let desired_registry_key = match &desired.spec {
+            platform_api::McpTransportSpec::InProcess { registry_key } => registry_key,
+            _ => unreachable!("managed Local App MCP is always in-process"),
+        };
+        let existing = registry.get_config(&scope.server_name()).await;
+        let same_conversation_route =
+            existing
+                .as_ref()
+                .is_some_and(|current| match &current.spec {
+                    platform_api::McpTransportSpec::InProcess { registry_key } => {
+                        let current_route = registry_key.rsplit_once(':').map(|(route, _)| route);
+                        let desired_route = desired_registry_key
+                            .rsplit_once(':')
+                            .map(|(route, _)| route);
+                        current_route == desired_route
+                    }
+                    _ => false,
+                });
+        if same_conversation_route {
+            return Ok(true);
+        }
+        if existing.is_some() {
+            registry
+                .disconnect(&scope.server_name())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        registry
+            .connect(desired)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    pub(crate) async fn set_managed_mcp_conversation_pinned(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pinned: bool,
+    ) -> Result<(), String> {
+        *self.active_mcp_conversation.lock().await = Some(conversation_id.to_string());
+        if pinned {
+            if !self
+                .expose_managed_mcp_for_conversation(conversation_id, app_id, true)
+                .await?
+            {
+                return Err("mcp_not_enabled: Local App MCP is not enabled".into());
+            }
+        } else if let Some(registry) = self.upgraded_mcp_registry() {
+            match registry
+                .pin_local_app_exposure(conversation_id, app_id, false)
+                .await
+            {
+                Ok(_) | Err(McpError::ToolNotFound(_)) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        self.emit_managed_mcp_inventory().await
+    }
+
+    /// Retarget the shared model ToolRegistry to one conversation's logical
+    /// Local App MCP partition. Existing per-conversation LRU/pin metadata is
+    /// retained, while live logical connections from the previous session are
+    /// removed before the new session is exposed.
+    pub(crate) async fn activate_managed_mcp_conversation(
+        &self,
+        conversation_id: &str,
+        cwd: &str,
+    ) -> Result<(), String> {
+        *self.active_mcp_conversation.lock().await = Some(conversation_id.to_string());
+        let Some(registry) = self.upgraded_mcp_registry() else {
+            return Ok(());
+        };
+        for managed in registry.managed_local_apps().await {
+            registry
+                .disconnect(&managed.scope.server_name())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        let mut desired = registry.local_app_exposures(conversation_id).await;
+        let canonical_cwd = canonical_cwd_string(Path::new(cwd));
+        if let Ok(service) = self.service() {
+            for record in service.list_apps().await {
+                let workspace = canonical_cwd_string(&self.root.join(&record.workspace_rel));
+                if workspace == canonical_cwd
+                    && !desired.iter().any(|entry| entry.app_id == record.id)
+                {
+                    desired.push(mcp::registry::LocalAppExposure {
+                        app_id: record.id,
+                        pinned: false,
+                        in_flight: 0,
+                        last_used: u64::MAX,
+                        exposure_generation: 0,
+                    });
+                    break;
+                }
+            }
+        }
+        desired.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
+        for entry in desired {
+            let _ = self
+                .expose_managed_mcp_for_conversation(conversation_id, &entry.app_id, entry.pinned)
+                .await?;
+        }
+        self.emit_managed_mcp_inventory().await
+    }
+
+    pub(crate) async fn set_managed_mcp_enabled(
+        &self,
+        app_id: &str,
+        enabled: bool,
+        expected_revision: u64,
+    ) -> Result<(), String> {
+        let _guard = self.mcp_settings_writes.lock().await;
+        self.service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let active = manifest.active_mcp_catalog.as_ref();
+        if enabled && active.is_none() {
+            return Err("mcp_authoring_required: Local App has no approved MCP catalog".into());
+        }
+        let mut settings = load_mcp_settings(&layout).map_err(|error| error.to_string())?;
+        if let Some(active) = active {
+            let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                .map_err(|error| error.to_string())?;
+            settings = settings
+                .reconcile_with_catalog(&catalog, false)
+                .map_err(|error| error.to_string())?;
+            if enabled && settings.enabled_tools.is_empty() {
+                settings.enabled_tools =
+                    mcp_catalog_tool_names(&catalog).map_err(|error| error.to_string())?;
+            }
+        }
+        if enabled && settings.enabled_tools.is_empty() {
+            return Err("invalid_mcp_settings: no model-visible tools are enabled".into());
+        }
+        settings.enabled = enabled;
+        save_mcp_settings(&layout, &settings, Some(expected_revision))
+            .map_err(|error| error.to_string())?;
+        drop(_guard);
+        self.sync_managed_local_app_publication(app_id).await?;
+        self.emit_managed_mcp_inventory().await
+    }
+
+    pub(crate) async fn set_managed_mcp_tool_enabled(
+        &self,
+        app_id: &str,
+        tool_name: &str,
+        enabled: bool,
+        expected_revision: u64,
+    ) -> Result<(), String> {
+        let _guard = self.mcp_settings_writes.lock().await;
+        self.service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let active = manifest.active_mcp_catalog.as_ref().ok_or_else(|| {
+            "mcp_authoring_required: Local App has no approved MCP catalog".to_string()
+        })?;
+        let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+            .map_err(|error| error.to_string())?;
+        let catalog_tools = mcp_catalog_tool_names(&catalog).map_err(|error| error.to_string())?;
+        let mut settings = load_mcp_settings(&layout).map_err(|error| error.to_string())?;
+        settings = settings
+            .reconcile_with_catalog(&catalog, false)
+            .map_err(|error| error.to_string())?;
+        if !catalog_tools.iter().any(|name| name == tool_name) {
+            return Err(format!(
+                "invalid_mcp_settings: tool {tool_name:?} is not in the active catalog"
+            ));
+        }
+        let mut enabled_tools: std::collections::BTreeSet<String> =
+            settings.enabled_tools.into_iter().collect();
+        if enabled {
+            enabled_tools.insert(tool_name.to_string());
+        } else {
+            enabled_tools.remove(tool_name);
+        }
+        settings.enabled_tools = catalog_tools
+            .into_iter()
+            .filter(|name| enabled_tools.contains(name))
+            .collect();
+        if settings.enabled_tools.is_empty() {
+            settings.enabled = false;
+        }
+        save_mcp_settings(&layout, &settings, Some(expected_revision))
+            .map_err(|error| error.to_string())?;
+        drop(_guard);
+        self.sync_managed_local_app_publication(app_id).await?;
+        self.emit_managed_mcp_inventory().await
+    }
+
     pub(crate) async fn sync_managed_local_app_publication(
         &self,
         app_id: &str,
@@ -1283,22 +1579,54 @@ impl LocalAppsHostBroker {
                     .unregister_managed_local_app(app_id)
                     .await
                     .map_err(|error| error.to_string())?;
+                registry
+                    .disconnect(&format!("local_app_{app_id}"))
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             Ok(
                 local_apps::AppPublicationState::PublishedUnverified
                 | local_apps::AppPublicationState::PublishedVerified,
             ) => {
-                let active = manifest.active_mcp_catalog.as_ref().ok_or_else(|| {
-                    "active_state_corrupt: published app is missing its active MCP catalog"
-                        .to_string()
-                })?;
-                let scope = mcp::registry::ConversationExport::new(
-                    app_id,
-                    active.tool_surface_sha256.clone(),
+                let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+                    registry
+                        .unregister_managed_local_app(app_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    registry
+                        .disconnect(&format!("local_app_{app_id}"))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                };
+                let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                    .map_err(|error| error.to_string())?;
+                let settings = load_mcp_settings(&layout)
+                    .map_err(|error| error.to_string())?
+                    .reconcile_with_catalog(&catalog, false)
+                    .map_err(|error| error.to_string())?;
+                let effective_surface = effective_tool_surface_sha256(
+                    &active.tool_surface_sha256,
+                    &settings.enabled_tools,
                 )
                 .map_err(|error| error.to_string())?;
+                let scope = mcp::registry::ConversationExport::new(app_id, effective_surface)
+                    .map_err(|error| error.to_string())?;
                 registry
                     .register_managed_local_app(scope, active.catalog_sha256.clone(), false)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let runtime_enabled = settings.enabled
+                    && !settings.enabled_tools.is_empty()
+                    && active_build_id.as_deref() == Some(active.build_id.as_str());
+                registry
+                    .set_managed_local_app_runtime(
+                        app_id,
+                        runtime_enabled,
+                        Some(settings.enabled_tools),
+                        managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
+                            .map(|(_, resource)| resource),
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -1350,6 +1678,44 @@ impl LocalAppsHostBroker {
         {
             return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
         }
+        let contexts = self.load_active_mcp_flow_contexts(layout).ok();
+        let flow_contract_unchanged = contexts.as_ref().is_some_and(|contexts| {
+            catalog
+                .get("execution")
+                .and_then(Value::as_array)
+                .is_some_and(|bindings| {
+                    !bindings.is_empty()
+                        && bindings.iter().all(|binding| {
+                            let flow_id = binding
+                                .get("flow")
+                                .and_then(|flow| flow.get("flowId"))
+                                .and_then(Value::as_str);
+                            let expected = binding.get("contextSha256").and_then(Value::as_str);
+                            match (flow_id, expected) {
+                                (Some(flow_id), Some(expected)) => contexts
+                                    .get(flow_id)
+                                    .and_then(|context| serde_json::to_value(context).ok())
+                                    .and_then(|context| value_sha256(&context).ok())
+                                    .is_some_and(|actual| actual == expected),
+                                _ => false,
+                            }
+                        })
+                })
+        });
+        if !flow_contract_unchanged {
+            let _guard = self.mcp_settings_writes.lock().await;
+            let mut settings = load_mcp_settings(layout).map_err(|error| error.to_string())?;
+            if settings.enabled {
+                let expected = settings.revision;
+                settings.enabled = false;
+                save_mcp_settings(layout, &settings, Some(expected))
+                    .map_err(|error| error.to_string())?;
+            }
+            drop(_guard);
+            self.sync_managed_local_app_publication(app_id).await?;
+            self.emit_managed_mcp_inventory().await?;
+            return Ok(());
+        }
         catalog["buildId"] = Value::String(active_build_id.clone());
         let catalog_sha256 =
             local_apps::hash_mcp_catalog(catalog.clone()).map_err(|error| error.to_string())?;
@@ -1368,6 +1734,21 @@ impl LocalAppsHostBroker {
     pub(crate) async fn emit_managed_mcp_inventory(&self) -> Result<(), String> {
         let service = self.service()?;
         let registry = self.upgraded_mcp_registry();
+        let active_conversation = self.active_mcp_conversation.lock().await.clone();
+        let pinned_apps: std::collections::HashSet<String> =
+            if let (Some(registry), Some(conversation_id)) =
+                (registry.as_ref(), active_conversation.as_deref())
+            {
+                registry
+                    .local_app_exposures(conversation_id)
+                    .await
+                    .into_iter()
+                    .filter(|entry| entry.pinned)
+                    .map(|entry| entry.app_id)
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
         let mut servers = Vec::new();
         for record in service.list_apps().await {
             let layout = self.layout(&record.id)?;
@@ -1380,50 +1761,115 @@ impl LocalAppsHostBroker {
             if matches!(publication, local_apps::AppPublicationState::Draft) {
                 continue;
             }
-            let active = manifest.active_mcp_catalog.as_ref().ok_or_else(|| {
-                "active_state_corrupt: published app is missing its active MCP catalog".to_string()
-            })?;
-            let managed = if let Some(registry) = registry.as_ref() {
-                registry
-                    .managed_local_app(&record.id)
-                    .await
-                    .ok_or_else(|| {
-                        "active_state_corrupt: published app is missing its managed MCP registry entry"
-                            .to_string()
-                    })?
+            let authoring_in_progress = local_apps::load_candidate_journal(&layout)
+                .ok()
+                .is_some_and(|journal| {
+                    journal.app_id == record.id
+                        && journal.stage < local_apps::McpAuthoringStage::Promoted
+                });
+            let mut settings = load_mcp_settings(&layout).map_err(|error| error.to_string())?;
+            let mut status = if authoring_in_progress {
+                AppMcpStatus::Authoring
             } else {
-                mcp::registry::ManagedLocalAppServer {
-                    scope: mcp::registry::ConversationExport::new(
-                        record.id.clone(),
-                        active.tool_surface_sha256.clone(),
-                    )
-                    .map_err(|error| error.to_string())?,
-                    catalog_sha256: active.catalog_sha256.clone(),
-                    surface_generation: 0,
-                }
+                AppMcpStatus::NeedsSetup
             };
-            if managed.catalog_sha256 != active.catalog_sha256
-                || managed.scope.listed_tool_surface_sha256 != active.tool_surface_sha256
-            {
-                return Err("active_state_corrupt: managed MCP registry entry does not match the active catalog".into());
+            let mut server_name = format!("local_app_{}", record.id);
+            let mut enabled = false;
+            let mut enabled_tools = settings.enabled_tools.clone();
+            let mut build_id = active_build_id.clone().unwrap_or_default();
+            let mut catalog_sha256 = String::new();
+            let mut tool_surface_sha256 = String::new();
+            let mut tool_count = 0u32;
+            let mut authoring_revision = 0u64;
+            let mut widget = None;
+            let mut tools = Vec::new();
+            let mut mcp_verification = LocalAppVerificationSummaryDto {
+                status: LocalAppVerificationStatusDto::Unverified,
+                summary: "No approved Local App MCP catalog is active yet.".into(),
+                code: Some("needs_setup".into()),
+            };
+
+            if let Some(active) = manifest.active_mcp_catalog.as_ref() {
+                let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                    .map_err(|error| error.to_string())?;
+                if catalog.get("appId").and_then(Value::as_str) != Some(record.id.as_str())
+                    || catalog.get("buildId").and_then(Value::as_str)
+                        != Some(active.build_id.as_str())
+                {
+                    return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
+                }
+                settings = settings
+                    .reconcile_with_catalog(&catalog, false)
+                    .map_err(|error| error.to_string())?;
+                enabled_tools = settings.enabled_tools.clone();
+                let needs_revalidation =
+                    active_build_id.as_deref() != Some(active.build_id.as_str());
+                enabled = settings.enabled && !enabled_tools.is_empty() && !needs_revalidation;
+                status = derive_mcp_status(
+                    &manifest,
+                    &AppMcpSettings {
+                        enabled,
+                        enabled_tools: enabled_tools.clone(),
+                        ..settings.clone()
+                    },
+                    authoring_in_progress,
+                    needs_revalidation,
+                    false,
+                );
+                build_id = active.build_id.clone();
+                catalog_sha256 = active.catalog_sha256.clone();
+                tool_surface_sha256 = if enabled {
+                    effective_tool_surface_sha256(&active.tool_surface_sha256, &enabled_tools)
+                        .map_err(|error| error.to_string())?
+                } else {
+                    active.tool_surface_sha256.clone()
+                };
+                authoring_revision = active.authoring_revision;
+                tools = mcp_tool_surfaces_from_catalog(&catalog)?;
+                tool_count = u32::try_from(tools.len()).unwrap_or(u32::MAX);
+                widget = managed_mcp_widget_resource(&layout, &record.name, &catalog)?
+                    .map(|(widget, _)| widget);
+                mcp_verification = if needs_revalidation {
+                    LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Unverified,
+                        summary: "The approved MCP catalog no longer matches the active build and must be revalidated.".into(),
+                        code: Some("needs_revalidation".into()),
+                    }
+                } else {
+                    LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Passed,
+                        summary: "MCP schema, Flow, call and isolation verification passed.".into(),
+                        code: None,
+                    }
+                };
             }
-            let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
-                .map_err(|error| error.to_string())?;
-            if catalog.get("appId").and_then(Value::as_str) != Some(record.id.as_str())
-                || catalog.get("buildId").and_then(Value::as_str) != Some(active.build_id.as_str())
-            {
-                return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
+
+            if let Some(registry) = registry.as_ref() {
+                if let Some(managed) = registry.managed_local_app(&record.id).await {
+                    server_name = managed.scope.server_name();
+                }
+                if let Some(runtime) = registry.managed_local_app_runtime(&record.id).await {
+                    enabled = runtime.enabled;
+                    if let Some(runtime_enabled_tools) = runtime.enabled_tools {
+                        enabled_tools = runtime_enabled_tools;
+                    }
+                }
             }
-            let tools = mcp_tool_surfaces_from_catalog(&catalog)?;
+            let pinned_to_current_conversation = pinned_apps.contains(&record.id);
             servers.push(ManagedLocalAppMcpServerDto {
-                server_name: managed.scope.server_name(),
+                server_name,
                 app_id: record.id,
                 app_name: record.name,
-                build_id: active.build_id.clone(),
-                catalog_sha256: active.catalog_sha256.clone(),
-                tool_surface_sha256: active.tool_surface_sha256.clone(),
-                tool_count: u32::try_from(tools.len()).unwrap_or(u32::MAX),
-                authoring_revision: active.authoring_revision,
+                enabled,
+                status: lower_managed_mcp_status(status),
+                settings_revision: settings.revision,
+                enabled_tools,
+                pinned_to_current_conversation,
+                build_id,
+                catalog_sha256,
+                tool_surface_sha256,
+                tool_count,
+                authoring_revision,
                 publication_state: match publication {
                     local_apps::AppPublicationState::Draft => AppWorkflowStateDto::Draft,
                     local_apps::AppPublicationState::PublishedUnverified => {
@@ -1433,16 +1879,13 @@ impl LocalAppsHostBroker {
                         AppWorkflowStateDto::PublishedVerified
                     }
                 },
-                mcp_verification: LocalAppVerificationSummaryDto {
-                    status: LocalAppVerificationStatusDto::Passed,
-                    summary: "MCP schema, Flow, call and isolation verification passed.".into(),
-                    code: None,
-                },
+                mcp_verification,
                 ui_verification: LocalAppVerificationSummaryDto {
                     status: LocalAppVerificationStatusDto::Unavailable,
                     summary: "UI verification evidence is unavailable on this host.".into(),
                     code: Some("verification_unavailable".into()),
                 },
+                widget,
                 tools,
             });
         }
@@ -1630,9 +2073,28 @@ impl LocalAppsHostBroker {
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
         let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
             .map_err(|error| {
-                local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
-            })?;
+            local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+        })?;
         serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
+    }
+
+    fn delete_mcp_candidate_state(
+        &self,
+        layout: &AppLayout,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<(), String> {
+        local_apps::delete_candidate_journal(layout).map_err(|error| error.to_string())?;
+        let relative =
+            Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
+        match platform_api::rooted_fs::remove_file(&self.root, &relative) {
+            Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
+            Err(error) => Err(local_apps::AppError::from_fs(
+                "delete create-only MCP candidate",
+                &error,
+            )
+            .to_string()),
+        }
     }
 
     fn load_active_mcp_flow_contexts(
@@ -1771,8 +2233,9 @@ impl LocalAppsHostBroker {
             .join(app_id)
             .join(workflow_run_id)
             .join("validated-selection.json");
-        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
-            .map_err(|error| format!("validated_selection_missing: {error}"))?;
+        let body =
+            platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+                .map_err(|error| format!("validated_selection_missing: {error}"))?;
         let value: Value = serde_json::from_str(&body)
             .map_err(|error| format!("validated_selection_invalid: {error}"))?;
         let handle = value
@@ -6065,6 +6528,18 @@ impl LocalAppsHostBroker {
                         "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
                     ),
                 }
+                if candidate.validated.tools.is_empty() {
+                    if let Err(error) =
+                        self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
+                    {
+                        tracing::warn!(
+                            app_id = %app_id,
+                            workflow_run_id = %workflow_run_id,
+                            %error,
+                            "plain create committed but create-only candidate cleanup failed"
+                        );
+                    }
+                }
                 committed
             }
             Err(error) => {
@@ -7868,6 +8343,128 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn approve_mcp_proposal(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        Self::validate_workflow_run_id(&workflow_run_id)?;
+        if input
+            .get("create_without_mcp")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let service = self.service()?;
+            let record = service
+                .record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if record.scaffolded {
+                return Err(
+                    "invalid_argument: create_without_mcp is only valid before scaffolding".into(),
+                );
+            }
+            let layout = self.layout(&app_id)?;
+            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+            let create_context = self.load_create_proposal_context(&app_id, &workflow_run_id)?;
+            let proposal = local_apps::AppMcpProposal {
+                app_id: app_id.clone(),
+                manifest_revision: manifest.revision,
+                user_goal_sha256: format!("{:x}", Sha256::digest(b"local-app-create-without-mcp")),
+                summary: "Create this Local App without publishing or enabling an MCP surface."
+                    .into(),
+                tools: Vec::new(),
+                required_flow_changes: Vec::new(),
+                excluded_capabilities: Vec::new(),
+            };
+            let validated = local_apps::validate_app_mcp_proposal(
+                proposal,
+                &app_id,
+                manifest.revision,
+                &create_context.contexts,
+                &local_apps::CapabilityRegistry::default(),
+            )
+            .map_err(|issues| {
+                format!(
+                    "create_approval_invalid: {}",
+                    issues
+                        .into_iter()
+                        .map(|issue| format!("{}: {}", issue.code, issue.message))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+            let review_surface =
+                Self::build_mcp_review_surface(&manifest, &validated, None, Some(&create_context));
+            let approval_contract_sha256 =
+                local_apps::approval_contract_sha256(review_surface.clone())
+                    .map_err(|issue| issue.message)?;
+            let mut journal = local_apps::McpCandidateJournal {
+                schema_version: local_apps::APPS_SCHEMA_VERSION,
+                app_id: app_id.clone(),
+                workflow_run_id: workflow_run_id.clone(),
+                stage: local_apps::McpAuthoringStage::Prepared,
+                previous_build_id: None,
+                previous_catalog_sha256: None,
+                proposal_sha256: validated.proposal_sha256.clone(),
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                tool_surface_sha256: validated.tool_surface_sha256.clone(),
+                catalog_sha256: None,
+                consumed_receipt_sha256: None,
+                integrity_sha256: String::new(),
+            }
+            .seal()
+            .map_err(|issue| issue.message)?;
+            let candidate = PersistedMcpCandidate {
+                validated,
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                review_surface,
+                verification_sha256: None,
+                catalog_sha256: None,
+                qa_context_sha256: None,
+            };
+            self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            let approval = self
+                .request_mcp_candidate_approval(&record, &workflow_run_id, &manifest, &candidate)
+                .await;
+            match approval {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)?;
+                    return Err("user denied the Local App create proposal".into());
+                }
+                Err(error) => {
+                    if let Err(cleanup_error) =
+                        self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
+                    {
+                        return Err(format!(
+                            "{error}; create-only candidate cleanup failed: {cleanup_error}"
+                        ));
+                    }
+                    return Err(error);
+                }
+            }
+            let receipt = local_apps::McpConfirmationReceipt::new(
+                &app_id,
+                &workflow_run_id,
+                approval_contract_sha256,
+                journal.proposal_sha256.clone(),
+                now_ms(),
+            );
+            let receipt_id = receipt.receipt_id.clone();
+            self.pending_mcp_receipts
+                .lock()
+                .await
+                .issue(receipt)
+                .map_err(|issue| issue.message)?;
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "approved": true,
+                "receipt_id": receipt_id,
+                "status": "create_approved_no_mcp",
+            }));
+        }
         let approval_contract_sha256 =
             required_string(&input, "approval_contract_sha256")?.to_string();
         let layout = self.layout(&app_id)?;
@@ -8268,6 +8865,43 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog_body)
             .map_err(|error| error.to_string())?;
         let previous = manifest.active_mcp_catalog.clone();
+        let _settings_guard = self.mcp_settings_writes.lock().await;
+        let current_settings = load_mcp_settings(&layout).map_err(|error| error.to_string())?;
+        let current_settings_revision = current_settings.revision;
+        let next_settings = if previous.is_none() {
+            AppMcpSettings {
+                // Authoring/promotion establishes an approved surface; it
+                // does not grant model visibility. Every Local App MCP starts
+                // disabled and becomes callable only after the user enables
+                // the app-owned service from its settings page.
+                enabled: false,
+                enabled_tools: mcp_catalog_tool_names(&catalog_body)
+                    .map_err(|error| error.to_string())?,
+                ..current_settings
+            }
+        } else {
+            let previous_catalog = local_apps::load_mcp_catalog(
+                &layout,
+                &previous.as_ref().expect("checked above").catalog_sha256,
+            )
+            .map_err(|error| error.to_string())?;
+            let previous_names: std::collections::BTreeSet<String> =
+                mcp_catalog_tool_names(&previous_catalog)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .collect();
+            let previously_enabled: std::collections::BTreeSet<String> =
+                current_settings.enabled_tools.iter().cloned().collect();
+            let enabled_tools = mcp_catalog_tool_names(&catalog_body)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|name| previously_enabled.contains(name) || !previous_names.contains(name))
+                .collect();
+            AppMcpSettings {
+                enabled_tools,
+                ..current_settings
+            }
+        };
         let mut promoted_manifest = manifest.clone();
         if promoted_manifest.revision == 0 {
             promoted_manifest.revision = 1;
@@ -8297,6 +8931,9 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         });
         local_apps::save_manifest(&layout, &promoted_manifest)
             .map_err(|error| error.to_string())?;
+        save_mcp_settings(&layout, &next_settings, Some(current_settings_revision))
+            .map_err(|error| error.to_string())?;
+        drop(_settings_guard);
         if journal.stage < local_apps::McpAuthoringStage::Promoted {
             journal = journal
                 .advance(local_apps::McpAuthoringStage::Promoted)
@@ -9339,6 +9976,175 @@ fn optional_json_string<T: Serialize>(value: Option<&T>) -> Result<Option<String
     value
         .map(|value| serde_json::to_string(value).map_err(|error| error.to_string()))
         .transpose()
+}
+
+fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppMcpStatusDto {
+    match status {
+        AppMcpStatus::Disabled => ManagedLocalAppMcpStatusDto::Disabled,
+        AppMcpStatus::NeedsSetup => ManagedLocalAppMcpStatusDto::NeedsSetup,
+        AppMcpStatus::Authoring => ManagedLocalAppMcpStatusDto::Authoring,
+        AppMcpStatus::Enabled => ManagedLocalAppMcpStatusDto::Enabled,
+        AppMcpStatus::NeedsRevalidation => ManagedLocalAppMcpStatusDto::NeedsRevalidation,
+        AppMcpStatus::Error => ManagedLocalAppMcpStatusDto::Error,
+    }
+}
+
+fn tool_meta_resource_uri(definition: &platform_api::McpToolDefinitionDto) -> Option<String> {
+    let meta = definition.meta.as_ref()?;
+    meta.get("ui")
+        .and_then(Value::as_object)
+        .and_then(|ui| ui.get("resourceUri"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            meta.get("openai/outputTemplate")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn resource_sha_for_app_uri(app_id: &str, uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("ui://local-app/")?;
+    let mut parts = rest.split('/');
+    let uri_app_id = parts.next()?;
+    let resource_sha256 = parts.next()?;
+    let file = parts.next()?;
+    if parts.next().is_some()
+        || uri_app_id != app_id
+        || file != LOCAL_APP_WIDGET_FILE
+        || resource_sha256.len() != 64
+        || resource_sha256
+            .bytes()
+            .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some(resource_sha256.to_string())
+}
+
+fn validate_managed_mcp_widget_file(
+    layout: &AppLayout,
+    resource_sha256: &str,
+    mime_type: &str,
+) -> Result<(), String> {
+    if mime_type != LOCAL_APP_WIDGET_MIME {
+        return Err(format!(
+            "widget_invalid: Local App MCP widget MIME must be {LOCAL_APP_WIDGET_MIME}"
+        ));
+    }
+    let relative = layout
+        .app_dir_rel()
+        .join(local_apps::manifest::MCP_DIR)
+        .join(LOCAL_APP_WIDGET_DIR)
+        .join(format!("{resource_sha256}.html"));
+    let body =
+        platform_api::rooted_fs::read_to_string_limited(layout.root(), &relative, 4 * 1024 * 1024)
+            .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
+    let actual = format!("{:x}", Sha256::digest(body.as_bytes()));
+    if actual != resource_sha256 {
+        return Err("widget_invalid: Local App MCP widget digest mismatch".into());
+    }
+    let lower = body.to_ascii_lowercase();
+    for forbidden in [
+        "src=\"http",
+        "src='http",
+        "href=\"http",
+        "href='http",
+        "window.openai",
+    ] {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "widget_invalid: Local App MCP widget contains forbidden token {forbidden:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn managed_mcp_widget_resource(
+    layout: &AppLayout,
+    app_name: &str,
+    catalog: &Value,
+) -> Result<Option<(McpAppWidgetDto, mcp::registry::ManagedLocalAppResource)>, String> {
+    let app_id = layout.app_id();
+    if let Some(resources) = catalog.get("resources").and_then(Value::as_array) {
+        for resource in resources {
+            let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(resource_sha256) = resource_sha_for_app_uri(app_id, uri) else {
+                continue;
+            };
+            let name = resource
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(app_name)
+                .to_string();
+            let description = resource
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mime_type = resource
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or(LOCAL_APP_WIDGET_MIME)
+                .to_string();
+            validate_managed_mcp_widget_file(layout, &resource_sha256, &mime_type)?;
+            return Ok(Some((
+                McpAppWidgetDto {
+                    resource_uri: uri.to_string(),
+                    mime_type: mime_type.clone(),
+                    resource_sha256: resource_sha256.clone(),
+                },
+                mcp::registry::ManagedLocalAppResource {
+                    uri: uri.to_string(),
+                    name,
+                    description,
+                    mime_type: Some(mime_type),
+                    meta: resource.get("_meta").cloned(),
+                },
+            )));
+        }
+    }
+
+    let entries = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
+    for entry in entries {
+        let definition: platform_api::McpToolDefinitionDto =
+            serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
+                .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
+        let Some(uri) = tool_meta_resource_uri(&definition) else {
+            continue;
+        };
+        let Some(resource_sha256) = resource_sha_for_app_uri(app_id, &uri) else {
+            continue;
+        };
+        let name = definition
+            .title
+            .clone()
+            .or_else(|| definition.description.clone())
+            .unwrap_or_else(|| format!("{app_name} widget"));
+        validate_managed_mcp_widget_file(layout, &resource_sha256, LOCAL_APP_WIDGET_MIME)?;
+        return Ok(Some((
+            McpAppWidgetDto {
+                resource_uri: uri.clone(),
+                mime_type: LOCAL_APP_WIDGET_MIME.into(),
+                resource_sha256: resource_sha256.clone(),
+            },
+            mcp::registry::ManagedLocalAppResource {
+                uri,
+                name,
+                description: definition.description.clone(),
+                mime_type: Some(LOCAL_APP_WIDGET_MIME.into()),
+                meta: None,
+            },
+        )));
+    }
+
+    Ok(None)
 }
 
 fn mcp_tool_surface(
@@ -10965,17 +11771,17 @@ mod tests {
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
     use local_apps::{storage, AppState, NoopAppEventObserver};
-    use serde_json::json;
-    use std::fs;
-    use std::future::Future;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-    use tempfile::TempDir;
     use platform_api::{
         LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
         NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
         SandboxBackend,
     };
+    use serde_json::json;
+    use std::fs;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use tempfile::TempDir;
 
     #[derive(Default)]
     struct NoopClientEventSink;
@@ -11785,7 +12591,8 @@ mod tests {
         )
         .expect("write flow contexts");
 
-        let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+        let mut definition =
+            platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.output_schema = Some(output_schema);
         let binding = json!({
             "flowId": "runtime-status-flow",
@@ -11872,6 +12679,38 @@ mod tests {
         )
         .expect("write build receipt");
 
+        let flow_context = local_apps::AppMcpFlowContext {
+            app_id: app_id.clone(),
+            source: local_apps::FlowSource::Active,
+            flow: local_apps::FlowDefinition {
+                flow_id: "flow".into(),
+                version: 1,
+                steps: vec![local_apps::FlowStep {
+                    step_id: "status".into(),
+                    capability: local_apps::CapabilityId::RuntimeStatus,
+                    depends_on: Vec::new(),
+                    input_json: "{}".into(),
+                }],
+            },
+            input_schema: json!({"type":"object","additionalProperties":false}),
+            output_schema: runtime_status_step_output_schema(),
+            step_output_schemas: std::collections::BTreeMap::from([(
+                "status".into(),
+                runtime_status_step_output_schema(),
+            )]),
+        };
+        let context_sha256 =
+            value_sha256(&serde_json::to_value(&flow_context).expect("serialize flow context"))
+                .expect("flow context digest");
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::create_dir_all(workspace.join(".lingxi")).expect("create context directory");
+        fs::write(
+            workspace.join(".lingxi/mcp-flow-contexts.json"),
+            serde_json::to_vec_pretty(&json!({"flow": flow_context}))
+                .expect("serialize flow contexts"),
+        )
+        .expect("write flow contexts");
+
         let catalog = json!({
             "appId": app_id,
             "buildId": initial_build_id,
@@ -11882,6 +12721,10 @@ mod tests {
                 },
                 "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
                 "ceiling": "allow",
+            }],
+            "execution": [{
+                "flow": {"flowId":"flow"},
+                "contextSha256": context_sha256,
             }],
         });
         let catalog_sha256 = local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog hash");
@@ -12051,12 +12894,14 @@ mod tests {
         fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
         let full_build = root.join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
+        let output_sha256 = fixture_output_digest(&static_dist);
         let build_receipt = json!({
             "version": 3,
+            "buildId": output_sha256,
             "buildKey": "fixture-static-build",
             "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime contract hash"),
             "dependencySnapshotSha256": manifest.dependency_snapshot_hash().expect("dependency snapshot hash"),
-            "outputSha256": fixture_output_digest(&static_dist),
+            "outputSha256": output_sha256,
         });
         fs::write(
             root.join(layout.build_rel(false)).join("build.json"),
@@ -12327,8 +13172,8 @@ mod tests {
 
     fn template_id_for_scaffold_surface(surface: &str) -> &'static str {
         match surface {
-            "dom" => "react-dom-r1",
-            "canvas" => "canvas-2d-r1",
+            "dom" => "react-dom-r2",
+            "canvas" => "canvas-2d-r2",
             other => panic!("unsupported test scaffold surface {other}"),
         }
     }
@@ -12536,7 +13381,8 @@ mod tests {
             "additionalProperties": false,
         });
         let output_schema = runtime_record_output_schema();
-        let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+        let mut definition =
+            platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.title = Some("Runtime status".into());
         definition.description =
             Some("Read the current runtime status from the staged flow.".into());
@@ -12782,6 +13628,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_create_approval_does_not_author_or_enable_mcp() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_plain_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "plain create without MCP",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+            }))
+            .await
+            .expect("stage create");
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        let request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) = broker
+                    .pending_create_confirmations
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("create confirmation request");
+        assert!(broker.resolve_create_confirmation(&request_id, true).await);
+        let approved = approval
+            .await
+            .expect("approval task")
+            .expect("approve plain create");
+        assert_eq!(approved["status"], "create_approved_no_mcp");
+        let receipt_id = approved["receipt_id"]
+            .as_str()
+            .expect("create receipt")
+            .to_string();
+
+        let candidate = broker
+            .load_mcp_candidate(&shell.id, &workflow_run_id)
+            .expect("Host-owned create candidate");
+        assert!(candidate.validated.tools.is_empty());
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "Plain create",
+                "brief": "MCP remains optional",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold plain create");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
+        let manifest = load_manifest(&broker.layout(&shell.id).expect("layout")).expect("manifest");
+        assert!(manifest.active_mcp_catalog.is_none());
+        assert!(
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout")).is_err()
+        );
+        assert!(
+            !load_mcp_settings(&broker.layout(&shell.id).expect("layout"))
+                .expect("MCP settings")
+                .enabled
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_workflow_model_releases_the_unified_create_receipt_claim() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (_root, service, broker) = create_broker(false, Some(runtime)).await;
@@ -12832,7 +13786,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r1",
+                "template_id": "react-dom-r2",
                 "reason": "bind design review surface",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -12909,7 +13863,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r1",
+                "template_id": "react-dom-r2",
                 "reason": "full create e2e",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -12985,7 +13939,7 @@ mod tests {
         .await
         .expect("create confirmation event");
         assert_eq!(request.app_id, shell.id);
-        assert_eq!(request.selected_template.template_id, "react-dom-r1");
+        assert_eq!(request.selected_template.template_id, "react-dom-r2");
         assert_eq!(request.initial_tools.len(), 1);
         assert!(
             !sink.events().await.iter().any(|event| matches!(
@@ -13026,7 +13980,7 @@ mod tests {
                 .as_ref()
                 .expect("template origin")
                 .template_id,
-            "react-dom-r1"
+            "react-dom-r2"
         );
         assert!(
             workspace_of(&root, &shell.id).join("app/app.jsx").is_file(),
@@ -13076,6 +14030,18 @@ mod tests {
         assert_eq!(promoted["publication_state"], "published_unverified");
         let promoted_manifest = load_manifest(&layout).expect("promoted manifest");
         assert!(promoted_manifest.active_mcp_catalog.is_some());
+        let promoted_settings = load_mcp_settings(&layout).expect("promoted MCP settings");
+        assert!(
+            !promoted_settings.enabled,
+            "an approved Local App MCP surface must remain off until the user enables it"
+        );
+        assert!(
+            promoted_settings
+                .enabled_tools
+                .iter()
+                .any(|name| name == "runtime_status"),
+            "promotion may preselect approved tools without exposing them"
+        );
         let flow_result = broker
             .execute_mcp_flow_value(json!({
                 "app_id": shell.id,
@@ -14661,7 +15627,7 @@ mod tests {
             );
         }
         assert!(
-            contract.contains("runtime profile `canvas_2d` revision `1`"),
+            contract.contains("runtime profile `canvas_2d` revision `2`"),
             "the formal contract must mirror the persisted profile identity: {contract}"
         );
         assert!(
@@ -15116,12 +16082,26 @@ mod tests {
         )
         .expect("write user source");
 
+        let workflow_run_id = format!("wf_rescaffold_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
         let error = broker
-            .scaffold_shell_app_value(
-                confirmed_scaffold_input(&broker, &shell.id, "B", "b", "dom").await,
-            )
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "attempt to resurface a formed app",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
             .await
-            .expect_err("the second scaffold must be rejected");
+            .expect_err("a formed app must be rejected before a second receipt is issued");
         assert!(error.contains("already"), "got {error}");
 
         assert!(

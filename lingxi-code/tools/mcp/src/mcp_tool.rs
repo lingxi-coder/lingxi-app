@@ -25,6 +25,7 @@ use mcp::McpClientError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{McpToolMaxPermission, PermissionDecisionReason, PermissionResult};
+use platform_api::{McpPermissionCeiling, McpTransportSpec};
 use serde_json::{json, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -34,7 +35,6 @@ use telemetry::tengu::tool::{
     READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use platform_api::{McpPermissionCeiling, McpTransportSpec};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::{ToolProgress, ToolProgressSender};
@@ -2790,9 +2790,15 @@ pub fn configured_permission_ceiling(
     {
         if let Some(policy) = configured.permission_policy {
             let policy_ceiling = match policy {
-                platform_api::McpToolPermissionPolicy::AlwaysAllow => platform_api::McpPermissionCeiling::Allow,
-                platform_api::McpToolPermissionPolicy::AlwaysAsk => platform_api::McpPermissionCeiling::Ask,
-                platform_api::McpToolPermissionPolicy::AlwaysDeny => platform_api::McpPermissionCeiling::Deny,
+                platform_api::McpToolPermissionPolicy::AlwaysAllow => {
+                    platform_api::McpPermissionCeiling::Allow
+                }
+                platform_api::McpToolPermissionPolicy::AlwaysAsk => {
+                    platform_api::McpPermissionCeiling::Ask
+                }
+                platform_api::McpToolPermissionPolicy::AlwaysDeny => {
+                    platform_api::McpPermissionCeiling::Deny
+                }
             };
             ceiling =
                 Some(ceiling.map_or(policy_ceiling, |current| current.strictest(policy_ceiling)));
@@ -2804,7 +2810,9 @@ pub fn configured_permission_ceiling(
     ceiling
 }
 
-fn max_permission_from_ceiling(ceiling: platform_api::McpPermissionCeiling) -> McpToolMaxPermission {
+fn max_permission_from_ceiling(
+    ceiling: platform_api::McpPermissionCeiling,
+) -> McpToolMaxPermission {
     match ceiling {
         platform_api::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
         platform_api::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
@@ -2862,10 +2870,10 @@ pub async fn build_registered_mcp_tools(
                         dto.full_name.clone(),
                         dto.description.clone(),
                         dto.input_schema.clone(),
-                        None,
+                        dto.output_schema.clone(),
                         None,
                         dto.search_hint.clone(),
-                        dto.always_load.unwrap_or(false),
+                        config.always_load || dto.always_load.unwrap_or(false),
                         dto.requires_user_interaction,
                     );
                     let tool = if let Some(ceiling) =
@@ -3639,16 +3647,16 @@ pub(crate) mod cached_resource_test_support {
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
     use mcp::{ConfigScope, McpConnectionState, McpServerConfig, RawConnectionProvider};
-    use protocol::McpConnectionId;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    use tokio::sync::mpsc;
     use platform_api::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
         ServerCapabilitiesDto,
     };
+    use protocol::McpConnectionId;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
 
     #[derive(Clone)]
     pub(crate) struct CachedServerBehavior {
@@ -4095,8 +4103,6 @@ mod auto_background_race_tests {
     use super::*;
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
-    use std::sync::Mutex as StdMutex;
-    use tokio::sync::mpsc;
     use platform_api::task_registry::{
         McpTaskRegistration, TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
@@ -4106,6 +4112,8 @@ mod auto_background_race_tests {
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
         McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
     };
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::mpsc;
 
     /// Minimal transport — the registry needs one to construct, but these tests
     /// drive a directly-`register_client`ed [`mcp::McpClient`], so nothing here
@@ -4971,6 +4979,10 @@ mod resource_tool_gating_tests {
             tool_name: tool_name.into(),
             description: format!("{tool_name} tool"),
             input_schema: serde_json::json!({"type":"object"}),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: format!(
                 "mcp__{}__{}",
                 mcp::normalization::normalize_name_for_mcp(server_name),
@@ -5056,6 +5068,55 @@ mod resource_tool_gating_tests {
                 .await,
             PermissionResult::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn shared_builder_preserves_output_schema_and_retrieval_hints() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let connection_id = protocol::McpConnectionId::new();
+        let mut server_config = config("srv");
+        server_config.always_load = true;
+        let mut advertised = dto("srv", "structured");
+        let output_schema = serde_json::json!({
+            "type": "object",
+            "required": ["ok"],
+            "properties": { "ok": { "type": "boolean" } }
+        });
+        advertised.output_schema = Some(output_schema.clone());
+        advertised.search_hint = Some("structured lookup".into());
+        // Server-level alwaysLoad forces the tool on even when its own
+        // metadata explicitly says false.
+        advertised.always_load = Some(false);
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id,
+                capabilities: caps(false),
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![advertised],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, ctx).await;
+        let tool = &built[0].1[0];
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(tool.search_hint(), Some("structured lookup"));
+        assert!(tool.always_load());
+        assert!(!tool.should_defer());
     }
 
     #[tokio::test]
@@ -5554,7 +5615,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://guide".into(),
                     name: "guide.md".into(),
+                    description: None,
                     mime_type: Some("text/markdown".into()),
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5568,7 +5631,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://linear".into(),
                     name: "linear.md".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5692,7 +5757,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5706,7 +5773,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://b".into(),
                     name: "beta.txt".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5765,7 +5834,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5850,7 +5921,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://dot".into(),
                     name: "dot.md".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5864,7 +5937,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://underscore".into(),
                     name: "underscore.md".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5931,7 +6006,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://shared".into(),
                     name: "shared.md".into(),
+                    description: None,
                     mime_type: Some("text/markdown".into()),
+                    meta: None,
                 }],
                 ..Default::default()
             },
@@ -5953,7 +6030,9 @@ mod cached_resource_tool_tests {
                 resources: vec![platform_api::McpResourceDto {
                     uri: "cached://scoped".into(),
                     name: "scoped.md".into(),
+                    description: None,
                     mime_type: None,
+                    meta: None,
                 }],
                 resource_templates: vec![],
                 prompts: vec![],

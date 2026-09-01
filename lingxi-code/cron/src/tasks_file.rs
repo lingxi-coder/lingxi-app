@@ -19,9 +19,9 @@
 //! at runtime from the cron string + `lastFiredAt ?? createdAt`
 //! ([`crate::schedule::CronExpression::next_match_after`]).
 
+use platform_api::{FileSystem, FlockGuard, FsError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use platform_api::{FileSystem, FlockGuard, FsError};
 
 /// Project-relative `.claude` subdir holding the single tasks file.
 pub const CLAUDE_DIR: &str = branding::DOT_DIR;

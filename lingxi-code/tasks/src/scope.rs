@@ -142,11 +142,11 @@ pub enum LocalAppWorkflowPurpose {
     McpAuthoring,
 }
 
-/// Longest accepted app id -- the `{0,63}` tail plus the leading character,
+/// Longest accepted app id -- the `{0,53}` tail plus the leading character,
 /// matching `local_apps::ids::APP_ID_MAX_LEN`.
-const APP_ID_MAX_LEN: usize = 64;
+const APP_ID_MAX_LEN: usize = 54;
 
-/// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,63}$`.
+/// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,53}$`.
 ///
 /// A local mirror of `local_apps::ids::is_valid_app_id`; see the module docs'
 /// `MIRRORED GRAMMAR` section for why it is a copy and what pins it.
@@ -166,7 +166,7 @@ fn is_well_formed_app_id(id: &str) -> bool {
 /// id. Says nothing about whether the caller *owns* a well-formed id -- see
 /// the module docs' "What this type does NOT guarantee".
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid app id {app_id:?}: must match ^[a-z0-9][a-z0-9-]{{0,63}}$")]
+#[error("invalid app id {app_id:?}: must match ^[a-z0-9][a-z0-9-]{{0,53}}$")]
 pub struct MalformedAppId {
     app_id: String,
 }

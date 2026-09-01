@@ -153,11 +153,11 @@
 //! `InProcess` MCP transports, which are cache-ineligible, so it deliberately
 //! leaves the optional store unwired.
 
-use sha2::{Digest, Sha256};
 use platform_api::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
+use sha2::{Digest, Sha256};
 
 /// Fixed byte-level compatibility domain used when reproducing Claude Code's
 /// discovery-cache fingerprint. This is not LingXi login state and must never
@@ -1861,6 +1861,10 @@ mod tests {
                 tool_name: format!("t{i}"),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
                 full_name: format!("mcp__srv__t{i}"),
                 search_hint: None,
                 always_load: None,
@@ -2118,19 +2122,22 @@ mod tests {
             fingerprint("grant:none"),
             "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
         );
+        // The partition vector is intentionally version-bound through
+        // `platform_api::CLAUDE_CODE_VERSION`; these literals therefore track
+        // the current 2.1.252 parity target rather than an older release.
         assert_eq!(
             partition_key(
                 "logical-cache-key",
                 "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
             ),
-            "a6fad12e13235da65ecc9b068d2c62b6"
+            "10c3b7773797ca760ab265d2f88c177f"
         );
         assert_eq!(
             partition_key(
                 "logical-cache-key",
                 "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971"
             ),
-            "f0217af2d59565e3f4f52e2625ecab10"
+            "3df92dbf7549984080d7ba2915cc056b"
         );
     }
 
@@ -2246,13 +2253,17 @@ mod tests {
             vec![platform_api::McpResourceDto {
                 uri: "file:///a".into(),
                 name: "a".into(),
+                description: None,
                 mime_type: None,
+                meta: None,
             }],
             vec![platform_api::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
                 name: "tmpl".into(),
                 description: None,
                 mime_type: None,
+                annotations: Some(serde_json::json!({"vendor/rank": 7})),
+                meta: Some(serde_json::json!({"vendor/template": "opaque"})),
             }],
             vec![platform_api::McpPromptDto {
                 name: "p".into(),

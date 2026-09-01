@@ -37,6 +37,10 @@ pub struct ModelRow {
     pub profile: Option<String>,
     /// Provider header (e.g. "Anthropic", "GitHub Copilot").
     pub provider_label: String,
+    /// Provenance of this row's current/default selection. Catalog rows use
+    /// [`platform_api::ModelProvenance::ProviderCatalogTier`]; only the row
+    /// imposed by managed policy carries the administrator provenance.
+    pub provenance: platform_api::ModelProvenance,
     /// Whether this row is the currently active model.
     pub is_current: bool,
     /// Whether this model supports extended thinking. `false` renders a dim
@@ -85,6 +89,10 @@ impl ModelRow {
 pub(crate) const NON_THINKING_TAG: &str = " · 无思考";
 /// The dim suffix shown for built-in image/document-capable models.
 pub(crate) const MULTIMODAL_TAG: &str = " · 多模态";
+/// The dim suffix shown when managed policy supplied the active/default model.
+/// Keep this out of [`ModelRow::display`] so statusline and welcome identities
+/// remain the provider/model label only.
+pub(crate) const MANAGED_MODEL_TAG: &str = " · Set by your organization";
 
 /// Filter the full captured model catalog down to what the `/model` picker
 /// should show: models of ELIGIBLE providers only, trimmed to each curated
@@ -239,6 +247,9 @@ pub struct SessionInfo {
     pub memory: Vec<InfoRow>,
     /// `/model` picker rows.
     pub models: Vec<ModelRow>,
+    /// Provenance of the active/default model at TUI startup. This is kept
+    /// separately from provider identity: managed policy is provider-neutral.
+    pub model_provenance: platform_api::ModelProvenance,
     /// Managed `availableModels` allowlist (parity 2.1.207 H-BIN-08): when an
     /// enterprise policy tier restricts model selection, the `/model` picker
     /// filters out barred rows (keeping the current model selectable). `None`
@@ -283,6 +294,24 @@ mod tests {
         assert!(s.mcp.is_empty());
         assert!(s.models.is_empty());
         assert_eq!(s.doctor.term_size, (0, 0));
+        assert_eq!(
+            s.model_provenance,
+            platform_api::ModelProvenance::ProviderCatalogTier
+        );
+    }
+
+    #[test]
+    fn model_provenance_serialization_is_stable_and_backward_safe() {
+        let managed = platform_api::ModelProvenance::ManagedAdministratorDefault;
+        assert_eq!(
+            serde_json::to_string(&managed).expect("serialize model provenance"),
+            "\"managed_administrator_default\""
+        );
+        assert_eq!(
+            serde_json::from_str::<platform_api::ModelProvenance>("\"provider_catalog_tier\"")
+                .expect("deserialize catalog provenance"),
+            platform_api::ModelProvenance::ProviderCatalogTier
+        );
     }
 
     fn row(display: &str, request: &str, provider: &str, current: bool) -> ModelRow {
@@ -291,6 +320,7 @@ mod tests {
             request_model: request.to_string(),
             profile: (!provider.is_empty()).then(|| provider.to_string()),
             provider_label: provider.to_string(),
+            provenance: platform_api::ModelProvenance::default(),
             is_current: current,
             supports_reasoning: true,
             supports_multimodal: false,

@@ -5,9 +5,9 @@
 //! discovers the canned tool catalog.
 
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
+use platform_api::{McpTransport, McpTransportSpec};
 use std::sync::Arc;
 use test_harness::mocks::MockMcpTransport;
-use platform_api::{McpTransport, McpTransportSpec};
 
 fn mock_config() -> McpServerConfig {
     McpServerConfig {

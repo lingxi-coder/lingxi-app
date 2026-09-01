@@ -2781,6 +2781,24 @@ mod run_id_tests {
             .and_then(serde_json::Value::as_object)
             .expect("args survive the seam as an object");
         for key in expected.iter() {
+            if key == "host_context" {
+                let normalize = |value: &serde_json::Value| {
+                    let mut value = value.clone();
+                    value
+                        .as_object_mut()
+                        .expect("host_context is an object")
+                        .remove("invocation_capability");
+                    value
+                };
+                let actual = hostile_after.get(key).expect("host context injected");
+                let capability = actual
+                    .get("invocation_capability")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("host invocation capability");
+                assert!(capability.starts_with("mcpv_"));
+                assert_eq!(normalize(actual), normalize(after.get(key).unwrap()));
+                continue;
+            }
             assert_eq!(
                 hostile_after.get(key),
                 after.get(key),

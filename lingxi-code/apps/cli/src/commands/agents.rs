@@ -24,9 +24,10 @@
 //!   exiting to shell);
 //!   `q`/`Esc`/`Ctrl-C` exits.
 
-use clap::Args;
+use clap::{Args, Parser};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The locked `claude agents --help` text — byte-identical to the captured
 /// fixture (`parity_claude_2_1_198.rs` pins the same bytes from the fixture
@@ -189,7 +190,7 @@ pub async fn run(cli: &Cli) -> i32 {
     // Built here (async context) so the sync view loop can fire through the
     // captured runtime handle.
     let watcher = NotificationWatcher::new(&crate::run::lingxi_home_dir()).await;
-    run_agents_view(cli, watcher)
+    run_agents_view(cli, watcher).await
 }
 
 /// Fires the `Notification` hook for background-agent band transitions —
@@ -249,12 +250,14 @@ impl NotificationWatcher {
             Arc::new(
                 hooks::HookExecutorImpl::new(
                     Arc::new(tokio::sync::RwLock::new(registry)),
-                    Arc::new(platform_posix::PosixHttp::new()) as Arc<dyn platform_api::HttpTransport>,
+                    Arc::new(platform_posix::PosixHttp::new())
+                        as Arc<dyn platform_api::HttpTransport>,
                     Arc::new(platform_posix::PosixRuntime::new())
                         as Arc<dyn platform_api::RuntimeSpawner>,
                 )
                 .with_process_runner(
-                    Arc::new(platform_posix::PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
+                    Arc::new(platform_posix::PosixProcess::new())
+                        as Arc<dyn platform_api::ProcessRunner>,
                     Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
                 ),
             )
@@ -416,6 +419,204 @@ fn load_view_rows(cli: &Cli) -> Vec<tui::agents_screen::AgentRow> {
         .collect()
 }
 
+fn live_session_display_name(rec: &crate::agents_registry::LiveSessionRecord) -> String {
+    use crate::agents_registry as reg;
+
+    rec.name
+        .as_deref()
+        .and_then(reg::sanitize_name)
+        .or_else(|| {
+            rec.session_id
+                .as_deref()
+                .filter(|session_id| !session_id.trim().is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "untitled session".to_string())
+}
+
+pub(crate) fn tui_agents_snapshot(
+    home: &Path,
+    self_pid: i32,
+    self_session_id: Option<&str>,
+) -> tui::bottom_pane::view::AgentsSnapshot {
+    use crate::agents_registry as reg;
+    let live = reg::read_live_sessions(&reg::sessions_dir(home));
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    tui_agents_snapshot_from(&live, &jobs, self_pid, self_session_id)
+}
+
+fn tui_agents_snapshot_from(
+    live: &[crate::agents_registry::LiveSessionRecord],
+    jobs: &[(String, crate::agents_registry::JobState)],
+    self_pid: i32,
+    self_session_id: Option<&str>,
+) -> tui::bottom_pane::view::AgentsSnapshot {
+    use crate::agents_registry as reg;
+
+    let mut worker_by_job: std::collections::HashMap<
+        &str,
+        &crate::agents_registry::LiveSessionRecord,
+    > = std::collections::HashMap::new();
+    for rec in live {
+        if rec.kind == "bg" {
+            if let Some(job_id) = rec.job_id.as_deref() {
+                worker_by_job.insert(job_id, rec);
+            }
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut consumed_pids = std::collections::HashSet::new();
+
+    for (short, job) in jobs {
+        let worker = worker_by_job.get(short.as_str()).copied();
+        if let Some(rec) = worker {
+            consumed_pids.insert(rec.pid);
+        }
+        let session_id = worker
+            .and_then(|rec| rec.session_id.as_deref())
+            .or(job.session_id.as_deref())
+            .unwrap_or_default()
+            .to_string();
+        if worker.is_some_and(|rec| rec.pid == self_pid)
+            || self_session_id
+                .is_some_and(|self_id| !session_id.is_empty() && self_id == session_id)
+        {
+            continue;
+        }
+
+        let status = worker
+            .and_then(|rec| rec.status.as_deref())
+            .map(reg::normalize_status)
+            .map(str::to_string);
+        let state = snapshot_state(job, worker);
+        let waiting_for = if status.as_deref() == Some("waiting") {
+            worker
+                .and_then(|rec| rec.waiting_for.clone())
+                .or_else(|| job.needs.clone())
+        } else if state == "blocked" {
+            job.needs.clone()
+        } else {
+            None
+        };
+        let name = worker
+            .and_then(|rec| rec.name.as_deref())
+            .or(job.name.as_deref())
+            .or(job.display_intent.as_deref())
+            .or(job.intent.as_deref())
+            .and_then(reg::sanitize_name)
+            .unwrap_or_else(|| {
+                if session_id.is_empty() {
+                    short.clone()
+                } else {
+                    session_id.clone()
+                }
+            });
+
+        rows.push(tui::bottom_pane::view::AgentsPaneRow {
+            session_id,
+            name,
+            state: state.to_string(),
+            kind: "background".to_string(),
+            cwd: worker
+                .map(|rec| rec.cwd.clone())
+                .or_else(|| job.cwd.clone())
+                .or_else(|| job.origin_cwd.clone())
+                .unwrap_or_default(),
+            status,
+            waiting_for,
+            detail: job.detail.clone(),
+            model: None,
+            tokens: None,
+            tool_calls: None,
+            started_at_ms: worker
+                .and_then(|rec| u64::try_from(rec.started_at).ok())
+                .or_else(|| {
+                    u64::try_from(reg::parse_created_at_ms(job.created_at.as_deref())).ok()
+                }),
+        });
+    }
+
+    for rec in live {
+        if rec.pid == self_pid
+            || self_session_id.is_some_and(|self_id| rec.session_id.as_deref() == Some(self_id))
+        {
+            continue;
+        }
+        if consumed_pids.contains(&rec.pid) {
+            continue;
+        }
+        if rec.kind != "interactive" && rec.kind != "bg" {
+            continue;
+        }
+        if rec.kind == "bg" && rec.job_id.is_some() {
+            continue;
+        }
+        let session_id = rec.session_id.clone().unwrap_or_default();
+        let status = rec
+            .status
+            .as_deref()
+            .map(reg::normalize_status)
+            .map(str::to_string);
+        rows.push(tui::bottom_pane::view::AgentsPaneRow {
+            session_id,
+            name: live_session_display_name(rec),
+            state: if status.as_deref() == Some("waiting") {
+                "blocked".to_string()
+            } else {
+                "working".to_string()
+            },
+            kind: if rec.kind == "bg" {
+                "background".to_string()
+            } else {
+                "interactive".to_string()
+            },
+            cwd: rec.cwd.clone(),
+            status,
+            waiting_for: rec.waiting_for.clone(),
+            detail: None,
+            model: None,
+            tokens: None,
+            tool_calls: None,
+            started_at_ms: u64::try_from(rec.started_at).ok(),
+        });
+    }
+
+    rows.sort_by_key(|row| {
+        (
+            tui::agents_screen::band_for_state(&row.state),
+            row.started_at_ms.unwrap_or(0),
+            row.name.clone(),
+        )
+    });
+    tui::bottom_pane::view::AgentsSnapshot { rows }
+}
+
+fn snapshot_state(
+    job: &crate::agents_registry::JobState,
+    worker: Option<&crate::agents_registry::LiveSessionRecord>,
+) -> &'static str {
+    use crate::agents_registry as reg;
+
+    if let Some(status) = worker.and_then(|rec| rec.status.as_deref()) {
+        return reg::merged_state(job, Some(status));
+    }
+    if reg::job_is_terminal(job) {
+        return reg::merged_state(job, None);
+    }
+    match job.phase.as_deref() {
+        Some("creating" | "queued" | "launching") => "queued",
+        Some("running" | "restarting" | "deleting")
+            if job.worker_pid.is_some_and(|pid| !reg::process_alive(pid)) =>
+        {
+            "nonresponsive"
+        }
+        _ if job.worker_pid.is_some_and(|pid| !reg::process_alive(pid)) => "nonresponsive",
+        _ if job.tempo.as_deref() == Some("blocked") => "blocked",
+        _ => reg::merged_state(job, None),
+    }
+}
+
 /// Resolve the working directory a session was created in, so an interactive
 /// attach/resume relaunch runs *in that directory*.
 ///
@@ -489,6 +690,71 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
     args
 }
 
+const AUTO_RESUME_ATTACH_POLL: Duration = Duration::from_millis(50);
+const AUTO_RESUME_ATTACH_ATTEMPTS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenSessionDisposition {
+    Attached,
+    ForegroundResume,
+    NotRunning {
+        short: String,
+        session_id: Option<String>,
+    },
+    LiveEndpointUnavailable {
+        short: String,
+        session_id: Option<String>,
+    },
+}
+
+fn resolve_open_session_disposition<Attach>(
+    home: &Path,
+    session_id: &str,
+    mut attach: Attach,
+) -> Result<OpenSessionDisposition, String>
+where
+    Attach: FnMut(&Path, &str) -> std::io::Result<crate::commands::attach::AttachDisposition>,
+{
+    match attach(home, session_id).map_err(|e| e.to_string())? {
+        crate::commands::attach::AttachDisposition::Attached => {
+            return Ok(OpenSessionDisposition::Attached);
+        }
+        crate::commands::attach::AttachDisposition::LiveEndpointUnavailable {
+            short,
+            session_id,
+        } => {
+            return Ok(OpenSessionDisposition::LiveEndpointUnavailable { short, session_id });
+        }
+        crate::commands::attach::AttachDisposition::NotFound => {
+            return Ok(OpenSessionDisposition::ForegroundResume);
+        }
+        crate::commands::attach::AttachDisposition::NotRunning { short, session_id } => {
+            return Ok(OpenSessionDisposition::NotRunning { short, session_id });
+        }
+    }
+}
+
+pub(crate) fn wait_for_auto_resumed_attach(
+    home: &Path,
+    session_id: &str,
+) -> Result<OpenSessionDisposition, String> {
+    for _ in 0..AUTO_RESUME_ATTACH_ATTEMPTS {
+        std::thread::sleep(AUTO_RESUME_ATTACH_POLL);
+        match resolve_open_session_disposition(
+            home,
+            session_id,
+            crate::commands::attach::attach_target,
+        )? {
+            OpenSessionDisposition::NotRunning { .. } => continue,
+            other => return Ok(other),
+        }
+    }
+    Ok(OpenSessionDisposition::NotRunning {
+        short: String::new(),
+        session_id: Some(session_id.to_string()),
+    })
+}
+
 /// Delete the background session driving `session_id` (the FleetView Ctrl-X
 /// two-press confirm): resolve its `jobs/<short>`, stop a live worker, and
 /// remove the job state (+ a managed worktree, kept on failure). Emits
@@ -516,14 +782,9 @@ fn stop_all_agents(home: &Path) {
     use crate::agents_registry as reg;
     let jobs = reg::read_jobs(&reg::jobs_dir(home));
     for (short, job) in &jobs {
-        let probe = crate::daemon_roster::SystemProbe;
-        let alive = job
-            .worker_pid
-            .is_some_and(|pid| crate::daemon_roster::ProcProbe::is_alive(&probe, pid));
-        if !alive {
+        if !crate::commands::daemon::stop_background_job(home, short, job) {
             continue;
         }
-        let _ = crate::commands::rm::stop_worker(job);
         tracing::info!(
             event = "tengu_bg_agent_action",
             action = "stop",
@@ -531,6 +792,119 @@ fn stop_all_agents(home: &Path) {
             short = short.as_str()
         );
     }
+}
+
+fn fallback_connect_auth_methods() -> std::collections::BTreeMap<String, String> {
+    llm_client::builtin_presets()
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            use llm_client::AuthStrategy::*;
+            let tag = match &provider.auth {
+                ApiKey | Bearer => "api_key",
+                CopilotBearer => "copilot_device",
+                ChatGptOAuth | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => "oauth",
+                None => return Option::None,
+            };
+            Some((provider.profile_name.clone(), tag.to_string()))
+        })
+        .collect()
+}
+
+fn agents_connect_argv(cli: &Cli) -> crate::argv::Argv {
+    let mut argv = crate::argv::Argv::parse_from(["lingxi-cli"]);
+    argv.add_dir = Some(cli.add_dir.clone());
+    argv.settings = cli.settings.clone();
+    argv.setting_sources = cli.setting_sources.clone();
+    argv.mcp_config = Some(cli.mcp_config.clone());
+    argv.strict_mcp_config = cli.strict_mcp_config;
+    argv.plugin_dir = cli.plugin_dir.clone();
+    argv.plugin_dir_no_mcp = Some(
+        cli.plugin_dir_no_mcp
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    );
+    argv.permission_mode = cli.permission_mode.clone();
+    argv.allow_dangerously_skip_permissions = cli.allow_dangerously_skip_permissions;
+    argv.dangerously_skip_permissions = cli.dangerously_skip_permissions;
+    argv.model = cli.model.clone();
+    argv.effort = cli.effort.clone();
+    argv
+}
+
+async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
+    use crossterm::event::{Event, KeyEventKind};
+
+    let argv = agents_connect_argv(cli);
+    let build = crate::init::build_runtime_for_tui(&argv)
+        .await
+        .map_err(|error| error.to_string())?;
+    let auth_methods = if build.runtime.provider_auth_methods.is_empty() {
+        fallback_connect_auth_methods()
+    } else {
+        build.runtime.provider_auth_methods.clone()
+    };
+    let availability = build.runtime.provider_availability.clone();
+    let key_store = build.runtime.provider_key_store.clone();
+    let oauth = build.runtime.oauth_connect_driver.clone();
+    let copilot = build.runtime.connect_copilot.clone();
+    drop(build);
+
+    let mut widget =
+        tui::chat_widget::ChatWidget::new(Vec::new(), tui::session::SessionInfo::default());
+    widget.set_connect_data(auth_methods, availability);
+    let outcome = widget.open_connect_picker();
+    debug_assert!(matches!(outcome, tui::chat_widget::ChatOutcome::Continue));
+
+    let mut session = tui::terminal::TerminalSession::new_fullscreen()
+        .map_err(|error| format!("terminal setup failed: {error}"))?;
+    let backend = tui::CrosstermBackend::new(std::io::stdout());
+    let mut terminal = tui::terminal::Terminal::with_options_at_origin(backend)
+        .map_err(|error| format!("terminal setup failed: {error}"))?;
+    let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = (|| -> Result<Option<tui::bottom_pane::ConnectAction>, String> {
+        loop {
+            while let Ok(event) = turn_rx.try_recv() {
+                widget.apply_turn_event(event);
+            }
+            terminal
+                .draw(|frame| widget.render_fullscreen_frame(frame))
+                .map_err(|error| error.to_string())?;
+            match crossterm::event::read().map_err(|error| error.to_string())? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    match widget.handle_key(key) {
+                        tui::chat_widget::ChatOutcome::Continue => {
+                            if !widget.bottom_pane().has_active_view() {
+                                return Ok(None);
+                            }
+                        }
+                        tui::chat_widget::ChatOutcome::ConnectAction(action) => {
+                            return Ok(Some(action));
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Paste(text) => {
+                    let outcome = widget.handle_paste(&text);
+                    if let tui::chat_widget::ChatOutcome::ConnectAction(action) = outcome {
+                        return Ok(Some(action));
+                    }
+                    if !widget.bottom_pane().has_active_view() {
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+    })();
+    drop(terminal);
+    drop(session);
+    let action = result?;
+    if let Some(action) = action {
+        crate::mode::run_connect_action(action, key_store, oauth, copilot, turn_tx).await;
+    }
+    Ok(())
 }
 
 /// Mount the agents view: draw/event loop on the alternate screen; `Enter`
@@ -549,9 +923,11 @@ fn stop_all_agents(home: &Path) {
 /// [`tui::agents_screen::AgentsScreenState`] +
 /// [`crate::agents_notify::detect_transitions`]. Errors restore the terminal
 /// and report on stderr.
-fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
+async fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
     use tui::agents_screen::{AgentsOutcome, AgentsScreenState};
 
+    let home = crate::run::lingxi_home_dir();
+    crate::background_dispatch::ensure_daemon_for_control(&home);
     // Seed the band map BEFORE the first render so a view opened onto an
     // already-blocked job stays quiet ($1f: first observation records, never
     // notifies) — then observe on every refresh.
@@ -581,22 +957,30 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
         drop(terminal);
         match outcome {
             Ok(AgentsOutcome::Exit) => return crate::exit_codes::SUCCESS,
+            Ok(AgentsOutcome::Login) => {
+                if let Err(error) = run_agents_connect_flow(cli).await {
+                    eprintln!("lingxi-cli agents: {error}");
+                }
+                watcher.observe();
+                continue;
+            }
             Ok(AgentsOutcome::Attach(session_id)) => {
                 // Live background attach: use the same job/session resolver as
                 // the public `lingxi-cli attach` command instead of spawning a
                 // second `--resume` writer against the same JSONL transcript.
                 // If an old/stale worker has no endpoint metadata, keep the
                 // single-writer guard and stay in the view.
-                let home = crate::run::lingxi_home_dir();
-                match crate::commands::attach::attach_target(&home, &session_id) {
-                    Ok(crate::commands::attach::AttachDisposition::Attached) => {
+                match resolve_open_session_disposition(
+                    &home,
+                    &session_id,
+                    crate::commands::attach::attach_target,
+                ) {
+                    Ok(OpenSessionDisposition::Attached) => {
                         watcher.observe();
                         state.reload(load_view_rows(cli));
                         continue;
                     }
-                    Ok(crate::commands::attach::AttachDisposition::LiveEndpointUnavailable {
-                        ..
-                    }) => {
+                    Ok(OpenSessionDisposition::LiveEndpointUnavailable { .. }) => {
                         eprintln!(
                             "lingxi-cli agents: session {session_id} is still running in the background, but its live attach endpoint is unavailable; it keeps running."
                         );
@@ -604,15 +988,70 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                         state.reload(load_view_rows(cli));
                         continue;
                     }
-                    Ok(
-                        crate::commands::attach::AttachDisposition::NotFound
-                        | crate::commands::attach::AttachDisposition::NotRunning { .. },
-                    ) => {
+                    Ok(OpenSessionDisposition::NotRunning {
+                        short,
+                        session_id: resolved_session_id,
+                    }) => {
+                        let resolved_session_id =
+                            resolved_session_id.as_deref().unwrap_or(&session_id);
+                        match crate::commands::respawn::queue_resume_for_short_if_safe(
+                            &home,
+                            &short,
+                            resolved_session_id,
+                        ) {
+                            Ok(true) => {
+                                crate::background_dispatch::ensure_daemon_for_control(&home);
+                                match wait_for_auto_resumed_attach(&home, &session_id) {
+                                    Ok(OpenSessionDisposition::Attached) => {
+                                        watcher.observe();
+                                        state.reload(load_view_rows(cli));
+                                        continue;
+                                    }
+                                    Ok(OpenSessionDisposition::LiveEndpointUnavailable {
+                                        ..
+                                    })
+                                    | Ok(OpenSessionDisposition::NotRunning { .. }) => {
+                                        eprintln!(
+                                            "lingxi-cli agents: session {session_id} is restarting in the background; try opening it again in a moment."
+                                        );
+                                        watcher.observe();
+                                        state.reload(load_view_rows(cli));
+                                        continue;
+                                    }
+                                    Ok(OpenSessionDisposition::ForegroundResume) => {
+                                        eprintln!(
+                                            "lingxi-cli agents: session {session_id} changed while background restart was being queued."
+                                        );
+                                        watcher.observe();
+                                        state.reload(load_view_rows(cli));
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("lingxi-cli agents: auto-resume failed: {e}");
+                                        watcher.observe();
+                                        state.reload(load_view_rows(cli));
+                                        continue;
+                                    }
+                                }
+                            }
+                            Ok(false) => {
+                                // No safe background job remains for this exact short.
+                                // Fall through to the legacy foreground resume path.
+                            }
+                            Err(e) => {
+                                eprintln!("lingxi-cli agents: auto-resume failed: {e}");
+                                watcher.observe();
+                                state.reload(load_view_rows(cli));
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(OpenSessionDisposition::ForegroundResume) => {
                         // No live worker owns the transcript, so the legacy
                         // foreground resume path below is safe.
                     }
                     Err(e) => {
-                        eprintln!("lingxi-cli agents: live attach failed: {e}");
+                        eprintln!("lingxi-cli agents: auto-resume failed: {e}");
                         watcher.observe();
                         state.reload(load_view_rows(cli));
                         continue;
@@ -686,6 +1125,76 @@ mod tests {
         Harness::try_parse_from(std::iter::once("agents").chain(args.iter().copied()))
             .unwrap()
             .agents
+    }
+
+    #[test]
+    fn fallback_connect_auth_methods_are_derived_only_from_the_provider_catalog() {
+        let methods = fallback_connect_auth_methods();
+        let presets = llm_client::builtin_presets();
+        let catalog_names: std::collections::BTreeSet<_> = presets
+            .providers
+            .iter()
+            .filter(|provider| provider.auth != llm_client::AuthStrategy::None)
+            .map(|provider| provider.profile_name.as_str())
+            .collect();
+        assert_eq!(
+            methods
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            catalog_names
+        );
+        assert_eq!(
+            methods.get("github-copilot").map(String::as_str),
+            Some("copilot_device")
+        );
+        assert_eq!(
+            methods.get("openai-chatgpt").map(String::as_str),
+            Some("oauth")
+        );
+    }
+
+    #[test]
+    fn live_session_display_name_falls_back_to_session_or_untitled() {
+        use crate::agents_registry::LiveSessionRecord;
+
+        let sanitized = LiveSessionRecord {
+            pid: 1,
+            session_id: Some("sid-1".into()),
+            cwd: "/repo".into(),
+            started_at: 0,
+            proc_start: None,
+            version: None,
+            peer_protocol: None,
+            kind: "interactive".into(),
+            job_id: None,
+            entrypoint: None,
+            name: Some("  alpha\tbeta  ".into()),
+            name_source: None,
+            status: None,
+            waiting_for: None,
+            updated_at: None,
+            status_updated_at: None,
+            name_since: None,
+            former_names: None,
+            messaging_socket_path: None,
+            permission_class: None,
+        };
+        assert_eq!(live_session_display_name(&sanitized), "alpha beta");
+
+        let session_fallback = LiveSessionRecord {
+            name: Some("\u{7}\n".into()),
+            session_id: Some("sid-2".into()),
+            ..sanitized.clone()
+        };
+        assert_eq!(live_session_display_name(&session_fallback), "sid-2");
+
+        let untitled = LiveSessionRecord {
+            name: None,
+            session_id: None,
+            ..sanitized
+        };
+        assert_eq!(live_session_display_name(&untitled), "untitled session");
     }
 
     #[test]
@@ -764,5 +1273,204 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--permission-mode bypassPermissions"));
         assert!(joined.contains("--model opus"));
+    }
+
+    #[test]
+    fn open_session_auto_respawns_background_job_before_foreground_resume() {
+        use crate::commands::attach::AttachDisposition;
+
+        let home = tempfile::tempdir().unwrap();
+        let got = resolve_open_session_disposition(home.path(), "sid-1", |_home, _session_id| {
+            Ok(AttachDisposition::NotRunning {
+                short: "abcd1234".to_string(),
+                session_id: Some("sid-1".to_string()),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(
+            got,
+            OpenSessionDisposition::NotRunning {
+                short: "abcd1234".to_string(),
+                session_id: Some("sid-1".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn open_session_uses_foreground_resume_when_no_background_job_matches() {
+        use crate::commands::attach::AttachDisposition;
+
+        let home = tempfile::tempdir().unwrap();
+        let got = resolve_open_session_disposition(home.path(), "sid-2", |_home, _session_id| {
+            Ok(AttachDisposition::NotFound)
+        })
+        .unwrap();
+
+        assert_eq!(got, OpenSessionDisposition::ForegroundResume);
+    }
+
+    #[test]
+    fn open_session_leaves_live_workers_and_completed_sessions_untouched() {
+        use crate::commands::attach::AttachDisposition;
+
+        let home = tempfile::tempdir().unwrap();
+        let got = resolve_open_session_disposition(home.path(), "sid-3", |_home, _session_id| {
+            Ok(AttachDisposition::Attached)
+        })
+        .unwrap();
+
+        assert_eq!(got, OpenSessionDisposition::Attached);
+    }
+
+    #[test]
+    fn wait_for_auto_resumed_attach_stops_on_first_non_not_running_result() {
+        use crate::commands::attach::AttachDisposition;
+        let home = tempfile::tempdir().unwrap();
+        let mut calls = 0usize;
+        let got = 'wait: loop {
+            fn resolve_with<Attach>(
+                home: &Path,
+                session_id: &str,
+                mut attach: Attach,
+            ) -> Result<OpenSessionDisposition, String>
+            where
+                Attach: FnMut(
+                    &Path,
+                    &str,
+                )
+                    -> std::io::Result<crate::commands::attach::AttachDisposition>,
+            {
+                resolve_open_session_disposition(home, session_id, &mut attach)
+            }
+
+            for _ in 0..AUTO_RESUME_ATTACH_ATTEMPTS {
+                match resolve_with(home.path(), "sid-4", |_home, _session_id| {
+                    calls += 1;
+                    Ok(if calls < 3 {
+                        AttachDisposition::NotRunning {
+                            short: "abcd1234".to_string(),
+                            session_id: Some("sid-4".to_string()),
+                        }
+                    } else {
+                        AttachDisposition::Attached
+                    })
+                })
+                .unwrap()
+                {
+                    OpenSessionDisposition::NotRunning { .. } => continue,
+                    other => break 'wait other,
+                }
+            }
+            break 'wait OpenSessionDisposition::NotRunning {
+                short: String::new(),
+                session_id: Some("sid-4".to_string()),
+            };
+        };
+
+        assert_eq!(got, OpenSessionDisposition::Attached);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn tui_agents_snapshot_keeps_queued_and_terminal_jobs_without_live_workers() {
+        use crate::agents_registry::{JobState, LiveSessionRecord};
+        use serde_json::json;
+
+        let live: Vec<LiveSessionRecord> = serde_json::from_value(json!([
+            {
+                "pid": 7,
+                "sessionId": "sid-live",
+                "cwd": "/repo",
+                "startedAt": 20,
+                "kind": "bg",
+                "jobId": "livejob",
+                "name": "Live worker",
+                "status": "busy"
+            }
+        ]))
+        .unwrap();
+        let jobs = vec![
+            (
+                "queuedjob".to_string(),
+                JobState {
+                    session_id: Some("sid-queued".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    created_at: Some("2026-09-01T00:00:00Z".to_string()),
+                    phase: Some("queued".to_string()),
+                    intent: Some("Queued worker".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "donejob".to_string(),
+                JobState {
+                    session_id: Some("sid-done".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    created_at: Some("2026-09-01T00:01:00Z".to_string()),
+                    state: "done".to_string(),
+                    tempo: Some("idle".to_string()),
+                    intent: Some("Done worker".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "livejob".to_string(),
+                JobState {
+                    session_id: Some("sid-live".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    created_at: Some("2026-09-01T00:02:00Z".to_string()),
+                    state: "working".to_string(),
+                    intent: Some("Live worker".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let snapshot = tui_agents_snapshot_from(&live, &jobs, 99, Some("sid-self"));
+        let states: std::collections::HashMap<_, _> = snapshot
+            .rows
+            .iter()
+            .map(|row| (row.session_id.as_str(), row.state.as_str()))
+            .collect();
+
+        assert_eq!(states.get("sid-queued"), Some(&"queued"));
+        assert_eq!(states.get("sid-done"), Some(&"done"));
+        assert_eq!(states.get("sid-live"), Some(&"working"));
+    }
+
+    #[test]
+    fn tui_agents_snapshot_marks_dead_running_workers_nonresponsive_and_hides_self() {
+        use crate::agents_registry::JobState;
+
+        let jobs = vec![
+            (
+                "deadjob".to_string(),
+                JobState {
+                    session_id: Some("sid-dead".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    state: "working".to_string(),
+                    phase: Some("running".to_string()),
+                    worker_pid: Some(i32::MAX),
+                    intent: Some("Dead worker".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "selfjob".to_string(),
+                JobState {
+                    session_id: Some("sid-self".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    state: "working".to_string(),
+                    intent: Some("Self".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let snapshot = tui_agents_snapshot_from(&[], &jobs, i32::MIN, Some("sid-self"));
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].session_id, "sid-dead");
+        assert_eq!(snapshot.rows[0].state, "nonresponsive");
     }
 }

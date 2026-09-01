@@ -51,11 +51,11 @@
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "uniffi")]
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-#[cfg(feature = "uniffi")]
 use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
 use platform_api::{CameraControl, SharingService, VoiceRecorder};
+#[cfg(feature = "uniffi")]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 // `Platform` is named only inside the `cfg(target_os = "android")` constructor
 // body; importing it unconditionally warns on the host build, so scope it.
 #[cfg(all(feature = "uniffi", target_os = "android"))]
@@ -256,7 +256,9 @@ pub struct AndroidHostEnvironmentFfi {
     pub launch_mode: AndroidLaunchModeFfi,
 }
 
-impl From<AndroidHostEnvironmentFfi> for platform_api::mobile_runtime_environment::MobileHostEnvironment {
+impl From<AndroidHostEnvironmentFfi>
+    for platform_api::mobile_runtime_environment::MobileHostEnvironment
+{
     fn from(value: AndroidHostEnvironmentFfi) -> Self {
         use platform_api::mobile_runtime_environment::{
             MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
@@ -826,7 +828,9 @@ fn capability_to_ffi(capability: platform_api::MobileLinuxCapability) -> MobileL
         backend: mobile_linux_backend_name(capability.backend),
         mode: match capability.mode {
             platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => {
+                MobileLinuxRuntimeModeFfi::MobileLinux
+            }
         },
         reason: capability.reason,
         streaming_output: capability.streaming_output,
@@ -844,7 +848,9 @@ fn status_to_ffi(status: platform_api::RootfsStatus) -> MobileLinuxStatusFfi {
         backend: mobile_linux_backend_name(status.backend),
         mode: match status.mode {
             platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => {
+                MobileLinuxRuntimeModeFfi::MobileLinux
+            }
         },
         platform: status.platform,
         abi: status.abi,
@@ -963,8 +969,14 @@ fn event_to_ffi(event: platform_api::MobileLinuxEvent) -> MobileLinuxEventFfi {
             session_id: None,
             status: Some(task_status_to_ffi(status)),
             exit_code,
-            timed_out: Some(matches!(status, platform_api::MobileLinuxTaskStatus::TimedOut)),
-            cancelled: Some(matches!(status, platform_api::MobileLinuxTaskStatus::Cancelled)),
+            timed_out: Some(matches!(
+                status,
+                platform_api::MobileLinuxTaskStatus::TimedOut
+            )),
+            cancelled: Some(matches!(
+                status,
+                platform_api::MobileLinuxTaskStatus::Cancelled
+            )),
             detail,
         },
         platform_api::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxEventFfi {
@@ -1145,7 +1157,8 @@ fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLin
         platform_api::MobileLinuxError::InvalidRequest(message) => {
             MobileLinuxApiErrorFfi::InvalidRequest { message }
         }
-        platform_api::MobileLinuxError::Integrity(message) | platform_api::MobileLinuxError::Io(message) => {
+        platform_api::MobileLinuxError::Integrity(message)
+        | platform_api::MobileLinuxError::Io(message) => {
             MobileLinuxApiErrorFfi::OperationFailed { message }
         }
         platform_api::MobileLinuxError::NetworkPolicyUnavailable(message) => {
@@ -1569,8 +1582,9 @@ fn android_mobile_linux_runtime(
         use std::collections::HashMap;
         use std::sync::{LazyLock, Mutex};
 
-        static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<dyn platform_api::MobileLinuxRuntime>>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
+        static RUNTIMES: LazyLock<
+            Mutex<HashMap<String, Arc<dyn platform_api::MobileLinuxRuntime>>>,
+        > = LazyLock::new(|| Mutex::new(HashMap::new()));
         let key = format!(
             "{}|{}|{}|{}|{}",
             cfg.managed_root,
@@ -1666,8 +1680,9 @@ fn block_on_mobile_linux_status(
         Arc<dyn platform_api::MobileLinuxRuntime>,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
-                + Send,
+            dyn std::future::Future<
+                    Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>,
+                > + Send,
         >,
     >,
 ) -> MobileLinuxStatusFfi {
@@ -1696,8 +1711,9 @@ fn verify_rootfs_op(
     runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
-            + Send,
+        dyn std::future::Future<
+                Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>,
+            > + Send,
     >,
 > {
     Box::pin(async move { runtime.verify_rootfs().await })
@@ -1708,8 +1724,9 @@ fn repair_rootfs_op(
     runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
-            + Send,
+        dyn std::future::Future<
+                Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>,
+            > + Send,
     >,
 > {
     Box::pin(async move { runtime.repair_rootfs().await })
@@ -1720,8 +1737,9 @@ fn reset_rootfs_op(
     runtime: Arc<dyn platform_api::MobileLinuxRuntime>,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>>
-            + Send,
+        dyn std::future::Future<
+                Output = Result<platform_api::RootfsStatus, platform_api::MobileLinuxError>,
+            > + Send,
     >,
 > {
     Box::pin(async move { runtime.reset_rootfs().await })
@@ -2258,7 +2276,9 @@ struct AndroidLocationBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl platform_api::LocationProvider for AndroidLocationBridge {
-    async fn current_location(&self) -> Result<platform_api::LocationFix, platform_api::LocationError> {
+    async fn current_location(
+        &self,
+    ) -> Result<platform_api::LocationFix, platform_api::LocationError> {
         match self.inner.current_location().await {
             Ok(fix) => Ok(platform_api::LocationFix {
                 latitude: fix.latitude,
@@ -2266,10 +2286,14 @@ impl platform_api::LocationProvider for AndroidLocationBridge {
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
-            Err(LocationFfiError::PermissionDenied) => Err(platform_api::LocationError::PermissionDenied),
+            Err(LocationFfiError::PermissionDenied) => {
+                Err(platform_api::LocationError::PermissionDenied)
+            }
             Err(LocationFfiError::Unavailable) => Err(platform_api::LocationError::Unavailable),
             Err(LocationFfiError::Timeout) => Err(platform_api::LocationError::Timeout),
-            Err(LocationFfiError::Other { message }) => Err(platform_api::LocationError::Other(message)),
+            Err(LocationFfiError::Other { message }) => {
+                Err(platform_api::LocationError::Other(message))
+            }
         }
     }
 }
@@ -2503,14 +2527,19 @@ impl platform_api::DeviceStatusProvider for AndroidDeviceControlBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl platform_api::HapticService for AndroidDeviceControlBridge {
-    async fn trigger(&self, style: platform_api::HapticStyle) -> Result<(), platform_api::HapticError> {
+    async fn trigger(
+        &self,
+        style: platform_api::HapticStyle,
+    ) -> Result<(), platform_api::HapticError> {
         self.inner
             .trigger_haptic(haptic_style_to_wire(style).to_string())
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::HapticError::Unavailable,
                 DeviceControlFfiError::Rejected { message }
-                | DeviceControlFfiError::Other { message } => platform_api::HapticError::Other(message),
+                | DeviceControlFfiError::Other { message } => {
+                    platform_api::HapticError::Other(message)
+                }
             })
     }
 }
@@ -2541,8 +2570,12 @@ impl platform_api::CalendarProvider for AndroidDeviceControlBridge {
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::CalendarError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => platform_api::CalendarError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => platform_api::CalendarError::Other(message),
+                DeviceControlFfiError::Rejected { .. } => {
+                    platform_api::CalendarError::PermissionDenied
+                }
+                DeviceControlFfiError::Other { message } => {
+                    platform_api::CalendarError::Other(message)
+                }
             })?;
         serde_json::from_str(&body).map_err(|error| {
             platform_api::CalendarError::Other(format!("invalid native calendar response: {error}"))
@@ -2565,8 +2598,12 @@ impl platform_api::ContactsProvider for AndroidDeviceControlBridge {
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::ContactsError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => platform_api::ContactsError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => platform_api::ContactsError::Other(message),
+                DeviceControlFfiError::Rejected { .. } => {
+                    platform_api::ContactsError::PermissionDenied
+                }
+                DeviceControlFfiError::Other { message } => {
+                    platform_api::ContactsError::Other(message)
+                }
             })?;
         serde_json::from_str(&body).map_err(|error| {
             platform_api::ContactsError::Other(format!("invalid native contacts response: {error}"))
@@ -2600,7 +2637,9 @@ fn device_control_error(error: DeviceControlFfiError) -> platform_api::DeviceSta
 fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> platform_api::DeepLinkError {
     match error {
         DeviceControlFfiError::Unavailable => platform_api::DeepLinkError::Unavailable,
-        DeviceControlFfiError::Rejected { message } => platform_api::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Rejected { message } => {
+            platform_api::DeepLinkError::Rejected(message)
+        }
         DeviceControlFfiError::Other { message } => platform_api::DeepLinkError::Other(message),
     }
 }
@@ -2716,14 +2755,19 @@ impl platform_api::SecureStorage for AndroidSecureStorageBridge {
             .map_err(securestorage_error_from_ffi)?
         {
             Some(blob) => {
-                let data = serde_json::from_slice(&blob)
-                    .map_err(|e| platform_api::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                let data = serde_json::from_slice(&blob).map_err(|e| {
+                    platform_api::SecureStorageError::Io(format!("deserialize: {e}"))
+                })?;
                 Ok(Some(data))
             }
             None => Ok(None),
         }
     }
-    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
+    async fn delete(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(), platform_api::SecureStorageError> {
         self.inner
             .delete(service.to_string(), account.to_string())
             .await
@@ -2850,7 +2894,9 @@ impl platform_api::CameraControl for AndroidCameraBridge {
             Err(e) => Err(camera_error_from_ffi(e)),
         }
     }
-    async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+    async fn pick_from_library(
+        &self,
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
         match self.inner.pick_from_library().await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -2977,7 +3023,9 @@ impl platform_api::VoiceRecorder for AndroidVoiceBridge {
             .await
             .map_err(voice_error_from_ffi)
     }
-    async fn stop_recording(&self) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
+    async fn stop_recording(
+        &self,
+    ) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
         match self.inner.stop_recording().await {
             Ok(rec) => Ok(platform_api::VoiceRecording {
                 audio_bytes: rec.audio_bytes,
@@ -3369,7 +3417,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
         })
     }
 
-    async fn ui_tree(&self) -> Result<platform_api::AndroidUiSnapshot, platform_api::AndroidAutomationError> {
+    async fn ui_tree(
+        &self,
+    ) -> Result<platform_api::AndroidUiSnapshot, platform_api::AndroidAutomationError> {
         let value = self
             .inner
             .ui_tree_json()
@@ -3880,7 +3930,8 @@ pub fn build_android_engine_with_mobile_linux(
         let contacts = device_control
             .clone()
             .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
-        let deep_link = device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
+        let deep_link =
+            device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
         // P5b: capture the app-private files root as an owned `String` up front —
         // `app_files_root` is consumed below into `AndroidPlatformInputs`, but the
         // bundled-shell bootstrap (which must run BEFORE `shell_cfg` is built +
@@ -4282,10 +4333,10 @@ pub fn android_sandbox_run_probe(command: String, workspace: String) -> String {
             capabilities::{probe_android_capabilities, CapabilityCache},
             AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
         };
-        use std::collections::HashMap;
         use platform_api::{
             NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
         };
+        use std::collections::HashMap;
 
         // The probe runtime: capability probe + the jailed run are independent
         // of the engine runtime, so spin up a transient current-thread runtime
@@ -4415,10 +4466,10 @@ pub fn android_bundled_shell_run_probe(
             capabilities::{probe_android_capabilities, CapabilityCache},
             AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
         };
-        use std::collections::HashMap;
         use platform_api::{
             NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
         };
+        use std::collections::HashMap;
 
         // Bootstrap the bundled shell: stage the applet symlink farm, verify
         // bundled execve + dispatch, sha256 libmksh.so. `None` = fail-closed.
@@ -4588,10 +4639,10 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
     }
     #[cfg(target_os = "android")]
     {
+        use platform_api::process::ProcessOutput;
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
         use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
-        use platform_api::process::ProcessOutput;
 
         // Parse the structured operation input. A malformed payload is a probe
         // error, not a tool failure.
@@ -4697,10 +4748,10 @@ pub fn android_git_probe_authed(
     }
     #[cfg(target_os = "android")]
     {
+        use platform_api::process::ProcessOutput;
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
         use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
-        use platform_api::process::ProcessOutput;
 
         let input: serde_json::Value = match serde_json::from_str(&operation_json) {
             Ok(v) => v,
@@ -4926,11 +4977,11 @@ mod tests {
     use client_protocol::events::ClientEvent;
     use client_protocol::permission::PermissionRequest as PermissionRequestDto;
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
-    use tokio::sync::Mutex;
     use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, LocationProvider, Platform, ProcessRunner,
         Sandbox, SharingService, VoiceRecorder, WorktreeManager,
     };
+    use tokio::sync::Mutex;
 
     struct FakeAndroidLocation {
         failure: Option<&'static str>,
@@ -4990,7 +5041,10 @@ mod tests {
         .current_location()
         .await
         .expect_err("unavailable failure");
-        assert!(matches!(unavailable, platform_api::LocationError::Unavailable));
+        assert!(matches!(
+            unavailable,
+            platform_api::LocationError::Unavailable
+        ));
 
         let timeout = super::AndroidLocationBridge {
             inner: Box::new(FakeAndroidLocation {

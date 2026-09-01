@@ -46,10 +46,6 @@ use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
-use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
-use tokio_tungstenite::tungstenite::Message;
 use platform_api::auth::{AuthError, AuthHandle, LoginInfo};
 use platform_api::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
@@ -60,6 +56,10 @@ use platform_api::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
+use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 // ── Test sink ───────────────────────────────────────────────────────────────
 
@@ -109,7 +109,11 @@ impl platform_api::SecureStorage for SelectiveFailureStorage {
             .cloned())
     }
 
-    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
+    async fn delete(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(), platform_api::SecureStorageError> {
         self.values
             .lock()
             .unwrap()

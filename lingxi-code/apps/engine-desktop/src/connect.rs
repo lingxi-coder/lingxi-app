@@ -64,16 +64,18 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
 use command_core::{
     ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
-use lingxi_core::settings::enterprise::{check_org_membership, ForceLoginOrgPin, OrgMembershipCheck};
+use lingxi_core::settings::enterprise::{
+    check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
+};
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::transport::BoxFuture;
 use llm_client::LlmError;
+use platform_api::{AuthHandle, HttpTransport};
 use platform_posix::PosixHttp;
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::Value;
 use std::sync::Mutex as StdMutex;
-use platform_api::{AuthHandle, HttpTransport};
 
 /// Credential id under which the GitHub Copilot OAuth token is stored. Matches
 /// the catalog preset's `profile_name`.
@@ -482,8 +484,8 @@ impl command_core::LoginOrgPolicy for DesktopLoginOrgPolicy {
 #[cfg(test)]
 mod oauth_connect_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use platform_api::{AuthError, AuthHandle, LoginInfo};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct OkAuth;
     #[async_trait]
@@ -686,11 +688,13 @@ Contact your administrator."
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::{
+        Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+    };
     use platform_posix::{PosixClock, PosixHttp};
     use protocol::SecureStorageData;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
 
     /// In-memory `(service, account) -> data` store. The real
     /// `platform_posix` secure storage backend is keychain/OS-backed and not

@@ -81,20 +81,19 @@ async fn turn_populates_slot_with_exact_sent_prefix() {
     // `fork_context_messages` is the cache-safe fork prefix — claude-code's
     // `cacheSafeParams.forkContextMessages = re` (`session.history`), captured
     // BEFORE the leading `additionalContext` meta message is prepended by `A6n`
-    // at `callModel` time. So the sent messages carry exactly ONE extra leading
-    // meta message (the `# currentDate` additional-context) versus the saved
-    // fork prefix — and the saved prefix equals the tail of the sent list.
+    // at `callModel` time. The sent messages carry that leading context plus
+    // the transient total-tokens reminder after the saved fork prefix.
     let calls = api.captured_msgs().await;
     assert_eq!(calls.len(), 1, "exactly one batched API call");
     assert_eq!(
-        saved.fork_context_messages.len() + 1,
+        saved.fork_context_messages.len() + 2,
         calls[0].len(),
-        "sent messages = saved fork prefix + 1 leading additionalContext meta"
+        "sent messages = additionalContext + saved fork prefix + total_tokens"
     );
     assert_eq!(
         saved.fork_context_messages,
-        calls[0][1..],
-        "saved fork_context_messages must equal the sent prefix sans the leading meta"
+        calls[0][1..calls[0].len() - 1],
+        "saved fork_context_messages must exclude transient reminders"
     );
 
     // The model id propagates into the snapshot's tool-use options.

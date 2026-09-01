@@ -65,7 +65,8 @@ import SwiftUI
                 ),
                 worker: nil,
                 owner: nil,
-                suppressAlwaysAllowRule: true
+                suppressAlwaysAllowRule: true,
+                autoModePrompt: nil
             )
 
             let pending = PendingPermission(request: request)
@@ -684,7 +685,8 @@ import SwiftUI
                 ),
                 worker: nil,
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             source.setCommandSubmitterForTesting { command in
                 if case .cancel = command { throw CancelFailure.rejected }
@@ -713,7 +715,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             var releaseCancellation: CheckedContinuation<Void, Never>?
             source.setCommandSubmitterForTesting { command in
@@ -747,7 +750,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "review", color: "review", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             source.beginTurnForTesting(turnId: 48, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -769,7 +773,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
 
             let resumedSource = makeSource()
@@ -991,7 +996,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             )
 
             await EnginePermissionSink(source: source).onRequest(request: request)
@@ -1011,7 +1017,8 @@ import SwiftUI
                 ),
                 worker: nil,
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             let second = PendingPermission(request: PermissionRequest(
                 requestId: 202,
@@ -1022,7 +1029,8 @@ import SwiftUI
                 ),
                 worker: nil,
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             source.model.pendingPermissions = [first, second]
 
@@ -1047,7 +1055,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             source.setCommandSubmitterForTesting { _ in
                 throw SubmitFailure.rejected
@@ -1090,7 +1099,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "review", color: "review", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))
             source.beginTurnForTesting(turnId: 49, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -1141,7 +1151,8 @@ import SwiftUI
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
                 owner: nil,
-                suppressAlwaysAllowRule: false
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: nil
             ))]
 
             // `DispatchQueue.main.async` retries need an actual run-loop turn;

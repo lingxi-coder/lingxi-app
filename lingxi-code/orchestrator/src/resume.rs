@@ -15,6 +15,7 @@ use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, Orches
 use crate::test_support::{HookExecutor, PermissionGate};
 use lingxi_core::session::ActiveGoalState;
 use lingxi_core::SessionState;
+use platform_api::{FileSystem, OutputStream};
 use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde_json::Value;
 use session::jsonl::{
@@ -27,7 +28,6 @@ use std::sync::Arc;
 use telemetry::tengu::session::RESUMED;
 use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
-use platform_api::{FileSystem, OutputStream};
 use uuid::Uuid;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.
@@ -120,6 +120,7 @@ impl ReplayedSession {
             consecutive_failures: tracking.consecutive_failures,
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             deferred_tools: self.runtime_metadata.deferred_tools.clone(),
+            prompt_snapshot: self.runtime_metadata.prompt_snapshot.clone(),
         }
     }
 }
@@ -141,6 +142,8 @@ pub struct ResumeRuntimeMetadata {
     pub compaction_tracking: compaction::AutoCompactTrackingState,
     /// Deferred hook tools that were persisted but never produced a result.
     pub deferred_tools: Vec<platform_api::DeferredToolReplay>,
+    /// Last valid static prompt snapshot recovered from the transcript.
+    pub prompt_snapshot: Option<platform_api::PromptSnapshot>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -167,6 +170,10 @@ pub async fn replay_session_state(
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
     runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);
+    // `load_session` returns only the resumable chain; prompt snapshots are
+    // generic attachments and may be off-chain when a transcript ended before
+    // the assistant response. Recover from the full routed entry stream.
+    runtime_metadata.prompt_snapshot = prompt_snapshot_from_messages(&transcript_entries);
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -233,6 +240,30 @@ pub fn post_compact_skill_attachments_from_messages(
             (!contents.is_empty()).then_some((MessageId::from_uuid(uuid), contents))
         })
         .collect()
+}
+
+/// Recover the last valid carved-slate prompt snapshot from generic JSONL
+/// attachment rows. Invalid or incomplete rows are ignored so a damaged tail
+/// falls back to live prompt/tool assembly; a later valid row still wins.
+#[must_use]
+pub fn prompt_snapshot_from_messages(
+    messages: &[JsonlMessage],
+) -> Option<platform_api::PromptSnapshot> {
+    messages.iter().rev().find_map(|message| {
+        if message.message_type != "attachment" {
+            return None;
+        }
+        let attachment = message.extra.get("attachment")?;
+        if attachment.get("type").and_then(Value::as_str) != Some("prompt_snapshot") {
+            return None;
+        }
+        let snapshot =
+            serde_json::from_value::<platform_api::PromptSnapshot>(attachment.clone()).ok()?;
+        (!snapshot.system_prompt.is_empty()
+            && snapshot.system_prompt.iter().all(|part| !part.is_empty())
+            && snapshot.tools.iter().all(|tool| !tool.name.is_empty()))
+        .then_some(snapshot)
+    })
 }
 
 /// An in-progress run of consecutive per-block "assistant" JSONL rows that
@@ -705,7 +736,9 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
                         tokens_at_start: goal.tokens_at_start,
                     })
                 }),
-                platform_api::GoalStatusKind::Cleared | platform_api::GoalStatusKind::Achieved => Some(None),
+                platform_api::GoalStatusKind::Cleared | platform_api::GoalStatusKind::Achieved => {
+                    Some(None)
+                }
             };
         }
     }
@@ -834,6 +867,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         cumulative_dropped_tokens,
         compaction_tracking: tracking,
         deferred_tools: Vec::new(),
+        prompt_snapshot: prompt_snapshot_from_messages(messages),
     }
 }
 
@@ -1013,6 +1047,13 @@ impl ConversationOrchestrator {
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
         let metadata = resume_runtime_metadata(messages);
+        // A resumed transcript is never allowed to manufacture a missing
+        // prompt snapshot on its first subsequent request. Adopt the last
+        // valid attachment (if any), otherwise leave prompt assembly live.
+        self.prompt_runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(
@@ -1106,6 +1147,11 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(&replayed.messages);
+        orch.prompt_runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
+        *orch.prompt_runtime.prompt_snapshot.lock().await =
+            replayed.runtime_metadata.prompt_snapshot.clone();
         if let Some(writer) = jsonl_writer {
             orch.transcript.jsonl_writer = Some(writer);
         }

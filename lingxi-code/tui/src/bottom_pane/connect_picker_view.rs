@@ -179,6 +179,10 @@ impl BottomPaneView for ConnectPickerView {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn is_connect_flow(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

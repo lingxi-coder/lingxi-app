@@ -41,6 +41,8 @@ import com.lingxi.code.bindings.LocalAppRejectedCandidateDto
 import com.lingxi.code.bindings.LocalAppTemplateSummaryDto
 import com.lingxi.code.bindings.LocalAppVerificationStatusDto
 import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
+import com.lingxi.code.bindings.ManagedLocalAppMcpStatusDto
+import com.lingxi.code.bindings.McpAppWidgetDto
 import com.lingxi.code.bindings.PluginCommandDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
@@ -1338,6 +1340,112 @@ class LocalAppsViewModelTest {
     }
 
     @Test
+    fun `managed MCP inventory is stored in local-app state instead of settings rows`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED))))
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.ManagedMcpInventoryChanged(
+                        listOf(
+                            managedServer(
+                                appId = APP_ID,
+                                appName = "客户跟进",
+                                toolNames = listOf("crm.search", "crm.open"),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val managed = viewModel.uiState.value.managedMcp(APP_ID)
+            assertEquals("local_app_tracker", managed.serverName)
+            assertEquals(2, managed.toolCount)
+            assertEquals(setOf("crm.search", "crm.open"), managed.enabledTools)
+            assertEquals(LocalAppManagedMcpStatus.Enabled, managed.status)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `starting MCP authoring emits the dedicated plugin command`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.UpdateMcpGoal(APP_ID, "帮我查客户并展示简版 Widget"))
+            viewModel.onAction(LocalAppsAction.StartMcpAuthoring(APP_ID))
+            runCurrent()
+
+            val command = source.commands
+                .filterIsInstance<ClientCommand.PluginCommand>()
+                .single { it.command is PluginCommandDto.StartLocalAppMcpAuthoring }
+            val request = command.command as? PluginCommandDto.StartLocalAppMcpAuthoring
+                ?: throw AssertionError("expected StartLocalAppMcpAuthoring")
+            assertEquals(APP_ID, request.appId)
+            assertEquals("帮我查客户并展示简版 Widget", request.userGoal)
+            assertEquals(
+                "正在生成 MCP 方案…",
+                viewModel.uiState.value.mcpPendingByApp[APP_ID],
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `service tool and conversation exposure controls emit dedicated plugin commands`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+                currentConversationId = { "session-123" },
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord())))
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.ManagedMcpInventoryChanged(
+                        listOf(managedServer(toolNames = listOf("crm.search", "crm.open"))),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.SetMcpEnabled(APP_ID, false))
+            viewModel.onAction(LocalAppsAction.SetMcpToolEnabled(APP_ID, "crm.search", false))
+            viewModel.onAction(LocalAppsAction.SetMcpPinnedToConversation(APP_ID, true))
+            runCurrent()
+
+            val commands = source.commands.filterIsInstance<ClientCommand.PluginCommand>().map { it.command }
+            assertTrue(commands.any { it is PluginCommandDto.SetLocalAppMcpEnabled })
+            assertTrue(commands.any { it is PluginCommandDto.SetLocalAppMcpToolEnabled })
+            assertTrue(commands.any { it is PluginCommandDto.SetLocalAppMcpConversationPinned })
+            val pin = commands.filterIsInstance<PluginCommandDto.SetLocalAppMcpConversationPinned>().single()
+            assertEquals("session-123", pin.conversationId)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
     fun `verification summary events project workflow and verification badges onto app state`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
@@ -1973,7 +2081,6 @@ class LocalAppsViewModelTest {
     }
 
     @Test
-    @Test
     fun `app details projects runtime profile status to card and details state`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
@@ -2317,6 +2424,52 @@ class LocalAppsViewModelTest {
         initSessionId = "00000000-0000-4000-8000-00000000$id".take(36),
         workspaceRel = "apps/$id/workspace",
         scaffolded = scaffolded,
+    )
+
+    private fun managedServer(
+        appId: String = APP_ID,
+        appName: String = "客户跟进",
+        toolNames: List<String>,
+    ) = com.lingxi.code.bindings.ManagedLocalAppMcpServerDto(
+        serverName = "local_app_$appId",
+        appId = appId,
+        appName = appName,
+        enabled = true,
+        status = ManagedLocalAppMcpStatusDto.ENABLED,
+        settingsRevision = 1uL,
+        enabledTools = toolNames,
+        pinnedToCurrentConversation = false,
+        buildId = "build-12345678",
+        catalogSha256 = "catalog-12345678",
+        toolSurfaceSha256 = "surface-12345678",
+        toolCount = toolNames.size.toUInt(),
+        authoringRevision = 7uL,
+        publicationState = AppWorkflowStateDto.PUBLISHED_UNVERIFIED,
+        mcpVerification = LocalAppVerificationSummaryDto(
+            status = LocalAppVerificationStatusDto.PASSED,
+            summary = "MCP ready",
+            code = null,
+        ),
+        uiVerification = LocalAppVerificationSummaryDto(
+            status = LocalAppVerificationStatusDto.PENDING,
+            summary = "Widget pending",
+            code = null,
+        ),
+        widget = null,
+        tools = toolNames.map { name ->
+            LocalAppMcpToolSurfaceDto(
+                name = name,
+                title = name.substringAfter('.'),
+                description = "Tool $name",
+                inputSchemaJson = "{}",
+                outputSchemaJson = null,
+                annotationsJson = null,
+                executionJson = null,
+                visibleMetaJson = null,
+                semanticFlowJson = "{}",
+                permissionCeiling = "allow_session",
+            )
+        },
     )
 
     private fun receiptStatus(

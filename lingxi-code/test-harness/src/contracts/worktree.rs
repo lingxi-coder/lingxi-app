@@ -20,10 +20,10 @@
 //! short-circuit the full-roundtrip cases; the contract still asserts the
 //! shape of the error returned by `create_worktree`.
 
+use platform_api::{WorktreeError, WorktreeManager};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-use platform_api::{WorktreeError, WorktreeManager};
 
 /// Run the standard [`WorktreeManager`] contract.
 ///

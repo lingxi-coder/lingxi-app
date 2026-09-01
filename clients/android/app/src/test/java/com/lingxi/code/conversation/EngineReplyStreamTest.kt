@@ -4,8 +4,6 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.TurnOutcomeDto
-import com.lingxi.code.model.Message
-import com.lingxi.code.model.Role
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.take
@@ -196,16 +194,15 @@ class EngineReplyStreamTest {
             },
         )
 
-        assertEquals(
-            listOf(
-                ReplyEvent.Thinking,
-                ReplyEvent.Delta("first"),
-                ReplyEvent.MessageComplete(Message(role = Role.Ai, text = "first")),
-                ReplyEvent.Delta("second"),
-                ReplyEvent.End,
-            ),
-            stream.toList(),
-        )
+        val replies = stream.toList()
+        assertEquals(5, replies.size)
+        assertEquals(ReplyEvent.Thinking, replies[0])
+        assertEquals(ReplyEvent.Delta("first"), replies[1])
+        val complete = replies[2] as ReplyEvent.MessageComplete
+        assertEquals("first", complete.message?.text)
+        assertEquals(listOf(MessageContent.Text("first")), complete.message?.blocks)
+        assertEquals(ReplyEvent.Delta("second"), replies[3])
+        assertEquals(ReplyEvent.End, replies[4])
     }
 
     @Test

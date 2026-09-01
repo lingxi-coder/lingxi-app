@@ -1,8 +1,8 @@
 //! Parity **delta baseline** vs Claude Code 2.1.215.
 //!
 //! Unlike [`parity_claude_2_1_208`], this file does **not** own or pin the live
-//! `platform_api::CLAUDE_CODE_VERSION` — the port's version-facing wave now tracks
-//! 2.1.216. This is a historical capture of the real 2.1.215
+//! `platform_api::CLAUDE_CODE_VERSION` — the port's live version-facing wave now tracks
+//! 2.1.252. This is a historical capture of the real 2.1.215
 //! native binary's observable CLI surface (root/agents/mcp/plugin `--help`),
 //! recorded so audits diff against the CURRENT release instead of the stale
 //! 2.1.198/2.1.208 fixtures. (An audit run against a 2.1.198 baseline is how a
@@ -12,8 +12,8 @@
 //! `~/.local/share/claude/versions/2.1.215 {--help, agents --help, mcp --help,
 //! plugin --help}` (SHA-256 in the review notes). Each `*_pins_*` test asserts a
 //! parity-relevant fact of that captured surface — a NEW flag/command that
-//! appeared since the last pinned wave — and doubles as executable
-//! documentation of the corresponding LingXi gap (noted inline).
+//! appeared since the last pinned wave — and records the current LingXi status
+//! inline (implemented paths and any remaining intentional divergence).
 
 const ROOT_HELP: &str = include_str!("../src/parity/fixtures/cc_2_1_215_root_help.txt");
 const AGENTS_HELP: &str = include_str!("../src/parity/fixtures/cc_2_1_215_agents_help.txt");
@@ -44,9 +44,9 @@ fn root_help_fixture_is_the_2_1_215_cli_surface() {
 /// question is answered by the harness rather than re-derived by hand.
 #[test]
 fn root_help_pins_2_1_214_215_new_flags() {
-    // M-01: `--brief` gates the `SendUserMessage` agent-to-user tool. LingXi
-    // gap: the tool is registered unconditionally (`tools/ui/brief.rs` is_enabled
-    // == true) and there is no `--brief` flag, so it is always exposed.
+    // M-01: `--brief` gates the `SendUserMessage` agent-to-user tool. LingXi's
+    // current CLI parses the flag and exports the session-scoped gate; only
+    // the oracle's entitlement/userMsgOptIn classification remains different.
     assert!(ROOT_HELP.contains("--brief"), "2.1.215 ships --brief");
     assert!(
         ROOT_HELP.contains("Enable SendUserMessage tool for"),
@@ -54,8 +54,8 @@ fn root_help_pins_2_1_214_215_new_flags() {
     );
 
     // M-04: `--plugin-url` fetches a session-only plugin .zip (repeatable).
-    // LingXi gap: the argv flag exists but is a dead stub (parsed, never
-    // consumed — no download / no thread-through to cli_plugin_dirs).
+    // LingXi's startup_resources path now downloads each archive into an
+    // owner-only temporary root and threads it through cli_plugin_dirs.
     assert!(
         ROOT_HELP.contains("--plugin-url <url>"),
         "2.1.215 ships --plugin-url"

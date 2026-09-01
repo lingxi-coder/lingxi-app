@@ -7,8 +7,8 @@
 //! `appNames.ts` uses to decide what counts as "user-facing" (`/Applications/`,
 //! `/System/Applications/`, `~/Applications/`).
 
-use std::path::{Path, PathBuf};
 use platform_api::computer_control::AppInfo;
+use std::path::{Path, PathBuf};
 
 fn roots() -> Vec<PathBuf> {
     let mut roots = vec![

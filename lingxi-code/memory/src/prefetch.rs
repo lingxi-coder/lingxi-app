@@ -29,11 +29,11 @@ use crate::file::MemoryFile;
 use crate::memdir::{scan_memdir, MemdirRoots};
 use crate::selector::{memory_entry_to_memory_file_with_frontmatter, MemorySelector};
 use crate::surfacing::SurfacedMemory;
+use platform_api::RuntimeSpawner;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use platform_api::RuntimeSpawner;
 
 /// Side-channel that fires the memory selector concurrently with the
 /// main turn.

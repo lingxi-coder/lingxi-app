@@ -82,7 +82,7 @@ test('the extraction actually reads the engine registry', () => {
   // test additionally proves the builtin-table reader works.
   interactiveOnlyNames();
   const builtins = builtinCommandNames();
-  assert.equal(builtins.length, 108, `expected the 108-name builtin table, got ${builtins.length}`);
+  assert.equal(builtins.length, 86, `expected the 86-name builtin table, got ${builtins.length}`);
 });
 
 test('every interactive-only engine command is handled by the desktop or explicitly deferred', () => {

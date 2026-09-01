@@ -5,9 +5,9 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use platform_api::OrchestratorHandle;
 
 fn build_orch_with_response(
     response: llm_client::LlmResponse,

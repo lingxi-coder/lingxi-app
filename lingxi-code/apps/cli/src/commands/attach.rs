@@ -275,14 +275,29 @@ fn resolve_attach_target_from(
             }
         }
 
-        if record.is_some_and(|record| {
-            record.proc_start.as_deref().is_some_and(|stored| {
-                is_alive(record.pid)
-                    && start_time(record.pid)
+        let durable_worker_may_be_live = job
+            .and_then(|job| job.worker_pid.map(|pid| (job, pid)))
+            .is_some_and(|(job, pid)| {
+                if !is_alive(pid) {
+                    return false;
+                }
+                match job.worker_proc_start.as_deref() {
+                    Some(expected) => start_time(pid)
                         .as_deref()
-                        .is_some_and(|live| live == stored)
+                        .is_none_or(|actual| actual == expected),
+                    None => true,
+                }
+            });
+        if durable_worker_may_be_live
+            || record.is_some_and(|record| {
+                record.proc_start.as_deref().is_some_and(|stored| {
+                    is_alive(record.pid)
+                        && start_time(record.pid)
+                            .as_deref()
+                            .is_some_and(|live| live == stored)
+                })
             })
-        }) {
+        {
             best_unavailable
                 .get_or_insert(ResolvedAttachTarget::LiveEndpointUnavailable { short, session_id });
         } else {
@@ -431,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_job_pid_is_not_trusted_without_a_verified_roster_identity() {
+    fn live_bare_job_pid_blocks_a_second_writer_without_a_roster_endpoint() {
         let jobs = vec![(
             "bead0001".to_string(),
             JobState {
@@ -445,7 +460,7 @@ mod tests {
             resolve_attach_target_from(&jobs, &roster, "sid-live", &|pid| pid == 4321, &|pid| (pid
                 == 4321)
                 .then(|| "START-4321".to_string()),),
-            Some(ResolvedAttachTarget::NotRunning {
+            Some(ResolvedAttachTarget::LiveEndpointUnavailable {
                 short: "bead0001".to_string(),
                 session_id: Some("sid-live".to_string()),
             })
@@ -454,7 +469,7 @@ mod tests {
 
     #[test]
     fn resolver_rejects_missing_or_recycled_process_identity() {
-        let jobs = vec![(
+        let mut jobs = vec![(
             "bead0001".to_string(),
             JobState {
                 session_id: Some("sid-live".to_string()),
@@ -476,13 +491,14 @@ mod tests {
                     &|pid| pid == 4321,
                     &|_pid| live_start.clone(),
                 ),
-                Some(ResolvedAttachTarget::NotRunning {
+                Some(ResolvedAttachTarget::LiveEndpointUnavailable {
                     short: "bead0001".to_string(),
                     session_id: Some("sid-live".to_string()),
                 })
             );
         }
 
+        jobs[0].1.worker_proc_start = Some("ORIGINAL".to_string());
         roster.workers.get_mut("bead0001").unwrap().proc_start = Some("ORIGINAL".to_string());
         assert_eq!(
             resolve_attach_target_from(&jobs, &roster, "sid-live", &|pid| pid == 4321, &|_pid| {

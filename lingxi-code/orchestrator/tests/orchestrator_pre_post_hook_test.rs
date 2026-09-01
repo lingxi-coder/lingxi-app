@@ -22,13 +22,13 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---------- unused HTTP / Runtime stubs (never called with empty arms) ----------
 
@@ -38,7 +38,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -54,7 +57,10 @@ impl RuntimeSpawner for UnusedRuntime {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _duration: Duration) {}
-    async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _handle: &platform_api::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -299,10 +305,11 @@ async fn pre_hook_blocks_bash_tool() {
     let captured = api.captured_msgs().await;
     assert_eq!(captured.len(), 2, "expected 2 API turns");
     let turn2 = &captured[1];
-    let user_msg_with_result = turn2
-        .last()
-        .expect("at least one message in turn 2 history");
-    let payload = serde_json::to_string(user_msg_with_result).unwrap();
+    let payload = turn2
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .find(|payload| payload.contains("tool_result"))
+        .expect("turn 2 contains the hook-blocked tool result");
     assert!(
         payload.contains("PreToolUse:Bash hook error: Bash is gated"),
         "turn-2 history must include the hook-blocked tool result; got: {payload}"

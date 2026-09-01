@@ -10,9 +10,9 @@ use command_api::builtin_support::list_render::render_list;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{McpServerInfo, McpStatus, OrchestratorHandle};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::{McpServerInfo, McpStatus, OrchestratorHandle};
 
 /// `/mcp` handler — list mode.
 #[derive(Clone)]

@@ -36,6 +36,7 @@ use orchestrator::test_support_stream::{
     text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -43,7 +44,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -52,7 +52,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

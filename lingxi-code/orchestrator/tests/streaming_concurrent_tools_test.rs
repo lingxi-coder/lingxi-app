@@ -13,6 +13,7 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::OutputEvent;
 use protocol::ToolUseId;
 use serde_json::json;
 use std::path::PathBuf;
@@ -24,7 +25,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::OutputEvent;
 
 struct SlowTool;
 struct FastTool;

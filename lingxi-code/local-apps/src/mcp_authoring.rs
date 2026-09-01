@@ -4,11 +4,11 @@ use crate::{
     allowed_for_synchronous_flow, AppError, AppLayout, CapabilityId, CapabilityRegistry,
     CapabilityTransport, FlowDefinition, APPS_SCHEMA_VERSION,
 };
+use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
 
 /// Maximum generated Local App tools allowed in one published catalog.
 pub const MAX_GENERATED_MCP_TOOLS: usize = 16;
@@ -1007,6 +1007,15 @@ pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal,
     Ok(journal)
 }
 
+/// Remove a completed create-only candidate journal. Missing files are a
+/// successful no-op so crash-recovery cleanup is idempotent.
+pub fn delete_candidate_journal(layout: &AppLayout) -> Result<(), AppError> {
+    match platform_api::rooted_fs::remove_file(layout.root(), &layout.mcp_authoring_journal_rel()) {
+        Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
+        Err(error) => Err(AppError::from_fs("delete candidate journal", &error)),
+    }
+}
+
 impl McpConfirmationReceipt {
     pub const TTL_MS: u64 = 10 * 60 * 1_000;
 
@@ -1601,9 +1610,9 @@ mod tests {
     use crate::{
         AppLayout, CapabilityId, CapabilityRegistry, FlowDefinition, FlowStep, APPS_SCHEMA_VERSION,
     };
+    use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
     use serde_json::json;
     use std::collections::BTreeMap;
-    use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
 
     #[test]
     fn zero_tool_catalog_is_valid() {

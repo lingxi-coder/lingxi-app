@@ -27,7 +27,7 @@ use crate::broker::{spawn as spawn_broker, BrokerError, BrokerHandle};
 use crate::codec::CodecError;
 use crate::inbound::{BoxedHandler, Dispatcher};
 use crate::messages::{Message, Notification};
-use crate::router::{Router, RouterError, DEFAULT_STARTING_REQUEST_ID};
+use crate::router::{Router, RouterError, StartedCall, DEFAULT_STARTING_REQUEST_ID};
 
 /// Connection-level error variants — surfaces the broker, router, codec, and
 /// I/O error types through a single enum the public API can return.
@@ -248,6 +248,16 @@ impl Connection {
         params: P,
     ) -> Result<R, ConnectionError> {
         Ok(self.router.call_unbounded(method, params).await?)
+    }
+
+    /// Start an outbound request without a local timeout and return the
+    /// assigned JSON-RPC id plus a later wait handle.
+    pub fn start_call_unbounded<P: Serialize>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<StartedCall, ConnectionError> {
+        Ok(self.router.start_call_unbounded(method, params)?)
     }
 
     /// Send an outbound request with an explicit per-call timeout.

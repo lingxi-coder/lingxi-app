@@ -234,7 +234,7 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
     }
 }
 
-fn modern_meta(version: &str) -> serde_json::Value {
+pub(crate) fn modern_meta(version: &str) -> serde_json::Value {
     serde_json::json!({
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientInfo": {
@@ -256,6 +256,7 @@ fn modern_request_requires_meta(method: &str) -> bool {
         method,
         "tools/list"
             | "tools/call"
+            | "subscriptions/listen"
             | "prompts/list"
             | "prompts/get"
             | "resources/list"
@@ -763,11 +764,18 @@ impl McpClient {
                     Some(note) => note,
                     None => t.description,
                 };
+                let search_hint = tool_meta_search_hint(&t.meta);
+                let always_load = tool_meta_always_load(&t.meta);
+                let requires_user_interaction = tool_meta_requires_user_interaction(&t.meta);
                 Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
                     description: truncate_description(&description).into_owned(),
                     input_schema: decision.schema,
+                    output_schema: t.output_schema,
+                    annotations: t.annotations,
+                    icons: t.icons,
+                    meta: t.meta,
                     tool_name: t.name,
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
@@ -775,13 +783,13 @@ impl McpClient {
                     // `alwaysLoad: true` config (parity 2.1.207 P2-01) forces
                     // ALL of this server's tools always-loaded, overriding an
                     // absent per-tool bit.
-                    search_hint: t.meta.search_hint,
+                    search_hint,
                     always_load: if self.config_always_load {
                         Some(true)
                     } else {
-                        t.meta.always_load
+                        always_load
                     },
-                    requires_user_interaction: t.meta.requires_user_interaction,
+                    requires_user_interaction,
                 })
             })
             .collect();
@@ -1220,7 +1228,9 @@ impl McpClient {
             .map(|r| McpResourceDto {
                 uri: r.uri,
                 name: r.name,
+                description: r.description,
                 mime_type: r.mime_type,
+                meta: r.meta,
             })
             .collect())
     }
@@ -1246,6 +1256,8 @@ impl McpClient {
             .map(|c| McpResourceContentDto {
                 uri: c.uri,
                 content: c.text,
+                mime_type: c.mime_type,
+                meta: c.meta,
             })
             .ok_or_else(|| {
                 McpClientError::Deserialize("resources/read returned empty contents array".into())
@@ -1287,6 +1299,7 @@ impl McpClient {
                 // the posix transport).
                 uri: c.uri.unwrap_or_else(|| uri.to_string()),
                 mime_type: c.mime_type,
+                meta: c.meta,
                 text: c.text,
                 blob: c.blob,
             })
@@ -1473,8 +1486,12 @@ struct RawResource {
     uri: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<serde_json::Value>,
 }
 
 /// TR-03 `NSf` (oracle @289724681) — the hard page cap on a paginated
@@ -1537,6 +1554,10 @@ struct RawResourceContent {
     uri: String,
     #[serde(default)]
     text: String,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<serde_json::Value>,
 }
 
 /// Wire-level shape of a `resources/read` response for the MCP-5d rich path.
@@ -1556,6 +1577,8 @@ struct RawResourceContentRich {
     uri: Option<String>,
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<serde_json::Value>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
@@ -1907,39 +1930,34 @@ struct RawTool {
     description: String,
     #[serde(rename = "inputSchema", default)]
     input_schema: serde_json::Value,
+    #[serde(rename = "outputSchema", default)]
+    output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    annotations: Option<platform_api::McpToolAnnotationsDto>,
+    #[serde(default)]
+    icons: Vec<platform_api::McpIconDto>,
     #[serde(default, rename = "_meta")]
-    meta: ToolMeta,
+    meta: Option<serde_json::Value>,
 }
 
-/// Optional `_meta` companion attached to each tool. All fields default to
-/// `None`/`false` when absent so non-claude-code servers decode cleanly.
-///
-/// Public because the round-trip serde contract for the slashed key names
-/// (`anthropic/searchHint`, `anthropic/alwaysLoad`,
-/// `anthropic/requiresUserInteraction`) is part of the load-bearing wire
-/// surface tests assert against.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ToolMeta {
-    /// Claude-code retrieval prefilter hint (e.g. `"shell"`, `"editor"`).
-    #[serde(default, rename = "anthropic/searchHint")]
-    pub search_hint: Option<String>,
-    /// `true` to force-include the tool in the agent prompt even when the
-    /// search hint doesn't match the current task.
-    #[serde(default, rename = "anthropic/alwaysLoad")]
-    pub always_load: Option<bool>,
-    /// `true` when the tool needs a fresh, in-the-moment user interaction on
-    /// every invocation (e.g. an embedded OAuth/consent step) that a stored
-    /// "always allow" rule cannot satisfy. Oracle: `v._meta?.
-    /// ["anthropic/requiresUserInteraction"]===!0` (client.ts factory,
-    /// binary-confirmed @182519150); read back as `requiresUserInteraction()`
-    /// (@182520425) and folded into `suppressesAlwaysAllowRule` (@182520462).
-    /// Forwarded onto `platform_api::McpToolDto::requires_user_interaction` and from
-    /// there onto `tool-mcp`'s `MCPTool::requires_user_interaction` override,
-    /// so a persistent "always allow" grant is never offered/written for such
-    /// a tool (see `tui/src/permission_gate.rs` and
-    /// `tui/src/bottom_pane/permission_view.rs`).
-    #[serde(default, rename = "anthropic/requiresUserInteraction")]
-    pub requires_user_interaction: bool,
+fn tool_meta_search_hint(meta: &Option<serde_json::Value>) -> Option<String> {
+    meta.as_ref()
+        .and_then(|meta| meta.get("anthropic/searchHint"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn tool_meta_always_load(meta: &Option<serde_json::Value>) -> Option<bool> {
+    meta.as_ref()
+        .and_then(|meta| meta.get("anthropic/alwaysLoad"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn tool_meta_requires_user_interaction(meta: &Option<serde_json::Value>) -> bool {
+    meta.as_ref()
+        .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Wire-level shape of a `tools/call` response body.
@@ -2716,7 +2734,15 @@ mod constructor_tests {
             serde_json::json!([
                 { "name": "a", "description": "A", "inputSchema": {} },
                 { "name": "b", "description": "B", "inputSchema": {},
-                  "_meta": { "anthropic/requiresUserInteraction": true } },
+                  "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } } },
+                  "annotations": { "title": "B", "readOnlyHint": true,
+                    "vendor/riskTier": "reviewed" },
+                  "icons": [{ "src": "https://example.invalid/icon.svg",
+                    "vendor/accent": "blue" }],
+                  "_meta": {
+                    "anthropic/requiresUserInteraction": true,
+                    "openai/outputTemplate": "ui://example/widget.html"
+                  } },
             ]),
         )
         .await;
@@ -2726,6 +2752,39 @@ mod constructor_tests {
         assert!(!tools[0].requires_user_interaction);
         // `_meta.anthropic/requiresUserInteraction: true` ⇒ forwarded as-is.
         assert!(tools[1].requires_user_interaction);
+        assert_eq!(
+            tools[1].output_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } }
+            }))
+        );
+        assert_eq!(
+            tools[1]
+                .annotations
+                .as_ref()
+                .and_then(|a| a.title.as_deref()),
+            Some("B")
+        );
+        assert_eq!(tools[1].icons.len(), 1);
+        assert_eq!(
+            tools[1]
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.extra.get("vendor/riskTier")),
+            Some(&serde_json::json!("reviewed"))
+        );
+        assert_eq!(
+            tools[1].icons[0].extra.get("vendor/accent"),
+            Some(&serde_json::json!("blue"))
+        );
+        assert_eq!(
+            tools[1].meta,
+            Some(serde_json::json!({
+                "anthropic/requiresUserInteraction": true,
+                "openai/outputTemplate": "ui://example/widget.html"
+            }))
+        );
     }
 
     #[tokio::test]
@@ -2755,6 +2814,10 @@ mod constructor_tests {
             tool_name: "write".into(),
             description: "write".into(),
             input_schema: serde_json::json!({}),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
             full_name: "mcp__srv__write".into(),
             search_hint: None,
             always_load: None,

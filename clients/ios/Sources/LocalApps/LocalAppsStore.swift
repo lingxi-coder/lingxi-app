@@ -41,6 +41,9 @@ final class LocalAppsStore {
     private(set) var builtinPluginInventory: LocalAppBuiltinPluginInventory?
     private(set) var builtinPluginStatus: LocalAppBuiltinPluginStatus?
     private(set) var builtinPluginCommandError: String?
+    private(set) var managedMcpInventories: [String: LocalAppManagedMcpInventory] = [:]
+    private(set) var managedMcpCommandErrors: [String: String] = [:]
+    private(set) var pendingManagedMcpAppIDs: Set<String> = []
     private(set) var lastRefreshAt: Date?
     /// The id of the app the last `createApp` produced, consumed once by the
     /// library so the user lands on the new app's detail screen. The FALLBACK
@@ -162,7 +165,6 @@ final class LocalAppsStore {
     @ObservationIgnored private var approvedUIAutomation: [String: LocalAppCapabilityDecision] = [:]
     @ObservationIgnored private var runtimeLastUsedAt: [String: Date] = [:]
     @ObservationIgnored private var pendingBuiltinPluginEnabled: Bool?
-    @ObservationIgnored private var managedMcpInventories: [String: LocalAppManagedMcpInventory] = [:]
     @ObservationIgnored private let websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry
     @ObservationIgnored private var websiteDataCleanupTask: Task<Void, Never>?
     /// Coalesces simultaneous library/detail refreshes into one bridge call.
@@ -180,6 +182,8 @@ final class LocalAppsStore {
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
+        @ObservationIgnored private var submitManagedMcpCommand:
+            ((LocalAppManagedMcpCommand) async -> Bool)?
         @ObservationIgnored private var pendingBackgroundMutationRequests: Set<String> = []
 
         private enum PendingApprovalKind {
@@ -242,9 +246,50 @@ final class LocalAppsStore {
         ).read(serverName: serverName, apps: apps)
     }
 
+    func managedMcpInventory(
+        appID: String,
+        appSandboxRoot: String? = nil
+    ) -> LocalAppManagedMcpInventory {
+        if let inventory = managedMcpInventories.values.first(where: { $0.appID == appID }) {
+            return inventory
+        }
+        if let persisted = managedMcpInventory(
+            serverName: "local_app_\(appID)",
+            appSandboxRoot: appSandboxRoot
+        ) {
+            return persisted
+        }
+        let publicationState = app(id: appID)?.workflow ?? .draft
+        return LocalAppManagedMcpInventory.placeholder(
+            appID: appID,
+            appName: app(id: appID)?.displayName ?? appID,
+            publicationState: publicationState
+        )
+    }
+
+    func managedMcpCommandError(appID: String) -> String? {
+        managedMcpCommandErrors[appID]
+    }
+
+    func clearManagedMcpCommandError(appID: String) {
+        managedMcpCommandErrors.removeValue(forKey: appID)
+    }
+
+    func isManagedMcpPending(appID: String) -> Bool {
+        pendingManagedMcpAppIDs.contains(appID)
+    }
+
     #if canImport(engine_mobileFFI)
         func configure(submit: @escaping (ClientCommand) async throws -> Void) {
             submitCommand = submit
+        }
+
+        func configureManagedMcpCommands(
+            submit: @escaping (LocalAppManagedMcpCommand) async -> Bool
+        ) {
+            // Wired by the engine integration once the dedicated managed-MCP
+            // PluginCommandDto cases land in the generated bindings.
+            submitManagedMcpCommand = submit
         }
 
         func refreshBuiltinPluginStatus() async {
@@ -311,6 +356,66 @@ final class LocalAppsStore {
                         requestId: prompt.requestID,
                         approved: approved
                     )
+                )
+            )
+        }
+
+        func refreshManagedMcpInventory() async {
+            _ = await send(.pluginCommand(command: .getManagedMcpInventory))
+        }
+
+        func startManagedMcpAuthoring(appID: String, userGoal: String) async -> Bool {
+            return await submitManagedMcpCommand(
+                appID: appID,
+                optimistic: nil,
+                command: .startAuthoring(appID: appID, userGoal: userGoal)
+            )
+        }
+
+        func setManagedMcpEnabled(appID: String, enabled: Bool) async -> Bool {
+            let inventory = managedMcpInventory(appID: appID)
+            return await submitManagedMcpCommand(
+                appID: appID,
+                optimistic: inventory.updatingEnabled(enabled),
+                command: .setEnabled(
+                    appID: appID,
+                    enabled: enabled,
+                    expectedRevision: inventory.settingsRevision
+                )
+            )
+        }
+
+        func setManagedMcpToolEnabled(
+            appID: String,
+            toolName: String,
+            enabled: Bool
+        ) async -> Bool {
+            let inventory = managedMcpInventory(appID: appID)
+            return await submitManagedMcpCommand(
+                appID: appID,
+                optimistic: inventory.updatingTool(toolName, enabled: enabled),
+                command: .setToolEnabled(
+                    appID: appID,
+                    toolName: toolName,
+                    enabled: enabled,
+                    expectedRevision: inventory.settingsRevision
+                )
+            )
+        }
+
+        func setManagedMcpConversationPinned(
+            conversationID: String,
+            appID: String,
+            pinned: Bool
+        ) async -> Bool {
+            let inventory = managedMcpInventory(appID: appID)
+            return await submitManagedMcpCommand(
+                appID: appID,
+                optimistic: inventory.updatingConversationPinned(pinned),
+                command: .setConversationPinned(
+                    conversationID: conversationID,
+                    appID: appID,
+                    pinned: pinned
                 )
             )
         }
@@ -421,6 +526,38 @@ final class LocalAppsStore {
             default:
                 break
             }
+        }
+    #endif
+
+    #if !canImport(engine_mobileFFI)
+        func refreshManagedMcpInventory() async {}
+
+        func startManagedMcpAuthoring(appID: String, userGoal: String) async -> Bool {
+            managedMcpCommandErrors[appID] = "Local App MCP controls are unavailable until the engine bindings are installed."
+            return false
+        }
+
+        func setManagedMcpEnabled(appID: String, enabled: Bool) async -> Bool {
+            managedMcpCommandErrors[appID] = "Local App MCP controls are unavailable until the engine bindings are installed."
+            return false
+        }
+
+        func setManagedMcpToolEnabled(
+            appID: String,
+            toolName: String,
+            enabled: Bool
+        ) async -> Bool {
+            managedMcpCommandErrors[appID] = "Local App MCP controls are unavailable until the engine bindings are installed."
+            return false
+        }
+
+        func setManagedMcpConversationPinned(
+            conversationID: String,
+            appID: String,
+            pinned: Bool
+        ) async -> Bool {
+            managedMcpCommandErrors[appID] = "Local App MCP controls are unavailable until the engine bindings are installed."
+            return false
         }
     #endif
 
@@ -1294,6 +1431,9 @@ final class LocalAppsStore {
                         return (inventory.serverName, inventory)
                     }
                 )
+                let liveManagedAppIDs = Set(managedMcpInventories.values.map(\.appID))
+                managedMcpCommandErrors = managedMcpCommandErrors.filter { liveManagedAppIDs.contains($0.key) }
+                pendingManagedMcpAppIDs.subtract(liveManagedAppIDs)
 
             case let .verificationSummaryChanged(appId, publicationState, mcpVerification, uiVerification):
                 updateApp(appID: appId) { app in
@@ -1309,6 +1449,8 @@ final class LocalAppsStore {
                 }
                 if let appId {
                     updateManagedInventoryFailure(appID: appId, message: message)
+                    managedMcpCommandErrors[appId] = message
+                    pendingManagedMcpAppIDs.remove(appId)
                 }
                 errorMessage = message
 
@@ -1492,6 +1634,10 @@ final class LocalAppsStore {
                     catalogDigest: inventory.catalogDigest,
                     toolSurfaceDigest: inventory.toolSurfaceDigest,
                     authoringRevision: inventory.authoringRevision,
+                    enabled: inventory.enabled,
+                    status: .error,
+                    settingsRevision: inventory.settingsRevision,
+                    pinnedToCurrentConversation: inventory.pinnedToCurrentConversation,
                     publicationState: inventory.publicationState,
                     mcpVerification: LocalAppVerificationSummary(
                         status: .failed,
@@ -1499,9 +1645,42 @@ final class LocalAppsStore {
                         code: inventory.mcpVerification.code
                     ),
                     uiVerification: inventory.uiVerification,
+                    enabledTools: inventory.enabledTools,
+                    widget: inventory.widget,
                     tools: inventory.tools
                 )
             }
+        }
+
+        private func submitManagedMcpCommand(
+            appID: String,
+            optimistic: LocalAppManagedMcpInventory?,
+            command: LocalAppManagedMcpCommand
+        ) async -> Bool {
+            managedMcpCommandErrors.removeValue(forKey: appID)
+            pendingManagedMcpAppIDs.insert(appID)
+            let previousInventory = managedMcpInventories.values.first(where: { $0.appID == appID })
+            if let optimistic {
+                managedMcpInventories[optimistic.serverName] = optimistic
+            }
+            guard let submitManagedMcpCommand else {
+                pendingManagedMcpAppIDs.remove(appID)
+                if let previousInventory {
+                    managedMcpInventories[previousInventory.serverName] = previousInventory
+                }
+                managedMcpCommandErrors[appID] = "Local App MCP controls need the newer engine protocol to send managed MCP commands."
+                return false
+            }
+            let submitted = await submitManagedMcpCommand(command)
+            if !submitted {
+                pendingManagedMcpAppIDs.remove(appID)
+                if let previousInventory {
+                    managedMcpInventories[previousInventory.serverName] = previousInventory
+                }
+                managedMcpCommandErrors[appID] = "The host rejected the Local App MCP command."
+                return false
+            }
+            return true
         }
 
         private func resolveUIRequest(
@@ -1806,8 +1985,15 @@ struct LocalAppManagedMcpInventoryReader {
         let catalogURL = URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
             .appendingPathComponent("apps/\(appID)/mcp/catalogs/\(catalogDigest).json")
         guard let catalogObject = jsonObject(at: catalogURL),
-              let tools = catalogObject["tools"] as? [[String: Any]]
+              let toolObjects = catalogObject["tools"] as? [[String: Any]]
         else { return nil }
+        let parsedTools = toolObjects.compactMap(tool)
+        let settingsURL = URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
+            .appendingPathComponent("apps/\(appID)/mcp/settings.json")
+        let settings = jsonObject(at: settingsURL) ?? [:]
+        let enabled = settings["enabled"] as? Bool ?? false
+        let settingsRevision = (settings["revision"] as? NSNumber)?.uint64Value ?? 0
+        let enabledTools = Set(settings["enabledTools"] as? [String] ?? [])
 
         return LocalAppManagedMcpInventory(
             serverName: serverName,
@@ -1817,6 +2003,10 @@ struct LocalAppManagedMcpInventoryReader {
             catalogDigest: catalogDigest,
             toolSurfaceDigest: toolSurfaceDigest,
             authoringRevision: authoringRevision.uint64Value,
+            enabled: enabled && !enabledTools.isEmpty,
+            status: enabled && !enabledTools.isEmpty ? .enabled : .disabled,
+            settingsRevision: settingsRevision,
+            pinnedToCurrentConversation: false,
             publicationState: app.workflow,
             mcpVerification: LocalAppVerificationSummary(
                 status: verificationDigest.isEmpty ? .unverified : .passed,
@@ -1828,7 +2018,9 @@ struct LocalAppManagedMcpInventoryReader {
                 summary: app.workflow == .publishedVerified ? "Published UI verification passed." : "UI verification pending.",
                 code: nil
             ),
-            tools: tools.compactMap(tool)
+            enabledTools: enabledTools,
+            widget: nil,
+            tools: parsedTools
         )
     }
 

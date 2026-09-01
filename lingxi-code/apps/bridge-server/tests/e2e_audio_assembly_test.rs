@@ -40,9 +40,9 @@ use client_protocol::commands::{AudioResultDto, ClientCommand};
 use client_protocol::events::{AudioOpDto, ClientEvent};
 use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
+use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
-use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 
 const TEST_TOKEN: &str = "audio-asm-token-32chars000000000";
 
@@ -190,7 +190,9 @@ where
 /// Round-trip a frame the connection always answers, so everything sent BEFORE
 /// it has necessarily been dispatched by the time this returns.
 async fn barrier(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) {
     let hello = Frame::Request(BridgeRequest {
         id: 99,

@@ -38,13 +38,13 @@ use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
     AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
+use platform_api::Clock;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use platform_api::Clock;
 
 tokio::task_local! {
     /// Set for the duration of every event-delivery task; its presence at an

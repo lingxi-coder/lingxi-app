@@ -51,6 +51,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -1033,6 +1034,11 @@ private fun LocalAppDetailsScreen(
                         )
                     }
                 }
+                LocalAppDetailsTab.Mcp -> LocalAppMcpDetails(
+                    appId = appId,
+                    state = state,
+                    onAction = onAction,
+                )
                 LocalAppDetailsTab.Data -> LocalAppDataDetails(state.details[appId])
                 LocalAppDetailsTab.Code -> LocalAppCodeDetails(appId, state.details[appId])
                 LocalAppDetailsTab.History -> LocalAppHistoryDetails(appId, state.details[appId], onAction)
@@ -1043,6 +1049,196 @@ private fun LocalAppDetailsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun LocalAppMcpDetails(
+    appId: String,
+    state: LocalAppsUiState,
+    onAction: (LocalAppsAction) -> Unit,
+) {
+    val managed = state.managedMcp(appId)
+    val draft = state.mcpDraft(appId)
+    val pending = state.mcpPendingByApp[appId]
+    val error = state.mcpErrorByApp[appId]
+    val toolSectionEnabled = managed.tools.isNotEmpty() && managed.status != LocalAppManagedMcpStatus.Authoring
+    Column(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+    ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(16.dp),
+            ) {
+                Text(
+                    stringResource(R.string.local_apps_mcp_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    stringResource(R.string.local_apps_mcp_status_fmt, managed.status.label()),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (pending != null) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        pending,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (error != null) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                ToggleRow(
+                    title = stringResource(R.string.local_apps_mcp_enable_service),
+                    subtitle = stringResource(R.string.local_apps_mcp_enable_service_detail),
+                    checked = managed.enabled,
+                    enabled = managed.tools.isNotEmpty() || managed.status != LocalAppManagedMcpStatus.NeedsSetup,
+                    onCheckedChange = { onAction(LocalAppsAction.SetMcpEnabled(appId, it)) },
+                )
+                ToggleRow(
+                    title = stringResource(R.string.local_apps_mcp_pin_current_conversation),
+                    subtitle = stringResource(R.string.local_apps_mcp_pin_current_conversation_detail),
+                    checked = managed.pinnedToCurrentConversation,
+                    enabled = managed.tools.isNotEmpty(),
+                    onCheckedChange = { onAction(LocalAppsAction.SetMcpPinnedToConversation(appId, it)) },
+                )
+                managed.widget?.takeIf { it.available }?.let { widget ->
+                    Text(
+                        widget.detail ?: widget.label ?: stringResource(R.string.local_apps_mcp_widget_ready),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                managed.mcpVerification?.let { VerificationSummaryRow(label = stringResource(R.string.local_apps_verification_mcp), summary = it) }
+                managed.uiVerification?.let { VerificationSummaryRow(label = stringResource(R.string.local_apps_verification_ui), summary = it) }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(16.dp),
+            ) {
+                Text(
+                    stringResource(R.string.local_apps_mcp_customize_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                OutlinedTextField(
+                    value = draft.userGoal,
+                    onValueChange = { onAction(LocalAppsAction.UpdateMcpGoal(appId, it)) },
+                    label = { Text(stringResource(R.string.local_apps_mcp_goal_label)) },
+                    placeholder = { Text(stringResource(R.string.local_apps_mcp_goal_placeholder)) },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { onAction(LocalAppsAction.StartMcpAuthoring(appId)) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            stringResource(
+                                if (managed.status == LocalAppManagedMcpStatus.NeedsSetup) {
+                                    R.string.local_apps_mcp_start_authoring
+                                } else {
+                                    R.string.local_apps_mcp_update_authoring
+                                },
+                            ),
+                        )
+                    }
+                }
+                if (managed.status == LocalAppManagedMcpStatus.NeedsSetup && managed.tools.isEmpty()) {
+                    Text(
+                        stringResource(R.string.local_apps_mcp_needs_setup_detail),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (managed.tools.isEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(16.dp),
+                ) {
+                    Text(
+                        stringResource(R.string.local_apps_mcp_tools_empty_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        stringResource(R.string.local_apps_mcp_tools_empty_detail),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            Text(
+                stringResource(R.string.local_apps_mcp_tools_title),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            managed.tools.forEach { tool ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(16.dp),
+                    ) {
+                        ToggleRow(
+                            title = tool.title ?: tool.name,
+                            subtitle = tool.description ?: tool.permissionCeiling,
+                            checked = tool.enabled,
+                            enabled = toolSectionEnabled,
+                            onCheckedChange = {
+                                onAction(LocalAppsAction.SetMcpToolEnabled(appId, tool.name, it))
+                            },
+                        )
+                        Text(
+                            stringResource(R.string.local_apps_mcp_tool_permission_fmt, tool.permissionCeiling),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
@@ -1696,6 +1892,16 @@ private fun LocalAppWorkflow.label(): String = when (this) {
 }
 
 @Composable
+private fun LocalAppManagedMcpStatus.label(): String = when (this) {
+    LocalAppManagedMcpStatus.Disabled -> stringResource(R.string.local_apps_mcp_status_disabled)
+    LocalAppManagedMcpStatus.NeedsSetup -> stringResource(R.string.local_apps_mcp_status_needs_setup)
+    LocalAppManagedMcpStatus.Authoring -> stringResource(R.string.local_apps_mcp_status_authoring)
+    LocalAppManagedMcpStatus.Enabled -> stringResource(R.string.local_apps_mcp_status_enabled)
+    LocalAppManagedMcpStatus.NeedsRevalidation -> stringResource(R.string.local_apps_mcp_status_needs_revalidation)
+    LocalAppManagedMcpStatus.Error -> stringResource(R.string.local_apps_mcp_status_error)
+}
+
+@Composable
 private fun FlowRowBadges(
     badges: List<LocalAppStatusBadgeKind>,
     modifier: Modifier = Modifier,
@@ -1900,6 +2106,7 @@ private fun LocalAppRuntimeProfileStatus.localizedLabel(): String = when (this) 
 private fun LocalAppDetailsTab.label(): String = when (this) {
     LocalAppDetailsTab.Sessions -> stringResource(R.string.local_apps_section_sessions)
     LocalAppDetailsTab.Preview -> stringResource(R.string.local_apps_section_preview)
+    LocalAppDetailsTab.Mcp -> stringResource(R.string.local_apps_section_mcp)
     LocalAppDetailsTab.Data -> stringResource(R.string.local_apps_section_data)
     LocalAppDetailsTab.Code -> stringResource(R.string.local_apps_section_code)
     LocalAppDetailsTab.History -> stringResource(R.string.local_apps_section_history)

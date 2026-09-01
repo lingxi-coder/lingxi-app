@@ -223,8 +223,8 @@ mod tests {
     use super::*;
     use crate::capabilities::AndroidSandboxCapabilities;
     use crate::policy::{AndroidSandboxPlan, NetProfile}; // not in the impl's imports — tests need it explicitly
-    use std::collections::HashMap;
     use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
+    use std::collections::HashMap;
 
     fn ready_caps() -> AndroidSandboxCapabilities {
         AndroidSandboxCapabilities {
@@ -504,7 +504,10 @@ mod tests {
         let err = sb
             .prepare(cmd(Some(tmp.path().join("missing"))), &deny_net_policy())
             .unwrap_err();
-        assert!(matches!(err, platform_api::SandboxError::PathCanonicalize(_)));
+        assert!(matches!(
+            err,
+            platform_api::SandboxError::PathCanonicalize(_)
+        ));
     }
 
     #[test]

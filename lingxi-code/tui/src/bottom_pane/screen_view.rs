@@ -320,7 +320,10 @@ impl ScreenView {
         let fallback;
         let breakdown = if usage.breakdown.is_empty() {
             fallback = vec![
-                platform_api::ContextUsageCategory::new(platform_api::ContextUsageCategoryKind::Messages, used),
+                platform_api::ContextUsageCategory::new(
+                    platform_api::ContextUsageCategoryKind::Messages,
+                    used,
+                ),
                 platform_api::ContextUsageCategory::new(
                     platform_api::ContextUsageCategoryKind::FreeSpace,
                     max.saturating_sub(used),
@@ -654,8 +657,8 @@ fn context_category_label(kind: platform_api::ContextUsageCategoryKind) -> &'sta
 }
 
 fn context_category_style(kind: platform_api::ContextUsageCategoryKind) -> Style {
-    use ratatui::style::Color;
     use platform_api::ContextUsageCategoryKind as Kind;
+    use ratatui::style::Color;
     match kind {
         Kind::SystemPrompt => Style::default().fg(Color::Magenta),
         Kind::SystemTools => Style::default().fg(Color::Blue),
@@ -974,6 +977,7 @@ mod tests {
             request_model: "claude-opus".into(),
             profile: None,
             provider_label: "Anthropic".into(),
+            provenance: platform_api::ModelProvenance::ProviderCatalogTier,
             is_current: true,
             supports_reasoning: true,
             supports_multimodal: false,
@@ -1038,6 +1042,10 @@ mod tests {
 
     #[test]
     fn settings_screen_probes_files_and_declares_itself_read_only() {
+        let _state = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        telemetry::test_clear_flag("tengu_maple_sundial");
         let dir = std::env::temp_dir().join(format!("tui-rata-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tempdir");
         std::fs::write(dir.join("settings.json"), b"{}").expect("write settings");
@@ -1339,9 +1347,9 @@ mod tests {
         // a dead chord here but is now a real registry-backed command, so it is
         // asserted present by the advertised-command sweep above.)
         assert!(!text.contains("for bash mode"));
-        // Parity: 2.1.206's help dialog renders no "For more help" docs footer,
-        // and does not advertise the unported `/powerup` command.
+        // Parity: the help dialog renders no "For more help" docs footer.
+        // `/powerup` is now a live registry command and is covered by the
+        // advertised-command sweep above.
         assert!(!text.contains("For more help"));
-        assert!(!text.contains("/powerup"));
     }
 }

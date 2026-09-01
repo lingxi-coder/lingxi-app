@@ -33,10 +33,10 @@ use bridge_server::server::BridgeConnection;
 use client_protocol::commands::{AudioResultDto, ClientCommand};
 use client_protocol::events::{AudioOpDto, ClientEvent};
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
-use tokio_tungstenite::tungstenite::Message;
 use platform_api::stt::{SpeechToText, SttOpts};
 use platform_api::voice::{VoiceError, VoiceRecorder};
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "audio-e2e-token-32chars000000000";
 

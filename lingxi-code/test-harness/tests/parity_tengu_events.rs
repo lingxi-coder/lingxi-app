@@ -1,4 +1,4 @@
-//! Parity fixture: lock the full 143-name `tengu_*` event-name registry.
+//! Parity fixture: lock the full count-locked `tengu_*` event-name registry.
 //!
 //! v3 §32.6 fixture protocol. The fixture is the single source of truth for
 //! the M3-06 event-name list. Any drift from `ALL_EVENT_NAMES` indicates an
@@ -15,6 +15,10 @@ struct SamplePayload {
 
 #[derive(Deserialize)]
 struct Fixture {
+    #[serde(rename = "_current_audit")]
+    current_audit: String,
+    #[serde(rename = "_registry_count_lock")]
+    registry_count_lock: usize,
     event_names: Vec<String>,
     cost_sample_payloads: Vec<SamplePayload>,
 }
@@ -23,6 +27,8 @@ struct Fixture {
 fn event_names_match_registry_byte_for_byte() {
     let fx: Fixture = load_fixture("tengu_events");
     let registry = telemetry::tengu::ALL_EVENT_NAMES;
+    assert_eq!(fx.registry_count_lock, 395);
+    assert_eq!(registry.len(), fx.registry_count_lock);
     assert_eq!(
         fx.event_names.len(),
         registry.len(),
@@ -36,6 +42,28 @@ fn event_names_match_registry_byte_for_byte() {
             "position {i} differs: fixture {f:?} vs registry {r:?}",
         );
     }
+}
+
+#[test]
+fn current_audit_keeps_unimplemented_mcp_telemetry_visible() {
+    let fx: Fixture = load_fixture("tengu_events");
+    assert!(
+        fx.current_audit.contains("23 of the oracle's 53")
+            && fx.current_audit.contains("29 absent"),
+        "current audit must retain the confirmed MCP telemetry remainder: {}",
+        fx.current_audit
+    );
+    assert!(
+        fx.current_audit.contains("schema-only"),
+        "plugin telemetry must remain marked schema-only until production emit sites exist"
+    );
+    assert!(
+        fx.current_audit.contains("23 of the oracle's 53")
+            && fx
+                .current_audit
+                .contains("now in this count-locked registry"),
+        "the audit must retain the confirmed registered MCP event names"
+    );
 }
 
 #[test]

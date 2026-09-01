@@ -5,13 +5,13 @@
 //! refreshes on a fixed interval via the [`RuntimeSpawner`] trait so engine
 //! code never spawns tasks directly.
 
+use platform_api::{RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use platform_api::{RuntimeError, RuntimeSpawner};
 
 // ── Synchronous GrowthBook-style flag reader (binary `nt`) ───────────────────
 //

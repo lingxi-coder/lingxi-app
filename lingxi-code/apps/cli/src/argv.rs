@@ -901,12 +901,10 @@ pub struct Argv {
     // is set — matching the shipped binary, whose `isBriefEnabled` (`aKr()`)
     // gates the tool on `Z.CLAUDE_CODE_BRIEF || dge("tengu_kairos_brief", !1)`.
     //
-    // WIRED: `run_cli` exports `LINGXI_BRIEF=1` for this process + children
-    // (CC's `CAn(e)` treats `e.brief` and the env as equivalent triggers, and
-    // the env is what the tool gate `aKr()` reads). `tool_ui::brief::
-    // brief_tool_enabled()` then reads `LINGXI_BRIEF`/`CLAUDE_CODE_BRIEF` (raw
-    // truthiness) OR the `tengu_kairos_brief` gate in the tool's `is_enabled`,
-    // so the default toolset is unchanged when the flag is absent. The Brief
+    // WIRED: `run_cli` publishes `e.brief` into the live session flag consumed
+    // by `tool_ui::brief::brief_tool_enabled()`. The default toolset is
+    // unchanged when the flag is absent; `/brief` can toggle the same state
+    // during an interactive session. The Brief
     // entitlement / `userMsgOptIn` classification pipeline (`isBriefEntitled`,
     // `getBriefEnforceText`) is not ported — LingXi has no entitlement gate — so
     // the flag simply exposes the tool.

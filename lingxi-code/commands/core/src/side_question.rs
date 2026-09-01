@@ -23,8 +23,8 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use std::sync::Arc;
 use platform_api::{OrchestratorHandle, RecapOutcome};
+use std::sync::Arc;
 
 /// Shown when `/btw` is invoked with no question. (The TUI dispatcher also
 /// guards the empty case before reaching the handler, so this is a defensive

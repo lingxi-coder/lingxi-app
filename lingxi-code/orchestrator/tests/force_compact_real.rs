@@ -16,9 +16,9 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use platform_api::OrchestratorHandle;
 use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
-use platform_api::OrchestratorHandle;
 
 struct CaptureCompactClient {
     seen: std::sync::Mutex<Option<sidequery::SideQueryRequest>>,

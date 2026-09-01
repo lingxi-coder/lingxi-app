@@ -57,11 +57,11 @@ use crate::result::{
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use async_trait::async_trait;
+use platform_api::permission_gate::PermissionRequestSource;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use platform_api::permission_gate::PermissionRequestSource;
 
 /// Live model/provider inputs read by the auto-mode permission gate.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -33,6 +33,7 @@ pub mod ids;
 pub mod mailbox;
 pub mod manifest;
 pub mod mcp_authoring;
+pub mod mcp_settings;
 pub mod packer;
 pub mod performance_thresholds;
 pub mod permissions;
@@ -68,8 +69,9 @@ pub use manifest::{
     WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use mcp_authoring::{
-    approval_contract_sha256, catalog_sha256, derive_local_app_mcp_ceiling, load_candidate_journal,
-    materialize_flow_value_binding, save_candidate_journal, validate_app_mcp_flow_binding,
+    approval_contract_sha256, catalog_sha256, delete_candidate_journal,
+    derive_local_app_mcp_ceiling, load_candidate_journal, materialize_flow_value_binding,
+    save_candidate_journal, validate_app_mcp_flow_binding,
     validate_app_mcp_flow_binding_for_consumer, validate_app_mcp_proposal,
     validate_generated_mcp_catalog, validate_generated_structured_result, value_matches_schema,
     AppMcpFlowBinding, AppMcpFlowContext, AppMcpProposal, AppMcpToolProposal, FlowSource,
@@ -79,6 +81,11 @@ pub use mcp_authoring::{
     MAX_GENERATED_MCP_DEFINITION_TOKENS, MAX_GENERATED_MCP_DEFINITION_UTF16,
     MAX_GENERATED_MCP_SCHEMA_BYTES, MAX_GENERATED_MCP_STRUCTURED_RESULT_BYTES,
     MAX_GENERATED_MCP_TOOLS,
+};
+pub use mcp_settings::{
+    derive_mcp_status, effective_tool_surface_sha256, load_mcp_settings, mcp_catalog_tool_names,
+    save_mcp_settings, AppMcpSettings, AppMcpStatus, MCP_SETTINGS_FILE,
+    MCP_SETTINGS_SCHEMA_VERSION,
 };
 pub use packer::{
     pack, sha256_hex, InventoryEntry, PackResult, PackedFile, PackerError, PRUNE_DIR_NAMES,

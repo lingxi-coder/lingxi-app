@@ -39,6 +39,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const ROSTER_LOCK_FILE: &str = ".locks/roster.lock";
+
 /// Wire protocol version the daemon speaks (binary `Ip`).
 pub const PROTO: u32 = 2;
 /// Minimum acceptable protocol version (binary `Zen`).
@@ -155,6 +157,19 @@ pub fn read_worktree_ownership_marker(
 #[must_use]
 pub fn roster_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("roster.json")
+}
+
+pub fn lock_roster(runtime_dir: &Path) -> std::io::Result<platform_api::rooted_fs::RootedFileLock> {
+    platform_api::rooted_fs::lock_exclusive(runtime_dir, Path::new(ROSTER_LOCK_FILE), 0o700, 0o600)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub fn with_roster_lock<T>(
+    runtime_dir: &Path,
+    f: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let _lock = lock_roster(runtime_dir)?;
+    f()
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +789,14 @@ fn is_transient_write_errno(e: &std::io::Error) -> bool {
 /// temp-file rename, dropping the transient `parseFailed` flag. Transient FS
 /// errnos are swallowed (logged); anything else is returned.
 pub fn write_roster(runtime_dir: &Path, roster: &Roster) -> std::io::Result<()> {
+    with_roster_lock(runtime_dir, || write_roster_unlocked(runtime_dir, roster))
+}
+
+pub fn write_roster_with_lock_held(runtime_dir: &Path, roster: &Roster) -> std::io::Result<()> {
+    write_roster_unlocked(runtime_dir, roster)
+}
+
+fn write_roster_unlocked(runtime_dir: &Path, roster: &Roster) -> std::io::Result<()> {
     let path = roster_path(runtime_dir);
     // mkdir -p 0o700.
     if let Some(parent) = path.parent() {

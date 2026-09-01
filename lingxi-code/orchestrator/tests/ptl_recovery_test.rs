@@ -19,11 +19,11 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig};
+use platform_api::OutputEvent;
 use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use platform_api::OutputEvent;
 
 /// A mock API client whose queue is `Result<LlmResponse, LlmError>` so a
 /// test can script `LlmError::ContextOverflow` responses. Captures per-call

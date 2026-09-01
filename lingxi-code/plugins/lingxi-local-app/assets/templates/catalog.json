@@ -1,13 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "toolchainKey": "pnpm@11.22.0/node@24.18.1",
   "templates": [
     {
-      "templateId": "react-dom-r1",
+      "templateId": "react-dom-r2",
       "family": "react_dom",
-      "revision": 1,
+      "revision": 2,
       "surface": "dom",
-      "summary": "DOM app shell with Ionic React routing and ordinary form/data surfaces",
+      "summary": "DOM app shell with Ionic React routing plus a starter MCP widget project",
       "recommendedFor": [
         "forms",
         "data pages",
@@ -16,16 +16,22 @@
       "notFor": [
         "custom game loop"
       ],
-      "contractSha256": "5fe4940d24bd8ebc065acfd96b9bcf3b6c6ee35b8cda881f3ee0c8d89afe2cfd",
-      "inventorySha256": "ecac9d15d74397a31d8aace88321b9a1c5e82c263ae2279438d6b62f8255308d",
+      "contractSha256": "86d26632e3edca20ab56e74a0154c08f1240ec29118460a11c1eebac93d0452a",
+      "inventorySha256": "53d8e020629871af9834875656c0ef44cb537577df6d32f883a9a69911783f93",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Start with a read-only search or lookup tool over the app's existing collections.",
+        "Render structuredContent in app/mcp-widget before adding mutating tools.",
+        "Use ui/message for follow-up prompts instead of encoding host-specific bridge calls."
+      ],
       "available": true
     },
     {
-      "templateId": "canvas-2d-r1",
+      "templateId": "canvas-2d-r2",
       "family": "canvas_2d",
-      "revision": 1,
+      "revision": 2,
       "surface": "canvas",
-      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop",
+      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop and MCP widget starter",
       "recommendedFor": [
         "2D visualization",
         "custom canvas",
@@ -34,16 +40,22 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "762c4e6ab401a428a99c05626dfcae1c03600f536b3cf432c080ca892ea8bda0",
-      "inventorySha256": "aad1a8efd2085a449f01826d8afe3d860c5b110726efa633fb7b35d744a974d9",
+      "contractSha256": "2d182ef8872ce22d7c1b9e362abdf23cddac7cbb12ad69d498589c6a54acf585",
+      "inventorySha256": "e13599a39d17d2be478353936307b4495e7b021b49b955871584f3a79fbf3438",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Expose read-only scene or frame state before adding write paths.",
+        "Use the widget to inspect structuredContent snapshots alongside the canvas runtime.",
+        "Keep tool contracts semantic and app-scoped; do not encode transport details."
+      ],
       "available": true
     },
     {
-      "templateId": "three-3d-r1",
+      "templateId": "three-3d-r2",
       "family": "three_3d",
-      "revision": 1,
+      "revision": 2,
       "surface": "canvas",
-      "summary": "Three.js 3D scene runtime with lifecycle and interaction helpers",
+      "summary": "Three.js 3D scene runtime with lifecycle helpers plus MCP widget starter",
       "recommendedFor": [
         "3D scene",
         "WebGL visualization",
@@ -52,16 +64,22 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "5aa58fabc2ef442ef8107c1f8fd55d6674081e9481b8a7761bf12180fb22c047",
-      "inventorySha256": "fa96ba4a2377df3a0e873580462d1b7ac95dcca4247933ff80892253c91cf5b9",
+      "contractSha256": "c40c3bcabc26a07969a30e7c68083d79cee18e2c39065f2c3063d5a7db34e623",
+      "inventorySha256": "854a371c5f69907c8292b80229c443ba487f552700421d5ff8093b2f3b8160aa",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Expose semantic scene queries such as selected object, camera, or asset inspection.",
+        "Use structuredContent for tool results and let the widget render comparison views.",
+        "Keep the widget bridge MCP-first, with no ChatGPT-only fallback path."
+      ],
       "available": true
     },
     {
-      "templateId": "phaser-2d-r1",
+      "templateId": "phaser-2d-r2",
       "family": "phaser_2d",
-      "revision": 1,
+      "revision": 2,
       "surface": "canvas",
-      "summary": "Scene-based 2D game runtime with sprite, input and collision support",
+      "summary": "Scene-based 2D game runtime with sprite support plus MCP widget starter",
       "recommendedFor": [
         "multi-scene game",
         "sprites",
@@ -72,8 +90,14 @@
         "ordinary forms",
         "static data pages"
       ],
-      "contractSha256": "7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1",
-      "inventorySha256": "b5adb57311e4f152001caf112e5a2479ecabbc85fca4265203b1b7fb73082920",
+      "contractSha256": "bdf7c54c88cd0ba7d9168be3748524b45ddde22dbd826bd0663c753cc4aaa227",
+      "inventorySha256": "481ced0795f9e934b12df10127eedc169e3a487d9fb63cfd234cf0a11287cc42",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Start with read-only gameplay state or inventory lookups.",
+        "Use the widget to inspect structuredContent for debugging and moderation flows.",
+        "Add mutating tools only after the read-only semantic surface is stable."
+      ],
       "available": true
     },
     {
@@ -92,6 +116,10 @@
       ],
       "contractSha256": "82827767bbc86238031a90bf8433eda71a7e111fb4468e726433328739fd4bb4",
       "inventorySha256": "12c7652fed18857d0693c1aa21e3bacc61c24183831a221eb99634c3d2807fab",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Unavailable until Babylon real-device validation is complete."
+      ],
       "available": false,
       "availabilityReason": "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation"
     }

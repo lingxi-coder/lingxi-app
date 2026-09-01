@@ -12,16 +12,20 @@
 //! ```text
 //! pub struct SessionMemoryExtractor { config, last_extracted_message_id }
 //! pub fn should_extract(&self, conversation) -> bool {
-//!   let n = count_tool_calls_since(history, last_extracted_message_id);
-//!   if !is_initialized() { n >= config.initialization_threshold }
-//!   else                 { n >= config.update_threshold }
+//!   let tokens = token_count_with_estimation(history);
+//!   let grew = tokens - tokens_at_last_extraction;
+//!   let calls = count_tool_calls_since(history, last_extracted_message_id);
+//!   tokens >= config.minimum_message_tokens_to_init
+//!     && grew >= config.minimum_tokens_between_update
+//!     && (calls >= config.tool_calls_between_updates
+//!       || !has_tool_calls_in_last_assistant_turn(history))
 //! }
 //! pub async fn extract(&mut self, conversation) -> Result<String, MemoryError>
 //!   // Effect::ForkAgent — extract via forked agent
 //! ```
 //!
 //! Gating is config-only: the sole gate is [`SessionMemoryConfig::enabled`]
-//! (there is no `tengu_session_memory` flag in claude-code v2.1.181 — the stale
+//! (there is no `tengu_session_memory` flag in claude-code v2.1.251 — the stale
 //! m3-02 plan invented one). `enabled == false` keeps the whole subsystem inert,
 //! so the ~4000 locked fixtures stay byte-identical.
 
@@ -33,20 +37,32 @@ use std::path::{Path, PathBuf};
 /// Configuration for the standalone session-memory extractor (spec §6.5).
 ///
 /// `enabled` is the single master gate (no `tengu_session_memory` flag exists in
-/// v2.1.181). The numeric `*_threshold` defaults are deliberately NOT pinned to
-/// a literal here — they are unknown in the spec/binary/git history, so tests
-/// assert behavior *relative to the configured field*, never a hard-coded
-/// number. A composition root / settings loader supplies concrete values.
+/// v2.1.251). The token/tool defaults mirror the local Claude Code source. The
+/// numeric `*_threshold` fields remain as a compatibility shim for callers of
+/// the original tool-count-only port; a non-zero legacy value overrides the
+/// corresponding new tool-call gate.
 #[derive(Debug, Clone)]
 pub struct SessionMemoryConfig {
     /// Master gate for the session-memory subsystem.
     pub enabled: bool,
-    /// Tool-call count since the last extraction that triggers the FIRST
-    /// extraction of a session (before any memory has been written).
+    /// Legacy tool-call count that triggers the FIRST extraction. A non-zero
+    /// value is retained for callers of the pre-token-threshold API; new
+    /// callers should leave it at zero and use the token + tool gates below.
     pub initialization_threshold: u32,
-    /// Tool-call count since the last extraction that triggers a SUBSEQUENT
-    /// (incremental) extraction once the session already has memory.
+    /// Legacy tool-call count that triggers a SUBSEQUENT extraction. A
+    /// non-zero value overrides [`Self::tool_calls_between_updates`] for
+    /// backwards compatibility with the original port.
     pub update_threshold: u32,
+    /// Minimum context size required before the first extraction. Claude Code
+    /// 2.1.251 uses 10,000 tokens for this gate.
+    pub minimum_message_tokens_to_init: u32,
+    /// Minimum context growth required between extractions. Claude Code
+    /// 2.1.251 uses 5,000 tokens for this gate.
+    pub minimum_tokens_between_update: u32,
+    /// Number of tool calls required between extractions. Claude Code
+    /// 2.1.251 uses three tool calls, unless a natural no-tool assistant turn
+    /// reaches the token-growth gate first.
+    pub tool_calls_between_updates: u32,
     /// Model alias used for the cheap distillation fork. Haiku-class by default
     /// (matches `crate::selector::MemorySelector::new`).
     pub extraction_model: String,
@@ -58,10 +74,13 @@ impl Default for SessionMemoryConfig {
             // Inert by default — keeps the locked fixtures byte-identical until a
             // composition root opts in.
             enabled: false,
-            // Thresholds are unknown upstream; tests assert against the field,
-            // not these placeholders. They only matter once `enabled` is set.
+            // Legacy fields are zero by default. The current token/tool gates
+            // mirror Claude Code's session-memory defaults.
             initialization_threshold: 0,
             update_threshold: 0,
+            minimum_message_tokens_to_init: 10_000,
+            minimum_tokens_between_update: 5_000,
+            tool_calls_between_updates: 3,
             // Cheap standalone distillation fork — Haiku-class, matching the
             // memory selector's default model.
             extraction_model: "claude-haiku-4-5".to_string(),
@@ -74,9 +93,8 @@ impl Default for SessionMemoryConfig {
 #[derive(Debug, Clone)]
 pub struct SessionMemoryExtractor {
     config: SessionMemoryConfig,
-    /// Id of the last message covered by the previous extraction; drives both
-    /// the initialization-vs-update threshold choice and the "tool calls since"
-    /// window. `None` until the first extraction completes.
+    /// Id of the last message covered by the previous extraction; drives the
+    /// "tool calls since" window. `None` until the first extraction completes.
     last_extracted_message_id: Option<MessageId>,
     /// Most recently observed "tool calls since extraction" count while the
     /// extraction watermark was still visible. When compaction drops that
@@ -85,6 +103,13 @@ pub struct SessionMemoryExtractor {
     /// After compaction removes the extraction watermark from retained history,
     /// count newly visible tool calls from this compacted tail onward.
     post_compaction_anchor_message_id: Option<MessageId>,
+    /// Claude marks session memory initialized as soon as the initial token
+    /// threshold is crossed, before the background extraction necessarily
+    /// succeeds. Keep this separate from the extraction watermark.
+    session_memory_initialized: bool,
+    /// Context size recorded after the last successful extraction. This is the
+    /// baseline for the minimum-token-growth gate.
+    tokens_at_last_extraction: u64,
     /// Monotonic revision used to reject compact snapshots that span an
     /// intervening background extraction.
     state_revision: u64,
@@ -99,6 +124,8 @@ impl SessionMemoryExtractor {
             last_extracted_message_id: None,
             observed_tool_calls_since_extraction: 0,
             post_compaction_anchor_message_id: None,
+            session_memory_initialized: false,
+            tokens_at_last_extraction: 0,
             state_revision: 0,
         }
     }
@@ -110,7 +137,8 @@ impl SessionMemoryExtractor {
     }
 
     /// `true` once at least one extraction has completed (spec §6.5
-    /// `is_initialized`). Drives the initialization-vs-update threshold choice.
+    /// `is_initialized`). Legacy threshold callers use this to select their
+    /// initial-vs-update field; the current token gate has separate state.
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.last_extracted_message_id.is_some()
@@ -143,6 +171,7 @@ impl SessionMemoryExtractor {
     /// `covered_through`, resetting any carried threshold progress.
     pub fn mark_extracted_through(&mut self, covered_through: Option<MessageId>) {
         self.last_extracted_message_id = covered_through;
+        self.session_memory_initialized = true;
         self.observed_tool_calls_since_extraction = 0;
         self.post_compaction_anchor_message_id = None;
         self.bump_state_revision();
@@ -152,6 +181,24 @@ impl SessionMemoryExtractor {
     /// or replaces its active session.
     pub fn reset(&mut self) {
         self.mark_extracted_through(None);
+        self.session_memory_initialized = false;
+        self.tokens_at_last_extraction = 0;
+        self.bump_state_revision();
+    }
+
+    /// Record the estimated context size covered by a successful extraction.
+    /// This is separate from [`Self::mark_extracted_through`] because that
+    /// method is also used by resume/compaction bookkeeping without a history
+    /// snapshot available.
+    pub fn record_extraction_token_count(&mut self, current_token_count: u64) {
+        self.tokens_at_last_extraction = current_token_count;
+        self.bump_state_revision();
+    }
+
+    /// Context size recorded at the last successful extraction.
+    #[must_use]
+    pub fn tokens_at_last_extraction(&self) -> u64 {
+        self.tokens_at_last_extraction
     }
 
     /// Preserve exact pre-compaction threshold progress and resume counting
@@ -166,24 +213,59 @@ impl SessionMemoryExtractor {
         self.bump_state_revision();
     }
 
-    /// Whether enough tool calls have accrued since the last extraction to
-    /// trigger another one (spec §6.5 `should_extract`).
+    /// Whether enough context and activity have accrued since the last
+    /// extraction to trigger another one (Claude Code's
+    /// `shouldExtractMemory`).
     ///
-    /// Gated on [`SessionMemoryConfig::enabled`] first (a disabled extractor
-    /// never fires). Then counts tool calls in `history` after
-    /// `last_extracted_message_id` and compares against the
-    /// initialization/update threshold depending on [`Self::is_initialized`].
+    /// Gated on [`SessionMemoryConfig::enabled`] first. The initial token
+    /// threshold marks the feature initialized before the asynchronous fork;
+    /// every extraction then requires token growth and either the configured
+    /// tool-call count or a natural assistant turn with no tool calls.
     #[must_use]
     pub fn should_extract(&mut self, history: &[ConversationMessage]) -> bool {
         if !self.config.enabled {
             return false;
         }
-        let n = self.pending_tool_calls_for_history(history);
-        if self.is_initialized() {
-            n >= self.config.update_threshold
-        } else {
-            n >= self.config.initialization_threshold
+        // Preserve the original public API's tool-count-only semantics for
+        // callers that explicitly zero both token gates. This keeps existing
+        // integrations/test fixtures deterministic while the default config
+        // (10k/5k/3) follows Claude's current token/activity rules.
+        if self.config.minimum_message_tokens_to_init == 0
+            && self.config.minimum_tokens_between_update == 0
+        {
+            let calls = self.pending_tool_calls_for_history(history);
+            return if self.is_initialized() {
+                calls >= self.config.update_threshold
+            } else {
+                calls >= self.config.initialization_threshold
+            };
         }
+        let current_tokens = token_count_with_estimation(history);
+        if !self.session_memory_initialized {
+            if current_tokens < u64::from(self.config.minimum_message_tokens_to_init) {
+                return false;
+            }
+            // Claude flips this state before starting the background fork.
+            self.session_memory_initialized = true;
+            self.bump_state_revision();
+        }
+
+        let token_growth = current_tokens.saturating_sub(self.tokens_at_last_extraction);
+        if token_growth < u64::from(self.config.minimum_tokens_between_update) {
+            return false;
+        }
+
+        let calls = self.pending_tool_calls_for_history(history);
+        let required_calls = if self.is_initialized() && self.config.update_threshold > 0 {
+            self.config.update_threshold
+        } else if !self.is_initialized() && self.config.initialization_threshold > 0 {
+            self.config.initialization_threshold
+        } else {
+            self.config.tool_calls_between_updates
+        };
+        let has_tool_call_threshold = calls >= required_calls;
+        let last_assistant_has_tool_calls = has_tool_calls_in_last_assistant_turn(history);
+        has_tool_call_threshold || !last_assistant_has_tool_calls
     }
 
     /// Run one forked extraction over `history`, write the distilled notes to
@@ -377,6 +459,90 @@ pub fn count_tool_calls_since(history: &[ConversationMessage], since: Option<&Me
     tail.iter().map(|m| m.tool_calls().len()).sum()
 }
 
+/// Match Claude Code's rough token estimate for session-memory thresholds.
+/// Text uses JavaScript's UTF-16 string length; media is charged at the
+/// conservative fixed 2,000-token estimate used by the compaction pipeline;
+/// structured blocks use their serialized size so tool arguments are not
+/// silently treated as zero-length.
+#[must_use]
+pub fn token_count_with_estimation(history: &[ConversationMessage]) -> u64 {
+    history.iter().map(estimate_message_tokens).sum()
+}
+
+fn rough_token_count(length: usize) -> u64 {
+    // JavaScript Math.round(length / 4), expressed without floating point.
+    u64::try_from(length.saturating_add(2) / 4).unwrap_or(u64::MAX)
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn estimate_message_tokens(message: &ConversationMessage) -> u64 {
+    match message {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => {
+            content.iter().map(estimate_block_tokens).sum()
+        }
+        ConversationMessage::System { content, .. } => rough_token_count(utf16_len(content)),
+    }
+}
+
+fn estimate_block_tokens(block: &protocol::ContentBlock) -> u64 {
+    use protocol::ContentBlock;
+
+    match block {
+        ContentBlock::Text { text } => rough_token_count(utf16_len(text)),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => rough_token_count(utf16_code_units.len()),
+        ContentBlock::ToolUse { name, input, .. } => {
+            rough_token_count(utf16_len(name).saturating_add(json_len(input)))
+        }
+        ContentBlock::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } => content_blocks.as_ref().map_or_else(
+            || rough_token_count(utf16_len(content)),
+            |blocks| {
+                blocks
+                    .iter()
+                    .map(|value| rough_token_count(json_len(value)))
+                    .sum()
+            },
+        ),
+        ContentBlock::Thinking { thinking, .. } => rough_token_count(utf16_len(thinking)),
+        ContentBlock::RedactedThinking { data } => rough_token_count(utf16_len(data)),
+        ContentBlock::Image { .. } | ContentBlock::Document { .. } => 2_000,
+        ContentBlock::ServerToolUse { name, input, .. } => {
+            rough_token_count(utf16_len(name).saturating_add(json_len(input)))
+        }
+        ContentBlock::ConnectorText { connector_text, .. } => {
+            rough_token_count(utf16_len(connector_text))
+        }
+        ContentBlock::AdvisorToolResult { content, .. } => rough_token_count(json_len(content)),
+        ContentBlock::MediaAnalysis { analysis } => rough_token_count(json_len(analysis)),
+    }
+}
+
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|serialized| utf16_len(&serialized))
+        .unwrap_or_default()
+}
+
+fn has_tool_calls_in_last_assistant_turn(history: &[ConversationMessage]) -> bool {
+    history
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::Assistant { .. } => Some(message.has_tool_use()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 /// Resolve the on-disk path for a session's memory file:
 /// `<config_home>/agents/session-memory/<session_id>.md`.
 ///
@@ -501,6 +667,28 @@ mod tests {
             enabled: true,
             initialization_threshold: init,
             update_threshold: update,
+            // Keep the pre-token-threshold unit tests focused on the legacy
+            // compatibility fields. Dedicated tests below exercise Claude's
+            // token/activity gates with their real defaults.
+            minimum_message_tokens_to_init: 0,
+            minimum_tokens_between_update: 0,
+            tool_calls_between_updates: update,
+            ..SessionMemoryConfig::default()
+        }
+    }
+
+    fn token_gated_config(
+        minimum_message_tokens_to_init: u32,
+        minimum_tokens_between_update: u32,
+        tool_calls_between_updates: u32,
+    ) -> SessionMemoryConfig {
+        SessionMemoryConfig {
+            enabled: true,
+            initialization_threshold: 0,
+            update_threshold: 0,
+            minimum_message_tokens_to_init,
+            minimum_tokens_between_update,
+            tool_calls_between_updates,
             ..SessionMemoryConfig::default()
         }
     }
@@ -534,6 +722,9 @@ mod tests {
             "must be off by default (locked fixtures stay byte-identical)"
         );
         assert_eq!(c.extraction_model, "claude-haiku-4-5");
+        assert_eq!(c.minimum_message_tokens_to_init, 10_000);
+        assert_eq!(c.minimum_tokens_between_update, 5_000);
+        assert_eq!(c.tool_calls_between_updates, 3);
     }
 
     #[test]
@@ -556,6 +747,7 @@ mod tests {
         assert!(!ex.is_initialized());
         assert_eq!(ex.pending_tool_calls(), 0);
         assert!(ex.post_compaction_anchor_message_id.is_none());
+        assert_eq!(ex.tokens_at_last_extraction(), 0);
     }
 
     #[test]
@@ -585,6 +777,78 @@ mod tests {
         // Add another tool call after the watermark => 2 >= update threshold.
         let history2 = vec![watermark, assistant_tools(1), assistant_tools(1)];
         assert!(ex.should_extract(&history2));
+    }
+
+    #[test]
+    fn token_gates_match_claude_initialization_and_activity_rules() {
+        let mut ex = SessionMemoryExtractor::new(token_gated_config(5, 3, 2));
+        let short = vec![user("1234567890123456")]; // 4 rough tokens.
+        assert!(!ex.should_extract(&short));
+        assert!(!ex.session_memory_initialized);
+
+        // Crossing the initialization gate marks the feature initialized, but
+        // one tool call is still below the activity threshold.
+        let mut one_call = vec![user("12345678901234567890")]; // 5 tokens.
+        one_call.push(assistant_tools(1));
+        assert!(!ex.should_extract(&one_call));
+        assert!(ex.session_memory_initialized);
+
+        // A second tool call satisfies the activity gate while the token gate
+        // remains anchored to the pre-extraction baseline of zero.
+        one_call.push(assistant_tools(1));
+        assert!(ex.should_extract(&one_call));
+    }
+
+    #[test]
+    fn token_growth_is_required_even_when_tool_call_threshold_is_met() {
+        let mut ex = SessionMemoryExtractor::new(token_gated_config(1, 5, 1));
+        let watermark = user("watermark");
+        let base = vec![watermark.clone(), assistant_tools(1)];
+        ex.mark_extracted_through(Some(watermark.id()));
+        ex.record_extraction_token_count(token_count_with_estimation(&base));
+
+        // The new call reaches the activity gate, but adds fewer than five
+        // tokens, so Claude's always-required growth gate keeps extraction off.
+        let small_growth = vec![watermark.clone(), assistant_tools(1), assistant_tools(1)];
+        assert!(token_count_with_estimation(&small_growth) < ex.tokens_at_last_extraction() + 5);
+        assert!(!ex.should_extract(&small_growth));
+
+        // A sufficiently large user turn crosses the growth gate while the
+        // earlier tool calls still satisfy the activity gate.
+        let large_text = "x".repeat(20);
+        let large_growth = vec![
+            watermark,
+            assistant_tools(1),
+            assistant_tools(1),
+            user(&large_text),
+        ];
+        assert!(token_count_with_estimation(&large_growth) >= ex.tokens_at_last_extraction() + 5);
+        assert!(ex.should_extract(&large_growth));
+    }
+
+    #[test]
+    fn token_growth_allows_a_natural_no_tool_assistant_turn() {
+        let mut ex = SessionMemoryExtractor::new(token_gated_config(1, 5, 99));
+        let watermark = user("watermark");
+        let base = vec![watermark.clone(), assistant_tools(1)];
+        ex.mark_extracted_through(Some(watermark.id()));
+        ex.record_extraction_token_count(token_count_with_estimation(&base));
+
+        let large_text = "x".repeat(20);
+        let natural_turn = vec![
+            watermark,
+            assistant_tools(1),
+            user(&large_text),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::Text {
+                    text: "done".to_string(),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+            },
+        ];
+        assert!(token_count_with_estimation(&natural_turn) >= ex.tokens_at_last_extraction() + 5);
+        assert!(ex.should_extract(&natural_turn));
     }
 
     #[test]

@@ -4,9 +4,9 @@
 
 #![cfg(unix)]
 
+use platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 use platform_posix::process::PosixProcess;
 use std::collections::HashMap;
-use platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 
 // These tests intentionally mutate the process-global environment. Keep the
 // mutation cases serialized so one test cannot remove another test's sentinel

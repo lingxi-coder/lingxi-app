@@ -15,7 +15,7 @@ const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'prompt-focus-electron.mjs');
 const composerDraftDriver = join(fixtureRoot, 'composer-draft-electron.mjs');
 
-test('real Electron Tab traversal leaves PermissionPrompt and preserves Sidebar focus after dismissal', async () => {
+test('real Electron preserves Sidebar focus and supports native resize dragging', async () => {
   const vite = await createServer({
     root: fixtureRoot,
     configFile: false,
@@ -90,6 +90,7 @@ test('real Electron Tab traversal leaves PermissionPrompt and preserves Sidebar 
       activeText: 'New session',
       activeIsSidebar: true,
     });
+    assert.deepEqual(result.resize, { before: 260, after: 360 });
   } finally {
     if (child && child.exitCode === null) {
       child.kill('SIGTERM');

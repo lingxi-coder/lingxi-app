@@ -419,14 +419,234 @@ struct LocalAppManagedMcpInventory: Identifiable, Hashable, Sendable {
     let catalogDigest: String
     let toolSurfaceDigest: String
     let authoringRevision: UInt64
+    let enabled: Bool
+    let status: LocalAppManagedMcpStatus
+    let settingsRevision: UInt64
+    let pinnedToCurrentConversation: Bool
     let publicationState: LocalAppWorkflow
     let mcpVerification: LocalAppVerificationSummary
     let uiVerification: LocalAppVerificationSummary
+    let enabledTools: Set<String>
+    let widget: LocalAppManagedMcpWidget?
     let tools: [LocalAppManagedMcpTool]
 
     var id: String { serverName }
     var toolCount: Int { tools.count }
     var publicationBadge: LocalAppStatusBadge { publicationState.statusBadge }
+    var statusBadge: LocalAppStatusBadge { status.badge }
+
+    func isToolEnabled(_ toolName: String) -> Bool {
+        enabledTools.contains(toolName)
+    }
+
+    func updatingEnabled(_ value: Bool) -> Self {
+        Self(
+            serverName: serverName,
+            appID: appID,
+            appName: appName,
+            buildID: buildID,
+            catalogDigest: catalogDigest,
+            toolSurfaceDigest: toolSurfaceDigest,
+            authoringRevision: authoringRevision,
+            enabled: value,
+            status: value ? .enabled : .disabled,
+            settingsRevision: settingsRevision,
+            pinnedToCurrentConversation: pinnedToCurrentConversation,
+            publicationState: publicationState,
+            mcpVerification: mcpVerification,
+            uiVerification: uiVerification,
+            enabledTools: enabledTools,
+            widget: widget,
+            tools: tools
+        )
+    }
+
+    func updatingTool(_ toolName: String, enabled value: Bool) -> Self {
+        var nextEnabledTools = enabledTools
+        if value {
+            nextEnabledTools.insert(toolName)
+        } else {
+            nextEnabledTools.remove(toolName)
+        }
+        return Self(
+            serverName: serverName,
+            appID: appID,
+            appName: appName,
+            buildID: buildID,
+            catalogDigest: catalogDigest,
+            toolSurfaceDigest: toolSurfaceDigest,
+            authoringRevision: authoringRevision,
+            enabled: enabled,
+            status: enabled ? .enabled : .disabled,
+            settingsRevision: settingsRevision,
+            pinnedToCurrentConversation: pinnedToCurrentConversation,
+            publicationState: publicationState,
+            mcpVerification: mcpVerification,
+            uiVerification: uiVerification,
+            enabledTools: nextEnabledTools,
+            widget: widget,
+            tools: tools
+        )
+    }
+
+    func updatingConversationPinned(_ value: Bool) -> Self {
+        Self(
+            serverName: serverName,
+            appID: appID,
+            appName: appName,
+            buildID: buildID,
+            catalogDigest: catalogDigest,
+            toolSurfaceDigest: toolSurfaceDigest,
+            authoringRevision: authoringRevision,
+            enabled: enabled,
+            status: status,
+            settingsRevision: settingsRevision,
+            pinnedToCurrentConversation: value,
+            publicationState: publicationState,
+            mcpVerification: mcpVerification,
+            uiVerification: uiVerification,
+            enabledTools: enabledTools,
+            widget: widget,
+            tools: tools
+        )
+    }
+
+    static func placeholder(
+        appID: String,
+        appName: String,
+        publicationState: LocalAppWorkflow = .draft
+    ) -> Self {
+        Self(
+            serverName: "local_app_\(appID)",
+            appID: appID,
+            appName: appName,
+            buildID: "",
+            catalogDigest: "",
+            toolSurfaceDigest: "",
+            authoringRevision: 0,
+            enabled: false,
+            status: .needsSetup,
+            settingsRevision: 0,
+            pinnedToCurrentConversation: false,
+            publicationState: publicationState,
+            mcpVerification: LocalAppVerificationSummary(
+                status: .unavailable,
+                summary: "No MCP surface has been authored for this app yet.",
+                code: nil
+            ),
+            uiVerification: LocalAppVerificationSummary(
+                status: .unavailable,
+                summary: "No MCP widget is available yet.",
+                code: nil
+            ),
+            enabledTools: [],
+            widget: nil,
+            tools: []
+        )
+    }
+}
+
+struct LocalAppManagedMcpWidget: Hashable, Sendable {
+    let title: String?
+    let resourceURI: String?
+    let mimeType: String?
+}
+
+enum LocalAppManagedMcpStatus: String, CaseIterable, Hashable, Sendable {
+    case disabled
+    case needsSetup = "needs_setup"
+    case authoring
+    case enabled
+    case needsRevalidation = "needs_revalidation"
+    case error
+
+    var title: String {
+        switch self {
+        case .disabled:
+            "Disabled"
+        case .needsSetup:
+            "Needs setup"
+        case .authoring:
+            "Authoring"
+        case .enabled:
+            "Enabled"
+        case .needsRevalidation:
+            "Needs revalidation"
+        case .error:
+            "Error"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .disabled:
+            "This app's MCP surface is registered but currently off."
+        case .needsSetup:
+            "This app does not have an MCP surface yet. Describe what the assistant should be allowed to do, then start authoring."
+        case .authoring:
+            "An MCP authoring flow is in progress for this app."
+        case .enabled:
+            "The assistant can call this app through its managed MCP surface."
+        case .needsRevalidation:
+            "The stored MCP surface needs to be reviewed before it is exposed again."
+        case .error:
+            "The last MCP operation failed. Review the error and retry."
+        }
+    }
+
+    var badge: LocalAppStatusBadge {
+        switch self {
+        case .disabled:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "pause.circle.fill",
+                tintName: "secondary"
+            )
+        case .needsSetup:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "wrench.and.screwdriver.fill",
+                tintName: "orange"
+            )
+        case .authoring:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "wand.and.stars",
+                tintName: "orange"
+            )
+        case .enabled:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "checkmark.circle.fill",
+                tintName: "green"
+            )
+        case .needsRevalidation:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "arrow.triangle.2.circlepath",
+                tintName: "orange"
+            )
+        case .error:
+            LocalAppStatusBadge(
+                label: title,
+                accessibilityLabel: title,
+                systemImageName: "xmark.octagon.fill",
+                tintName: "orange"
+            )
+        }
+    }
+}
+
+enum LocalAppManagedMcpCommand: Hashable, Sendable {
+    case startAuthoring(appID: String, userGoal: String)
+    case setEnabled(appID: String, enabled: Bool, expectedRevision: UInt64)
+    case setToolEnabled(appID: String, toolName: String, enabled: Bool, expectedRevision: UInt64)
+    case setConversationPinned(conversationID: String, appID: String, pinned: Bool)
 }
 
 /// Workflow state of an app — the v3 publication projection. The old

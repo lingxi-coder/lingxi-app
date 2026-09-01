@@ -35,10 +35,10 @@
 //! manifests' commands + hooks into the live registries.
 //!
 //! Residual (still NOT ported in either path): marketplace-catalog source
-//! resolution, enterprise allow/blocklist policy, and seed-dir precedence.
-//! Enabled cache entries use the exact version in `installed_plugins.json`;
-//! cache-only entries without a record retain the single-version compatibility
-//! probe.
+//! resolution and enterprise allow/blocklist policy. Seed-cache fallback and
+//! source precedence are handled by the enabled/effective resolver. Enabled
+//! cache entries use the exact version in `installed_plugins.json`; cache-only
+//! entries without a record retain the single-version compatibility probe.
 
 use crate::manifest::{
     BinaryPin, ComponentPath, HljsLanguageEntry, MonitorTrigger, PluginChannel, PluginComponents,
@@ -55,6 +55,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use telemetry::tengu::plugin as plugin_telemetry;
+use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
 
 /// A leading UTF-8 byte-order mark, as some editors on Windows write it.
 /// `serde_json` does not treat U+FEFF as whitespace, so every manifest/config
@@ -197,6 +200,12 @@ struct RawManifest {
     /// [`PluginManifest::metadata`].
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    /// Optional previous plugin name used by local manifests that have been
+    /// renamed in place. Marketplace-wide rename maps are loaded separately
+    /// from `marketplace.json`; this field is intentionally not copied into
+    /// the public manifest because it is install provenance, not identity.
+    #[serde(default, alias = "renamedFrom", alias = "previousName")]
+    rename_from: Option<String>,
 }
 
 fn default_plugin_enabled() -> bool {
@@ -231,6 +240,16 @@ enum CommandsDecl {
     One(String),
     Many(Vec<String>),
     Map(BTreeMap<String, RawCommandEntry>),
+}
+
+impl CommandsDecl {
+    fn declared_count(&self) -> u32 {
+        match self {
+            Self::One(_) => 1,
+            Self::Many(values) => values.len() as u32,
+            Self::Map(entries) => entries.len() as u32,
+        }
+    }
 }
 
 /// One value of the `commands` object-map form (oracle `Ds`). Exactly one of
@@ -867,16 +886,16 @@ fn exact_installed_paths(
     }
 
     // Older files keyed records by marketplace, then plugin name.
-    let Some(marketplace_records) = records
-        .get(marketplace)
-        .and_then(Value::as_object)
-    else {
+    let Some(marketplace_records) = records.get(marketplace).and_then(Value::as_object) else {
         return None;
     };
     let Some(record) = marketplace_records.get(name) else {
         return None;
     };
-    let version = record.get("version").and_then(Value::as_str).unwrap_or_default();
+    let version = record
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let path = if !version.is_empty() {
         versioned_cache_path(plugins_dir, marketplace, name, version)
     } else if let Some(raw) = record.get("installPath").and_then(Value::as_str) {
@@ -1178,18 +1197,34 @@ mod name_validation_tests {
 /// cache-only installations with no matching record, the single-version probe
 /// remains as a compatibility fallback.
 ///
-/// What is still NOT ported (residual): marketplace-catalog source resolution,
-/// enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
-/// `getBlockedMarketplaces`), and seed-dir precedence.
+/// What is still NOT ported (residual): marketplace-catalog source resolution
+/// and enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
+/// `getBlockedMarketplaces`). Seed-dir fallback is resolved before the primary
+/// cache is loaded, with the same source precedence used by the final merge.
 pub async fn discover_enabled_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_enabled_plugins_with_bus(plugins_dir, enabled, None).await
+}
+
+pub async fn discover_enabled_plugins_with_bus(
+    plugins_dir: &Path,
+    enabled: &BTreeMap<String, bool>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_enabled_plugins_impl(plugins_dir, enabled, analytics_bus, true).await
+}
+
+async fn discover_enabled_plugins_impl(
+    plugins_dir: &Path,
+    enabled: &BTreeMap<String, bool>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    resolve_collisions: bool,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
     let cache_root = plugins_dir.join("cache");
-    let installed_records = tokio::fs::read_to_string(crate::installed::path(plugins_dir))
-        .await
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    let seed_dirs = plugin_seed_dirs();
+    let installed_records = crate::installed::load_normalized(plugins_dir)
         .and_then(|value| value.get("plugins").cloned());
     let mut out = Vec::new();
     for (entry_id, is_enabled) in enabled {
@@ -1206,7 +1241,7 @@ pub async fn discover_enabled_plugins(
         if name.is_empty() {
             continue;
         }
-        let candidates = if let Some(exact) =
+        let mut candidates = if let Some(exact) =
             exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref())
         {
             exact
@@ -1219,18 +1254,90 @@ pub async fn discover_enabled_plugins(
                 .into_iter()
                 .collect()
         };
+        // Claude probes the primary cache first and only consults the
+        // configured seed cache when that exact cache entry is absent. Keep
+        // that distinction: a malformed primary plugin must not silently turn
+        // into a different seed plugin, while a missing primary version can
+        // still boot from the administrator-provided seed tree.
+        let primary_exists = candidates.iter().any(|path| path_exists(path));
+        let seed_candidates = seed_plugin_cache_candidates(marketplace, name, &candidates).await;
+        if !primary_exists {
+            for seed in &seed_candidates {
+                if !candidates.contains(seed) {
+                    candidates.push(seed.clone());
+                }
+            }
+        }
         for versioned in candidates {
-            if let Some((id, manifest)) =
-                load_plugin_from_path_with_mcp_gate(&versioned, false, Some(entry_id.as_str()))
-                    .await
+            let mut allowed_roots = Vec::with_capacity(seed_dirs.len() + 1);
+            allowed_roots.push(plugins_dir);
+            allowed_roots.extend(seed_dirs.iter().map(PathBuf::as_path));
+            let Some(versioned) = confined_plugin_install_dir(&versioned, &allowed_roots).await
+            else {
+                continue;
+            };
+            if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
+                &versioned,
+                false,
+                Some(entry_id.as_str()),
+                analytics_bus,
+            )
+            .await
             {
                 out.push((id, manifest, versioned));
             }
         }
+        if primary_exists {
+            // A present primary cache shadows a seed folder rather than
+            // loading both. Still surface the folder-shadowed diagnostic for
+            // each lower-precedence component, as Claude does when the source
+            // resolver discards a same-name folder.
+            for seed in seed_candidates {
+                let Some((_, seed_manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
+                    &seed,
+                    false,
+                    Some(entry_id.as_str()),
+                    None,
+                )
+                .await
+                else {
+                    continue;
+                };
+                let seed_inventory =
+                    plugin_component_inventory_for_path(&seed_manifest, &seed).await;
+                let primary_plugins = out
+                    .iter()
+                    .filter(|(_, manifest, path)| {
+                        *path != seed && manifest.name.eq_ignore_ascii_case(&seed_manifest.name)
+                    })
+                    .map(|(_, manifest, path)| (manifest.clone(), path.clone()))
+                    .collect::<Vec<_>>();
+                for (primary_manifest, _primary_path) in primary_plugins {
+                    let primary_inventory =
+                        plugin_component_inventory_for_path(&primary_manifest, &_primary_path)
+                            .await;
+                    for kind in seed_inventory.keys() {
+                        if seed_inventory
+                            .get(kind)
+                            .zip(primary_inventory.get(kind))
+                            .is_some_and(|(seed_names, primary_names)| {
+                                seed_names.iter().any(|name| primary_names.contains(name))
+                            })
+                        {
+                            emit_folder_shadowed_event(analytics_bus, kind, &seed_manifest, &seed)
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
     }
-    // Stable ordering by plugin name for deterministic bootstrap.
-    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-    out
+    if resolve_collisions {
+        resolve_discovered_plugins(out, analytics_bus).await
+    } else {
+        out.sort_by(|left, right| left.1.name.cmp(&right.1.name));
+        out
+    }
 }
 
 /// Probe `cache/{marketplace}/{plugin}/` for an installed version directory.
@@ -1243,8 +1350,13 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
     let mut entries = tokio::fs::read_dir(plugin_dir).await.ok()?;
     let mut version_dirs = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-            version_dirs.push(entry.path());
+        if let Ok(file_type) = entry.file_type().await {
+            if file_type.is_dir() && !file_type.is_symlink() {
+                let path = entry.path();
+                if tokio::fs::canonicalize(&path).await.is_ok() {
+                    version_dirs.push(path);
+                }
+            }
         }
     }
     if version_dirs.len() == 1 {
@@ -1252,6 +1364,53 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn path_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false)
+}
+
+/// Resolve a missing cache entry from the ordered seed roots. The seed layout
+/// is `<seed>/cache/<marketplace>/<plugin>/<version>`, exactly the path used by
+/// Claude's `oUt`/`sae` helpers. The first seed root with a usable version wins.
+async fn seed_plugin_cache_candidates(
+    marketplace: &str,
+    name: &str,
+    primary_candidates: &[PathBuf],
+) -> Vec<PathBuf> {
+    let versions = primary_candidates
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|value| value.to_str()))
+        .filter(|version| !version.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    for seed in plugin_seed_dirs() {
+        let plugin_cache = seed
+            .join("cache")
+            .join(sanitize_segment(marketplace, false))
+            .join(sanitize_segment(name, false));
+        let mut found = Vec::new();
+        if versions.is_empty() {
+            if let Some(version) = resolve_installed_version_dir(&plugin_cache).await {
+                found.push(version);
+            }
+        } else {
+            for version in &versions {
+                let candidate = plugin_cache.join(sanitize_segment(version, true));
+                if path_exists(&candidate) {
+                    found.push(candidate);
+                }
+            }
+        }
+        if !found.is_empty() {
+            out.extend(found);
+            break;
+        }
+    }
+    out
 }
 
 /// Re-discover every plugin recorded in `installed_plugins.json`, resolving each
@@ -1266,6 +1425,8 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
 /// `(freshly-minted id, manifest, install dir)`, sorted by plugin name.
 async fn discover_recorded_plugins_identified(
     plugins_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    resolve_collisions: bool,
 ) -> Vec<(String, PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
 
@@ -1274,12 +1435,7 @@ async fn discover_recorded_plugins_identified(
     // exact `installPath` cache dir, so resolution is direct. Read the raw JSON so
     // the v2 array shape and the legacy `plugins[market][plugin]` object shape can
     // coexist during migration.
-    let raw = tokio::fs::read_to_string(crate::installed::path(plugins_dir))
-        .await
-        .ok();
-    if let Some(records) = raw
-        .as_deref()
-        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+    if let Some(records) = crate::installed::load_normalized(plugins_dir)
         .and_then(|v| v.get("plugins").and_then(|p| p.as_object()).cloned())
     {
         let cache_root = plugins_dir.join("cache");
@@ -1312,9 +1468,17 @@ async fn discover_recorded_plugins_identified(
                         if !seen.insert(dir.clone()) {
                             continue;
                         }
-                        if let Some((id, manifest)) =
-                            load_plugin_from_path_with_mcp_gate(&dir, false, Some(key.as_str()))
-                                .await
+                        let Some(dir) = confined_plugin_install_dir(&dir, &[plugins_dir]).await
+                        else {
+                            continue;
+                        };
+                        if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
+                            &dir,
+                            false,
+                            Some(key.as_str()),
+                            analytics_bus,
+                        )
+                        .await
                         {
                             out.push((key.clone(), id, manifest, dir));
                         }
@@ -1332,9 +1496,17 @@ async fn discover_recorded_plugins_identified(
                             .join(sanitize_segment(name, false))
                             .join(sanitize_segment(version, true));
                         let identifier = format!("{name}@{key}");
-                        if let Some((id, manifest)) =
-                            load_plugin_from_path_with_mcp_gate(&dir, false, Some(&identifier))
-                                .await
+                        let Some(dir) = confined_plugin_install_dir(&dir, &[plugins_dir]).await
+                        else {
+                            continue;
+                        };
+                        if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
+                            &dir,
+                            false,
+                            Some(&identifier),
+                            analytics_bus,
+                        )
+                        .await
                         {
                             out.push((identifier, id, manifest, dir));
                         }
@@ -1345,7 +1517,30 @@ async fn discover_recorded_plugins_identified(
         }
     }
 
-    out.sort_by(|a, b| a.2.name.cmp(&b.2.name));
+    let resolved = if resolve_collisions {
+        resolve_discovered_plugins(
+            out.iter()
+                .map(|(_, id, manifest, path)| (*id, manifest.clone(), path.clone()))
+                .collect(),
+            analytics_bus,
+        )
+        .await
+    } else {
+        out.iter()
+            .map(|(_, id, manifest, path)| (*id, manifest.clone(), path.clone()))
+            .collect()
+    };
+    let paths = resolved
+        .iter()
+        .map(|(_, _, path)| path)
+        .collect::<BTreeSet<_>>();
+    out.retain(|(_, _, _, path)| paths.contains(path));
+    out.sort_by(|a, b| {
+        a.2.name
+            .to_lowercase()
+            .cmp(&b.2.name.to_lowercase())
+            .then_with(|| a.3.cmp(&b.3))
+    });
     out
 }
 
@@ -1357,7 +1552,14 @@ async fn discover_recorded_plugins_identified(
 pub async fn discover_recorded_plugins(
     plugins_dir: &Path,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_recorded_plugins_identified(plugins_dir)
+    discover_recorded_plugins_with_bus(plugins_dir, None).await
+}
+
+pub async fn discover_recorded_plugins_with_bus(
+    plugins_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_recorded_plugins_identified(plugins_dir, analytics_bus, true)
         .await
         .into_iter()
         .map(|(_, id, manifest, path)| (id, manifest, path))
@@ -1375,10 +1577,19 @@ pub async fn discover_effective_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    let mut out = discover_enabled_plugins(plugins_dir, enabled).await;
+    discover_effective_plugins_with_bus(plugins_dir, enabled, None).await
+}
+
+pub async fn discover_effective_plugins_with_bus(
+    plugins_dir: &Path,
+    enabled: &BTreeMap<String, bool>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let mut out = discover_enabled_plugins_impl(plugins_dir, enabled, analytics_bus, false).await;
     let mut seen_paths: BTreeSet<PathBuf> = out.iter().map(|(_, _, path)| path.clone()).collect();
 
-    for (identifier, id, manifest, path) in discover_recorded_plugins_identified(plugins_dir).await
+    for (identifier, id, manifest, path) in
+        discover_recorded_plugins_identified(plugins_dir, analytics_bus, false).await
     {
         let active = enabled
             .get(&identifier)
@@ -1389,8 +1600,7 @@ pub async fn discover_effective_plugins(
         }
     }
 
-    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-    out
+    resolve_discovered_plugins(out, analytics_bus).await
 }
 
 /// Walk `plugins_dir` and return every installed plugin discovered on disk.
@@ -1406,6 +1616,13 @@ pub async fn discover_effective_plugins(
 pub async fn discover_installed_plugins(
     plugins_dir: &Path,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_installed_plugins_with_bus(plugins_dir, None).await
+}
+
+pub async fn discover_installed_plugins_with_bus(
+    plugins_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(plugins_dir).await else {
         // Missing / unreadable plugins dir = no plugins (fresh install).
@@ -1416,13 +1633,14 @@ pub async fn discover_installed_plugins(
         if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        if let Some((id, manifest)) = load_plugin_from_path(&entry_path).await {
+        if let Some((id, manifest)) =
+            load_plugin_from_path_with_bus(&entry_path, analytics_bus).await
+        {
             out.push((id, manifest, entry_path));
         }
     }
     // Stable ordering by plugin name for deterministic bootstrap.
-    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-    out
+    resolve_discovered_plugins(out, analytics_bus).await
 }
 
 /// (M4 cc2.1.198) Load the `--plugin-dir <path>` session-only plugins — the
@@ -1442,7 +1660,14 @@ pub async fn discover_installed_plugins(
 pub async fn discover_cli_plugin_dirs(
     paths: &[PathBuf],
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_cli_plugin_dirs_impl(paths, false).await
+    discover_cli_plugin_dirs_with_bus(paths, None).await
+}
+
+pub async fn discover_cli_plugin_dirs_with_bus(
+    paths: &[PathBuf],
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_cli_plugin_dirs_impl(paths, false, analytics_bus).await
 }
 
 /// Sibling of [`discover_cli_plugin_dirs`] for plugin directories whose MCP
@@ -1459,15 +1684,24 @@ pub async fn discover_cli_plugin_dirs(
 pub async fn discover_cli_plugin_dirs_no_mcp(
     paths: &[PathBuf],
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_cli_plugin_dirs_impl(paths, true).await
+    discover_cli_plugin_dirs_impl(paths, true, None).await
 }
 
 async fn discover_cli_plugin_dirs_impl(
     paths: &[PathBuf],
     sdk_skip_mcp_discovery: bool,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
     for (i, raw) in paths.iter().enumerate() {
+        if tokio::fs::symlink_metadata(raw)
+            .await
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            tracing::warn!(path = %raw.display(), "refusing symlink-spelled session plugin path");
+            continue;
+        }
         let path = match tokio::fs::canonicalize(raw).await {
             Ok(p) => p,
             // `Cd.stat(l)` failed → warn + `path-not-found` record, skip.
@@ -1524,7 +1758,13 @@ async fn discover_cli_plugin_dirs_impl(
         } else {
             path
         };
-        match load_plugin_from_path_with_mcp_gate(&plugin_root, sdk_skip_mcp_discovery, None).await
+        match load_plugin_from_path_with_mcp_gate_and_bus(
+            &plugin_root,
+            sdk_skip_mcp_discovery,
+            None,
+            analytics_bus,
+        )
+        .await
         {
             Some((id, manifest)) => {
                 tracing::debug!("Loaded inline plugin from path: {}", manifest.name);
@@ -1545,7 +1785,7 @@ async fn discover_cli_plugin_dirs_impl(
             out.len()
         );
     }
-    out
+    resolve_discovered_plugins(out, analytics_bus).await
 }
 
 /// The per-process inline-plugin extraction dir (`PXt()` port: a temp-root
@@ -1612,7 +1852,14 @@ fn errno_name(code: i32) -> String {
 /// site (production and test) is unaffected by the MCP-discovery gate added
 /// for §3/§4.
 pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
-    load_plugin_from_path_with_mcp_gate(plugin_dir, false, None).await
+    load_plugin_from_path_with_bus(plugin_dir, None).await
+}
+
+pub(crate) async fn load_plugin_from_path_with_bus(
+    plugin_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Option<(PluginId, PluginManifest)> {
+    load_plugin_from_path_with_mcp_gate_and_bus(plugin_dir, false, None, analytics_bus).await
 }
 
 /// Read + auto-detect a single plugin directory. Returns `None` when there is
@@ -1635,14 +1882,44 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
     sdk_skip_mcp_discovery: bool,
     install_source_id: Option<&str>,
 ) -> Option<(PluginId, PluginManifest)> {
+    load_plugin_from_path_with_mcp_gate_and_bus(
+        plugin_dir,
+        sdk_skip_mcp_discovery,
+        install_source_id,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn load_plugin_from_path_with_mcp_gate_and_bus(
+    plugin_dir: &Path,
+    sdk_skip_mcp_discovery: bool,
+    install_source_id: Option<&str>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Option<(PluginId, PluginManifest)> {
+    // Resolve the root once and refuse a symlink-spelled plugin directory.
+    // Every declared component is subsequently resolved relative to this
+    // canonical root, preventing a manifest from escaping through a symlink
+    // even when its lexical path contains no `..` segment.
+    let plugin_root = canonical_plugin_root(plugin_dir).await?;
+    let plugin_dir = plugin_root.as_path();
     let manifest_path = plugin_dir
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
+    let manifest_path = canonical_regular_path_under(plugin_dir, &manifest_path)?;
     let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
-    let parsed: RawManifest = match serde_json::from_str(raw) {
+    let mut parsed: RawManifest = match serde_json::from_str(raw) {
         Ok(m) => m,
         Err(e) => {
+            emit_plugin_load_failed(
+                analytics_bus,
+                plugin_dir.file_name().and_then(|name| name.to_str()),
+                install_source_id,
+                "malformed-plugin-json",
+                Some("manifest"),
+            )
+            .await;
             tracing::warn!(
                 error = %e,
                 path = %manifest_path.display(),
@@ -1656,6 +1933,14 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
     // manifest with an empty/space-containing/bidi-spoofed `name` was trusted
     // verbatim into `plugin list` and every downstream cache-path segment.
     if let Err(reason) = validate_plugin_name(&parsed.name) {
+        emit_plugin_load_failed(
+            analytics_bus,
+            Some(parsed.name.as_str()),
+            install_source_id,
+            "invalid-name",
+            Some("manifest"),
+        )
+        .await;
         tracing::warn!(
             reason = %reason,
             path = %manifest_path.display(),
@@ -1664,11 +1949,59 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
         return None;
     }
 
-    let id = PluginId::new();
     let source = PluginSource::LocalPath {
         path: plugin_dir.to_path_buf(),
     };
     let trust_level = default_trust_for_source(&source);
+
+    // Marketplace rename metadata is keyed by the durable install-source name,
+    // not by the manifest's current display identity. Resolve the complete
+    // chain before minting the runtime manifest so all registries use one
+    // canonical namespace while `PluginSource::LocalPath` still points at the
+    // original install tree.
+    let (source_name, marketplace_name) = install_source_id
+        .map(parse_plugin_identifier)
+        .unwrap_or((parsed.name.as_str(), None));
+    let mut renames = HashMap::new();
+    let mut known_names = HashSet::new();
+    if let Some(marketplace) = marketplace_name {
+        let (catalog_renames, catalog_names) =
+            load_marketplace_renames(plugin_dir, marketplace).await;
+        renames.extend(catalog_renames);
+        known_names.extend(catalog_names);
+    }
+    if let Some(previous_name) = parsed.rename_from.as_ref() {
+        if validate_plugin_name(previous_name).is_ok() {
+            renames.insert(previous_name.clone(), Some(parsed.name.clone()));
+            known_names.insert(parsed.name.clone());
+        }
+    }
+    if let Some(resolution) = resolve_rename_chain(source_name, &renames, &known_names) {
+        let canonical_name_changed = matches!(
+            &resolution,
+            RenameResolution::Renamed { to, .. } if to != source_name
+        );
+        if canonical_name_changed || !matches!(&resolution, RenameResolution::Renamed { .. }) {
+            emit_plugin_renamed_event(
+                analytics_bus,
+                source_name,
+                marketplace_name,
+                &source,
+                plugin_dir,
+                &resolution,
+            )
+            .await;
+        }
+        match resolution {
+            RenameResolution::Renamed { to, .. } if to != parsed.name => {
+                parsed.name = to;
+            }
+            RenameResolution::Removed { .. } => return None,
+            _ => {}
+        }
+    }
+
+    let id = PluginId::new();
 
     let skip_mcp_discovery =
         resolve_skip_mcp_discovery(&parsed.name, sdk_skip_mcp_discovery, install_source_id);
@@ -1732,12 +2065,846 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
             .map(|fields| UserConfigSchema { fields: fields.0 }),
         channels,
         settings,
+        settings_declared: parsed.settings.is_some(),
         keywords: parsed.keywords.unwrap_or_default(),
         license: parsed.license,
         repository: parsed.repository,
         metadata,
     };
     Some((id, manifest))
+}
+
+fn plugin_hash(value: &str) -> String {
+    crate::plugin_source_sha256(value.as_bytes())[..16].to_string()
+}
+
+fn plugin_identity_hash(plugin_name: &str, marketplace_name: Option<&str>) -> String {
+    plugin_hash(&format!(
+        "{plugin_name}@{}",
+        marketplace_name
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default()
+    ))
+}
+
+fn load_failed_scope(install_source_id: Option<&str>) -> &'static str {
+    if install_source_id.is_some() {
+        "cache-installed"
+    } else {
+        "user-local"
+    }
+}
+
+fn payload_metadata<T: serde::Serialize>(payload: &T) -> LogEventMetadata {
+    let Ok(Value::Object(fields)) = serde_json::to_value(payload) else {
+        return LogEventMetadata::new();
+    };
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let value = match value {
+                Value::Bool(value) => AnalyticsValue::Bool(value),
+                Value::Number(value) => {
+                    if let Some(value) = value.as_i64() {
+                        AnalyticsValue::Int(value)
+                    } else if let Some(value) = value.as_f64() {
+                        AnalyticsValue::Float(value)
+                    } else {
+                        return None;
+                    }
+                }
+                Value::String(value) => AnalyticsValue::String(value),
+                Value::Null => AnalyticsValue::None,
+                Value::Array(_) | Value::Object(_) => return None,
+            };
+            Some((key, value))
+        })
+        .collect()
+}
+
+fn is_official_marketplace_name(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    RESERVED_OFFICIAL_MARKETPLACE_NAMES.contains(&lower.as_str())
+}
+
+async fn emit_plugin_load_failed(
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    plugin_name: Option<&str>,
+    install_source_id: Option<&str>,
+    error_category: &'static str,
+    component: Option<&str>,
+) {
+    let (fallback_name, marketplace_name) = install_source_id
+        .map(parse_plugin_identifier)
+        .unwrap_or(("unknown", None));
+    let plugin_name = plugin_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(fallback_name);
+    if let Some(bus) = analytics_bus {
+        let payload = plugin_telemetry::LoadFailedPayload {
+            error_category: Verified::assert_safe(error_category.to_string()),
+            cache_only: install_source_id.is_some(),
+            component: component.map(|value| Verified::assert_safe(value.to_string())),
+            errno: None,
+            proto_plugin_name: PiiTagged::assert_pii_tagged_column(plugin_name.to_string()),
+            proto_marketplace_name: marketplace_name
+                .map(|value| PiiTagged::assert_pii_tagged_column(value.to_string())),
+            plugin_id_hash: Verified::assert_safe(plugin_identity_hash(
+                plugin_name,
+                marketplace_name,
+            )),
+            plugin_scope: Verified::assert_safe(load_failed_scope(install_source_id).to_string()),
+            plugin_name_redacted: Verified::assert_safe("(redacted)".to_string()),
+            marketplace_name_redacted: Verified::assert_safe(
+                if marketplace_name.is_some() {
+                    "(redacted)"
+                } else {
+                    ""
+                }
+                .to_string(),
+            ),
+            is_official_plugin: is_official_marketplace_name(marketplace_name),
+        };
+        bus.log_event(plugin_telemetry::LOAD_FAILED, payload_metadata(&payload))
+            .await;
+    }
+}
+
+/// Stable provenance used by the resolver and plugin telemetry. The path is
+/// deliberately reduced to a source class plus a content-independent hash;
+/// absolute cache/seed paths must never reach a general-access event field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginSourceDescriptor {
+    pub token: String,
+    pub rank: u8,
+    pub marketplace: Option<String>,
+    pub scope: &'static str,
+    pub official: bool,
+}
+
+/// Describe one discovered plugin's source using the same precedence as the
+/// Claude loader: session/local paths outrank installed cache entries, while
+/// a seed cache is only the fallback for an absent primary cache entry.
+pub(crate) fn plugin_source_descriptor(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+) -> PluginSourceDescriptor {
+    plugin_source_descriptor_for_name(&manifest.name, &manifest.source, install_dir)
+}
+
+fn plugin_source_descriptor_for_name(
+    plugin_name: &str,
+    source: &PluginSource,
+    install_dir: &Path,
+) -> PluginSourceDescriptor {
+    let marketplace = cache_marketplace_name(install_dir);
+    let seed = is_seed_path(install_dir);
+    let (class, rank, scope) = match source {
+        // `mergePluginSources` appends built-ins last, so they are the
+        // lowest-precedence source when a session/local or cached plugin
+        // declares the same canonical name.
+        PluginSource::BuiltIn => ("builtin", 0, "builtin"),
+        _ if seed => ("seed", 1, "cache-installed"),
+        _ if marketplace.is_some() => ("cache", 2, "cache-installed"),
+        _ => ("user-local", 3, "user-local"),
+    };
+    // A sibling set of local plugin directories is one source (the normal
+    // flat-walk/reload case), while copies supplied from different roots are
+    // distinct sources and must participate in deterministic collision
+    // resolution. Hash the source root rather than exposing its path.
+    let identity = if marketplace.is_some() || seed || matches!(source, PluginSource::BuiltIn) {
+        format!(
+            "{}@{}",
+            plugin_name,
+            marketplace.as_deref().unwrap_or_default()
+        )
+    } else {
+        let source_root = install_dir
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .unwrap_or_else(|| install_dir.parent().unwrap_or(install_dir).to_path_buf());
+        format!(
+            "{}@local:{}",
+            plugin_name,
+            plugin_hash(source_root.to_string_lossy().as_ref())
+        )
+    };
+    PluginSourceDescriptor {
+        token: format!("{class}:{}", plugin_hash(&identity)),
+        rank,
+        official: is_official_marketplace_name(marketplace.as_deref()),
+        scope,
+        marketplace,
+    }
+}
+
+/// Component names after the plugin namespace is applied. Keeping this
+/// inventory in discovery means the same collision policy is used before
+/// materialization and by `PluginManager::enable` for direct loads.
+pub(crate) fn plugin_component_inventory(
+    manifest: &PluginManifest,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut inventory = BTreeMap::new();
+    let mut add_paths = |kind: &str, paths: &[ComponentPath]| {
+        let names = paths
+            .iter()
+            .filter_map(|component| component_name(&component.path))
+            .map(|name| format!("{}:{name}", manifest.name))
+            .collect::<BTreeSet<_>>();
+        if !names.is_empty() {
+            inventory.insert(kind.to_string(), names);
+        }
+    };
+    add_paths("command", &manifest.components.commands);
+    add_paths("skill", &manifest.components.skills);
+    add_paths("agent", &manifest.components.agents);
+    add_paths("outputStyle", &manifest.components.output_styles);
+    add_paths("theme", &manifest.components.themes);
+    add_paths("workflow", &manifest.components.workflows);
+
+    if !manifest.components.hooks.is_empty() {
+        inventory.insert(
+            "hook".to_string(),
+            BTreeSet::from([format!("{}:hooks", manifest.name)]),
+        );
+    }
+    if !manifest.components.mcp_servers.is_empty() {
+        inventory.insert(
+            "mcp".to_string(),
+            manifest
+                .components
+                .mcp_servers
+                .keys()
+                .map(|name| format!("{}:{name}", manifest.name))
+                .collect(),
+        );
+    }
+    if !manifest.components.lsp_servers.is_empty() {
+        inventory.insert(
+            "lsp".to_string(),
+            manifest
+                .components
+                .lsp_servers
+                .keys()
+                .map(|name| format!("{}:{name}", manifest.name))
+                .collect(),
+        );
+    }
+    if !manifest.components.monitors.is_empty() {
+        inventory.insert(
+            "monitor".to_string(),
+            manifest
+                .components
+                .monitors
+                .iter()
+                .map(|monitor| format!("{}:{}", manifest.name, monitor.name))
+                .collect(),
+        );
+    }
+    inventory
+}
+
+/// Build the component inventory with the same component-name parsers used by
+/// materialization. The manifest stores paths rather than the parsed
+/// frontmatter names for skills, agents, and output styles, so a basename-only
+/// inventory can miss a real collision (or report one for a file that the
+/// manager would skip). Discovery runs this once per loaded plugin before the
+/// source resolver chooses a winner.
+pub(crate) async fn plugin_component_inventory_for_path(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut inventory = plugin_component_inventory(manifest);
+
+    let mut commands = BTreeSet::new();
+    for component in &manifest.components.commands {
+        let root = component_root_from_metadata(component, install_dir.join("commands"));
+        let name = command_api::command_name_from_path(&component.path, &root);
+        if !name.is_empty() {
+            commands.insert(format!("{}:{name}", manifest.name));
+        }
+    }
+    inventory.insert("command".to_string(), commands);
+
+    let mut skills = BTreeSet::new();
+    for component in &manifest.components.skills {
+        let Ok(raw) = tokio::fs::read_to_string(&component.path).await else {
+            continue;
+        };
+        let Ok(skill) = skill_api::parse_skill_markdown(
+            &raw,
+            component.path.clone(),
+            skill_api::SkillSource::Plugin,
+            skill_api::LoadedFrom::Plugin,
+        ) else {
+            continue;
+        };
+        skills.insert(format!("{}:{}", manifest.name, skill.name));
+    }
+    inventory.insert("skill".to_string(), skills);
+
+    let mut agents = BTreeSet::new();
+    for component in &manifest.components.agents {
+        let Ok(raw) = tokio::fs::read_to_string(&component.path).await else {
+            continue;
+        };
+        let root = component_root_from_metadata(component, install_dir.join("agents"));
+        let Ok(agent) = agent::parse_agent_markdown(
+            &raw,
+            agent::AgentSource::Plugin,
+            root.clone(),
+            &component.path,
+        ) else {
+            continue;
+        };
+        let namespace = component
+            .path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&root).ok())
+            .map(|relative| {
+                relative
+                    .components()
+                    .filter_map(|part| match part {
+                        std::path::Component::Normal(value) => {
+                            Some(value.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        let name = if namespace.is_empty() {
+            format!("{}:{}", manifest.name, agent.agent_type)
+        } else {
+            format!("{}:{namespace}:{}", manifest.name, agent.agent_type)
+        };
+        agents.insert(name);
+    }
+    inventory.insert("agent".to_string(), agents);
+
+    let mut output_styles = BTreeSet::new();
+    for component in &manifest.components.output_styles {
+        let stem = component
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let Ok(raw) = tokio::fs::read_to_string(&component.path).await else {
+            continue;
+        };
+        let style = outputstyles::parse_output_style(&raw, stem);
+        output_styles.insert(format!("{}:{}", manifest.name, style.name));
+    }
+    inventory.insert("outputStyle".to_string(), output_styles);
+
+    let mut workflows = BTreeSet::new();
+    for component in &manifest.components.workflows {
+        let Ok(raw) = tokio::fs::read_to_string(&component.path).await else {
+            continue;
+        };
+        if workflow::validate_meta(&raw).is_err() {
+            continue;
+        }
+        let Some(name) = workflow::meta_string_value(&raw, "name") else {
+            continue;
+        };
+        if !name.is_empty() {
+            workflows.insert(format!("{}:{name}", manifest.name));
+        }
+    }
+    inventory.insert("workflow".to_string(), workflows);
+    inventory
+}
+
+fn component_root_from_metadata(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
+    component
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("root"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
+}
+
+fn component_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    if file_name.eq_ignore_ascii_case("skill.md") {
+        return path.parent()?.file_name()?.to_str().map(ToOwned::to_owned);
+    }
+    path.file_stem()?.to_str().map(ToOwned::to_owned)
+}
+
+/// Apply the deterministic plugin-name/component resolver to a discovered
+/// set. The first source in the oracle's effective-source order is selected;
+/// rank ties are broken by the privacy-safe provenance token and then the
+/// canonical path, so input enumeration order cannot affect the winner.
+pub(crate) async fn resolve_discovered_plugins(
+    mut plugins: Vec<(PluginId, PluginManifest, PathBuf)>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (_, manifest, _)) in plugins.iter().enumerate() {
+        groups
+            .entry(manifest.name.to_lowercase())
+            .or_default()
+            .push(index);
+    }
+
+    let mut drop = BTreeSet::new();
+    let mut emitted_collisions = BTreeSet::new();
+    let mut emitted_folders = BTreeSet::new();
+    for indexes in groups.values().filter(|indexes| indexes.len() > 1) {
+        let winner = indexes
+            .iter()
+            .copied()
+            .min_by(|left, right| {
+                let left_desc = plugin_source_descriptor(&plugins[*left].1, &plugins[*left].2);
+                let right_desc = plugin_source_descriptor(&plugins[*right].1, &plugins[*right].2);
+                right_desc
+                    .rank
+                    .cmp(&left_desc.rank)
+                    .then_with(|| left_desc.token.cmp(&right_desc.token))
+                    .then_with(|| plugins[*left].2.cmp(&plugins[*right].2))
+            })
+            .expect("non-empty plugin collision group");
+        let descriptors = indexes
+            .iter()
+            .map(|&index| plugin_source_descriptor(&plugins[index].1, &plugins[index].2))
+            .collect::<Vec<_>>();
+        // Multiple versions of one local/cache source are retained for the
+        // listing/reload APIs. They share one provenance token, so there is no
+        // cross-source collision to resolve; marketplace/seed/source-class
+        // changes produce distinct tokens and continue through the policy.
+        if descriptors
+            .iter()
+            .map(|descriptor| descriptor.token.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            < 2
+        {
+            continue;
+        }
+        let mut inventories = Vec::with_capacity(indexes.len());
+        for &index in indexes {
+            inventories.push(
+                plugin_component_inventory_for_path(&plugins[index].1, &plugins[index].2).await,
+            );
+        }
+
+        // Every component name is resolved independently for telemetry. This
+        // matters when three marketplaces provide the same plugin: the event
+        // must report all distinct sources once, not one pair per loser.
+        let mut item_sources: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        for (position, inventory) in inventories.iter().enumerate() {
+            for (kind, names) in inventory {
+                for name in names {
+                    item_sources
+                        .entry((kind.clone(), name.clone()))
+                        .or_default()
+                        .push(position);
+                }
+            }
+        }
+        for ((kind, name), positions) in item_sources {
+            let mut source_positions = BTreeMap::<String, usize>::new();
+            for position in positions {
+                source_positions
+                    .entry(descriptors[position].token.clone())
+                    .or_insert(position);
+            }
+            if source_positions.len() < 2 {
+                continue;
+            }
+            let component_winner_position = source_positions
+                .values()
+                .copied()
+                .min_by(|left, right| {
+                    descriptors[*right]
+                        .rank
+                        .cmp(&descriptors[*left].rank)
+                        .then_with(|| descriptors[*left].token.cmp(&descriptors[*right].token))
+                })
+                .expect("non-empty component collision source set");
+            let component_sources = source_positions
+                .values()
+                .map(|position| descriptors[*position].clone())
+                .collect::<Vec<_>>();
+            let event_key = format!(
+                "{kind}\0{name}\0{}",
+                component_sources
+                    .iter()
+                    .map(|source| source.token.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            if emitted_collisions.insert(event_key) {
+                emit_name_collision_event(
+                    analytics_bus,
+                    &kind,
+                    &name,
+                    &component_sources,
+                    Some(&descriptors[component_winner_position]),
+                )
+                .await;
+            }
+            for position in source_positions.values().copied() {
+                if position == component_winner_position {
+                    continue;
+                }
+                let index = indexes[position];
+                let folder_key = format!("{kind}\0{}", descriptors[position].token);
+                if emitted_folders.insert(folder_key) {
+                    emit_folder_shadowed_event(
+                        analytics_bus,
+                        &kind,
+                        &plugins[index].1,
+                        &plugins[index].2,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // The plugin resolver drops every lower-precedence plugin with the
+        // same canonical name, even if that particular loser only contributed
+        // a component not present in the winner. This mirrors Vgr's first-name
+        // ownership rule while keeping collision telemetry component-specific.
+        for &index in indexes {
+            if index != winner {
+                drop.insert(index);
+            }
+        }
+    }
+
+    plugins = plugins
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, plugin)| (!drop.contains(&index)).then_some(plugin))
+        .collect();
+    plugins.sort_by(|left, right| {
+        left.1
+            .name
+            .to_lowercase()
+            .cmp(&right.1.name.to_lowercase())
+            .then_with(|| left.1.name.cmp(&right.1.name))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    plugins
+}
+
+/// Emit the oracle-shaped component collision event. Sources are safe opaque
+/// provenance tokens, while only the proto-tagged component name is raw.
+pub(crate) async fn emit_name_collision_event(
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    item_type: &str,
+    item_name: &str,
+    sources: &[PluginSourceDescriptor],
+    winner: Option<&PluginSourceDescriptor>,
+) {
+    let Some(bus) = analytics_bus else {
+        return;
+    };
+    let source_tokens = sources
+        .iter()
+        .map(|source| source.token.clone())
+        .collect::<BTreeSet<_>>();
+    if source_tokens.len() < 2 {
+        return;
+    }
+    let winner_source = winner.map(|source| source.token.clone());
+    let payload = plugin_telemetry::NameCollisionPayload {
+        item_type: Verified::assert_safe(item_type.to_string()),
+        proto_skill_name: PiiTagged::assert_pii_tagged_column(item_name.to_string()),
+        item_name_hash: Verified::assert_safe(plugin_hash(item_name)),
+        source_count: source_tokens.len() as u32,
+        sources: Verified::assert_safe({
+            let mut values = source_tokens.iter().cloned().collect::<Vec<_>>();
+            values.sort();
+            values.join(",")
+        }),
+        winner_source: winner_source.map(Verified::assert_safe),
+    };
+    bus.log_event(plugin_telemetry::NAME_COLLISION, payload_metadata(&payload))
+        .await;
+}
+
+pub(crate) async fn emit_folder_shadowed_event(
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    component: &str,
+    manifest: &PluginManifest,
+    install_dir: &Path,
+) {
+    let Some(bus) = analytics_bus else {
+        return;
+    };
+    let descriptor = plugin_source_descriptor(manifest, install_dir);
+    let component = match component {
+        "command" => "commands",
+        "skill" => "skills",
+        "agent" => "agents",
+        "outputStyle" => "output-styles",
+        "theme" => "themes",
+        "workflow" => "workflows",
+        "hook" => "hooks",
+        "mcp" => "mcpServers",
+        "lsp" => "lspServers",
+        "monitor" => "monitors",
+        other => other,
+    };
+    static EMITTED: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{:p}:{}:{}", Arc::as_ptr(bus), descriptor.token, component);
+    let should_emit = EMITTED
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .map(|mut emitted| emitted.insert(key))
+        .unwrap_or(true);
+    if !should_emit {
+        return;
+    }
+    let payload = plugin_telemetry::FolderShadowedPayload {
+        component: Verified::assert_safe(component.to_string()),
+        proto_plugin_name: PiiTagged::assert_pii_tagged_column(manifest.name.clone()),
+        proto_marketplace_name: descriptor
+            .marketplace
+            .clone()
+            .map(PiiTagged::assert_pii_tagged_column),
+        plugin_id_hash: Verified::assert_safe(plugin_hash(&format!(
+            "{}@{}",
+            manifest.name,
+            descriptor.marketplace.as_deref().unwrap_or_default()
+        ))),
+        plugin_scope: Verified::assert_safe(descriptor.scope.to_string()),
+        plugin_name_redacted: Verified::assert_safe("(redacted)".to_string()),
+        marketplace_name_redacted: Verified::assert_safe(
+            descriptor
+                .marketplace
+                .as_ref()
+                .map(|_| "(redacted)")
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        is_official_plugin: descriptor.official,
+    };
+    bus.log_event(
+        plugin_telemetry::FOLDER_SHADOWED,
+        payload_metadata(&payload),
+    )
+    .await;
+}
+
+fn plugin_seed_dirs() -> Vec<PathBuf> {
+    let value = std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR")
+        .or_else(|| std::env::var_os("LINGXI_PLUGIN_SEED_DIR"));
+    value
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_seed_path(path: &Path) -> bool {
+    plugin_seed_dirs().into_iter().any(|seed| {
+        let Ok(seed) = std::fs::canonicalize(seed) else {
+            return false;
+        };
+        let Ok(path) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        path.starts_with(seed)
+    })
+}
+
+fn cache_marketplace_name(install_dir: &Path) -> Option<String> {
+    let plugin_dir = install_dir.parent()?;
+    let marketplace_dir = plugin_dir.parent()?;
+    let cache_dir = marketplace_dir.parent()?;
+    (cache_dir.file_name()?.to_str()? == "cache")
+        .then(|| marketplace_dir.file_name()?.to_str().map(ToOwned::to_owned))
+        .flatten()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenameResolution {
+    Renamed { to: String, chain_depth: u32 },
+    Removed { chain_depth: u32 },
+    Unresolved { reason: &'static str },
+}
+
+/// Follow the marketplace rename table exactly like Claude's `SPe`: at most
+/// sixteen links, a visited-name cycle check, `null` means removed, and a
+/// target that is not in the marketplace catalog is unresolved. Returning
+/// `None` means the old name has no rename entry and therefore must not create
+/// a telemetry event.
+fn resolve_rename_chain(
+    old_name: &str,
+    renames: &HashMap<String, Option<String>>,
+    known_names: &HashSet<String>,
+) -> Option<RenameResolution> {
+    if !renames.contains_key(old_name) {
+        return None;
+    }
+    const MAX_RENAME_DEPTH: usize = 16;
+    let mut seen = HashSet::new();
+    let mut current = old_name.to_string();
+    for depth in 0..MAX_RENAME_DEPTH {
+        if !seen.insert(current.clone()) {
+            return Some(RenameResolution::Unresolved { reason: "cycle" });
+        }
+        let Some(target) = renames.get(&current) else {
+            if known_names.contains(&current) {
+                return Some(RenameResolution::Renamed {
+                    to: current,
+                    chain_depth: depth as u32,
+                });
+            }
+            return Some(RenameResolution::Unresolved {
+                reason: "target-missing",
+            });
+        };
+        let Some(target) = target else {
+            return Some(RenameResolution::Removed {
+                chain_depth: (depth + 1) as u32,
+            });
+        };
+        current.clone_from(target);
+    }
+    Some(RenameResolution::Unresolved {
+        reason: "chain-too-deep",
+    })
+}
+
+/// Read a marketplace's optional rename table. The catalog is intentionally
+/// treated as untrusted JSON: malformed or non-object entries simply provide
+/// no rename mapping and never prevent an otherwise valid plugin from loading.
+async fn load_marketplace_renames(
+    plugin_dir: &Path,
+    marketplace: &str,
+) -> (HashMap<String, Option<String>>, HashSet<String>) {
+    let Some(plugins_root) = cache_root_for_plugin(plugin_dir) else {
+        return (HashMap::new(), HashSet::new());
+    };
+    let path = plugins_root
+        .join("marketplaces")
+        .join(sanitize_segment(marketplace, false))
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("marketplace.json");
+    let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        return (HashMap::new(), HashSet::new());
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return (HashMap::new(), HashSet::new());
+    };
+    let known_names = value
+        .get("plugins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    let renames = value
+        .get("renames")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(old, target)| match target {
+                    Value::Null => Some((old.clone(), None)),
+                    Value::String(target) if !target.is_empty() => {
+                        Some((old.clone(), Some(target.clone())))
+                    }
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    (renames, known_names)
+}
+
+fn cache_root_for_plugin(plugin_dir: &Path) -> Option<PathBuf> {
+    let plugin_name = plugin_dir.parent()?;
+    let marketplace = plugin_name.parent()?;
+    let cache = marketplace.parent()?;
+    (cache.file_name()?.to_str()? == "cache")
+        .then(|| cache.parent().map(Path::to_path_buf))
+        .flatten()
+}
+
+async fn emit_plugin_renamed_event(
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    old_name: &str,
+    marketplace_name: Option<&str>,
+    source: &PluginSource,
+    install_dir: &Path,
+    resolution: &RenameResolution,
+) {
+    let Some(bus) = analytics_bus else {
+        return;
+    };
+    static EMITTED: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+    let (outcome_key, depth_key, reason_key) = match resolution {
+        RenameResolution::Renamed { chain_depth, .. } => {
+            ("renamed", chain_depth.to_string(), String::new())
+        }
+        RenameResolution::Removed { chain_depth } => {
+            ("removed", chain_depth.to_string(), String::new())
+        }
+        RenameResolution::Unresolved { reason } => {
+            ("unresolved", String::new(), reason.to_string())
+        }
+    };
+    let key = format!(
+        "{:p}:{}:{}:{}:{}",
+        Arc::as_ptr(bus),
+        plugin_hash(&format!(
+            "{old_name}@{}",
+            marketplace_name.unwrap_or_default()
+        )),
+        plugin_hash(install_dir.to_string_lossy().as_ref()),
+        outcome_key,
+        plugin_hash(&format!("{depth_key}:{reason_key}")),
+    );
+    let should_emit = EMITTED
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .map(|mut emitted| emitted.insert(key))
+        .unwrap_or(true);
+    if !should_emit {
+        return;
+    }
+    let descriptor = plugin_source_descriptor_for_name(old_name, source, install_dir);
+    let (outcome, chain_depth, reason) = match resolution {
+        RenameResolution::Renamed { chain_depth, .. } => ("renamed", Some(*chain_depth), None),
+        RenameResolution::Removed { chain_depth } => ("removed", Some(*chain_depth), None),
+        RenameResolution::Unresolved { reason } => ("unresolved", None, Some(*reason)),
+    };
+    let payload = plugin_telemetry::RenamedPayload {
+        outcome: Verified::assert_safe(outcome.to_string()),
+        chain_depth,
+        reason: reason.map(|reason| Verified::assert_safe(reason.to_string())),
+        proto_plugin_name: PiiTagged::assert_pii_tagged_column(old_name.to_string()),
+        proto_marketplace_name: marketplace_name
+            .map(|name| PiiTagged::assert_pii_tagged_column(name.to_string())),
+        plugin_id_hash: Verified::assert_safe(plugin_identity_hash(old_name, marketplace_name)),
+        plugin_scope: Verified::assert_safe(descriptor.scope.to_string()),
+        plugin_name_redacted: Verified::assert_safe("(redacted)".to_string()),
+        marketplace_name_redacted: Verified::assert_safe(
+            marketplace_name
+                .map(|_| "(redacted)")
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        is_official_plugin: is_official_marketplace_name(marketplace_name),
+    };
+    bus.log_event(plugin_telemetry::RENAMED, payload_metadata(&payload))
+        .await;
 }
 
 /// Retain only channel declarations that can bind to a server contributed by
@@ -1805,6 +2972,24 @@ async fn detect_components(
     skip_mcp_discovery: bool,
     confined: bool,
 ) -> PluginComponents {
+    let declared_skill_path_count = parsed
+        .skills
+        .as_ref()
+        .map(path_decl_count)
+        .unwrap_or_default();
+    let declared_command_path_count = parsed
+        .commands
+        .as_ref()
+        .map(CommandsDecl::declared_count)
+        .unwrap_or_default();
+    let declared_agent_path_count = parsed
+        .agents
+        .as_ref()
+        .map(path_decl_count)
+        .unwrap_or_default();
+    let hooks_declared = parsed.hooks.is_some();
+    let mcp_servers_declared = parsed.mcp_servers.is_some();
+    let lsp_servers_declared = parsed.lsp_servers.is_some();
     let default_commands = glob_md(&plugin_dir.join("commands")).await;
     let default_agents = glob_md(&plugin_dir.join("agents")).await;
     let default_skills_dir = plugin_dir.join("skills");
@@ -1815,7 +3000,7 @@ async fn detect_components(
             .unwrap_or(false)
     {
         let root_skill = plugin_dir.join("SKILL.md");
-        if tokio::fs::try_exists(&root_skill).await.unwrap_or(false) {
+        if let Some(root_skill) = canonical_regular_path_under(plugin_dir, &root_skill) {
             default_skills.push(ComponentPath {
                 path: root_skill,
                 metadata: component_root_metadata(plugin_dir),
@@ -1898,6 +3083,9 @@ async fn detect_components(
     let monitors = resolve_monitors(plugin_dir, parsed.monitors.as_ref()).await;
 
     PluginComponents {
+        declared_skill_path_count,
+        declared_command_path_count,
+        declared_agent_path_count,
         commands,
         agents,
         skills,
@@ -1908,12 +3096,62 @@ async fn detect_components(
         binaries,
         monitors,
         hooks,
+        hooks_declared,
         mcp_servers,
+        mcp_servers_declared,
         lsp_servers,
+        lsp_servers_declared,
         skip_mcp_discovery,
     }
 }
 
+fn path_decl_count(paths: &PathDecl) -> u32 {
+    match paths {
+        PathDecl::One(_) => 1,
+        PathDecl::Many(values) => values.len() as u32,
+    }
+}
+
+async fn canonical_plugin_root(plugin_dir: &Path) -> Option<PathBuf> {
+    canonical_plain_directory(plugin_dir).await?;
+    Some(plugin_dir.to_path_buf())
+}
+
+/// Return the canonical location of a plain directory, refusing symlink
+/// roots. Component scans use this before opening a directory so a symlinked
+/// `commands/`, `skills/`, or `themes/` folder cannot make discovery read
+/// outside the plugin root.
+async fn canonical_plain_directory(path: &Path) -> Option<PathBuf> {
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    tokio::fs::canonicalize(path).await.ok()
+}
+
+async fn confined_plugin_install_dir(path: &Path, roots: &[&Path]) -> Option<PathBuf> {
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical = tokio::fs::canonicalize(path).await.ok()?;
+    for root in roots {
+        let root_metadata = tokio::fs::symlink_metadata(root).await.ok()?;
+        if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
+            continue;
+        }
+        let canonical_root = tokio::fs::canonicalize(root).await.ok()?;
+        if canonical.starts_with(canonical_root) {
+            return Some(path.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Resolve a declared component path and verify both lexical and canonical
+/// containment. Symlink-spelled component roots are rejected altogether;
+/// this gives every caller the same no-follow behavior without relying on a
+/// later registry-specific read to notice an escape.
 fn resolve_declared_relative_path(plugin_dir: &Path, raw: &str) -> Option<PathBuf> {
     let rel = raw.strip_prefix("./")?;
     if rel.is_empty() {
@@ -1932,7 +3170,26 @@ fn resolve_declared_relative_path(plugin_dir: &Path, raw: &str) -> Option<PathBu
     {
         return None;
     }
-    Some(plugin_dir.join(path))
+    let candidate = plugin_dir.join(path);
+    let metadata = std::fs::symlink_metadata(&candidate).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical_root = std::fs::canonicalize(plugin_dir).ok()?;
+    let canonical = std::fs::canonicalize(&candidate).ok()?;
+    canonical.starts_with(canonical_root).then_some(candidate)
+}
+
+fn canonical_regular_path_under(root: &Path, path: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return None;
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical = std::fs::canonicalize(path).ok()?;
+    canonical
+        .starts_with(canonical_root)
+        .then_some(path.to_path_buf())
 }
 
 /// oracle `Jqt`: at most 64 valid `binaries` entries survive.
@@ -2032,6 +3289,9 @@ fn parse_monitor_array(raw: &str) -> Option<Vec<PluginMonitor>> {
 /// `outputStyles`/`themes`/`workflows` already follow).
 async fn load_default_monitors(plugin_dir: &Path) -> Vec<PluginMonitor> {
     let path = plugin_dir.join("monitors").join("monitors.json");
+    let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
+        return Vec::new();
+    };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
     };
@@ -2246,7 +3506,7 @@ async fn resolve_skill_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec
         };
         if meta.is_dir() {
             let direct_skill = abs.join("SKILL.md");
-            if tokio::fs::try_exists(&direct_skill).await.unwrap_or(false) {
+            if let Some(direct_skill) = canonical_regular_path_under(&abs, &direct_skill) {
                 let root = abs.parent().unwrap_or(plugin_dir);
                 out.push(ComponentPath {
                     path: direct_skill,
@@ -2279,11 +3539,14 @@ async fn resolve_skill_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec
 /// discovered skill root is not scanned as another independent skill.
 async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
     let mut out = Vec::new();
+    if canonical_plain_directory(skills_dir).await.is_none() {
+        return out;
+    }
     let mut stack = vec![skills_dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         if current != skills_dir {
             let skill_md = current.join("SKILL.md");
-            if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
+            if let Some(skill_md) = canonical_regular_path_under(skills_dir, &skill_md) {
                 out.push(ComponentPath {
                     path: skill_md,
                     metadata: component_root_metadata(skills_dir),
@@ -2409,6 +3672,18 @@ fn resolve_skip_mcp_discovery(
     !except_exempts(name, install_source_id)
 }
 
+/// Serialize tests that mutate the process-wide plugin MCP suppression vars.
+#[cfg(test)]
+pub(crate) fn skip_mcp_test_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS");
+    std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS");
+    std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
+    std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
+    guard
+}
+
 /// Read the plugin-root `.mcp.json` into `{ server name → McpServerConfig }`.
 ///
 /// Mirrors `loadPluginMcpServers` (`mcpPluginIntegration.ts:137`): the file is
@@ -2422,6 +3697,9 @@ fn resolve_skip_mcp_discovery(
 /// [`load_declared_mcp_servers`].
 async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerConfig> {
     let path = plugin_dir.join(".mcp.json");
+    let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
+        return HashMap::new();
+    };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return HashMap::new();
     };
@@ -2452,6 +3730,9 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
 /// [`load_declared_lsp_servers`].
 async fn load_lsp_servers(plugin_dir: &Path) -> IndexMap<String, platform_api::LspServerConfig> {
     let path = plugin_dir.join(".lsp.json");
+    let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
+        return IndexMap::new();
+    };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return IndexMap::new();
     };
@@ -2480,6 +3761,9 @@ async fn load_lsp_servers(plugin_dir: &Path) -> IndexMap<String, platform_api::L
 /// `SKILL.md` nested under `commands/` is not a supported LingXi layout.)
 async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
     let mut out = Vec::new();
+    let Some(canonical_root) = canonical_plain_directory(dir).await else {
+        return out;
+    };
     // Iterative DFS (avoids boxing for async recursion). A directory that
     // cannot be read is skipped, matching TS's swallowed readdir errors.
     let mut stack = vec![dir.to_path_buf()];
@@ -2497,6 +3781,15 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
                 .and_then(|s| s.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("md"))
             {
+                let Ok(metadata) = std::fs::symlink_metadata(&p) else {
+                    continue;
+                };
+                let Ok(canonical) = std::fs::canonicalize(&p) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() || !canonical.starts_with(&canonical_root) {
+                    continue;
+                }
                 out.push(ComponentPath {
                     path: p,
                     metadata: component_root_metadata(dir),
@@ -2516,6 +3809,9 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
 /// no subdirectory walk). Returns an empty vec when `dir` does not exist.
 async fn glob_ext_flat(dir: &Path, ext: &str) -> Vec<ComponentPath> {
     let mut out = Vec::new();
+    let Some(canonical_root) = canonical_plain_directory(dir).await else {
+        return out;
+    };
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return out;
     };
@@ -2529,6 +3825,15 @@ async fn glob_ext_flat(dir: &Path, ext: &str) -> Vec<ComponentPath> {
             .and_then(|s| s.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case(ext))
         {
+            let Ok(metadata) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            let Ok(canonical) = std::fs::canonicalize(&p) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || !canonical.starts_with(&canonical_root) {
+                continue;
+            }
             out.push(ComponentPath {
                 path: p,
                 metadata: component_root_metadata(dir),
@@ -2550,29 +3855,34 @@ async fn load_plugin_settings(
     const ALLOWED: [&str; 2] = ["agent", "subagentStatusLine"];
 
     let settings_path = plugin_dir.join("settings.json");
-    let selected = match tokio::fs::read_to_string(&settings_path).await {
-        Ok(raw) => match serde_json::from_str::<HashMap<String, Value>>(&raw) {
-            Ok(settings) => settings,
+    let selected = match canonical_regular_path_under(plugin_dir, &settings_path)
+        .map(|path| tokio::fs::read_to_string(path))
+    {
+        None => manifest_settings.cloned().unwrap_or_default(),
+        Some(read) => match read.await {
+            Ok(raw) => match serde_json::from_str::<HashMap<String, Value>>(&raw) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %settings_path.display(),
+                        error = %error,
+                        "ignoring malformed plugin settings.json"
+                    );
+                    manifest_settings.cloned().unwrap_or_default()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                manifest_settings.cloned().unwrap_or_default()
+            }
             Err(error) => {
                 tracing::warn!(
                     path = %settings_path.display(),
                     error = %error,
-                    "ignoring malformed plugin settings.json"
+                    "unable to read plugin settings.json"
                 );
                 manifest_settings.cloned().unwrap_or_default()
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            manifest_settings.cloned().unwrap_or_default()
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %settings_path.display(),
-                error = %error,
-                "unable to read plugin settings.json"
-            );
-            manifest_settings.cloned().unwrap_or_default()
-        }
     };
 
     selected
@@ -2615,6 +3925,9 @@ struct RawHooksFile {
 /// the plugin).
 async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
     let path = plugin_dir.join("hooks").join("hooks.json");
+    let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
+        return Vec::new();
+    };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
     };
@@ -3078,7 +4391,43 @@ async fn merge_declared_json_records<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::sync::Arc;
+    use telemetry::{AnalyticsValue, InMemorySink};
+
+    fn string_field<'a>(metadata: &'a telemetry::LogEventMetadata, key: &str) -> &'a str {
+        match metadata.get(key) {
+            Some(AnalyticsValue::String(value)) => value,
+            other => panic!("expected string field {key}, got {other:?}"),
+        }
+    }
+
+    fn bool_field(metadata: &telemetry::LogEventMetadata, key: &str) -> bool {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Bool(value)) => *value,
+            other => panic!("expected bool field {key}, got {other:?}"),
+        }
+    }
+
+    fn int_field(metadata: &telemetry::LogEventMetadata, key: &str) -> i64 {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Int(value)) => *value,
+            other => panic!("expected integer field {key}, got {other:?}"),
+        }
+    }
+
+    fn assert_no_raw_path(metadata: &telemetry::LogEventMetadata, path: &Path) {
+        let raw_path = path.display().to_string();
+        for (key, value) in metadata {
+            if let AnalyticsValue::String(value) = value {
+                assert!(
+                    !value.contains(&raw_path),
+                    "metadata field {key} leaked plugin path: {value}"
+                );
+            }
+        }
+    }
 
     /// §22: byte-exact copy for the out-of-directory MCP source skip (the
     /// oracle string recovered from the 2.1.251 Mach-O @160863770), sibling
@@ -3419,6 +4768,470 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn invalid_name_emits_plugin_load_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"my plugin"}"#,
+        )
+        .unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        assert!(load_plugin_from_path_with_bus(plugin, Some(&bus))
+            .await
+            .is_none());
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1, "one load failure event expected");
+        let record = &events[0];
+        assert_eq!(record.name, plugin_telemetry::LOAD_FAILED);
+        assert_eq!(
+            string_field(&record.metadata, "error_category"),
+            "invalid-name"
+        );
+        assert_eq!(string_field(&record.metadata, "plugin_scope"), "user-local");
+        assert!(!bool_field(&record.metadata, "cache_only"));
+        assert!(!bool_field(&record.metadata, "is_official_plugin"));
+        assert_eq!(
+            string_field(&record.metadata, "plugin_name_redacted"),
+            "(redacted)"
+        );
+        assert_eq!(
+            string_field(&record.metadata, "_PROTO_plugin_name"),
+            "my plugin"
+        );
+        for (key, value) in &record.metadata {
+            if key.starts_with("_PROTO_") {
+                continue;
+            }
+            if let AnalyticsValue::String(value) = value {
+                assert!(
+                    !value.contains("my plugin"),
+                    "non-proto field {key} leaked raw plugin name: {value}"
+                );
+            }
+        }
+        assert_no_raw_path(&record.metadata, plugin);
+    }
+
+    #[tokio::test]
+    async fn malformed_manifest_emits_plugin_load_failed_to_analytics_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo""#,
+        )
+        .unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        assert!(load_plugin_from_path_with_mcp_gate_and_bus(
+            plugin,
+            false,
+            Some("demo@claude-code-marketplace"),
+            Some(&bus),
+        )
+        .await
+        .is_none());
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1, "one load failure event expected");
+        let record = &events[0];
+        assert_eq!(record.name, plugin_telemetry::LOAD_FAILED);
+        assert_eq!(
+            string_field(&record.metadata, "error_category"),
+            "malformed-plugin-json"
+        );
+        assert!(bool_field(&record.metadata, "cache_only"));
+        assert!(bool_field(&record.metadata, "is_official_plugin"));
+        assert_eq!(
+            string_field(&record.metadata, "plugin_scope"),
+            "cache-installed"
+        );
+        assert_eq!(string_field(&record.metadata, "component"), "manifest");
+        assert_eq!(
+            string_field(&record.metadata, "_PROTO_marketplace_name"),
+            "claude-code-marketplace"
+        );
+        assert_eq!(
+            string_field(&record.metadata, "marketplace_name_redacted"),
+            "(redacted)"
+        );
+        assert_no_raw_path(&record.metadata, plugin);
+    }
+
+    #[tokio::test]
+    async fn successful_load_does_not_emit_plugin_load_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo"}"#,
+        )
+        .unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        assert!(load_plugin_from_path_with_bus(plugin, Some(&bus))
+            .await
+            .is_some());
+        assert!(
+            sink.events().await.is_empty(),
+            "successful load must not emit load_failed"
+        );
+    }
+
+    async fn load_collision_plugin(
+        root: &Path,
+        marketplace: &str,
+        name: &str,
+    ) -> (PluginId, PluginManifest, PathBuf) {
+        let dir = root
+            .join("cache")
+            .join(marketplace)
+            .join(name)
+            .join("1.0.0");
+        fs::create_dir_all(dir.join("commands")).unwrap();
+        write_manifest(&dir, &serde_json::json!({"name": name, "version": "1.0.0"}));
+        fs::write(dir.join("commands/ping.md"), "# ping").unwrap();
+        let source_id = format!("{name}@{marketplace}");
+        let (id, manifest) =
+            load_plugin_from_path_with_mcp_gate(&dir, false, Some(source_id.as_str()))
+                .await
+                .expect("collision fixture loads");
+        (id, manifest, dir)
+    }
+
+    #[tokio::test]
+    async fn component_collision_winner_is_order_independent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = load_collision_plugin(tmp.path(), "market-a", "collision").await;
+        let second = load_collision_plugin(tmp.path(), "market-b", "collision").await;
+
+        let forward = resolve_discovered_plugins(vec![first.clone(), second.clone()], None).await;
+        let reverse = resolve_discovered_plugins(vec![second.clone(), first.clone()], None).await;
+
+        assert_eq!(forward.len(), 1);
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(forward[0].2, reverse[0].2);
+        assert_eq!(forward[0].1.name, "collision");
+    }
+
+    #[tokio::test]
+    async fn component_collision_emits_one_privacy_safe_event_per_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = load_collision_plugin(tmp.path(), "market-a", "collision").await;
+        let second = load_collision_plugin(tmp.path(), "market-b", "collision").await;
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let resolved = resolve_discovered_plugins(vec![first, second], Some(&bus)).await;
+        assert_eq!(resolved.len(), 1);
+
+        let events = sink.events().await;
+        let collisions = events
+            .iter()
+            .filter(|event| event.name == plugin_telemetry::NAME_COLLISION)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            collisions.len(),
+            1,
+            "one event for one resolved command name"
+        );
+        let metadata = &collisions[0].metadata;
+        assert_eq!(string_field(metadata, "item_type"), "command");
+        assert_eq!(
+            string_field(metadata, "_PROTO_skill_name"),
+            "collision:ping"
+        );
+        assert_eq!(int_field(metadata, "source_count"), 2);
+        let sources = string_field(metadata, "sources");
+        assert!(!sources.contains(tmp.path().to_string_lossy().as_ref()));
+        let winner = string_field(metadata, "winner_source");
+        assert!(sources.split(',').any(|source| source == winner));
+        assert!(!winner.contains('/'));
+
+        let shadows = events
+            .iter()
+            .filter(|event| event.name == plugin_telemetry::FOLDER_SHADOWED)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shadows.len(),
+            1,
+            "only the losing source folder is shadowed"
+        );
+        assert_eq!(string_field(&shadows[0].metadata, "component"), "commands");
+        assert_no_raw_path(&shadows[0].metadata, tmp.path());
+    }
+
+    #[tokio::test]
+    async fn local_source_precedes_cache_source_for_same_plugin_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local_path = tmp.path().join("local/collision");
+        fs::create_dir_all(local_path.join("commands")).unwrap();
+        write_manifest(&local_path, &serde_json::json!({"name": "collision"}));
+        fs::write(local_path.join("commands/ping.md"), "# local").unwrap();
+        let (local_id, local_manifest) = load_plugin_from_path(&local_path).await.unwrap();
+        let local = (local_id, local_manifest, local_path);
+
+        let cached = load_collision_plugin(tmp.path(), "market", "collision").await;
+        let forward = resolve_discovered_plugins(vec![cached.clone(), local.clone()], None).await;
+        let reverse = resolve_discovered_plugins(vec![local, cached], None).await;
+        assert_eq!(forward.len(), 1);
+        assert_eq!(reverse.len(), 1);
+        assert!(forward[0].2.ends_with("local/collision"));
+        assert_eq!(forward[0].2, reverse[0].2);
+    }
+
+    #[tokio::test]
+    async fn seed_cache_is_used_only_when_primary_is_missing_and_is_shadowed_otherwise() {
+        use std::sync::Mutex;
+
+        static SEED_ENV_SERIAL: Mutex<()> = Mutex::new(());
+        let _guard = SEED_ENV_SERIAL.lock().expect("seed env lock");
+        let previous_claude = std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR");
+        let previous_lingxi = std::env::var_os("LINGXI_PLUGIN_SEED_DIR");
+        std::env::remove_var("LINGXI_PLUGIN_SEED_DIR");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join("plugins/cache/market/seeded/1.0.0");
+        let seed = tmp.path().join("seed/cache/market/seeded/1.0.0");
+        for (dir, body) in [(&primary, "# primary"), (&seed, "# seed")] {
+            fs::create_dir_all(dir.join("commands")).unwrap();
+            write_manifest(dir, &serde_json::json!({"name": "seeded"}));
+            fs::write(dir.join("commands/ping.md"), body).unwrap();
+        }
+        std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", tmp.path().join("seed"));
+
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let enabled = BTreeMap::from([(String::from("seeded@market"), true)]);
+        let discovered = discover_enabled_plugins_with_bus(
+            tmp.path().join("plugins").as_path(),
+            &enabled,
+            Some(&bus),
+        )
+        .await;
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].2, primary);
+        assert_eq!(
+            fs::read_to_string(discovered[0].2.join("commands/ping.md")).unwrap(),
+            "# primary"
+        );
+        let shadows = sink
+            .events()
+            .await
+            .into_iter()
+            .filter(|event| event.name == plugin_telemetry::FOLDER_SHADOWED)
+            .collect::<Vec<_>>();
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(string_field(&shadows[0].metadata, "component"), "commands");
+        assert_no_raw_path(&shadows[0].metadata, tmp.path());
+
+        // Removing the primary cache causes the first configured seed root to
+        // become the actual loaded source.
+        fs::remove_dir_all(tmp.path().join("plugins/cache")).unwrap();
+        let loaded_from_seed =
+            discover_enabled_plugins_with_bus(tmp.path().join("plugins").as_path(), &enabled, None)
+                .await;
+        assert_eq!(loaded_from_seed.len(), 1);
+        assert_eq!(loaded_from_seed[0].2, seed);
+
+        match previous_claude {
+            Some(value) => std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", value),
+            None => std::env::remove_var("CLAUDE_CODE_PLUGIN_SEED_DIR"),
+        }
+        match previous_lingxi {
+            Some(value) => std::env::set_var("LINGXI_PLUGIN_SEED_DIR", value),
+            None => std::env::remove_var("LINGXI_PLUGIN_SEED_DIR"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_resolution_follows_chain_and_reports_cycles_and_depth() {
+        let mut renames = HashMap::from([
+            ("old".to_string(), Some("middle".to_string())),
+            ("middle".to_string(), Some("new".to_string())),
+        ]);
+        let known = HashSet::from(["new".to_string()]);
+        assert_eq!(
+            resolve_rename_chain("old", &renames, &known),
+            Some(RenameResolution::Renamed {
+                to: "new".to_string(),
+                chain_depth: 2,
+            })
+        );
+
+        renames.insert("new".to_string(), None);
+        assert_eq!(
+            resolve_rename_chain("old", &renames, &known),
+            Some(RenameResolution::Removed { chain_depth: 3 })
+        );
+
+        let cycle = HashMap::from([
+            ("old".to_string(), Some("middle".to_string())),
+            ("middle".to_string(), Some("old".to_string())),
+        ]);
+        assert_eq!(
+            resolve_rename_chain("old", &cycle, &HashSet::new()),
+            Some(RenameResolution::Unresolved { reason: "cycle" })
+        );
+
+        let missing = HashMap::from([("old".to_string(), Some("missing".to_string()))]);
+        assert_eq!(
+            resolve_rename_chain("old", &missing, &HashSet::new()),
+            Some(RenameResolution::Unresolved {
+                reason: "target-missing"
+            })
+        );
+
+        let mut deep = HashMap::new();
+        for index in 0..16 {
+            deep.insert(format!("n{index}"), Some(format!("n{}", index + 1)));
+        }
+        deep.insert("n16".to_string(), Some("n17".to_string()));
+        assert_eq!(
+            resolve_rename_chain("n0", &deep, &HashSet::from(["n17".to_string()])),
+            Some(RenameResolution::Unresolved {
+                reason: "chain-too-deep"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_updates_identity_preserves_install_provenance_and_emits_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("cache/market/old/1.0.0");
+        fs::create_dir_all(install_dir.join("commands")).unwrap();
+        write_manifest(&install_dir, &serde_json::json!({"name": "new"}));
+        fs::write(install_dir.join("commands/ping.md"), "# ping").unwrap();
+        let catalog = tmp.path().join("marketplaces/market/.lingxi-plugin");
+        fs::create_dir_all(&catalog).unwrap();
+        fs::write(
+            catalog.join("marketplace.json"),
+            serde_json::json!({
+                "plugins": [{"name": "new"}],
+                "renames": {"old": "new"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let source_id = "old@market";
+        let loaded = load_plugin_from_path_with_mcp_gate_and_bus(
+            &install_dir,
+            false,
+            Some(source_id),
+            Some(&bus),
+        )
+        .await
+        .expect("renamed plugin loads");
+        assert_eq!(loaded.1.name, "new");
+        match &loaded.1.source {
+            PluginSource::LocalPath { path } => assert_eq!(path, &install_dir),
+            source => panic!("renamed cache source changed unexpectedly: {source:?}"),
+        }
+
+        let events = sink.events().await;
+        let renamed = events
+            .iter()
+            .filter(|event| event.name == plugin_telemetry::RENAMED)
+            .collect::<Vec<_>>();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(string_field(&renamed[0].metadata, "outcome"), "renamed");
+        assert_eq!(int_field(&renamed[0].metadata, "chain_depth"), 1);
+        assert_eq!(
+            string_field(&renamed[0].metadata, "_PROTO_plugin_name"),
+            "old"
+        );
+        assert_no_raw_path(&renamed[0].metadata, tmp.path());
+
+        // Re-reading the same source must not duplicate the diagnostic on the
+        // shared bus, but it must continue to preserve the old install path.
+        let loaded_again = load_plugin_from_path_with_mcp_gate_and_bus(
+            &install_dir,
+            false,
+            Some(source_id),
+            Some(&bus),
+        )
+        .await
+        .expect("renamed plugin reloads");
+        assert_eq!(loaded_again.1.name, "new");
+        match &loaded_again.1.source {
+            PluginSource::LocalPath { path } => assert_eq!(path, &install_dir),
+            source => panic!("renamed cache source changed unexpectedly: {source:?}"),
+        }
+        assert_eq!(
+            sink.events()
+                .await
+                .iter()
+                .filter(|event| event.name == plugin_telemetry::RENAMED)
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn component_scans_refuse_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plugin");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("commands")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        write_manifest(&plugin, &serde_json::json!({"name": "safe"}));
+        fs::write(outside.join("escape.md"), "# escaped").unwrap();
+        symlink(outside.join("escape.md"), plugin.join("commands/escape.md")).unwrap();
+        assert!(load_plugin_from_path(&plugin)
+            .await
+            .expect("plugin manifest loads")
+            .1
+            .components
+            .commands
+            .is_empty());
+
+        let linked_commands = plugin.join("linked-commands");
+        symlink(&outside, &linked_commands).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "safe", "commands": "./linked-commands"}).to_string(),
+        )
+        .unwrap();
+        assert!(load_plugin_from_path(&plugin)
+            .await
+            .expect("plugin manifest loads")
+            .1
+            .components
+            .commands
+            .is_empty());
+    }
+
     /// Oracle `gt`'s `type` is a fixed enum (`string`/`number`/`boolean`/
     /// `directory`/`file`), not an arbitrary string.
     #[tokio::test]
@@ -3592,6 +5405,65 @@ mod tests {
                 .map(|(_, manifest, _)| manifest.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["disabled"]
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_discovery_reads_legacy_filename_and_persists_canonical_v2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+        let cache_path = plugins_dir.join("cache/mkt/weather/1.0.0");
+        fs::create_dir_all(cache_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            cache_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"weather"}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugins_dir.join("installed_plugins_v2.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "plugins": {
+                    "mkt": {
+                        "weather": {
+                            "version": "1.0.0",
+                            "installPath": "cache/mkt/weather/1.0.0",
+                            "added": "2026-08-31T00:00:00.000Z"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let discovered = discover_effective_plugins(plugins_dir, &BTreeMap::new()).await;
+
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|(_, manifest, _)| manifest.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["weather"]
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(crate::installed::path(plugins_dir)).unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "weather@mkt": [{
+                        "scope": "user",
+                        "version": "1.0.0",
+                        "installPath": "cache/mkt/weather/1.0.0",
+                        "installedAt": "2026-08-31T00:00:00.000Z",
+                        "lastUpdated": "2026-08-31T00:00:00.000Z"
+                    }]
+                }
+            })
         );
     }
 
@@ -4167,19 +6039,9 @@ mod tests {
     /// `LINGXI_`/`CLAUDE_CODE_` alias) to "unset" at entry. Mirrors
     /// `tools/ui/src/brief.rs`'s `brief_guard` / `push_notification.rs`'s
     /// `guard`.
-    fn skip_mcp_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS");
-        std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS");
-        std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
-        std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
-        g
-    }
-
     #[tokio::test]
     async fn sdk_skip_mcp_discovery_suppresses_mcp_but_not_other_components() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         write_plugin_with_mcp_and_command(plugin, "demo");
@@ -4214,7 +6076,7 @@ mod tests {
 
     #[tokio::test]
     async fn skip_plugin_mcp_servers_env_suppresses_discovery_for_every_plugin() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         write_plugin_with_mcp_and_command(plugin, "demo");
@@ -4250,7 +6112,7 @@ mod tests {
 
     #[tokio::test]
     async fn except_with_at_sign_matches_install_source_id_directory_loaded_or_not() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         write_plugin_with_mcp_and_command(plugin, "demo");
@@ -4290,7 +6152,7 @@ mod tests {
     /// re-admits them whether or not this port resolved an install-source id.
     #[tokio::test]
     async fn except_bare_name_exempts_a_plugin_with_or_without_an_install_source_id() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         write_plugin_with_mcp_and_command(plugin, "demo");
@@ -4820,7 +6682,7 @@ mod tests {
         // The env tests set that var while other tests run in parallel, so
         // take the same serializing guard here — otherwise these assertions
         // are scheduling-dependent.
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -4874,7 +6736,7 @@ mod tests {
     /// id must still resolve its MCPB source.
     #[tokio::test]
     async fn mcp_servers_mcpb_source_resolves_for_a_plugin_dir_load_too() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -4908,7 +6770,7 @@ mod tests {
     /// byte-for-byte from claude-code's.
     #[tokio::test]
     async fn mcpb_extract_dir_is_keyed_on_the_16_hex_short_hash() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -4962,7 +6824,7 @@ mod tests {
     /// the FAILURE forever.
     #[tokio::test]
     async fn a_stale_cache_dir_does_not_suppress_re_extraction() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -5003,7 +6865,7 @@ mod tests {
     /// directory it created behind, or the next load reads it as a cache hit.
     #[tokio::test]
     async fn a_failed_mcpb_extraction_leaves_no_cache_dir_behind() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -5032,7 +6894,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_servers_mcpb_manifest_with_no_server_yields_no_server() {
-        let _g = skip_mcp_env_guard();
+        let _g = super::skip_mcp_test_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();

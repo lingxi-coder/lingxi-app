@@ -14,6 +14,7 @@
 //! the owner acting on the returned [`BottomPaneOutcome`]. The pane never
 //! cancels a turn or exits the process by itself.
 
+pub mod agents_view;
 pub mod ask_user_question_view;
 pub mod cd_confirm_view;
 pub mod completion_view;
@@ -22,6 +23,7 @@ pub mod connect_key_view;
 pub mod connect_method_view;
 pub mod connect_picker_view;
 pub mod dialog_view;
+pub mod focus_view;
 pub mod footer;
 pub mod held_peer_view;
 pub mod input_status;
@@ -66,6 +68,7 @@ use crate::bottom_pane::computer_access_view::ComputerAccessView;
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
+use crate::bottom_pane::view::{AgentsSnapshot, FocusProjection, OwnerViewUpdate};
 use crate::composer::{Composer, ComposerView, EditDelta};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
@@ -78,6 +81,8 @@ pub use view::{
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
+/// The idle `Esc` double-press window that opens `/rewind`.
+const ESC_REWIND_WINDOW: Duration = Duration::from_millis(800);
 
 /// The owner-computed task status the pane renders while a turn is running.
 /// The pane holds NO turn state itself (`current_turn`/`turn_started_at`/
@@ -128,6 +133,8 @@ pub enum BottomPaneOutcome {
     /// The composer submitted this (trimmed) buffer text. Slash-command
     /// routing versus prompt submission is the owner's decision.
     Submitted(String),
+    /// Idle `Esc Esc` on an empty prompt: open the `/rewind` picker.
+    OpenRewindPicker,
     /// A stacked view asks the owner to submit `String` as a user prompt.
     SubmitPrompt(String),
     /// Shift+Tab cycled the session permission mode to this new mode. The pane
@@ -194,6 +201,10 @@ pub enum BottomPaneOutcome {
     /// whole picker view stack has already been cleared by [`ViewStack::apply`]
     /// by the time this surfaces.
     SwitchSession(uuid::Uuid),
+    /// The agents view selected a session. Unlike `/resume`, the CLI must
+    /// resolve live ownership and attach/restart safely before deciding whether
+    /// a transcript remount is allowed.
+    OpenAgentSession(crate::bottom_pane::view::AgentSessionTarget),
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
@@ -251,6 +262,9 @@ pub struct BottomPane {
     /// second press within [`CTRL_C_EXIT_WINDOW`] surfaces
     /// [`BottomPaneOutcome::Quit`].
     ctrl_c_at: Option<Instant>,
+    /// First idle `Esc` on an empty prompt; the second within
+    /// [`ESC_REWIND_WINDOW`] opens `/rewind`.
+    esc_rewind_at: Option<Instant>,
     /// ←-on-empty gesture timestamps (`tui_core::left_arrow_gesture`). Pane-
     /// local like `ctrl_c_at`: it drives the "Press ← again to open agents"
     /// footer hint and decides whether the next ← moves the cursor or opens
@@ -362,6 +376,7 @@ impl BottomPane {
             vim_insert_mode_remaps: BTreeMap::new(),
             vim_insert_remap_pending: None,
             ctrl_c_at: None,
+            esc_rewind_at: None,
             left_arrow: tui_core::left_arrow_gesture::LeftArrowState::default(),
             left_arrow_opens_agents: true,
             left_arrow_hint_at: None,
@@ -463,6 +478,9 @@ impl BottomPane {
     /// it resolves, then the completion popup, then vim, then the composer.
     pub fn handle_key(&mut self, key: KeyEvent) -> BottomPaneOutcome {
         self.accessibility_announcement = None;
+        if !(key.code == KeyCode::Esc && key.modifiers.is_empty()) {
+            self.esc_rewind_at = None;
+        }
         if let Some(outcome) = self.view_stack.route_key(key) {
             return Self::map_view_outcome(outcome);
         }
@@ -692,6 +710,31 @@ impl BottomPane {
         self.view_stack.push(view);
     }
 
+    pub fn show_focus(&mut self, projection: FocusProjection) {
+        self.view_stack
+            .push(Box::new(focus_view::FocusView::new(projection, self.theme)));
+    }
+
+    pub fn show_agents(&mut self, snapshot: AgentsSnapshot) {
+        self.view_stack
+            .push(Box::new(agents_view::AgentsView::new(snapshot, self.theme)));
+    }
+
+    pub fn refresh_focus(&mut self, projection: FocusProjection) {
+        self.view_stack
+            .apply_owner_update(OwnerViewUpdate::Focus(projection));
+    }
+
+    pub fn refresh_agents(&mut self, snapshot: AgentsSnapshot) {
+        self.view_stack
+            .apply_owner_update(OwnerViewUpdate::Agents(snapshot));
+    }
+
+    #[must_use]
+    pub fn dismiss_active_focus_view(&mut self) -> bool {
+        self.view_stack.pop_if_active::<focus_view::FocusView>()
+    }
+
     /// Open a permission prompt for `exchange`: it owns the keyboard until
     /// the user resolves it and delivers the response through the exchange's
     /// one-shot channel exactly once.
@@ -701,6 +744,16 @@ impl BottomPane {
     #[must_use]
     pub fn has_active_view(&self) -> bool {
         self.view_stack.active().is_some()
+    }
+
+    /// Whether the active view requests redraws while the app is otherwise
+    /// idle. Dynamic views use this to observe external state without taking
+    /// keyboard input (for example a branch switch while `/diff` is open).
+    #[must_use]
+    pub fn active_view_needs_redraw(&self) -> bool {
+        self.view_stack
+            .active()
+            .is_some_and(|view| view.needs_redraw())
     }
 
     /// Toggle the non-bracketed paste-burst heuristic (codex
@@ -950,7 +1003,9 @@ impl BottomPane {
 
     /// Replace the live agent snapshot shown below the composer.
     pub fn set_running_agents(&mut self, agents: Vec<RunningAgentStatus>) {
-        self.running_agents = agents;
+        self.running_agents = agents.clone();
+        self.view_stack
+            .apply_owner_update(OwnerViewUpdate::RunningAgents(agents));
     }
 
     /// Current live-agent snapshot, for event reducers and tests.
@@ -1240,6 +1295,12 @@ impl BottomPane {
         self.left_arrow_opens_agents
     }
 
+    #[must_use]
+    fn esc_rewind_armed(&self) -> bool {
+        self.esc_rewind_at
+            .is_some_and(|t| t.elapsed() <= ESC_REWIND_WINDOW)
+    }
+
     /// The armed ←-gesture hint, if one is showing and has not timed out.
     /// The pane's only gesture handler opens the agents view, so the hint is
     /// `kGt`'s open-agents `confirmHint` (the `GLe` arm), not the state
@@ -1341,6 +1402,7 @@ impl BottomPane {
             ViewOutcome::Rewind { message, scope } => BottomPaneOutcome::Rewind { message, scope },
             ViewOutcome::ChangeDirectory(path) => BottomPaneOutcome::ChangeDirectory(path),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
+            ViewOutcome::OpenAgentSession(target) => BottomPaneOutcome::OpenAgentSession(target),
             ViewOutcome::RewakePeer => BottomPaneOutcome::RewakePeer,
         }
     }
@@ -1595,6 +1657,14 @@ impl BottomPane {
             KeyCode::Esc => {
                 if self.status.running {
                     BottomPaneOutcome::Interrupt
+                } else if self.composer.is_empty() {
+                    if self.esc_rewind_armed() {
+                        self.esc_rewind_at = None;
+                        BottomPaneOutcome::OpenRewindPicker
+                    } else {
+                        self.esc_rewind_at = Some(Instant::now());
+                        BottomPaneOutcome::Consumed
+                    }
                 } else {
                     BottomPaneOutcome::Quit
                 }
@@ -2172,6 +2242,25 @@ impl ViewStack {
         }
     }
 
+    pub fn apply_owner_update(&mut self, update: OwnerViewUpdate) {
+        for view in &mut self.views {
+            view.refresh_from_owner(update.clone());
+        }
+    }
+
+    pub fn pop_if_active<V: 'static>(&mut self) -> bool {
+        if self
+            .views
+            .last()
+            .is_some_and(|view| view.as_any().is::<V>())
+        {
+            self.views.pop();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drop every turn-owned interactive prompt while preserving unrelated
     /// screens (help, settings, pickers). Dropping these views closes their
     /// one-shot response senders, so a cancelled turn cannot be approved by a
@@ -2236,11 +2325,13 @@ impl ViewStack {
             // A `/connect` effect, in contrast, CLOSES the whole flow: the
             // picker → method-choice → key-entry chain is fully dismissed
             // (unlike `/web`'s config screen, which stays open to show test/
-            // save status in place). The result (key stored, Copilot/OAuth
-            // kicked off) is reported into the transcript instead, so there is
-            // no live screen left to update.
+            // save status in place). When another parent surface launched the
+            // flow (for example the agents pane's `l` shortcut), preserve that
+            // parent and dismiss only the contiguous connect child stack.
             ViewOutcome::RunConnectAction(action) => {
-                self.views.clear();
+                while self.views.last().is_some_and(|view| view.is_connect_flow()) {
+                    self.views.pop();
+                }
                 ViewOutcome::RunConnectAction(action)
             }
             // A `/permissions` add/remove keeps the editor OPEN (like a `/web`
@@ -2263,6 +2354,10 @@ impl ViewStack {
                 self.views.clear();
                 ViewOutcome::SwitchSession(uuid)
             }
+            ViewOutcome::OpenAgentSession(target) => {
+                self.views.clear();
+                ViewOutcome::OpenAgentSession(target)
+            }
             ViewOutcome::Rewind { message, scope } => {
                 self.views.clear();
                 ViewOutcome::Rewind { message, scope }
@@ -2277,6 +2372,12 @@ impl ViewStack {
                 // Consumed locally: the requesting view stays open beneath.
                 self.views.push(child);
                 ViewOutcome::Pending
+            }
+            ViewOutcome::RunCommand(CommandAction::OpenConnectPicker) => {
+                // The agents view launches `/connect` as a child flow. Keep
+                // that parent mounted so cancelling or completing the login
+                // returns to the same selected agent row.
+                ViewOutcome::RunCommand(CommandAction::OpenConnectPicker)
             }
             accepted => {
                 // Accepted / SubmitPrompt / SwitchModel / PermissionResponse /
@@ -2305,6 +2406,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::*;
+    use crate::bottom_pane::view::AgentsPaneRow;
     use crate::renderable::Renderable;
 
     /// A scripted view: returns the next queued outcome per key/paste.
@@ -2451,13 +2553,14 @@ mod tests {
             1,
             "TestSearch keeps the view open"
         );
-        // Any /connect effect dismisses the whole connect flow.
+        // A /connect effect dismisses connect-flow children but preserves the
+        // non-connect parent that launched them.
         assert_eq!(
             drive(ViewOutcome::RunConnectAction(ConnectAction::OAuth {
                 provider_id: "anthropic".to_string(),
             })),
-            0,
-            "RunConnectAction clears the connect stack"
+            1,
+            "RunConnectAction preserves a non-connect parent"
         );
         // A /permissions add/remove keeps the editor open (edit in place).
         assert_eq!(
@@ -3340,15 +3443,36 @@ mod tests {
     }
 
     #[test]
-    fn esc_quits_and_ctrl_o_toggles_verbose_via_owner() {
+    fn empty_prompt_esc_double_press_opens_rewind_and_ctrl_o_toggles_verbose_via_owner() {
         let mut pane = pane();
         assert!(matches!(
             pane.handle_key(key(KeyCode::Esc)),
-            BottomPaneOutcome::Quit
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::OpenRewindPicker
         ));
         assert!(matches!(
             pane.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             BottomPaneOutcome::ToggleVerbose
+        ));
+    }
+
+    #[test]
+    fn non_escape_keys_disarm_the_idle_rewind_chord_and_nonempty_esc_still_quits() {
+        let mut pane = pane();
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('h'))),
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Quit
         ));
     }
 
@@ -3398,11 +3522,15 @@ mod tests {
             !pane.ctrl_c_armed(),
             "interrupt does not arm the quit chord"
         );
-        // Idle again: Esc falls back to the quit policy.
+        // Idle again: Esc arms, then the second press opens the rewind chord.
         pane.set_task_running(BottomPaneStatus::default());
         assert!(matches!(
             pane.handle_key(key(KeyCode::Esc)),
-            BottomPaneOutcome::Quit
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::OpenRewindPicker
         ));
     }
 
@@ -3758,11 +3886,9 @@ mod tests {
             "first item highlighted: {}",
             buffer_row(&buf, 4)
         );
-        // Sixth item: `/cd` (parity 2.1.207 added it to the advertised set; it
-        // sorts /add-dir, /agents, /autocompact, /branch, /btw, /cd — pushing
-        // /clear to the 7th, off-window, slot).
+        // Sixth item: `/btw` in the current advertised registry order.
         assert!(
-            buffer_row(&buf, 9).contains("/cd"),
+            buffer_row(&buf, 9).contains("/btw"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );
@@ -3852,6 +3978,51 @@ mod tests {
             matches!(outcome, BottomPaneOutcome::RunConnectAction(_)),
             "paste + Enter reaches the store-key effect: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn connect_action_preserves_a_parent_view_beneath_connect_children() {
+        let mut stack = ViewStack::new();
+        stack.push(Box::new(agents_view::AgentsView::new(
+            AgentsSnapshot {
+                rows: vec![AgentsPaneRow {
+                    session_id: "11111111-1111-4111-8111-111111111111".into(),
+                    name: "agent".into(),
+                    state: "working".into(),
+                    kind: "background".into(),
+                    cwd: "/repo".into(),
+                    status: Some("busy".into()),
+                    waiting_for: None,
+                    detail: None,
+                    model: None,
+                    tokens: None,
+                    tool_calls: None,
+                    started_at_ms: Some(1),
+                }],
+            },
+            Theme::dark(),
+        )));
+        let open = stack.apply(ViewOutcome::RunCommand(CommandAction::OpenConnectPicker));
+        assert!(matches!(
+            open,
+            ViewOutcome::RunCommand(CommandAction::OpenConnectPicker)
+        ));
+        assert_eq!(stack.len(), 1, "opening connect must retain agents parent");
+        stack.push(Box::new(connect_picker_view::ConnectPickerView::new(
+            [("openrouter".to_string(), "api_key".to_string())]
+                .into_iter()
+                .collect(),
+            std::collections::BTreeMap::new(),
+        )));
+        assert_eq!(stack.len(), 2);
+
+        let outcome = stack.apply(ViewOutcome::RunConnectAction(ConnectAction::OAuth {
+            provider_id: "anthropic".to_string(),
+        }));
+
+        assert!(matches!(outcome, ViewOutcome::RunConnectAction(_)));
+        assert_eq!(stack.len(), 1, "agents parent should survive");
+        assert!(stack.contains::<agents_view::AgentsView>());
     }
 
     // ===== Plan Phase 13 step 4: cursor containment =====

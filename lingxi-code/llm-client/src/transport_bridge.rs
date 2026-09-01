@@ -11,12 +11,12 @@ use crate::{
     BoxFuture, FrameStream, LlmError, ProviderRequest, ProviderResponse, ProviderStreamTransport,
     RawStreamFrame, StreamFraming, StreamingResponse,
 };
-use protocol::{HttpMethod, HttpRequest, HttpResponse};
 use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
     WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
 use platform_api::{HttpError, HttpTransport};
+use protocol::{HttpMethod, HttpRequest, HttpResponse};
 
 /// Adapter exposing a [`platform_api::HttpTransport`] as an [`llm_client::Transport`].
 pub struct LlmTransportBridge<T> {

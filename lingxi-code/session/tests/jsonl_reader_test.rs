@@ -1,5 +1,6 @@
 //! `JsonlReader` full + lite parity.
 
+use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::reader::{route_lines, JsonlReader, SessionMetadata};
@@ -7,7 +8,6 @@ use session::jsonl::schema::JsonlMessage;
 use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
-use platform_api::FileSystem;
 
 fn user_msg(n: u8) -> JsonlMessage {
     JsonlMessage {

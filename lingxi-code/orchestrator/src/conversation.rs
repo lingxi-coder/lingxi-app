@@ -13,9 +13,9 @@ use crate::turn_loop::{
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
-use lingxi_core::SessionState;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
+use lingxi_core::SessionState;
 use llm_client::{LlmError, LlmEvent, LlmResponse};
 use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
@@ -23,6 +23,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::Duration;
 
+use platform_api::orchestrator::ModelListing;
+use platform_api::OutputStream;
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
 /// that do NOT depend on the `protocol` crate — notably the desktop bridge's
 /// `OrchestratorTurnDriver` — can construct the already-decoded sources handed to
@@ -34,8 +36,6 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 use tool_api::ToolRegistryView as _;
-use platform_api::orchestrator::ModelListing;
-use platform_api::OutputStream;
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -1256,6 +1256,9 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
     /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
     pub(crate) mcp_registry: Option<Arc<mcp::McpRegistry>>,
+    /// Provider-neutral local IDE lifecycle handle. `None` for hosts that do
+    /// not expose a local endpoint inventory (mobile/embedded callers).
+    pub(crate) ide_handle: Option<Arc<dyn platform_api::IdeHandle>>,
     /// Compaction engines, token ledgers, and extraction state.
     pub(crate) compaction_runtime: CompactionRuntime,
     /// `/fork` background-agent spawner. When wired (via

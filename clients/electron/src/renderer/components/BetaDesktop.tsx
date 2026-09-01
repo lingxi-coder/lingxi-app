@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   ImageRefDto,
   ModelDetailsDto,
@@ -33,6 +33,15 @@ import { Icon } from './Icon';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
 import { PERM_MODES } from '../data';
+
+export const SIDEBAR_DEFAULT_WIDTH = 260;
+export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_MAX_WIDTH = 480;
+const SIDEBAR_KEYBOARD_STEP = 16;
+
+export function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+}
 
 function basename(path?: string): string {
   if (!path) return 'No project';
@@ -168,6 +177,8 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
 
 export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onOpenSettings(): void }) {
   const t = useT();
+  const asideRef = useRef<HTMLElement>(null);
+  const resizingPointerRef = useRef<number | null>(null);
   const settings = bridge.bootstrap?.settings;
   const projects = settings?.projects ?? [];
   const pinnedSessions = settings?.pinnedSessions ?? [];
@@ -180,6 +191,20 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
+
+  useEffect(() => {
+    if (!resizingSidebar) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [resizingSidebar]);
 
   useEffect(() => {
     setMenuProject(null);
@@ -220,9 +245,42 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
   }, [bridge.newSession]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
+  const startSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizingPointerRef.current = event.pointerId;
+    setResizingSidebar(true);
+  }, []);
+  const resizeSidebar = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (resizingPointerRef.current !== event.pointerId) return;
+    const sidebarLeft = asideRef.current?.getBoundingClientRect().left ?? 0;
+    setSidebarWidth(clampSidebarWidth(event.clientX - sidebarLeft));
+  }, []);
+  const finishSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizingPointerRef.current = null;
+    setResizingSidebar(false);
+  }, []);
+  const resizeSidebarWithKeyboard = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    setSidebarWidth((current) => {
+      if (event.key === 'Home') return SIDEBAR_MIN_WIDTH;
+      if (event.key === 'End') return SIDEBAR_MAX_WIDTH;
+      const delta = event.key === 'ArrowLeft' ? -SIDEBAR_KEYBOARD_STEP : SIDEBAR_KEYBOARD_STEP;
+      return clampSidebarWidth(current + delta);
+    });
+  }, []);
 
   return (
-    <aside style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 38 }}>
+    <aside
+      ref={asideRef}
+      data-resizing={resizingSidebar || undefined}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 38 }}
+    >
       <div className="drag-region" style={{ minHeight: 46, padding: '7px 14px 6px', display: 'flex', alignItems: 'center' }}>
         <strong style={{ color: t.text, fontSize: 16.5, fontWeight: 650, letterSpacing: '-.02em' }}>LingXi</strong>
       </div>
@@ -453,6 +511,28 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
           <Icon name="cog" size={15} /> Settings & diagnostics
         </button>
       </div>
+
+      <div
+        className="sidebar-resize-handle no-drag"
+        role="separator"
+        aria-label="Resize sidebar"
+        aria-orientation="vertical"
+        aria-valuenow={Math.round(sidebarWidth)}
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        tabIndex={0}
+        onPointerDown={startSidebarResize}
+        onPointerMove={resizeSidebar}
+        onPointerUp={finishSidebarResize}
+        onPointerCancel={finishSidebarResize}
+        onLostPointerCapture={() => {
+          resizingPointerRef.current = null;
+          setResizingSidebar(false);
+        }}
+        onKeyDown={resizeSidebarWithKeyboard}
+        onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+        style={{ color: t.accent }}
+      />
     </aside>
   );
 }

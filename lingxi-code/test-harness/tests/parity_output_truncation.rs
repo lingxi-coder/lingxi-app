@@ -172,6 +172,9 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
             || body.contains("shared::truncate")
             || body.contains("truncate_shell_output")
             || body.contains("OutputTruncated")
+            // The registry enforces a tool's explicit result-size method even
+            // when the implementation does not call a truncation helper.
+            || body.contains("fn max_result_size_chars")
             // ST-10: a tool may declare its OWN cap instead of reusing the
             // shared `MAX_TOOL_OUTPUT_LENGTH`, because upstream the caps differ
             // per tool (Glob 100_000 vs Grep 20_000). Declaring

@@ -1128,6 +1128,42 @@ pub enum PluginCommandDto {
         /// Whether the user approved the exact reviewed surface.
         approved: bool,
     },
+    /// Start the host-managed Local App MCP authoring flow for one app.
+    StartLocalAppMcpAuthoring {
+        /// App whose MCP surface should be authored or revised.
+        app_id: String,
+        /// User-visible goal that constrains the generated MCP surface.
+        user_goal: String,
+    },
+    /// Enable or disable one Local App's MCP service with CAS protection.
+    SetLocalAppMcpEnabled {
+        /// App whose MCP exposure should change.
+        app_id: String,
+        /// Target enabled state.
+        enabled: bool,
+        /// Caller-observed settings revision used for CAS.
+        expected_revision: u64,
+    },
+    /// Enable or disable one catalog tool with CAS protection.
+    SetLocalAppMcpToolEnabled {
+        /// Owning app for the MCP tool.
+        app_id: String,
+        /// Raw MCP tool name from the active catalog.
+        tool_name: String,
+        /// Target enabled state.
+        enabled: bool,
+        /// Caller-observed settings revision used for CAS.
+        expected_revision: u64,
+    },
+    /// Pin or unpin one app's MCP surface into a conversation.
+    SetLocalAppMcpConversationPinned {
+        /// Conversation whose registry exposure should change.
+        conversation_id: String,
+        /// App whose MCP server should be pinned.
+        app_id: String,
+        /// Whether the app should stay pinned for this conversation.
+        pinned: bool,
+    },
     /// Read the managed Local App MCP inventory projection for native UI.
     GetManagedMcpInventory,
 }
@@ -1148,6 +1184,8 @@ pub enum LocalAppPluginErrorCodeDto {
     ProposalInvalid,
     CatalogStale,
     ActiveStateCorrupt,
+    RevisionConflict,
+    InvalidMcpSettings,
     McpAuthoringRequired,
     RepairBudgetExhausted,
     ExposureCapacityReached,
@@ -1175,6 +1213,20 @@ pub struct LocalAppVerificationSummaryDto {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+}
+
+/// Managed Local App MCP lifecycle state rendered in native inventory UIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ManagedLocalAppMcpStatusDto {
+    Disabled,
+    NeedsSetup,
+    Authoring,
+    Enabled,
+    NeedsRevalidation,
+    Error,
 }
 
 /// One named gate shown in a native approval or verification surface.
@@ -1370,6 +1422,16 @@ pub struct LocalAppMcpProposalApprovalRequestDto {
     pub receipt: Option<LocalAppReceiptStatusDto>,
 }
 
+/// Host-managed widget resource surfaced alongside one Local App MCP server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppWidgetDto {
+    pub resource_uri: String,
+    pub mime_type: String,
+    pub resource_sha256: String,
+}
+
 /// One managed Local App MCP logical-server row for native inventory UIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -1378,6 +1440,15 @@ pub struct ManagedLocalAppMcpServerDto {
     pub server_name: String,
     pub app_id: String,
     pub app_name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    pub status: ManagedLocalAppMcpStatusDto,
+    pub settings_revision: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_tools: Vec<String>,
+    /// Whether this app is pinned in the currently active conversation.
+    #[serde(default)]
+    pub pinned_to_current_conversation: bool,
     pub build_id: String,
     pub catalog_sha256: String,
     pub tool_surface_sha256: String,
@@ -1386,6 +1457,8 @@ pub struct ManagedLocalAppMcpServerDto {
     pub publication_state: AppWorkflowStateDto,
     pub mcp_verification: LocalAppVerificationSummaryDto,
     pub ui_verification: LocalAppVerificationSummaryDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget: Option<McpAppWidgetDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<LocalAppMcpToolSurfaceDto>,
 }
@@ -1587,14 +1660,16 @@ mod tests {
     // `native_toggle_writes_back_the_same_bare_key` (fully reachable here)
     // keeps its required name.
     use super::{
-        AppEventDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto,
-        AppSurfaceDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
-        LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
+        AppErrorCodeDto, AppEventDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto,
+        AppRuntimeProfilePackageDto, AppSurfaceDto, AppWorkflowStateDto,
+        LocalAppCreateConfirmationRequestDto, LocalAppGateStatusDto,
+        LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
         LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
         LocalAppPluginComponentCountsDto, LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
         LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
         LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
-        PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
+        ManagedLocalAppMcpStatusDto, McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto,
+        PluginStatusDto,
     };
 
     fn canonical_profile_option() -> AppRuntimeProfileOptionDto {
@@ -1662,6 +1737,27 @@ mod tests {
             available: true,
             detail: Some("Will run after approval.".into()),
         }
+    }
+
+    fn canonical_widget() -> McpAppWidgetDto {
+        McpAppWidgetDto {
+            resource_uri:
+                "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html"
+                    .into(),
+            mime_type: "text/html;profile=mcp-app".into(),
+            resource_sha256: "8".repeat(64),
+        }
+    }
+
+    #[test]
+    fn app_error_code_dto_round_trips_new_lsp_failure_code() {
+        let json = serde_json::to_value(AppErrorCodeDto::LspDiagnosticsFailed)
+            .expect("serialize app error code");
+        assert_eq!(json, "lsp_diagnostics_failed");
+        assert_eq!(
+            serde_json::from_value::<AppErrorCodeDto>(json).expect("deserialize app error code"),
+            AppErrorCodeDto::LspDiagnosticsFailed
+        );
     }
 
     /// The wire-shape half of "explicit `false` is Disabled, not absent"
@@ -1890,6 +1986,26 @@ mod tests {
                 request_id: "proposal-0001".into(),
                 approved: false,
             },
+            PluginCommandDto::StartLocalAppMcpAuthoring {
+                app_id: "habits-1a2b".into(),
+                user_goal: "Let the model save and summarize my habit data.".into(),
+            },
+            PluginCommandDto::SetLocalAppMcpEnabled {
+                app_id: "habits-1a2b".into(),
+                enabled: true,
+                expected_revision: 4,
+            },
+            PluginCommandDto::SetLocalAppMcpToolEnabled {
+                app_id: "habits-1a2b".into(),
+                tool_name: "save_habit".into(),
+                enabled: false,
+                expected_revision: 5,
+            },
+            PluginCommandDto::SetLocalAppMcpConversationPinned {
+                conversation_id: "conv-0001".into(),
+                app_id: "habits-1a2b".into(),
+                pinned: true,
+            },
             PluginCommandDto::GetManagedMcpInventory,
         ] {
             let json = serde_json::to_value(&command).expect("serialize plugin command");
@@ -1905,6 +2021,18 @@ mod tests {
                 }
                 PluginCommandDto::ResolveMcpProposalApproval { .. } => {
                     assert_eq!(json["type"], "resolve_mcp_proposal_approval")
+                }
+                PluginCommandDto::StartLocalAppMcpAuthoring { .. } => {
+                    assert_eq!(json["type"], "start_local_app_mcp_authoring")
+                }
+                PluginCommandDto::SetLocalAppMcpEnabled { .. } => {
+                    assert_eq!(json["type"], "set_local_app_mcp_enabled")
+                }
+                PluginCommandDto::SetLocalAppMcpToolEnabled { .. } => {
+                    assert_eq!(json["type"], "set_local_app_mcp_tool_enabled")
+                }
+                PluginCommandDto::SetLocalAppMcpConversationPinned { .. } => {
+                    assert_eq!(json["type"], "set_local_app_mcp_conversation_pinned")
                 }
                 PluginCommandDto::GetManagedMcpInventory => {
                     assert_eq!(json["type"], "get_managed_mcp_inventory")
@@ -2035,6 +2163,11 @@ mod tests {
                 server_name: "local_app_habits-1a2b".into(),
                 app_id: "habits-1a2b".into(),
                 app_name: "Habits".into(),
+                enabled: true,
+                status: ManagedLocalAppMcpStatusDto::Enabled,
+                settings_revision: 6,
+                enabled_tools: vec!["save_habit".into()],
+                pinned_to_current_conversation: true,
                 build_id: "build-0001".into(),
                 catalog_sha256: "6".repeat(64),
                 tool_surface_sha256: "7".repeat(64),
@@ -2051,16 +2184,32 @@ mod tests {
                     summary: "No UI runner is available on this device.".into(),
                     code: Some("verification_unavailable".into()),
                 },
+                widget: Some(canonical_widget()),
                 tools: vec![canonical_tool_surface("save_habit")],
             }],
         };
         let inventory_json =
             serde_json::to_value(&inventory_event).expect("serialize managed inventory");
         assert_eq!(inventory_json["type"], "managed_mcp_inventory_changed");
+        assert_eq!(inventory_json["servers"][0]["enabled"], true);
+        assert_eq!(inventory_json["servers"][0]["status"], "enabled");
+        assert_eq!(inventory_json["servers"][0]["settingsRevision"], 6_u64);
+        assert_eq!(
+            inventory_json["servers"][0]["pinnedToCurrentConversation"],
+            true
+        );
+        assert_eq!(
+            inventory_json["servers"][0]["enabledTools"][0],
+            "save_habit"
+        );
         assert_eq!(inventory_json["servers"][0]["toolCount"], 2_u64);
         assert_eq!(
             inventory_json["servers"][0]["uiVerification"]["status"],
             "unavailable"
+        );
+        assert_eq!(
+            inventory_json["servers"][0]["widget"]["resourceUri"],
+            "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html"
         );
         assert_eq!(
             serde_json::from_value::<AppEventDto>(inventory_json)
@@ -2096,13 +2245,13 @@ mod tests {
 
         let failure = AppEventDto::LocalAppOperationFailed {
             app_id: None,
-            code: LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable,
-            message: "The verified builtin bundle root is missing.".into(),
+            code: LocalAppPluginErrorCodeDto::InvalidMcpSettings,
+            message: "The saved MCP settings for this app are invalid.".into(),
             request_id: Some("plugin-read-1".into()),
         };
         let json = serde_json::to_value(&failure).expect("serialize local app failure");
         assert_eq!(json["type"], "local_app_operation_failed");
-        assert_eq!(json["code"], "builtin_bundle_unavailable");
+        assert_eq!(json["code"], "invalid_mcp_settings");
         assert_eq!(json["request_id"], "plugin-read-1");
         assert_eq!(
             serde_json::from_value::<AppEventDto>(json).expect("deserialize local app failure"),

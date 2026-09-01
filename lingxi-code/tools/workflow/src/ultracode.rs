@@ -206,7 +206,9 @@ fn contains_literal_ultracode(prompt: &str) -> bool {
 #[must_use]
 pub fn workflows_enabled(managed_disabled: bool) -> bool {
     !managed_disabled
-        && !platform_api::env::is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref())
+        && !platform_api::env::is_env_truthy(
+            std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref(),
+        )
 }
 
 #[cfg(test)]

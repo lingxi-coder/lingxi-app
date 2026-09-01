@@ -66,16 +66,17 @@ mod tests {
                 // /reload-plugins stays visible (host-bound, no isHidden gate).
                 // (x402 was removed from the command set — 0 hits in 2.1.216+.)
                 assert!(s.contains("/reload-plugins"));
-                // Hidden/disabled commands are filtered out of /help.
+                // Hidden/disabled commands are filtered out of /help, and the
+                // policy-only `/heapdump` object is absent from recognition.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 81 newlines total (1 header + 80 visible commands).
+                // 79 newlines total (1 header + 78 visible commands).
                 // SLASH-06 gave `bug` its own visible row and dropped `share`
                 // (that command's alias, not a command); SLASH-14 then removed
                 // `/version`, whose two oracle objects @2.1.238 296268759 both
                 // carry `isEnabled:()=>!1`; SLASH-13 added the ungated
                 // `/powerup` object (2.1.238 @296124285).
-                assert_eq!(s.matches('\n').count(), 81);
+                assert_eq!(s.matches('\n').count(), 79);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
                 assert!(!s.contains("  /version "));

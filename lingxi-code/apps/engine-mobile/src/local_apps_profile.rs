@@ -6,12 +6,12 @@ use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use local_apps::{AppError, AppEventFanout, AppService};
+use platform_api::{Clock, MobileLinuxRuntime};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use tokio::sync::OnceCell;
-use platform_api::{Clock, MobileLinuxRuntime};
 
 type ProfileCell = Arc<OnceCell<Arc<ProfileApps>>>;
 

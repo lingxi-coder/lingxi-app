@@ -6,17 +6,17 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (74 lines, sorted ASCII-ascending) ...
+//!   ... (78 visible command lines, sorted ASCII-ascending) ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` — the real per-command
 //! one-liner for every visible builtin with a claude-code analogue (cp-01),
 //! falling back to the literal `"(unimplemented in v0.6.0)"` only for the few
-//! LingXi-specific / internal commands without one. The 28 hidden/disabled
+//! LingXi-specific / internal commands without one. The 8 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 80
-//! visible commands = 81 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 78
+//! visible commands = 79 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -46,7 +46,7 @@ pub fn render_help_screen() -> String {
     let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
 
     // Capacity hint: header + visible lines.
-    let mut out = String::with_capacity(10 + 80 * (col1_width + 40));
+    let mut out = String::with_capacity(10 + 78 * (col1_width + 40));
     out.push_str("Commands:\n");
 
     for name in visible() {
@@ -84,25 +84,19 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_80_lines() {
-        // 1 header + 80 visible commands = 81 lines (each terminated by '\n').
+    fn output_has_exactly_78_visible_lines() {
+        // 1 header + 78 visible commands = 79 lines (each terminated by '\n').
         // The hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (108 builtins − 28 hidden = 80 visible, with no DISABLE_* env set.)
-        // Was 79 visible until SLASH-06: `share` left the hidden-stub table and
-        // `bug` joined the visible set (still 107 builtins, still 79 visible
-        // net); then 80 visible while `/version` was still advertised, until
-        // SLASH-14 filtered it out — both of its oracle objects carry
-        // `isEnabled:()=>!1`, so claude-code never lists it either. SLASH-13
-        // then added the ungated `powerup` object: 108 builtins, 80 visible.
+        // (86 builtins − 8 hidden = 78 visible, with no DISABLE_* env set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 81,
-            "expected 81 newlines (1 header + 80 visible commands), got {n}"
+            n, 79,
+            "expected 79 newlines (1 header + 78 visible commands), got {n}"
         );
     }
 
@@ -185,7 +179,7 @@ mod tests {
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
             // Hidden/disabled commands are filtered out (see is_palette_hidden);
-            // only the 80 visible commands appear.
+            // only the 78 visible commands appear.
             if is_palette_hidden(name) {
                 continue;
             }

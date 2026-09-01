@@ -8,7 +8,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 (globalThis as { React?: typeof React }).React = React;
 
 import { canResumePendingSession } from '../src/renderer/bridge/useBridge';
-import { BetaComposer, BetaSidebar } from '../src/renderer/components/BetaDesktop';
+import {
+  BetaComposer,
+  BetaSidebar,
+  clampSidebarWidth,
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+} from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { formatRelativeSessionTime, formatSessionMetadata } from '../src/renderer/bridge/sessionPresentation';
@@ -134,6 +141,28 @@ test('sidebar renders global pins before projects and limits each project sessio
   assert.match(markup, /aria-label="Running"/);
   assert.match(markup, /aria-current="page" title="Session 1"/);
   assert.match(markup, /disabled/); // project actions remain independently guarded by project activity
+});
+
+test('sidebar exposes a bounded drag handle for resizing', () => {
+  assert.equal(clampSidebarWidth(SIDEBAR_MIN_WIDTH - 40), SIDEBAR_MIN_WIDTH);
+  assert.equal(clampSidebarWidth(318), 318);
+  assert.equal(clampSidebarWidth(SIDEBAR_MAX_WIDTH + 40), SIDEBAR_MAX_WIDTH);
+
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaSidebar, { bridge: bridgeFixture() as any, onOpenSettings: () => undefined }),
+  ));
+  assert.match(markup, /role="separator"/);
+  assert.match(markup, /aria-label="Resize sidebar"/);
+  assert.match(markup, /aria-orientation="vertical"/);
+  assert.match(markup, new RegExp(`aria-valuenow="${SIDEBAR_DEFAULT_WIDTH}"`));
+  assert.match(markup, new RegExp(`aria-valuemin="${SIDEBAR_MIN_WIDTH}"`));
+  assert.match(markup, new RegExp(`aria-valuemax="${SIDEBAR_MAX_WIDTH}"`));
+
+  const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  assert.match(source, /setPointerCapture\(event\.pointerId\)/);
+  assert.match(source, /onPointerMove=\{resizeSidebar\}/);
 });
 
 test('project rows omit the disclosure arrow and the active session uses the accent background', () => {

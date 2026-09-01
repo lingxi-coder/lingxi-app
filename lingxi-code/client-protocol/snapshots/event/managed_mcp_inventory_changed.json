@@ -7,6 +7,13 @@
         "serverName": "local_app_habits-1a2b",
         "appId": "habits-1a2b",
         "appName": "Habits",
+        "enabled": true,
+        "status": "enabled",
+        "settingsRevision": 6,
+        "enabledTools": [
+          "save_habit"
+        ],
+        "pinnedToCurrentConversation": true,
         "buildId": "build-0001",
         "catalogSha256": "6666666666666666666666666666666666666666666666666666666666666666",
         "toolSurfaceSha256": "7777777777777777777777777777777777777777777777777777777777777777",
@@ -21,6 +28,11 @@
           "status": "unavailable",
           "summary": "UI verification runner is unavailable.",
           "code": "verification_unavailable"
+        },
+        "widget": {
+          "resourceUri": "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html",
+          "mimeType": "text/html;profile=mcp-app",
+          "resourceSha256": "8888888888888888888888888888888888888888888888888888888888888888"
         },
         "tools": [
           {

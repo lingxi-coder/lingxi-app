@@ -2,10 +2,10 @@
 //! awaitWriteFinish.stabilityThreshold (500ms / 200ms defaults).
 
 use futures_util::StreamExt;
+use platform_api::FileSystem;
 use platform_posix::PosixFileSystem;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use platform_api::FileSystem;
 
 #[tokio::test]
 async fn rapid_writes_collapse_to_single_event() {

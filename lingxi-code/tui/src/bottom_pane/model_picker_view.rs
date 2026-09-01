@@ -157,8 +157,18 @@ impl ModelPickerView {
                 } else {
                     0
                 };
+                let managed_tag = if r.is_current && r.provenance.is_managed() {
+                    crate::session::MANAGED_MODEL_TAG.chars().count()
+                } else {
+                    0
+                };
                 let summary = r.summary().map_or(0, |summary| summary.chars().count() + 3);
-                r.display.chars().count() + 4 + reasoning_tag + multimodal_tag + summary
+                r.display.chars().count()
+                    + 4
+                    + reasoning_tag
+                    + multimodal_tag
+                    + managed_tag
+                    + summary
             })
             .max()
             .unwrap_or(0);
@@ -311,6 +321,12 @@ impl Renderable for ModelPickerView {
                     Style::default().add_modifier(Modifier::DIM),
                 ));
             }
+            if row.is_current && row.provenance.is_managed() {
+                spans.push(Span::styled(
+                    crate::session::MANAGED_MODEL_TAG,
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
             if let Some(summary) = row.summary() {
                 spans.push(Span::styled(
                     format!(" · {summary}"),
@@ -420,6 +436,7 @@ mod tests {
                 request_model: "claude-opus".into(),
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -430,6 +447,7 @@ mod tests {
                 request_model: "claude-sonnet".into(),
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -469,6 +487,7 @@ mod tests {
                 request_model: "glm-5.1".into(),
                 profile: Some("glm-coding".into()),
                 provider_label: "GLM (coding)".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -479,6 +498,7 @@ mod tests {
                 request_model: "gpt-5.5".into(),
                 profile: Some("openai".into()),
                 provider_label: "OpenAI".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -490,6 +510,7 @@ mod tests {
                 request_model: "glm-5.1".into(),
                 profile: Some("glm-coding".into()),
                 provider_label: "GLM (coding)".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -522,6 +543,7 @@ mod tests {
                 request_model: "shared-model".into(),
                 profile: Some("provider-a".into()),
                 provider_label: "Custom".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -532,6 +554,7 @@ mod tests {
                 request_model: "shared-model".into(),
                 profile: Some("provider-b".into()),
                 provider_label: "Custom".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -606,6 +629,7 @@ mod tests {
                 request_model: format!("model-{i:02}"),
                 profile: None,
                 provider_label: String::new(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: Some(i) == current,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -640,6 +664,7 @@ mod tests {
                 request_model: "gpt-5.5".into(),
                 profile: Some("openai".into()),
                 provider_label: "OpenAI".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -650,6 +675,7 @@ mod tests {
                 request_model: "qwen/qwen3-coder:free".into(),
                 profile: Some("openrouter".into()),
                 provider_label: "OpenRouter".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: false,
                 supports_multimodal: false,
@@ -690,12 +716,88 @@ mod tests {
     }
 
     #[test]
+    fn managed_model_renders_an_attribution_tag_without_polluting_display() {
+        let rows = vec![
+            ModelRow {
+                display: "Managed Sonnet".into(),
+                request_model: "claude-sonnet-4-5".into(),
+                profile: Some("anthropic".into()),
+                provider_label: "Anthropic".into(),
+                provenance: platform_api::ModelProvenance::ManagedAdministratorDefault,
+                is_current: true,
+                supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
+            },
+            ModelRow {
+                display: "User GPT".into(),
+                request_model: "gpt-5.5".into(),
+                profile: Some("openai".into()),
+                provider_label: "OpenAI".into(),
+                provenance: platform_api::ModelProvenance::UserOrEnv,
+                is_current: false,
+                supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
+            },
+            ModelRow {
+                display: "Catalog Gemini".into(),
+                request_model: "gemini-3.1-pro-preview".into(),
+                profile: Some("gemini".into()),
+                provider_label: "Google".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                is_current: false,
+                supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
+            },
+            ModelRow {
+                display: "Former Managed".into(),
+                request_model: "claude-opus-4-8".into(),
+                profile: Some("anthropic".into()),
+                provider_label: "Anthropic".into(),
+                provenance: platform_api::ModelProvenance::ManagedAdministratorDefault,
+                is_current: false,
+                supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
+            },
+        ];
+        let picker = ModelPickerView::new(rows);
+        let text = render_text(&picker, Rect::new(0, 0, 100, 20));
+        let packed = text.replace(' ', "");
+
+        assert_eq!(
+            packed.matches("Setbyyourorganization").count(),
+            1,
+            "only the managed row is attributed: {text}"
+        );
+        assert!(text.contains("Managed Sonnet"), "clean display: {text}");
+        assert!(
+            text.contains("User GPT"),
+            "user row remains visible: {text}"
+        );
+        assert!(
+            text.contains("Catalog Gemini"),
+            "catalog row remains visible: {text}"
+        );
+        assert!(
+            picker
+                .rows()
+                .iter()
+                .all(|row| !row.display.contains("Set by")),
+            "attribution must be a render-only suffix"
+        );
+    }
+
+    #[test]
     fn multimodal_catalog_model_renders_the_dim_tag_without_polluting_display() {
         let rows = vec![ModelRow {
             display: "Gemini 3.1 Pro".into(),
             request_model: "gemini-3.1-pro-preview".into(),
             profile: Some("gemini".into()),
             provider_label: "Google".into(),
+            provenance: platform_api::ModelProvenance::ProviderCatalogTier,
             is_current: true,
             supports_reasoning: true,
             supports_multimodal: true,
@@ -712,6 +814,7 @@ mod tests {
             request_model: "claude-sonnet-4-6".into(),
             profile: Some("anthropic".into()),
             provider_label: "Anthropic".into(),
+            provenance: platform_api::ModelProvenance::ProviderCatalogTier,
             is_current: false,
             supports_reasoning: true,
             supports_multimodal: true,
@@ -797,6 +900,7 @@ mod tests {
                 request_model: format!("m{i}"),
                 profile: None,
                 provider_label: String::new(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -844,6 +948,7 @@ mod tests {
                 request_model: "claude-opus-4-8".into(),
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -854,6 +959,7 @@ mod tests {
                 request_model: "openai/gpt-4o".into(),
                 profile: Some("openrouter".into()),
                 provider_label: "OpenRouter".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -864,6 +970,7 @@ mod tests {
                 request_model: "google/gemini-pro".into(),
                 profile: Some("openrouter".into()),
                 provider_label: "OpenRouter".into(),
+                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,

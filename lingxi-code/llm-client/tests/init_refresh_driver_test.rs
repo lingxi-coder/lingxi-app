@@ -3,6 +3,10 @@
 use async_trait::async_trait;
 use llm_client::oauth::anthropic::client::init_refresh_driver;
 use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
+use platform_api::http::SseStream;
+use platform_api::{
+    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
+};
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
 use std::pin::Pin;
@@ -10,8 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
-use platform_api::http::SseStream;
-use platform_api::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct NoopTransport;
 #[async_trait]

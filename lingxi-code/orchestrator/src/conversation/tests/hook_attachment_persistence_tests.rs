@@ -34,7 +34,9 @@ mod tool_frame_ordering_tests {
         events
             .iter()
             .filter_map(|e| match e {
-                platform_api::orchestrator::OutputEvent::ToolResult { id, .. } => Some(id.to_string()),
+                platform_api::orchestrator::OutputEvent::ToolResult { id, .. } => {
+                    Some(id.to_string())
+                }
                 _ => None,
             })
             .collect()

@@ -13,11 +13,13 @@
 //! per-crate test were accidentally moved.
 
 use lsp::LspRegistry;
+use platform_api::{
+    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use test_harness::parity::load_fixture;
-use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 #[derive(Deserialize)]
 struct Fixture {

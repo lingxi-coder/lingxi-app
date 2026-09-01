@@ -11,11 +11,11 @@
 //! resource template, one `greet` prompt).
 
 use futures::StreamExt;
+use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 mod support;
 

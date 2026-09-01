@@ -8,9 +8,9 @@ use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use command_core::{register_all_builtin_commands, register_core_batch_1};
 use orchestrator::test_support::MockOrchestratorHandle;
+use platform_api::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use platform_api::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 
 fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
     let mut reg = CommandRegistry::new();
@@ -62,13 +62,13 @@ async fn help_dispatch() {
             assert!(display.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
-            // 81 newlines (header + 80 visible command lines); hidden and
+            // 79 newlines (header + 78 visible command lines); hidden and
             // disabled commands remain filtered out. SLASH-06 made `bug`
             // visible and stopped counting `share` (it is `bug`'s alias);
             // SLASH-14 then filtered `/version` out — both of its oracle
             // objects @2.1.238 296268759 are `isEnabled:()=>!1` — and SLASH-13
             // added the ungated `/powerup` object.
-            assert_eq!(display.matches('\n').count(), 81);
+            assert_eq!(display.matches('\n').count(), 79);
         }
         other => panic!("{other:?}"),
     }
@@ -119,11 +119,11 @@ async fn init_dispatch_returns_handled_with_template_text() {
 async fn non_batch_1_command_still_returns_stub() {
     let (d, _) = fresh();
     // `x402` left the 105-name surface, so it is no longer a registered stub;
-    // `ant-trace` is the sample `register.rs` itself uses for one.
-    let r = d.dispatch("/ant-trace").await;
+    // `teleport` remains a faithful compiled stub.
+    let r = d.dispatch("/teleport").await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "ant-trace: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)");
         }
         other => panic!("{other:?}"),
     }

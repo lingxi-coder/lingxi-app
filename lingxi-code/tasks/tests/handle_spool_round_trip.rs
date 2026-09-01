@@ -11,6 +11,8 @@
     clippy::map_unwrap_or
 )]
 
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,8 +20,6 @@ use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tempfile::tempdir;
 use tokio::sync::Mutex as TokioMutex;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 
 struct MapFs {
     files: TokioMutex<HashMap<String, String>>,

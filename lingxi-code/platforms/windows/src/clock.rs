@@ -1,7 +1,7 @@
 //! Wall-clock implementation using `std::time::SystemTime`.
 
-use std::time::SystemTime;
 use platform_api::Clock;
+use std::time::SystemTime;
 
 /// Production system clock.
 #[derive(Default)]

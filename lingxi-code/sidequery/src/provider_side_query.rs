@@ -37,10 +37,10 @@ use llm_client::{
     LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-use protocol::{HttpRequest, HttpResponse, MediaAnalysis};
-use std::sync::Arc;
 use platform_api::http::{RawByteStream, SseStream};
 use platform_api::{HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse, MediaAnalysis};
+use std::sync::Arc;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";

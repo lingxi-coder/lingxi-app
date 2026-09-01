@@ -43,6 +43,17 @@ pub const WS_SUBPROTOCOL: &str = "mcp";
 /// Returns [`WsConnectError::InvalidRequest`] if the URL or header value
 /// cannot be expressed in HTTP form (e.g. non-ASCII in the auth token).
 pub fn build_handshake_request(url: &Url, auth_token: &str) -> Result<Request<()>, WsConnectError> {
+    build_handshake_request_optional(url, Some(auth_token))
+}
+
+/// Build a WebSocket handshake with an optional local IDE auth token.
+///
+/// A lockfile-discovered IDE always supplies a token, while plugin-configured
+/// `ws-ide` entries may omit one. In the latter case no auth header is sent.
+pub fn build_handshake_request_optional(
+    url: &Url,
+    auth_token: Option<&str>,
+) -> Result<Request<()>, WsConnectError> {
     // `tokio-tungstenite` knows how to fill all required handshake headers
     // (Sec-WebSocket-Key, Upgrade, Connection, etc.) from a `Url`. We start
     // from that baseline and then add our two custom headers.
@@ -51,14 +62,16 @@ pub fn build_handshake_request(url: &Url, auth_token: &str) -> Result<Request<()
         .into_client_request()
         .map_err(|e| WsConnectError::InvalidRequest(e.to_string()))?;
     let headers = req.headers_mut();
-    headers.insert(
-        AUTH_HEADER_NAME,
-        auth_token
-            .parse()
-            .map_err(|e: http::header::InvalidHeaderValue| {
-                WsConnectError::InvalidRequest(e.to_string())
-            })?,
-    );
+    if let Some(auth_token) = auth_token {
+        headers.insert(
+            AUTH_HEADER_NAME,
+            auth_token
+                .parse()
+                .map_err(|e: http::header::InvalidHeaderValue| {
+                    WsConnectError::InvalidRequest(e.to_string())
+                })?,
+        );
+    }
     headers.insert(
         "Sec-WebSocket-Protocol",
         WS_SUBPROTOCOL
@@ -86,7 +99,15 @@ pub fn build_handshake_request(url: &Url, auth_token: &str) -> Result<Request<()
 /// - [`WsConnectError::Handshake`] if the TCP, TLS, or HTTP-upgrade handshake
 ///   fails (refused, unreachable, server rejected upgrade, etc.).
 pub async fn connect_ws(url: Url, auth_token: &str) -> Result<Connection, WsConnectError> {
-    let req = build_handshake_request(&url, auth_token)?;
+    connect_ws_optional(url, Some(auth_token)).await
+}
+
+/// Connect to an MCP WebSocket with an optional local IDE auth token.
+pub async fn connect_ws_optional(
+    url: Url,
+    auth_token: Option<&str>,
+) -> Result<Connection, WsConnectError> {
+    let req = build_handshake_request_optional(&url, auth_token)?;
     let (ws_stream, _resp) = connect_async(req)
         .await
         .map_err(|e| WsConnectError::Handshake(e.to_string()))?;
@@ -160,6 +181,22 @@ mod tests {
         assert_eq!(header.to_str().unwrap(), "test-token-abc");
         // No `Bearer ` prefix.
         assert!(!header.to_str().unwrap().starts_with("Bearer"));
+    }
+
+    #[test]
+    fn build_request_omits_optional_auth_header_when_token_is_absent() {
+        let req = build_handshake_request_optional(
+            &url::Url::parse("ws://127.0.0.1:9876").unwrap(),
+            None,
+        )
+        .expect("request build");
+        assert!(req.headers().get(AUTH_HEADER_NAME).is_none());
+        assert_eq!(
+            req.headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|value| value.to_str().ok()),
+            Some("mcp")
+        );
     }
 
     #[test]

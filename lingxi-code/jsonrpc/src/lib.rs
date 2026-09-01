@@ -20,7 +20,7 @@ pub use messages::{
     Id, Message, Notification, Request, Response, ResponseError, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, PARSE_ERROR,
 };
-pub use router::{OutboundMessage, Router, RouterError, DEFAULT_TIMEOUT};
+pub use router::{OutboundMessage, Router, RouterError, StartedCall, DEFAULT_TIMEOUT};
 
 // JS-protocol-name aliases for ergonomic dual naming. Consumer crates may
 // `use jsonrpc::JsonRpcError;` or `use jsonrpc::RequestId;` and

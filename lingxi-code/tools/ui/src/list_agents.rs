@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
 use platform_api::task_registry::TaskRecord;
+use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -104,7 +104,8 @@ impl ListAgentsTool {
     }
 
     async fn self_note(&self, ctx: &ToolUseContext) -> Option<String> {
-        let name = platform_api::live_sessions::process_name().or_else(|| ctx.agent_name.clone())?;
+        let name =
+            platform_api::live_sessions::process_name().or_else(|| ctx.agent_name.clone())?;
         let self_id = platform_api::live_sessions::process_session_id().unwrap_or_default();
         let rref = session_ref(&self_id, 0);
         Some(format!(
@@ -316,15 +317,15 @@ impl Tool for ListAgentsTool {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
     use platform_api::process::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,
     };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -428,9 +429,9 @@ mod tests {
     async fn empty_listing_without_any_sources() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        platform_api::live_sessions::set_process_dir(platform_api::live_sessions::LiveSessionDir::at(
-            temp.path().join("sessions"),
-        ));
+        platform_api::live_sessions::set_process_dir(
+            platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions")),
+        );
         platform_api::live_sessions::set_process_session_id("self-session");
         platform_api::live_sessions::set_process_name("lead");
 

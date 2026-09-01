@@ -14,6 +14,7 @@
 //! share timeout, completion, persistence, and re-wake behavior.
 
 use crate::response::{HookOutcome, HookResult};
+use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use protocol::HookId;
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,7 +22,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// Default async-hook timeout (15s) — matches claude-code
 /// `registerPendingAsyncHook` (`utils/hooks/AsyncHookRegistry.ts:51`):

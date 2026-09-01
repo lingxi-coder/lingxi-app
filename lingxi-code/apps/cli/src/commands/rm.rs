@@ -370,7 +370,24 @@ pub fn perform_delete(
     use crate::agents_registry as reg;
 
     let verified_before = resolve_verified_worktree_binding(home, short, job)?;
-    if !stop_worker(job) || live_bg_identity_exists(home, short) {
+    let deletion = match crate::commands::daemon::claim_and_quiesce_background_job_for_delete(
+        home, short, job,
+    ) {
+        Ok(claim) => claim,
+        Err(error) => {
+            tracing::warn!(short, %error, "background deletion could not quiesce exact worker");
+            if error.contains("state changed") {
+                return Err(error);
+            }
+            tracing::info!(
+                event = "cli_bg_rm",
+                short = short,
+                outcome = "kill_unconfirmed"
+            );
+            return Err(couldnt_confirm_message(short));
+        }
+    };
+    if live_bg_identity_exists(home, short) {
         tracing::info!(
             event = "cli_bg_rm",
             short = short,
@@ -378,7 +395,23 @@ pub fn perform_delete(
         );
         return Err(couldnt_confirm_message(short));
     }
-    let verified_after = resolve_verified_worktree_binding(home, short, job)?;
+
+    // Keep the exact delete token stable through worktree verification and the
+    // final directory unlink. The lock file lives in `jobs/.locks`, outside the
+    // removed job directory, so this is safe on Windows as well as POSIX.
+    let _job_lock = reg::lock_job_state(home, short).map_err(|error| error.to_string())?;
+    let current = reg::read_job(home, short)
+        .ok_or_else(|| "background job disappeared before deletion".to_string())?;
+    if current.phase.as_deref() != Some(crate::commands::respawn::PHASE_DELETING)
+        || current.claim_token.as_deref() != Some(deletion.token.as_str())
+        || current.claim_owner.as_deref() != Some(crate::commands::respawn::CLAIM_OWNER_DELETE)
+        || current.worker_pid.is_some()
+        || current.worker_proc_start.is_some()
+    {
+        return Err("session state changed while deletion was finalizing".to_string());
+    }
+    debug_assert_eq!(current.claim_token, deletion.job.claim_token);
+    let verified_after = resolve_verified_worktree_binding(home, short, &current)?;
     if verified_before != verified_after {
         return Err(format!(
             "Failed to verify managed-worktree deletion for {short}: ownership metadata changed before deletion."
@@ -392,7 +425,11 @@ pub fn perform_delete(
 
     // Remove the job state dir (idempotent — a missing dir is a no-op).
     let dir = reg::jobs_dir(home).join(short);
-    let _ = std::fs::remove_dir_all(&dir);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to remove background job {short}: {error}")),
+    }
 
     // Parity-name telemetry (routed through the tracing event sink, like
     // daemon.rs's tengu_bg_* emissions).
@@ -867,62 +904,6 @@ mod worktree_delete {
     }
 }
 
-/// Best-effort stop of a job's live worker: `SIGTERM` the recorded `workerPid`
-/// (when alive) and poll briefly for it to exit. Returns whether the worker is
-/// confirmed stopped (no live worker, or it exited within the grace window).
-/// A `None`/dead `workerPid` is already stopped. Shared by the `rm` command and
-/// the agents-view Ctrl-X delete / `Ctrl+X Ctrl+K` stop-all paths.
-#[cfg(unix)]
-#[must_use]
-pub fn stop_worker(job: &crate::agents_registry::JobState) -> bool {
-    use crate::agents_registry::process_alive;
-    let Some(pid) = job.worker_pid else {
-        return true;
-    };
-    if !process_alive(pid) {
-        return true;
-    }
-    // Ask it to stop, then wait up to ~1s for the process to leave the table.
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid),
-        Some(nix::sys::signal::Signal::SIGTERM),
-    );
-    for _ in 0..20 {
-        if !process_alive(pid) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    false
-}
-
-#[cfg(windows)]
-#[must_use]
-pub fn stop_worker(job: &crate::agents_registry::JobState) -> bool {
-    let Some(pid) = job.worker_pid else {
-        return true;
-    };
-    if !crate::agents_registry::process_alive(pid) {
-        return true;
-    }
-    let _ = std::process::Command::new("taskkill.exe")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status();
-    for _ in 0..20 {
-        if !crate::agents_registry::process_alive(pid) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    false
-}
-
-#[cfg(not(any(unix, windows)))]
-#[must_use]
-pub fn stop_worker(job: &crate::agents_registry::JobState) -> bool {
-    job.worker_pid.is_none()
-}
-
 /// Run the `rm` family (see the module doc for the binary-verified surface).
 pub async fn run(cli: &Cli) -> i32 {
     use crate::agents_registry as reg;
@@ -1110,6 +1091,13 @@ mod tests {
             initial_prompt: Some("do the thing"),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: None,
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         write_job_state(home, "bc7c6b33", &job).unwrap();
         let dir = jobs_dir(home).join("bc7c6b33");
@@ -1120,6 +1108,79 @@ mod tests {
         // Plain project cwd → no managed worktree → nothing kept.
         assert!(kept.is_none());
         assert!(!dir.exists(), "jobs/<short> state dir is unlinked");
+    }
+
+    #[test]
+    fn perform_delete_rejects_stale_snapshot_after_worker_generation_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().to_path_buf();
+        let short = "fade0001";
+        let flags: Vec<String> = Vec::new();
+        write_job_state(
+            &home,
+            short,
+            &crate::agents_registry::JobStateWrite {
+                state: "working",
+                tempo: Some("active"),
+                name: None,
+                session_id: Some("11111111-1111-1111-1111-111111111111"),
+                cwd: Some("/work"),
+                origin_cwd: Some("/work"),
+                created_at: Some("2026-07-04T00:00:00.000Z"),
+                intent: Some("intent"),
+                display_intent: None,
+                template: Some("bg"),
+                respawn_flags: &flags,
+                in_flight: None,
+                backend: Some("daemon"),
+                initial_prompt: None,
+                detail: None,
+                worker_pid: Some(4100),
+                worker_proc_start: Some("OLD-START"),
+                phase: Some("running"),
+                worker_generation: Some("old-gen"),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+        )
+        .unwrap();
+        let stale = crate::agents_registry::read_job(&home, short).unwrap();
+        crate::agents_registry::patch_job_state_if_matches(
+            &home,
+            short,
+            crate::agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("running"),
+                worker_pid: Some(4100),
+                worker_proc_start: Some("OLD-START"),
+                worker_generation: Some("old-gen"),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            crate::agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(Some(4200)),
+                worker_proc_start: Some(Some("NEW-START")),
+                phase: Some(Some("running")),
+                worker_generation: Some(Some("new-gen")),
+                claim_token: Some(None),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+            },
+        )
+        .unwrap();
+
+        let err = perform_delete(&home, short, &stale, "cli").unwrap_err();
+        assert!(err.contains("state changed") || err.contains("kill_unconfirmed"));
+        assert!(crate::agents_registry::jobs_dir(&home).join(short).exists());
     }
 
     #[test]
@@ -1267,6 +1328,13 @@ mod tests {
             initial_prompt: Some("clean up"),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: None,
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         write_job_state(&home, &short, &state).unwrap();
         let spec = BackgroundLaunchSpec {
@@ -1415,6 +1483,13 @@ mod tests {
             initial_prompt: Some("do the thing"),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: None,
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         write_job_state(home, short, &state).unwrap();
 

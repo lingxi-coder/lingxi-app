@@ -60,10 +60,10 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
 use client_protocol::events::{AudioOpDto, ClientEvent};
-use tokio::sync::{oneshot, Mutex};
 use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+use tokio::sync::{oneshot, Mutex};
 
 /// Deadline for a pure state read (`IsRecording`).
 ///
@@ -613,10 +613,10 @@ mod tests {
     use async_trait::async_trait;
     use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
     use client_protocol::events::{AudioOpDto, ClientEvent};
-    use tokio::sync::mpsc;
     use platform_api::stt::{SpeechToText, SttError, SttOpts};
     use platform_api::tts::{TextToSpeech, TtsError, TtsOpts};
     use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecordingOpts};
+    use tokio::sync::mpsc;
 
     use super::{
         new_audio_bridge, synthesis_deadline, AudioBridge, AudioRequestSink, AudioResponder,

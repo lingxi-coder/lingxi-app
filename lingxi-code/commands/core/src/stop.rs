@@ -54,10 +54,10 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use platform_api::OrchestratorHandle;
 
 /// The ported `isEnabled` predicate: `true` iff the process is running as a
 /// background session (`LINGXI_SESSION_KIND=bg`). Identical condition to

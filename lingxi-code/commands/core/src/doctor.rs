@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::{CheckStatus, DoctorReport, OrchestratorHandle};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::{CheckStatus, DoctorReport, OrchestratorHandle};
 
 /// `/doctor` handler — renders the locked diagnostic panel.
 #[derive(Clone)]

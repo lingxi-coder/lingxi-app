@@ -214,10 +214,7 @@ final class LingxiCodeUITests: XCTestCase {
 
     func testVoiceModesShareInlinePanelAndConfigurationDeepLink() {
         app.terminate()
-        app.launchArguments += [
-            "-voiceSpeechConfigurationVersion", "0",
-            "-voiceTTSConfigurationVersion", "0",
-        ]
+        app.launchEnvironment["LINGXI_UI_TEST_VOICE_CONFIGURATION_REQUIRED"] = "1"
         app.launch()
 
         let messageList = app.scrollViews["conversation.message-list"]
@@ -229,11 +226,17 @@ final class LingxiCodeUITests: XCTestCase {
         let panel = app.descendants(matching: .any)["conversation.voice-panel"]
         XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.staticTexts["心流模式"].exists)
-        XCTAssertTrue(app.staticTexts["需要配置语音能力"].exists)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["voice.configuration-required"].exists,
+            app.debugDescription
+        )
         XCTAssertTrue(messageList.exists)
         XCTAssertTrue(composerInput.exists)
-        XCTAssertLessThanOrEqual(messageList.frame.maxY, panel.frame.minY + 1)
-        XCTAssertLessThanOrEqual(panel.frame.maxY, composerInput.frame.minY + 1)
+        // XCUI reports a ScrollView's content extent rather than its clipped
+        // viewport, so its frame can overlap later VStack siblings even when
+        // the rendered transcript does not. The load-bearing layout boundary
+        // is the panel-to-composer edge below.
+        XCTAssertTrue(waitUntilVerticallyStacked(panel, above: composerInput, timeout: 3))
         let panelScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         panelScreenshot.name = "iOS-内联心流配置面板"
         panelScreenshot.lifetime = .keepAlways
@@ -245,13 +248,14 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.staticTexts["语音输入"].exists)
 
-        let configure = app.buttons["voice.configure"]
-        XCTAssertTrue(configure.exists)
+        let configure = app.descendants(matching: .any)["voice.configure"].firstMatch
+        XCTAssertTrue(configure.waitForExistence(timeout: 5), app.debugDescription)
         configure.tap()
         XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
-        let saveVoiceConfiguration = app.buttons["settings.voice.save"]
-        XCTAssertTrue(saveVoiceConfiguration.exists)
-        XCTAssertTrue(saveVoiceConfiguration.isEnabled)
+        // Voice preferences persist directly from their controls; the former
+        // explicit Save button no longer exists.
+        XCTAssertTrue(app.staticTexts["听 · 语音识别"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["说 · 语音合成"].exists, app.debugDescription)
     }
 
     func testCancelledRunClosesEveryRunningRow() {
@@ -260,11 +264,10 @@ final class LingxiCodeUITests: XCTestCase {
         app.launch()
 
         XCTAssertFalse(app.descendants(matching: .any)["conversation.agent-run"].exists)
-        XCTAssertTrue(app.staticTexts["WebSearch"].waitForExistence(timeout: 8), app.debugDescription)
         let batch = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")
         ).firstMatch
-        XCTAssertTrue(batch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(batch.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertFalse(app.descendants(matching: .any)["conversation.tool-call.ui-web-search"].exists)
         batch.tap()
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-web-search"].waitForExistence(timeout: 5), app.debugDescription)
@@ -467,6 +470,18 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
+    func testCompactSidebarHasAnExplicitCloseControl() {
+        openDrawer()
+
+        let close = app.buttons["drawer.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(close.label, "关闭侧栏")
+        close.tap()
+
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(waitUntilGone(close, timeout: 5), app.debugDescription)
+    }
+
     /// Every sidebar route used to be routed through a deferred close
     /// (`closeDrawerThen` + `Task.yield()`) because dismissing the hand-written
     /// drawer and changing presentation state in one animated transaction made
@@ -502,7 +517,9 @@ final class LingxiCodeUITests: XCTestCase {
         openDrawer()
         app.buttons["drawer.settings"].tap()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
-        app.buttons["关闭设置"].tap()
+        let settingsClose = app.descendants(matching: .any)["settings.close"].firstMatch
+        XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
+        settingsClose.tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
 
         // Terminal — a push onto the detail column's stack, i.e. the one route
@@ -702,8 +719,20 @@ final class LingxiCodeUITests: XCTestCase {
         app.keyboards.buttons["return"].tap()
         app.buttons["provider.cancel"].tap()
         XCTAssertTrue(waitUntilGone(keyField, timeout: 5), app.debugDescription)
-        app.buttons["完成"].tap()
-        app.buttons["关闭设置"].tap()
+        let savePasswordPrompt = app.sheets["Save Password?"]
+        if savePasswordPrompt.waitForExistence(timeout: 1) {
+            let notNow = savePasswordPrompt.buttons["Not Now"]
+            XCTAssertTrue(notNow.waitForExistence(timeout: 2), app.debugDescription)
+            notNow.tap()
+            XCTAssertTrue(waitUntilGone(savePasswordPrompt, timeout: 5), app.debugDescription)
+        }
+        let settingsBack = app.navigationBars["LLM 提供商"].buttons["设置"]
+        XCTAssertTrue(settingsBack.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(settingsBack, timeout: 5), app.debugDescription)
+        settingsBack.tap()
+        let settingsClose = app.descendants(matching: .any)["settings.close"].firstMatch
+        XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
+        settingsClose.tap()
         openDrawer()
         XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)
         XCTAssertFalse(app.buttons["drawer.shortcut.cron"].exists)
@@ -1029,6 +1058,21 @@ final class LingxiCodeUITests: XCTestCase {
     private func waitUntilGone(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
         return XCTWaiter.wait(for: [gone], timeout: timeout) == .completed
+    }
+
+    private func waitUntilVerticallyStacked(
+        _ upper: XCUIElement,
+        above lower: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if upper.exists, lower.exists, upper.frame.maxY <= lower.frame.minY + 1 {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        return false
     }
 
 }

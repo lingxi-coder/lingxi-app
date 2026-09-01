@@ -545,6 +545,28 @@ mod imp {
         root_identity_from_file(&root_file, root)
     }
 
+    pub(super) fn ensure_private_directory(
+        root: &Path,
+        relative: &Path,
+        _dir_mode: u32,
+    ) -> Result<RootIdentity, FsError> {
+        let (parent, directory_name) = open_parent(root, relative, true)?;
+        let descriptor = private_security_descriptor()?;
+        let directory = nt_create_relative(
+            &parent,
+            &directory_name,
+            relative,
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN_IF,
+            FILE_DIRECTORY_FILE,
+            FILE_ATTRIBUTE_DIRECTORY,
+            descriptor.0,
+        )?;
+        ensure_directory(&directory, relative)?;
+        root_identity_from_file(&directory, relative)
+    }
+
     fn open_parent(
         root: &Path,
         relative: &Path,
@@ -925,6 +947,26 @@ mod imp {
         file.flush().map_err(|error| map_io(relative, error))
     }
 
+    pub(super) fn open_append_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
+        const FILE_APPEND_DATA: u32 = 0x0004;
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let descriptor = private_security_descriptor()?;
+        open_regular_with_security(
+            &parent,
+            &file_name,
+            relative,
+            FILE_APPEND_DATA | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN_IF,
+            FILE_ATTRIBUTE_NORMAL,
+            descriptor.0,
+        )
+    }
+
     pub(super) fn read_to_string_pinned(
         root: &Path,
         relative: &Path,
@@ -1273,6 +1315,18 @@ pub fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
     imp::root_identity(root)
 }
 
+/// Create or open one directory below `root` without following symlinks and
+/// return the identity of the opened directory handle. Newly-created Unix
+/// directories use `dir_mode`; existing Unix directories are tightened to the
+/// same mode before their identity is returned.
+pub fn ensure_private_directory(
+    root: &Path,
+    relative: &Path,
+    dir_mode: u32,
+) -> Result<RootIdentity, FsError> {
+    imp::ensure_private_directory(root, relative, dir_mode)
+}
+
 /// Acquire an exclusive lock without following any component below `root`.
 pub fn lock_exclusive(
     root: &Path,
@@ -1322,6 +1376,18 @@ pub fn create_new_file_pinned(
     imp::create_new_file_pinned(root, relative, expected)
 }
 
+/// Exclusively create and return a regular file through a pinned, no-follow
+/// root handle. Unlike a create-then-reopen sequence, the returned handle is
+/// the exact inode whose `O_EXCL` allocation succeeded.
+#[cfg(unix)]
+pub fn open_create_new_file_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<std::fs::File, FsError> {
+    imp::open_create_new_file_pinned(root, relative, expected)
+}
+
 /// Append to a regular file without following any component below `root`.
 pub fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
     imp::append_file(root, relative, content)
@@ -1340,6 +1406,18 @@ pub fn append_file_pinned(
     expected: Option<&RootIdentity>,
 ) -> Result<(), FsError> {
     imp::append_file_pinned(root, relative, content, expected)
+}
+
+/// Open a regular file for filesystem-level append through a no-follow rooted
+/// handle. The returned file remains confined even if a pathname is swapped
+/// after this call, and `expected` rejects a root directory replacement before
+/// the file is opened.
+pub fn open_append_file_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<std::fs::File, FsError> {
+    imp::open_append_file_pinned(root, relative, expected)
 }
 
 /// Read UTF-8 only if the opened root still has `expected` identity.
@@ -1578,6 +1656,29 @@ mod imp {
         identity_from_fd(&directory, root)
     }
 
+    pub(super) fn ensure_private_directory(
+        root: &Path,
+        relative: &Path,
+        dir_mode: u32,
+    ) -> Result<RootIdentity, FsError> {
+        let (parent, directory_name) = open_parent(root, relative, true, dir_mode)?;
+        match fs::mkdirat(&parent, &directory_name, mode(dir_mode, relative)?) {
+            Ok(()) => {}
+            Err(error) if error == rustix::io::Errno::EXIST => {}
+            Err(error) => return Err(map_unix_io(relative, error)),
+        }
+        let directory = fs::openat(
+            &parent,
+            &directory_name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        fs::fchmod(&directory, mode(dir_mode, relative)?)
+            .map_err(|error| map_unix_io(relative, error))?;
+        identity_from_fd(&directory, relative)
+    }
+
     fn split(relative: &Path) -> Result<(Vec<OsString>, OsString), FsError> {
         validate_relative_path(relative)?;
         let mut parts: Vec<_> = relative
@@ -1736,6 +1837,15 @@ mod imp {
         relative: &Path,
         expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
+        drop(open_create_new_file_pinned(root, relative, expected)?);
+        Ok(())
+    }
+
+    pub(super) fn open_create_new_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
         let (parent, file_name) =
             open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
         let fd = fs::openat(
@@ -1745,7 +1855,10 @@ mod imp {
             mode(PRIVATE_FILE_MODE, relative)?,
         )
         .map_err(|error| map_unix_io(relative, error))?;
-        ensure_opened_regular(&fd, relative)
+        ensure_opened_regular(&fd, relative)?;
+        fs::fchmod(&fd, mode(PRIVATE_FILE_MODE, relative)?)
+            .map_err(|error| map_unix_io(relative, error))?;
+        Ok(std::fs::File::from(fd))
     }
 
     pub(super) fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
@@ -1789,6 +1902,26 @@ mod imp {
         file.write_all(content)
             .map_err(|error| map_io(relative, error))?;
         file.flush().map_err(|error| map_io(relative, error))
+    }
+
+    pub(super) fn open_append_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(PRIVATE_FILE_MODE, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        fs::fchmod(&fd, mode(PRIVATE_FILE_MODE, relative)?)
+            .map_err(|error| map_unix_io(relative, error))?;
+        Ok(std::fs::File::from(fd))
     }
 
     pub(super) fn read_to_string_pinned(
@@ -2126,6 +2259,14 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn ensure_private_directory(
+        _root: &Path,
+        _relative: &Path,
+        _dir_mode: u32,
+    ) -> Result<RootIdentity, FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn lock_exclusive(
         _root: &Path,
         _relative: &Path,
@@ -2230,6 +2371,14 @@ mod imp {
         _content: &str,
         _expected: Option<&RootIdentity>,
     ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn open_append_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
         Err(unsupported())
     }
 
@@ -2346,6 +2495,59 @@ mod tests {
         let result = create_new_file_pinned(&task_dir, Path::new("task.output"), Some(&identity));
         assert!(result.is_err(), "a replacement directory must fail the pin");
         assert!(!task_dir.join("task.output").exists());
+    }
+
+    #[test]
+    fn private_directory_append_handle_rejects_root_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let relative_dir = Path::new("tasks");
+        let task_dir = parent.path().join(relative_dir);
+        let identity =
+            ensure_private_directory(parent.path(), relative_dir, PRIVATE_DIR_MODE).unwrap();
+        let mut file =
+            open_append_file_pinned(&task_dir, Path::new("task.output"), Some(&identity)).unwrap();
+        file.write_all(b"first").unwrap();
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::symlink_metadata(&task_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                PRIVATE_DIR_MODE
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(task_dir.join("task.output"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                PRIVATE_FILE_MODE
+            );
+        }
+
+        std::fs::rename(&task_dir, parent.path().join("tasks-old")).unwrap();
+        std::fs::create_dir(&task_dir).unwrap();
+        let result =
+            open_append_file_pinned(&task_dir, Path::new("second.output"), Some(&identity));
+        assert!(result.is_err(), "a replacement directory must fail the pin");
+        assert!(!task_dir.join("second.output").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_refuses_symlink_leaf() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(victim.path(), parent.path().join("tasks")).unwrap();
+
+        let result = ensure_private_directory(parent.path(), Path::new("tasks"), PRIVATE_DIR_MODE);
+        assert!(result.is_err(), "a symlinked output root must be refused");
+        assert!(victim.path().read_dir().unwrap().next().is_none());
     }
 
     #[cfg(target_os = "macos")]

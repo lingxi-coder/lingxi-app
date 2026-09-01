@@ -5,10 +5,11 @@
 use crate::local_app_runtime_profiles::{
     contract_for_binding as runtime_profile_contract_for_binding, BABYLON_3D_EDITABLE_FILES,
     BABYLON_3D_MANAGED_FILES, CANVAS_2D_EDITABLE_FILES, CANVAS_2D_MANAGED_FILES,
-    EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL, PHASER_2D_EDITABLE_FILES,
-    PHASER_2D_MANAGED_FILES, REACT_DOM_EDITABLE_FILES, REACT_DOM_MANAGED_FILES, REQUESTED_FILE_REL,
-    SBOM_FILE_REL, SNAPSHOT_FILE_REL, THREE_3D_EDITABLE_FILES, THREE_3D_MANAGED_FILES,
-    TREE_PROOF_FILE_REL,
+    CANVAS_2D_R2_EDITABLE_FILES, EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL,
+    PHASER_2D_EDITABLE_FILES, PHASER_2D_MANAGED_FILES, PHASER_2D_R2_EDITABLE_FILES,
+    REACT_DOM_EDITABLE_FILES, REACT_DOM_MANAGED_FILES, REACT_DOM_R2_EDITABLE_FILES,
+    REQUESTED_FILE_REL, SBOM_FILE_REL, SNAPSHOT_FILE_REL, THREE_3D_EDITABLE_FILES,
+    THREE_3D_MANAGED_FILES, THREE_3D_R2_EDITABLE_FILES, TREE_PROOF_FILE_REL,
 };
 use crate::local_apps_host::LocalAppsHostBroker;
 use local_apps::{
@@ -16,6 +17,9 @@ use local_apps::{
     AppRuntimeProfileBinding,
 };
 use lsp_types::{DiagnosticSeverity, NumberOrString};
+use platform_api::{
+    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -24,9 +28,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use platform_api::{
-    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
-};
 
 const BUILD_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const LOW_MEMORY_BUILD_BUDGET_MB: u32 = 2_048;
@@ -96,12 +97,20 @@ struct BuildProvenance {
 pub(crate) enum LocalAppBuildTarget {
     /// Profile-aware routed scaffold.
     ReactDomR1,
+    /// Profile-aware routed scaffold plus MCP widget starter.
+    ReactDomR2,
     /// Profile-aware Canvas 2D scaffold.
     Canvas2dR1,
+    /// Profile-aware Canvas 2D scaffold plus MCP widget starter.
+    Canvas2dR2,
     /// Profile-aware Three.js scaffold.
     Three3dR1,
+    /// Profile-aware Three.js scaffold plus MCP widget starter.
+    Three3dR2,
     /// Profile-aware Phaser scaffold.
     Phaser2dR1,
+    /// Profile-aware Phaser scaffold plus MCP widget starter.
+    Phaser2dR2,
     /// Profile-aware Babylon scaffold.
     Babylon3dR1,
 }
@@ -113,9 +122,13 @@ impl LocalAppBuildTarget {
         let contract = runtime_profile_contract_for_binding(binding)?;
         match (contract.family, contract.revision) {
             (AppRuntimeProfile::ReactDom, 1) => Ok(Self::ReactDomR1),
+            (AppRuntimeProfile::ReactDom, 2) => Ok(Self::ReactDomR2),
             (AppRuntimeProfile::Canvas2d, 1) => Ok(Self::Canvas2dR1),
+            (AppRuntimeProfile::Canvas2d, 2) => Ok(Self::Canvas2dR2),
             (AppRuntimeProfile::Three3d, 1) => Ok(Self::Three3dR1),
+            (AppRuntimeProfile::Three3d, 2) => Ok(Self::Three3dR2),
             (AppRuntimeProfile::Phaser2d, 1) => Ok(Self::Phaser2dR1),
+            (AppRuntimeProfile::Phaser2d, 2) => Ok(Self::Phaser2dR2),
             (AppRuntimeProfile::Babylon3d, 1) => Ok(Self::Babylon3dR1),
             (family, revision) => Err(AppError::NotYetAvailable(format!(
                 "runtime profile {family} r{revision} has no build bundle in this host build"
@@ -136,10 +149,14 @@ impl LocalAppBuildTarget {
     #[cfg(test)]
     fn surface(self) -> local_apps::AppSurface {
         match self {
-            Self::ReactDomR1 => local_apps::AppSurface::Dom,
-            Self::Canvas2dR1 | Self::Three3dR1 | Self::Phaser2dR1 | Self::Babylon3dR1 => {
-                local_apps::AppSurface::Canvas
-            }
+            Self::ReactDomR1 | Self::ReactDomR2 => local_apps::AppSurface::Dom,
+            Self::Canvas2dR1
+            | Self::Canvas2dR2
+            | Self::Three3dR1
+            | Self::Three3dR2
+            | Self::Phaser2dR1
+            | Self::Phaser2dR2
+            | Self::Babylon3dR1 => local_apps::AppSurface::Canvas,
         }
     }
 
@@ -149,9 +166,13 @@ impl LocalAppBuildTarget {
     pub(crate) fn template_id(self) -> &'static str {
         match self {
             Self::ReactDomR1 => "runtime-profile/react-dom/r1",
+            Self::ReactDomR2 => "runtime-profile/react-dom/r2",
             Self::Canvas2dR1 => "runtime-profile/canvas-2d/r1",
+            Self::Canvas2dR2 => "runtime-profile/canvas-2d/r2",
             Self::Three3dR1 => "runtime-profile/three-3d/r1",
+            Self::Three3dR2 => "runtime-profile/three-3d/r2",
             Self::Phaser2dR1 => "runtime-profile/phaser-2d/r1",
+            Self::Phaser2dR2 => "runtime-profile/phaser-2d/r2",
             Self::Babylon3dR1 => "runtime-profile/babylon-3d/r1",
         }
     }
@@ -159,10 +180,10 @@ impl LocalAppBuildTarget {
     #[cfg(test)]
     fn runtime_profile(self) -> AppRuntimeProfile {
         match self {
-            Self::ReactDomR1 => AppRuntimeProfile::ReactDom,
-            Self::Canvas2dR1 => AppRuntimeProfile::Canvas2d,
-            Self::Three3dR1 => AppRuntimeProfile::Three3d,
-            Self::Phaser2dR1 => AppRuntimeProfile::Phaser2d,
+            Self::ReactDomR1 | Self::ReactDomR2 => AppRuntimeProfile::ReactDom,
+            Self::Canvas2dR1 | Self::Canvas2dR2 => AppRuntimeProfile::Canvas2d,
+            Self::Three3dR1 | Self::Three3dR2 => AppRuntimeProfile::Three3d,
+            Self::Phaser2dR1 | Self::Phaser2dR2 => AppRuntimeProfile::Phaser2d,
             Self::Babylon3dR1 => AppRuntimeProfile::Babylon3d,
         }
     }
@@ -171,9 +192,13 @@ impl LocalAppBuildTarget {
 fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'static [u8])] {
     match target {
         LocalAppBuildTarget::ReactDomR1 => REACT_DOM_EDITABLE_FILES,
+        LocalAppBuildTarget::ReactDomR2 => REACT_DOM_R2_EDITABLE_FILES,
         LocalAppBuildTarget::Canvas2dR1 => CANVAS_2D_EDITABLE_FILES,
+        LocalAppBuildTarget::Canvas2dR2 => CANVAS_2D_R2_EDITABLE_FILES,
         LocalAppBuildTarget::Three3dR1 => THREE_3D_EDITABLE_FILES,
+        LocalAppBuildTarget::Three3dR2 => THREE_3D_R2_EDITABLE_FILES,
         LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_EDITABLE_FILES,
+        LocalAppBuildTarget::Phaser2dR2 => PHASER_2D_R2_EDITABLE_FILES,
         LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_EDITABLE_FILES,
     }
 }
@@ -225,10 +250,18 @@ fn hash_bytes(bytes: &[u8]) -> String {
 
 fn locked_files(target: LocalAppBuildTarget) -> Vec<(&'static str, &'static [u8])> {
     match target {
-        LocalAppBuildTarget::ReactDomR1 => REACT_DOM_MANAGED_FILES.to_vec(),
-        LocalAppBuildTarget::Canvas2dR1 => CANVAS_2D_MANAGED_FILES.to_vec(),
-        LocalAppBuildTarget::Three3dR1 => THREE_3D_MANAGED_FILES.to_vec(),
-        LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::ReactDomR1 | LocalAppBuildTarget::ReactDomR2 => {
+            REACT_DOM_MANAGED_FILES.to_vec()
+        }
+        LocalAppBuildTarget::Canvas2dR1 | LocalAppBuildTarget::Canvas2dR2 => {
+            CANVAS_2D_MANAGED_FILES.to_vec()
+        }
+        LocalAppBuildTarget::Three3dR1 | LocalAppBuildTarget::Three3dR2 => {
+            THREE_3D_MANAGED_FILES.to_vec()
+        }
+        LocalAppBuildTarget::Phaser2dR1 | LocalAppBuildTarget::Phaser2dR2 => {
+            PHASER_2D_MANAGED_FILES.to_vec()
+        }
         LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_MANAGED_FILES.to_vec(),
     }
 }
@@ -452,9 +485,13 @@ const HOST_MANAGED_FILES: &[&str] = &[
 fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
         LocalAppBuildTarget::ReactDomR1
+        | LocalAppBuildTarget::ReactDomR2
         | LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Canvas2dR2
         | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Three3dR2
         | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Phaser2dR2
         | LocalAppBuildTarget::Babylon3dR1 => HOST_MANAGED_FILES,
     }
 }
@@ -465,9 +502,13 @@ fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'stati
 fn build_locked_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
         LocalAppBuildTarget::ReactDomR1
+        | LocalAppBuildTarget::ReactDomR2
         | LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Canvas2dR2
         | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Three3dR2
         | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Phaser2dR2
         | LocalAppBuildTarget::Babylon3dR1 => &[
             ".gitignore",
             "package.json",
@@ -621,7 +662,9 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
 fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> MountSpec {
     MountSpec {
         host_path: build_root.to_path_buf(),
-        guest_path: platform_api::mobile_linux::guest_paths::local_app_build_project(app_id, channel),
+        guest_path: platform_api::mobile_linux::guest_paths::local_app_build_project(
+            app_id, channel,
+        ),
         read_only: false,
         purpose: MountPurpose::LocalAppBuild,
     }
@@ -2671,15 +2714,15 @@ mod tests {
         );
     }
     use async_trait::async_trait;
-    use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex;
     use platform_api::mobile_linux::{guest_paths, map_guest_path_to_host};
     use platform_api::{
         LinuxCommandResult, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
         MobileLinuxTaskSnapshot, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
         RootfsStatus, SandboxBackend,
     };
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
 
     struct RecordingIsolatedRuntime {
         requests: Mutex<Vec<LinuxCommandRequest>>,
@@ -2799,7 +2842,10 @@ mod tests {
             Err(MobileLinuxError::Unsupported)
         }
 
-        async fn kill(&self, _handle: &platform_api::LinuxProcessHandle) -> Result<(), MobileLinuxError> {
+        async fn kill(
+            &self,
+            _handle: &platform_api::LinuxProcessHandle,
+        ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
 
@@ -2882,6 +2928,13 @@ mod tests {
     /// record mirror and the manifest CONSISTENTLY, so it cannot express the
     /// two torn rows this suite exists to pin. Written by hand, each half can
     /// disagree with the other.
+    fn write_manifest_unchecked(layout: &AppLayout, manifest: &local_apps::AppManifest) {
+        let path = layout.root().join(layout.manifest_rel());
+        let mut body = serde_json::to_vec_pretty(manifest).expect("serialize corrupt manifest");
+        body.push(b'\n');
+        fs::write(path, body).expect("write corrupt manifest fixture");
+    }
+
     fn layout_with(
         root: &Path,
         scaffolded: bool,
@@ -2913,6 +2966,16 @@ mod tests {
                 crate::local_app_runtime_profiles::current_binding_for_family(family).ok()
             });
             if let Some(binding) = manifest.runtime_profile.as_ref() {
+                manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+                    plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+                    plugin_version: "builtin".into(),
+                    template_id: format!(
+                        "{}-r{}",
+                        binding.family.as_str().replace('_', "-"),
+                        binding.revision
+                    ),
+                    template_sha256: binding.contract_sha256.clone(),
+                });
                 manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
                     requested_sha256: "0".repeat(64),
                     package_sha256: "1".repeat(64),
@@ -2942,7 +3005,7 @@ mod tests {
     /// receipt, which are the final inputs needed for `verified`.
     fn verified_status_fixture(root: &Path) -> (AppLayout, local_apps::AppRecord) {
         let layout = AppLayout::new(root, "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
         let record = load_record_mirror(&layout).expect("record mirror");
         let manifest = local_apps::load_manifest(&layout).expect("manifest");
         let build_root = layout.root().join(layout.build_rel(false));
@@ -3041,7 +3104,7 @@ mod tests {
         manifest.surface = None;
         manifest.runtime_profile = None;
         manifest.dependency_snapshot = None;
-        local_apps::save_manifest(&layout, &manifest).expect("remove profile metadata");
+        write_manifest_unchecked(&layout, &manifest);
         assert_eq!(
             derive_runtime_profile_status(root.path(), &record),
             Some(AppRuntimeProfileStatus::RuntimeContractCorrupt)
@@ -3086,7 +3149,7 @@ mod tests {
     fn runtime_profile_status_reports_rebuild_when_output_receipt_is_missing_or_stale() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
         let record = load_record_mirror(&layout).expect("record mirror");
         assert_eq!(
             derive_runtime_profile_status(root.path(), &record),
@@ -3202,7 +3265,7 @@ mod tests {
                 Some(local_apps::AppSurface::Dom)
             ))
             .expect("dom surface"),
-            LocalAppBuildTarget::ReactDomR1
+            LocalAppBuildTarget::ReactDomR2
         );
 
         let canvas_root = tempfile::tempdir().expect("tempdir");
@@ -3213,7 +3276,7 @@ mod tests {
                 Some(local_apps::AppSurface::Canvas)
             ))
             .expect("canvas surface"),
-            LocalAppBuildTarget::Canvas2dR1
+            LocalAppBuildTarget::Canvas2dR2
         );
     }
 
@@ -3233,7 +3296,7 @@ mod tests {
         fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
         assert_eq!(
             detect_build_target(&layout).expect("canvas surface survives a Vite marker"),
-            LocalAppBuildTarget::Canvas2dR1
+            LocalAppBuildTarget::Canvas2dR2
         );
     }
 
@@ -3289,7 +3352,7 @@ mod tests {
     fn scaffold_workspace_stamps_both_halves_of_the_pair() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::Canvas2dR1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::Canvas2dR2).expect("scaffold");
 
         assert!(
             load_record_mirror(&layout)
@@ -3299,7 +3362,7 @@ mod tests {
         );
         assert_eq!(
             detect_build_target(&layout).expect("a scaffolded workspace is buildable"),
-            LocalAppBuildTarget::Canvas2dR1
+            LocalAppBuildTarget::Canvas2dR2
         );
     }
 
@@ -3315,7 +3378,7 @@ mod tests {
         before.brief = "shows the local tide".to_string();
         save_record_mirror(&layout, &before).expect("named record");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
 
         let after = load_record_mirror(&layout).expect("record mirror");
         assert_eq!(
@@ -3656,7 +3719,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
 
         let workspace = layout.root().join(layout.workspace_rel());
         assert!(workspace.join(".gitignore").is_file());
@@ -3697,7 +3760,7 @@ mod tests {
     /// everything under `app/` and `src/` is the user's app from here on.
     fn formed_layout(root: &Path) -> AppLayout {
         let layout = shell_layout(root);
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("first scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("first scaffold");
         layout
     }
 
@@ -3946,7 +4009,7 @@ mod tests {
         fs::write(&outside, "{\"outside\":true}").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
         assert!(metadata.is_file());
@@ -3995,6 +4058,16 @@ mod tests {
         let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
         manifest.surface = Some(local_apps::AppSurface::Dom);
         manifest.runtime_profile = Some(binding.clone());
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: format!(
+                "{}-r{}",
+                binding.family.as_str().replace('_', "-"),
+                binding.revision
+            ),
+            template_sha256: binding.contract_sha256.clone(),
+        });
         manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
             requested_sha256: "1".repeat(64),
             package_sha256: "2".repeat(64),
@@ -4114,7 +4187,7 @@ mod tests {
     async fn the_build_re_pins_host_managed_infrastructure_without_touching_app_owned_files() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         let pinned_bridge =
             pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js");
@@ -4213,7 +4286,7 @@ mod tests {
     async fn a_failed_build_cleans_up_its_staging_directory() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -4257,7 +4330,7 @@ mod tests {
     async fn build_runs_from_the_workspace_mount_and_promotes_private_output() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -4324,7 +4397,7 @@ mod tests {
     async fn build_fails_fast_when_fresh_lsp_errors_exist_in_app_managed_js() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -4409,7 +4482,7 @@ mod tests {
     async fn stale_lsp_versions_only_degrade_and_do_not_block_build_start() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(

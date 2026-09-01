@@ -64,6 +64,229 @@ pub struct JobSpec {
     pub launch: BackgroundLaunchSpec,
 }
 
+#[derive(Debug, Clone)]
+struct BoundWorkerIdentity {
+    pid: i32,
+    proc_start: String,
+    generation: String,
+}
+
+fn claimed_identity_from_env() -> Result<Option<(String, String)>, String> {
+    let generation = std::env::var(crate::commands::respawn::BG_WORKER_GENERATION_ENV).ok();
+    let claim = std::env::var(crate::commands::respawn::BG_WORKER_CLAIM_TOKEN_ENV).ok();
+    match (generation, claim) {
+        (Some(generation), Some(claim)) if !generation.is_empty() && !claim.is_empty() => {
+            Ok(Some((generation, claim)))
+        }
+        (None, None) => Ok(None),
+        _ => Err("background worker launch claim is incomplete".to_string()),
+    }
+}
+
+fn fail_bound_job(
+    config_home: &Path,
+    short: &str,
+    bound_identity: Option<&BoundWorkerIdentity>,
+    detail: &str,
+) {
+    let result = match bound_identity {
+        Some(bound) => crate::agents_registry::patch_job_state_if_matches(
+            config_home,
+            short,
+            crate::agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some(crate::commands::respawn::PHASE_RUNNING),
+                worker_pid: Some(bound.pid),
+                worker_proc_start: Some(bound.proc_start.as_str()),
+                worker_generation: Some(bound.generation.as_str()),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            crate::agents_registry::JobStatePatch {
+                state: Some("failed"),
+                tempo: None,
+                cwd: None,
+                detail: Some(Some(detail)),
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(None),
+                worker_generation: Some(None),
+                claim_token: Some(None),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+            },
+        )
+        .map(|_| ()),
+        None => crate::agents_registry::update_job_state_with_detail(
+            config_home,
+            short,
+            "failed",
+            None,
+            detail,
+        ),
+    };
+    if let Err(error) = result {
+        tracing::warn!("lingxi-cli __bg-run: could not persist failure state: {error}");
+    }
+}
+
+fn bind_claimed_worker(
+    config_home: &Path,
+    short: &str,
+    claimed_generation: &str,
+    claim_token: &str,
+) -> Result<Option<BoundWorkerIdentity>, String> {
+    let pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+    let proc_start = crate::daemon_roster::read_proc_start(pid)
+        .ok_or_else(|| "could not establish a PID-reuse-safe worker identity".to_string())?;
+    let bound = crate::agents_registry::patch_job_state_if_matches(
+        config_home,
+        short,
+        crate::agents_registry::JobStateMatch {
+            state: "working",
+            phase: Some(crate::commands::respawn::PHASE_LAUNCHING),
+            worker_pid: None,
+            worker_proc_start: None,
+            worker_generation: Some(claimed_generation),
+            claim_token: Some(claim_token),
+            claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH),
+            claim_created_at: None,
+            claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
+        },
+        crate::agents_registry::JobStatePatch {
+            state: Some("working"),
+            tempo: None,
+            cwd: None,
+            detail: Some(None),
+            worker_pid: Some(Some(pid)),
+            worker_proc_start: Some(Some(proc_start.as_str())),
+            phase: Some(Some(crate::commands::respawn::PHASE_RUNNING)),
+            worker_generation: Some(Some(claimed_generation)),
+            claim_token: Some(None),
+            claim_owner: Some(None),
+            claim_created_at: Some(None),
+            claim_lease_ms: Some(None),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !bound {
+        return Ok(None);
+    }
+    Ok(Some(BoundWorkerIdentity {
+        pid,
+        proc_start,
+        generation: claimed_generation.to_string(),
+    }))
+}
+
+/// Root-confined recent-output writer for one background job.
+///
+/// The normal path appends cheaply. Once the file reaches its hard bound, it
+/// atomically replaces it with a smaller recent tail plus the newest chunk,
+/// leaving headroom so compaction is not paid on every subsequent write.
+struct RetainedOutputLog {
+    home: PathBuf,
+    relative: PathBuf,
+    observed_len: Option<u64>,
+}
+
+impl RetainedOutputLog {
+    fn new(home: PathBuf, relative: PathBuf) -> Self {
+        Self {
+            home,
+            relative,
+            observed_len: None,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), platform_api::FsError> {
+        self.append_with_limits(
+            bytes,
+            crate::background_launch::OUTPUT_LOG_MAX_BYTES,
+            crate::background_launch::OUTPUT_LOG_RETAIN_BYTES,
+        )
+    }
+
+    fn append_with_limits(
+        &mut self,
+        bytes: &[u8],
+        max_bytes: u64,
+        retain_bytes: u64,
+    ) -> Result<(), platform_api::FsError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let retain_bytes = usize::try_from(retain_bytes)
+            .unwrap_or(usize::MAX)
+            .min(max_bytes);
+        if max_bytes == 0 {
+            return platform_api::rooted_fs::atomic_write(
+                &self.home,
+                &self.relative,
+                &[],
+                platform_api::rooted_fs::AtomicWriteOptions::default(),
+            );
+        }
+
+        let observed_len = match self.observed_len {
+            Some(len) => len,
+            None => match platform_api::rooted_fs::read_tail_bytes(
+                &self.home,
+                &self.relative,
+                u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX),
+            ) {
+                Ok(existing) => u64::try_from(existing.len()).unwrap_or(u64::MAX),
+                Err(platform_api::FsError::NotFound(_)) => 0,
+                Err(error) => return Err(error),
+            },
+        };
+        let incoming_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if observed_len.saturating_add(incoming_len) <= u64::try_from(max_bytes).unwrap_or(u64::MAX)
+        {
+            platform_api::rooted_fs::append_file_bytes(&self.home, &self.relative, bytes)?;
+            self.observed_len = Some(observed_len.saturating_add(incoming_len));
+            return Ok(());
+        }
+
+        let mut retained = if bytes.len() >= max_bytes {
+            bytes[bytes.len() - max_bytes..].to_vec()
+        } else {
+            let prior_budget = retain_bytes.saturating_sub(bytes.len());
+            let mut prior = if prior_budget == 0 {
+                Vec::new()
+            } else {
+                match platform_api::rooted_fs::read_tail_bytes(
+                    &self.home,
+                    &self.relative,
+                    u64::try_from(prior_budget).unwrap_or(u64::MAX),
+                ) {
+                    Ok(prior) => prior,
+                    Err(platform_api::FsError::NotFound(_)) => Vec::new(),
+                    Err(error) => return Err(error),
+                }
+            };
+            prior.extend_from_slice(bytes);
+            prior
+        };
+        if retained.len() > max_bytes {
+            retained = retained.split_off(retained.len() - max_bytes);
+        }
+        platform_api::rooted_fs::atomic_write(
+            &self.home,
+            &self.relative,
+            &retained,
+            platform_api::rooted_fs::AtomicWriteOptions::default(),
+        )?;
+        self.observed_len = Some(u64::try_from(retained.len()).unwrap_or(u64::MAX));
+        Ok(())
+    }
+}
+
 /// Production entrypoint: resolve the shared config home and drive
 /// [`run_worker_core`] with the real PTY supervisor.
 pub async fn run(cli: &Cli) -> i32 {
@@ -95,6 +318,32 @@ where
     if agents_registry::job_is_terminal(&job) {
         return exit_codes::SUCCESS;
     }
+    let bound_identity = match claimed_identity_from_env() {
+        Ok(Some((generation, claim_token))) => {
+            match bind_claimed_worker(config_home, short, &generation, &claim_token) {
+                Ok(Some(bound)) => Some(bound),
+                Ok(None) => return exit_codes::SUCCESS,
+                Err(error) => {
+                    fail_bound_job(config_home, short, None, &error);
+                    return exit_codes::SUCCESS;
+                }
+            }
+        }
+        Ok(None) if cfg!(test) => None,
+        Ok(None) => {
+            fail_bound_job(
+                config_home,
+                short,
+                None,
+                "background worker launch claim is missing",
+            );
+            return exit_codes::SUCCESS;
+        }
+        Err(error) => {
+            fail_bound_job(config_home, short, None, &error);
+            return exit_codes::SUCCESS;
+        }
+    };
     let launch = match crate::background_launch::load_or_migrate_launch_spec(
         config_home,
         config_home,
@@ -102,21 +351,19 @@ where
     ) {
         Ok(Some(launch)) => launch,
         Ok(None) => {
-            let _ = agents_registry::update_job_state_with_detail(
+            fail_bound_job(
                 config_home,
                 short,
-                "failed",
-                None,
+                bound_identity.as_ref(),
                 "background launch context is missing or incompatible",
             );
             return exit_codes::SUCCESS;
         }
         Err(error) => {
-            let _ = agents_registry::update_job_state_with_detail(
+            fail_bound_job(
                 config_home,
                 short,
-                "failed",
-                None,
+                bound_identity.as_ref(),
                 &format!("could not load background launch context: {error}"),
             );
             return exit_codes::SUCCESS;
@@ -132,8 +379,48 @@ where
     // with the supervisor's unconditional `busy` state.
     let outcome = execute(spec).await;
     let new_state = if outcome.is_ok() { "done" } else { "failed" };
-    if let Err(e) = agents_registry::update_job_state(config_home, short, new_state, None) {
-        tracing::warn!("lingxi-cli __bg-run: could not persist terminal job state: {e}");
+    let terminalized = match bound_identity.as_ref() {
+        Some(bound) => crate::agents_registry::patch_job_state_if_matches(
+            config_home,
+            short,
+            crate::agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some(crate::commands::respawn::PHASE_RUNNING),
+                worker_pid: Some(bound.pid),
+                worker_proc_start: Some(bound.proc_start.as_str()),
+                worker_generation: Some(bound.generation.as_str()),
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            crate::agents_registry::JobStatePatch {
+                state: Some(new_state),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(None),
+                worker_generation: Some(None),
+                claim_token: Some(None),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+            },
+        ),
+        None => {
+            agents_registry::update_job_state(config_home, short, new_state, None).map(|_| true)
+        }
+    };
+    match terminalized {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            "lingxi-cli __bg-run: terminal job state changed concurrently for {short}"
+        ),
+        Err(error) => {
+            tracing::warn!("lingxi-cli __bg-run: could not persist terminal job state: {error}")
+        }
     }
 
     exit_codes::SUCCESS
@@ -227,16 +514,13 @@ async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
         let output_log_relative = std::path::PathBuf::from("jobs")
             .join(&job.short)
             .join(crate::background_launch::OUTPUT_LOG_FILE);
+        let mut output_log = RetainedOutputLog::new(output_log_home, output_log_relative);
         let mut log_warning_emitted = false;
         let mut append_log = |bytes: &[u8]| {
             if bytes.is_empty() {
                 return;
             }
-            if let Err(error) = platform_api::rooted_fs::append_file_bytes(
-                &output_log_home,
-                &output_log_relative,
-                bytes,
-            ) {
+            if let Err(error) = output_log.append(bytes) {
                 if !log_warning_emitted {
                     tracing::warn!(
                         "lingxi-cli __bg-run: could not persist terminal output log: {error}"
@@ -570,6 +854,13 @@ mod tests {
             initial_prompt: None,
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: Some("running"),
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         write_job_state(home, short, &job).unwrap();
         crate::background_launch::write_launch_spec(
@@ -606,6 +897,31 @@ mod tests {
         );
         let narrow = platform_pty::TerminalSize { rows: 1, cols: 1 };
         assert_eq!(neighboring_size(narrow).cols, 2);
+    }
+
+    #[test]
+    fn retained_output_log_stays_bounded_and_keeps_the_newest_bytes() {
+        let home = tmpdir();
+        let relative = PathBuf::from("jobs/face0002/output.log");
+        std::fs::create_dir_all(home.join("jobs/face0002")).unwrap();
+
+        let mut log = RetainedOutputLog::new(home.clone(), relative.clone());
+        log.append_with_limits(b"0123456789abcdef", 16, 8).unwrap();
+        log.append_with_limits(b"-new", 16, 8).unwrap();
+
+        let path = home.join(&relative);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() <= 16, "the persisted log must remain bounded");
+        assert!(bytes.ends_with(b"-new"), "the newest output must survive");
+
+        // A restarted worker must inspect and compact the existing file instead
+        // of assuming it starts empty.
+        std::fs::write(&path, b"stale-prefix-that-is-over-the-limit").unwrap();
+        let mut restarted = RetainedOutputLog::new(home, relative);
+        restarted.append_with_limits(b"-restart", 16, 8).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.len() <= 16);
+        assert!(bytes.ends_with(b"-restart"));
     }
 
     #[tokio::test]

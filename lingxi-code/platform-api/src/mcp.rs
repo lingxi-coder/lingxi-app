@@ -13,6 +13,7 @@ use futures_util::FutureExt;
 use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::pin::Pin;
 use thiserror::Error;
 
@@ -35,7 +36,7 @@ pub type McpHeaders = indexmap::IndexMap<String, String>;
 /// mcp §10 in the byte-alignment doc). Platform
 /// implementations decide which variants they support via
 /// [`McpTransport::supported_transports`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum McpTransportSpec {
     /// Local subprocess speaking MCP over stdin/stdout. Desktop platforms only.
     Stdio {
@@ -95,7 +96,15 @@ pub enum McpTransportSpec {
         url: String,
         /// Human-readable IDE name (for logs and approval UI).
         ide_name: String,
+        /// Optional local bearer token presented on the SSE GET and POST.
+        ///
+        /// Older plugin-config entries omit this field; local lockfile
+        /// discovery supplies it so SSE and WebSocket IDE peers share the
+        /// same authentication contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
         /// True when the IDE is hosted on Windows (affects path normalization).
+        #[serde(default)]
         ide_running_in_windows: bool,
     },
     /// WebSocket endpoint exposed by a developer IDE.
@@ -114,6 +123,7 @@ pub enum McpTransportSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
         /// True when the IDE is hosted on Windows (affects path normalization).
+        #[serde(default)]
         ide_running_in_windows: bool,
     },
     /// Logical channel controlled by a host SDK / embedder.
@@ -175,6 +185,89 @@ impl McpTransportSpec {
             Self::SdkControl { .. } => McpTransportKind::SdkControl,
         }
     }
+}
+
+impl fmt::Debug for McpTransportSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdio { command, args, env } => formatter
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", args)
+                .field("env", env)
+                .finish(),
+            Self::Sse {
+                url,
+                headers,
+                headers_helper,
+                oauth,
+            } => formatter
+                .debug_struct("Sse")
+                .field("url", url)
+                .field("headers", headers)
+                .field("headers_helper", headers_helper)
+                .field("oauth", oauth)
+                .finish(),
+            Self::Http {
+                url,
+                headers,
+                headers_helper,
+                oauth,
+            } => formatter
+                .debug_struct("Http")
+                .field("url", url)
+                .field("headers", headers)
+                .field("headers_helper", headers_helper)
+                .field("oauth", oauth)
+                .finish(),
+            Self::WebSocket {
+                url,
+                headers,
+                headers_helper,
+            } => formatter
+                .debug_struct("WebSocket")
+                .field("url", url)
+                .field("headers", headers)
+                .field("headers_helper", headers_helper)
+                .finish(),
+            Self::InProcess { registry_key } => formatter
+                .debug_struct("InProcess")
+                .field("registry_key", registry_key)
+                .finish(),
+            Self::SseIde {
+                url,
+                ide_name,
+                auth_token,
+                ide_running_in_windows,
+            } => formatter
+                .debug_struct("SseIde")
+                .field("url", url)
+                .field("ide_name", ide_name)
+                .field("auth_token", &redacted_auth_token(auth_token))
+                .field("ide_running_in_windows", ide_running_in_windows)
+                .finish(),
+            Self::WsIde {
+                url,
+                ide_name,
+                auth_token,
+                ide_running_in_windows,
+            } => formatter
+                .debug_struct("WsIde")
+                .field("url", url)
+                .field("ide_name", ide_name)
+                .field("auth_token", &redacted_auth_token(auth_token))
+                .field("ide_running_in_windows", ide_running_in_windows)
+                .finish(),
+            Self::SdkControl { control_channel_id } => formatter
+                .debug_struct("SdkControl")
+                .field("control_channel_id", control_channel_id)
+                .finish(),
+        }
+    }
+}
+
+fn redacted_auth_token(token: &Option<String>) -> Option<&'static str> {
+    token.as_ref().map(|_| "<redacted>")
 }
 
 /// OAuth 2.1 PKCE configuration carried in [`McpTransportSpec`].
@@ -408,6 +501,9 @@ pub struct McpIconDto {
     /// Optional theme discriminator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// Unrecognized extension members preserved across transport/cache hops.
+    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub extra: indexmap::IndexMap<String, Value>,
 }
 
 /// Optional MCP tool annotations.
@@ -429,6 +525,9 @@ pub struct McpToolAnnotationsDto {
     /// Whether the tool touches the outside world.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_world_hint: Option<bool>,
+    /// Unrecognized annotation hints preserved across transport/cache hops.
+    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub extra: indexmap::IndexMap<String, Value>,
 }
 
 /// MCP task-support declaration for one tool.
@@ -534,6 +633,18 @@ pub struct McpToolDto {
     pub description: String,
     /// JSON-Schema for the tool's input.
     pub input_schema: Value,
+    /// Optional JSON-Schema for the tool's structured output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    /// Optional standardized tool annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<McpToolAnnotationsDto>,
+    /// Optional icon list preserved from the upstream definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<McpIconDto>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
     /// Engine-side fully-qualified identifier (`mcp__<server>__<tool>`).
     pub full_name: String,
     /// Retrieval prefilter hint from `tool._meta['anthropic/searchHint']`
@@ -601,8 +712,15 @@ pub struct McpResourceDto {
     pub uri: String,
     /// Human-readable name.
     pub name: String,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Optional content type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// One parameterized resource template advertised by an MCP server
@@ -616,8 +734,7 @@ pub struct McpResourceDto {
 /// uriTemplate:i(),description:qT(i()),mimeType:qT(i()),
 /// annotations:LYe.optional(),_meta:qT(un({}))})` (2.1.251 Mach-O
 /// @167622755); the response envelope is `{resourceTemplates:[...]}` (oracle
-/// `MYe = yEt.extend({resourceTemplates:H(GGt)})`, same offset). `annotations`
-/// / `_meta` are not yet surfaced here — no consumer needs them.
+/// `MYe = yEt.extend({resourceTemplates:H(GGt)})`, same offset).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceTemplateDto {
     /// RFC 6570 URI template, e.g. `"file:///{path}"`.
@@ -631,6 +748,12 @@ pub struct McpResourceTemplateDto {
     /// Optional content type.
     #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// Optional resource annotations preserved as arbitrary JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
+    /// Opaque vendor metadata preserved from the wire.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// One prompt advertised by an MCP server.
@@ -716,6 +839,12 @@ pub struct McpResourceContentDto {
     pub uri: String,
     /// Resource body (text-encoded; binaries are base64).
     pub content: String,
+    /// Optional content type for the returned body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// One element of a `resources/read` `contents[]` array, preserving the full
@@ -740,6 +869,9 @@ pub struct McpResourceContentsRich {
     /// MIME type as advertised by the server (absent on the wire → `None`).
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none", default)]
     pub mime_type: Option<String>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none", default)]
+    pub meta: Option<Value>,
     /// Text content of the block (text blocks; also the human-readable
     /// "saved to disk" message for persisted blobs).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -899,7 +1031,8 @@ pub trait McpTransport: Send + Sync {
         let single = self.read_resource(conn, uri).await?;
         Ok(vec![McpResourceContentsRich {
             uri: single.uri,
-            mime_type: None,
+            mime_type: single.mime_type,
+            meta: single.meta,
             text: Some(single.content),
             blob_saved_to: None,
         }])
@@ -932,6 +1065,139 @@ pub trait McpTransport: Send + Sync {
 
     /// Transports this implementation can carry on the current platform.
     fn supported_transports(&self) -> Vec<McpTransportKind>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        McpIconDto, McpResourceContentDto, McpResourceContentsRich, McpResourceDto,
+        McpResourceTemplateDto, McpToolAnnotationsDto, McpToolDto, McpTransportSpec,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn mcp_tool_dto_preserves_optional_metadata_fields() {
+        let value = serde_json::to_value(McpToolDto {
+            server_name: "local_app_habits".to_string(),
+            tool_name: "save_habit".to_string(),
+            description: "Save one habit entry.".to_string(),
+            input_schema: json!({"type":"object"}),
+            output_schema: Some(json!({"type":"object","properties":{"ok":{"type":"boolean"}}})),
+            annotations: Some(McpToolAnnotationsDto {
+                title: Some("Save habit".to_string()),
+                read_only_hint: Some(false),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                extra: indexmap::IndexMap::from([(
+                    "vendor/riskTier".to_string(),
+                    json!("reviewed"),
+                )]),
+            }),
+            icons: vec![McpIconDto {
+                src: "https://example.invalid/icon.svg".to_string(),
+                mime_type: Some("image/svg+xml".to_string()),
+                sizes: vec!["64x64".to_string()],
+                theme: None,
+                extra: indexmap::IndexMap::from([("vendor/accent".to_string(), json!("blue"))]),
+            }],
+            meta: Some(json!({"openai/outputTemplate":"ui://local-app/habits/widget.html"})),
+            full_name: "mcp__local_app_habits__save_habit".to_string(),
+            search_hint: Some("habit tracker".to_string()),
+            always_load: Some(true),
+            requires_user_interaction: false,
+        })
+        .expect("serialize tool dto");
+
+        assert_eq!(value["output_schema"]["type"], "object");
+        assert_eq!(value["annotations"]["title"], "Save habit");
+        assert_eq!(value["annotations"]["vendor/riskTier"], "reviewed");
+        assert_eq!(value["icons"][0]["src"], "https://example.invalid/icon.svg");
+        assert_eq!(value["icons"][0]["vendor/accent"], "blue");
+        assert_eq!(
+            value["_meta"]["openai/outputTemplate"],
+            "ui://local-app/habits/widget.html"
+        );
+    }
+
+    #[test]
+    fn mcp_resource_dtos_preserve_description_mime_and_meta() {
+        let resource = serde_json::to_value(McpResourceDto {
+            uri: "ui://local-app/habits/widget.html".to_string(),
+            name: "Habits widget".to_string(),
+            description: Some("Interactive MCP App widget".to_string()),
+            mime_type: Some("text/html;profile=mcp-app".to_string()),
+            meta: Some(json!({"openai/widgetPrefersBorder":true})),
+        })
+        .expect("serialize resource dto");
+        assert_eq!(resource["description"], "Interactive MCP App widget");
+        assert_eq!(resource["mime_type"], "text/html;profile=mcp-app");
+        assert_eq!(resource["_meta"]["openai/widgetPrefersBorder"], true);
+
+        let template = serde_json::to_value(McpResourceTemplateDto {
+            uri_template: "file:///{path}".to_string(),
+            name: "Workspace file".to_string(),
+            description: Some("One workspace file".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            annotations: Some(json!({"audience":["assistant"],"vendor/rank":7})),
+            meta: Some(json!({"vendor/template":"opaque"})),
+        })
+        .expect("serialize resource template dto");
+        assert_eq!(template["annotations"]["vendor/rank"], 7);
+        assert_eq!(template["_meta"]["vendor/template"], "opaque");
+
+        let content = serde_json::to_value(McpResourceContentDto {
+            uri: "ui://local-app/habits/widget.html".to_string(),
+            content: "<!doctype html>".to_string(),
+            mime_type: Some("text/html;profile=mcp-app".to_string()),
+            meta: Some(json!({"openai/widgetDescription":"Habits widget"})),
+        })
+        .expect("serialize resource content dto");
+        assert_eq!(content["mime_type"], "text/html;profile=mcp-app");
+        assert_eq!(
+            content["_meta"]["openai/widgetDescription"],
+            "Habits widget"
+        );
+
+        let rich = serde_json::to_value(McpResourceContentsRich {
+            uri: "ui://local-app/habits/widget.html".to_string(),
+            mime_type: Some("text/html;profile=mcp-app".to_string()),
+            meta: Some(json!({"openai/widgetCSP":{"connect_domains":[]}})),
+            text: Some("<!doctype html>".to_string()),
+            blob_saved_to: None,
+        })
+        .expect("serialize rich resource dto");
+        assert_eq!(rich["mimeType"], "text/html;profile=mcp-app");
+        assert!(rich.get("blobSavedTo").is_none());
+        assert_eq!(
+            rich["_meta"]["openai/widgetCSP"]["connect_domains"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn ide_transport_debug_redacts_local_auth_tokens() {
+        let token = "local-only-token";
+        let specs = [
+            McpTransportSpec::SseIde {
+                url: "http://127.0.0.1:43123/sse".into(),
+                ide_name: "VS Code".into(),
+                auth_token: Some(token.into()),
+                ide_running_in_windows: false,
+            },
+            McpTransportSpec::WsIde {
+                url: "ws://127.0.0.1:43124".into(),
+                ide_name: "Cursor".into(),
+                auth_token: Some(token.into()),
+                ide_running_in_windows: false,
+            },
+        ];
+        for spec in specs {
+            let rendered = format!("{spec:?}");
+            assert!(!rendered.contains(token));
+            assert!(rendered.contains("<redacted>"));
+        }
+    }
 }
 
 /// Failure modes shared by every [`McpTransport`] method.

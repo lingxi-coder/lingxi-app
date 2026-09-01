@@ -415,6 +415,13 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // recomputed. See the `turn_reminders` param there.
     let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
 
+    // `/brief` (2.1.252): the interactive toggle queues one transient
+    // model-facing reminder. Consume it before any retry snapshot is built so
+    // a retried call reuses the same reminder rather than emitting it twice.
+    if let Some(reminder) = orch.brief_mode_reminder_message() {
+        turn_reminders.push(reminder);
+    }
+
     // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
     // output style is active, claude-code injects a meta user message into EVERY
     // turn's model input (the `output_style` attachment). We append it to THIS
@@ -494,6 +501,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         turn_reminders.push(reminder);
     }
 
+    // REM-05: surface files changed outside the session on the batched path as
+    // well. Claude has one main loop; this must not be streaming-only.
+    turn_reminders.extend(orch.changed_files_reminder_messages().await);
+
     // Finding #73 (batched twin): per-turn, transient `todo_reminder` (V1) /
     // `task_reminder` (V2) reminder, emitted ONLY when the killswitch is not
     // `"off"`, the relevant tool is present (TodoWrite / TaskUpdate), the Brief
@@ -507,7 +518,18 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // snapshot only (never `session.history` / JSONL). `None` keeps the locked
     // turn-loop fixtures byte-identical (default: counters start at 0). See
     // [`ConversationOrchestrator::todo_reminder_message`].
-    if let Some(reminder) = orch.todo_reminder_message().await {
+    let todo_reminder = orch.todo_reminder_message().await;
+    let todo_reminder_fired = todo_reminder.is_some();
+    if let Some(reminder) = todo_reminder {
+        turn_reminders.push(reminder);
+    }
+
+    // REM-10: keep the periodic deferred-tool discovery nudge on both turn
+    // drivers. It is a no-op unless its feature/config gate is enabled.
+    if let Some(reminder) = orch
+        .tool_search_usage_reminder_message(todo_reminder_fired)
+        .await
+    {
         turn_reminders.push(reminder);
     }
 
@@ -532,6 +554,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         turn_reminders.push(reminder);
     }
 
+    // REM-14: dream completions enqueue memory updates while task
+    // notifications are drained; consume those updates before memory search.
+    turn_reminders.extend(orch.memory_update_reminder_messages().await);
+
     // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
     // reminders — the memory-selector/prefetch result rendered as one meta user
     // message per surfaced memory. Appended to THIS call's OUTGOING
@@ -552,7 +578,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // empty result / everything already surfaced. See
     // [`ConversationOrchestrator::skill_discovery_reminder_message`].
     if let Some(reminder) = orch.skill_discovery_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
+    }
+
+    // Keep the late tool-round reminders in the batched path too. Their gates
+    // are off by default, so ordinary requests remain byte-identical.
+    if let Some(reminder) = orch.silent_turn_reminder_message().await {
+        turn_reminders.push(reminder);
+    }
+    if let Some(reminder) = orch.total_tokens_reminder_message().await {
+        turn_reminders.push(reminder);
     }
 
     // 1. Call the API. Advertise the registry's wire tool definitions
@@ -563,6 +598,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
     //    hard error.
     let tools = orch.build_wire_tools().await;
+    // Carved-slate records the first eligible static prompt before the API
+    // request. Resume sessions (including resumes with a missing/corrupt
+    // attachment) are explicitly barred from creating a new snapshot.
+    orch.record_prompt_snapshot_if_needed(system, &tools).await;
     history_snapshot.extend(turn_reminders.iter().cloned());
 
     let deferred_tools_reminder = orch.deferred_tools_reminder_message();
@@ -606,7 +645,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         model_profile.as_deref(),
         history_snapshot,
         outgoing_history_rewriter,
-        tools,
+        tools.clone(),
         max_tokens_override,
         deferred_tools_reminder,
         date_change_reminder,
@@ -727,6 +766,11 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             ));
         }
     };
+
+    // Inline tool descriptions may grow after MCP/plugin discovery. Commit an
+    // append-only replacement only after a successful non-API-error response;
+    // deferred entries are excluded and existing descriptions are immutable.
+    orch.record_inline_prompt_tools_after_success(&tools).await;
 
     // A3: this call's output-token count, returned to the budget loop so it can
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
@@ -3115,6 +3159,106 @@ fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>)
 struct PersistenceOutcome {
     content: String,
     replaced: bool,
+}
+
+/// Read the process-output spill identity emitted by the Bash tool. The three
+/// fields are an all-or-nothing contract: accepting a partial object would
+/// make the persistence layer fall back to a path that cannot be tied to the
+/// task registry's stable identity.
+fn process_output_file_from_data(
+    data: &serde_json::Value,
+) -> Option<platform_api::ProcessOutputFile> {
+    let object = data.as_object()?;
+    let task_id = object.get("outputTaskId")?.as_str()?;
+    let path = object.get("outputFilePath")?.as_str()?;
+    let size = object.get("outputFileSize")?.as_u64()?;
+    if task_id.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(platform_api::ProcessOutputFile {
+        task_id: task_id.to_string(),
+        path: path.to_string(),
+        size,
+    })
+}
+
+/// Reuse a process runner's rooted output file when building the model-facing
+/// `<persisted-output>` envelope. This keeps the process task identity/path
+/// intact and, unlike the generic persistence arm, does not write the same
+/// bytes a second time under the tool-use id.
+async fn apply_tool_result_persistence_with_process_output(
+    orch: &ConversationOrchestrator,
+    tool_name: &str,
+    tool_use_id: &ToolUseId,
+    threshold: Option<usize>,
+    content: String,
+    content_blocks: Option<&[serde_json::Value]>,
+    output_file: Option<&platform_api::ProcessOutputFile>,
+) -> PersistenceOutcome {
+    use crate::tool_result_persistence as trp;
+
+    if let Some(output_file) = output_file {
+        // Keep the normal blank/media guards authoritative. In particular, a
+        // large image result may have been captured through the same process
+        // seam, but its structured media blocks must remain inline.
+        if !tool_result_is_blank(&content, content_blocks) && !tool_result_has_media(content_blocks)
+        {
+            let (preview, content_has_more) = trp::preview(&content, trp::PREVIEW_CHARS);
+            let original_size = usize::try_from(output_file.size).unwrap_or(usize::MAX);
+            let replacement = trp::wrap(
+                original_size,
+                &output_file.path,
+                preview,
+                content_has_more || output_file.size > trp::PREVIEW_CHARS as u64,
+            );
+            tracing::info!(
+                task_id = %output_file.task_id,
+                path = %output_file.path,
+                size = output_file.size,
+                "Reused rooted process output for tool result persistence"
+            );
+            if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
+                #[allow(clippy::cast_possible_wrap)]
+                fn int(v: usize) -> telemetry::AnalyticsValue {
+                    telemetry::AnalyticsValue::Int(i64::try_from(v).unwrap_or(i64::MAX))
+                }
+                let mut metadata = telemetry::LogEventMetadata::new();
+                metadata.insert(
+                    "toolName".into(),
+                    telemetry::AnalyticsValue::String(tool_name.to_string()),
+                );
+                metadata.insert("originalSizeBytes".into(), int(original_size));
+                metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+                metadata.insert(
+                    "estimatedOriginalTokens".into(),
+                    int(original_size.div_ceil(trp::CHARS_PER_TOKEN)),
+                );
+                metadata.insert(
+                    "estimatedPersistedTokens".into(),
+                    int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+                );
+                metadata.insert(
+                    "thresholdUsed".into(),
+                    int(threshold.unwrap_or(original_size)),
+                );
+                bus.log_event("tengu_tool_result_persisted", metadata).await;
+            }
+            return PersistenceOutcome {
+                content: replacement,
+                replaced: true,
+            };
+        }
+    }
+
+    apply_tool_result_persistence(
+        orch,
+        tool_name,
+        tool_use_id,
+        threshold,
+        content,
+        content_blocks,
+    )
+    .await
 }
 
 async fn apply_tool_result_persistence(
@@ -5514,7 +5658,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // the `(<tool> completed with no output)` sentinel; oversized ones are
         // written to `<session>/tool-results/` and replaced by a
         // `<persisted-output>` envelope.
-        let persistence = apply_tool_result_persistence(
+        let process_output_file = if name == "Bash" {
+            process_output_file_from_data(&emit_payload)
+        } else {
+            None
+        };
+        let persistence = apply_tool_result_persistence_with_process_output(
             orch,
             &name,
             &tool_use_id,
@@ -5526,6 +5675,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             }),
             final_content,
             content_blocks.as_deref(),
+            process_output_file.as_ref(),
         )
         .await;
         // claude-code's `F0u` substitutes the ONE model-facing payload
@@ -7840,6 +7990,44 @@ mod tool_result_persistence_wiring_tests {
             5_000
         );
         assert!(content.contains(&file.display().to_string()));
+    }
+
+    /// A process runner has already persisted the full body under its rooted
+    /// task path, so the orchestrator must point the model at that file rather
+    /// than creating a second tool-use-id file with duplicate bytes.
+    #[tokio::test]
+    async fn process_output_persistence_reuses_task_file_without_duplicate_write() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().to_path_buf()));
+        let output_path = tmp.path().join("tasks/local_bash_spilled.out");
+        std::fs::create_dir_all(output_path.parent().expect("task dir")).expect("task dir");
+        std::fs::write(&output_path, "x".repeat(5_000)).expect("task output");
+        let data = json!({
+            "outputTaskId": "local_bash_spilled",
+            "outputFilePath": output_path,
+            "outputFileSize": 5_000,
+        });
+        let output_file = super::process_output_file_from_data(&data).expect("all metadata");
+        let id = ToolUseId::new();
+        let outcome = super::apply_tool_result_persistence_with_process_output(
+            &orch,
+            "Bash",
+            &id,
+            Some(THRESHOLD),
+            "x".repeat(5_000),
+            None,
+            Some(&output_file),
+        )
+        .await;
+
+        assert!(outcome.replaced);
+        assert!(outcome.content.starts_with(PERSISTED_OUTPUT_OPEN));
+        assert!(outcome.content.contains(&output_file.path));
+        assert_eq!(std::fs::read_to_string(&output_path).unwrap().len(), 5_000);
+        assert!(
+            !tmp.path().join("projects").exists(),
+            "the generic tool-use persistence path must not receive a duplicate"
+        );
     }
 
     /// T6 — `U0u`: a block array containing an image (or document) is NEVER

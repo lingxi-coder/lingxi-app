@@ -66,7 +66,8 @@ impl platform_api::filesystem::FileSystem for PanickingFs {
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
+    {
         panic!("not called")
     }
     async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
@@ -101,7 +102,8 @@ impl platform_api::filesystem::FileSystem for PanickingFs {
         &self,
         root: &std::path::Path,
         relative: &std::path::Path,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
+    {
         platform_api::rooted_fs::lock_exclusive(
             root,
             relative,
@@ -186,7 +188,8 @@ impl platform_api::filesystem::FileSystem for GuestAliasFs {
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
+    {
         panic!("not called")
     }
     async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
@@ -202,9 +205,9 @@ impl platform_api::filesystem::FileSystem for GuestAliasFs {
                 .strip_prefix(&self.fence_prefix)
                 .is_some_and(|rest| rest.starts_with('/'))
         {
-            return Err(platform_api::filesystem::FsError::PermissionDenied(format!(
-                "guest path is not host-backed: {path}"
-            )));
+            return Err(platform_api::filesystem::FsError::PermissionDenied(
+                format!("guest path is not host-backed: {path}"),
+            ));
         }
         if let Some(rest) = path.strip_prefix(&self.guest_prefix) {
             if rest.is_empty() || rest.starts_with('/') {
@@ -297,12 +300,12 @@ pub fn fresh_tx() -> ToolProgressSender {
 
 // ===== M4-02 shell-tool test stubs ==========================================
 
-use std::sync::Mutex;
 use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 use platform_api::sandbox::{
     ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
+use std::sync::Mutex;
 
 /// In-test `ProcessRunner` that returns a canned [`ProcessOutput`] for each
 /// `run` call. Panics on `spawn_background` (most tests don't need it; the
@@ -480,11 +483,11 @@ pub fn make_stub_http() -> Arc<dyn platform_api::http::HttpTransport> {
 
 // ===== M4-04 workflow-tool test stubs =======================================
 
-use std::path::PathBuf;
-use std::time::Duration;
 use platform_api::worktree::{
     WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
 };
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// In-memory `WorktreeManager` for hermetic tests. Tracks every call so tests
 /// can assert on `created`, `removed`, `listed`. Reuses the M2-01 slug helpers

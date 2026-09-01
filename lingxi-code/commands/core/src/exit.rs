@@ -7,9 +7,9 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::OrchestratorHandle;
 
 /// `/exit` handler — calls
 /// [`OrchestratorHandle::request_exit`](platform_api::OrchestratorHandle::request_exit)

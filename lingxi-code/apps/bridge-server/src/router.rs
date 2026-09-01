@@ -87,12 +87,12 @@ use client_protocol::listings::{AuthStateDto, SlashCommandDto, TaskStatusDto};
 use command_api::builtin_support::names::{core_description, is_palette_hidden};
 use command_api::model::CommandSource;
 use command_api::registry::CommandRegistry;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 use platform_api::auth::{AuthHandle, LoginInfo};
 use platform_api::orchestrator::OrchestratorHandle;
 use platform_api::task_registry::{TaskListFilter, TaskRegistryHandle};
 use platform_api::SlashCommandDispatcher;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::{
@@ -119,7 +119,11 @@ impl SessionStoreContext {
     /// Build a session-store context rooted at the desktop config directory and
     /// the connection's project cwd.
     #[must_use]
-    pub fn new(lingxi_home: PathBuf, session_cwd: String, fs: Arc<dyn platform_api::FileSystem>) -> Self {
+    pub fn new(
+        lingxi_home: PathBuf,
+        session_cwd: String,
+        fs: Arc<dyn platform_api::FileSystem>,
+    ) -> Self {
         Self {
             lingxi_home,
             session_cwd,
@@ -915,7 +919,10 @@ impl EngineCommandRouter {
         let snapshot = self.handle.get_status_snapshot().await;
         SlashAuthoritySnapshot {
             session_id: self.handle.current_session_id().await.to_string(),
-            model: platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            model: platform_api::qualified_model_ref(
+                &snapshot.model,
+                snapshot.model_profile.as_deref(),
+            ),
             permission_mode: self.handle.permission_mode().await,
             auth: lower_auth_state(self.auth.current_user().await),
             catalog: self.slash_command_catalog().await,
@@ -983,8 +990,10 @@ impl EngineCommandRouter {
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let current =
-                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let current = platform_api::qualified_model_ref(
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 sink.emit(ClientEvent::ModelList {
                     models,
                     current,
@@ -1292,7 +1301,8 @@ impl CommandRouter for EngineCommandRouter {
                     .await
                 {
                     Ok(()) => {
-                        let selected = platform_api::qualified_model_ref(&model_id, profile.as_deref());
+                        let selected =
+                            platform_api::qualified_model_ref(&model_id, profile.as_deref());
                         sink.emit(ClientEvent::ModelChanged { model: selected })
                             .await;
                         if let Some(controls) = self.handle.conversation_controls().await {
@@ -1303,7 +1313,9 @@ impl CommandRouter for EngineCommandRouter {
                             {
                                 let _ = self
                                     .handle
-                                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                                    .set_reasoning_selection(
+                                        platform_api::ReasoningSelection::Automatic,
+                                    )
                                     .await;
                             }
                         }
@@ -1377,7 +1389,9 @@ impl CommandRouter for EngineCommandRouter {
                     let before = self.capture_slash_authority().await;
                     let (display, is_error) = match dispatcher.dispatch(&raw).await {
                         platform_api::SlashDispatchResult::Handled { display } => (display, false),
-                        platform_api::SlashDispatchResult::Unknown { display, .. } => (display, true),
+                        platform_api::SlashDispatchResult::Unknown { display, .. } => {
+                            (display, true)
+                        }
                         // A `type: "prompt"` command reached the display-only
                         // fallback (the connection should have intercepted it via
                         // `dispatch_slash` and run it as a turn). Surface the
@@ -1654,24 +1668,24 @@ impl CommandRouter for EngineCommandRouter {
                         return;
                     }
                 }
-                if let Err(error) =
-                    self.handle
-                        .resume_session(
-                            protocol::SessionId::from_uuid(uuid),
-                            replayed.state.history,
-                            replayed.last_message_uuid.map(|value| value.to_string()),
-                            replayed.state.active_goal.clone().map(|goal| {
-                                platform_api::ActiveGoalSnapshot {
-                                    condition: goal.condition,
-                                    set_at: goal.set_at,
-                                    last_reason: goal.last_reason,
-                                    iterations: goal.iterations,
-                                    tokens_at_start: goal.tokens_at_start,
-                                }
-                            }),
-                            runtime_snapshot,
-                        )
-                        .await
+                if let Err(error) = self
+                    .handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        replayed.state.history,
+                        replayed.last_message_uuid.map(|value| value.to_string()),
+                        replayed.state.active_goal.clone().map(|goal| {
+                            platform_api::ActiveGoalSnapshot {
+                                condition: goal.condition,
+                                set_at: goal.set_at,
+                                last_reason: goal.last_reason,
+                                iterations: goal.iterations,
+                                tokens_at_start: goal.tokens_at_start,
+                            }
+                        }),
+                        runtime_snapshot,
+                    )
+                    .await
                 {
                     if resume_plan_mode {
                         let _ = self.handle.set_plan_mode(previous_plan_mode).await;
@@ -1830,19 +1844,25 @@ impl CommandRouter for EngineCommandRouter {
     }
 }
 
-fn lower_reasoning_selection(selection: &platform_api::ReasoningSelection) -> ReasoningSelectionDto {
+fn lower_reasoning_selection(
+    selection: &platform_api::ReasoningSelection,
+) -> ReasoningSelectionDto {
     match selection {
         platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
         platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
         platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::Level { id } => {
+            ReasoningSelectionDto::Level { id: id.clone() }
+        }
         platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
 }
 
-fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> platform_api::ReasoningSelection {
+fn decode_reasoning_selection(
+    selection: ReasoningSelectionDto,
+) -> platform_api::ReasoningSelection {
     match selection {
         ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
         ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,

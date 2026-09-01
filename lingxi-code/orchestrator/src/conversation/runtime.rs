@@ -390,6 +390,13 @@ pub(crate) struct PromptRuntime {
     pub(crate) surfaced_skill_names: Mutex<std::collections::HashSet<String>>,
     /// User-approved app Agent Profile applied additively to the next turn.
     pub(crate) app_agent_prompt_profile: std::sync::RwLock<Option<AppAgentPromptProfile>>,
+    /// Optional carved-slate snapshot of the static prompt and inline tool
+    /// descriptions. Dynamic system context remains live per request.
+    pub(crate) prompt_snapshot: Mutex<Option<platform_api::PromptSnapshot>>,
+    /// True while the mounted session came from resume. Missing snapshots on
+    /// resumed sessions must remain missing rather than being created by the
+    /// next turn.
+    pub(crate) prompt_snapshot_resume: std::sync::atomic::AtomicBool,
 }
 
 impl PromptRuntime {
@@ -428,6 +435,8 @@ impl PromptRuntime {
             pending_skill_prefetch: Mutex::new(None),
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
+            prompt_snapshot: Mutex::new(None),
+            prompt_snapshot_resume: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -478,6 +487,9 @@ impl PromptRuntime {
         *self.current_turn_system_prompt.lock().await = None;
         *self.pending_memory_prefetch.lock().await = None;
         *self.pending_skill_prefetch.lock().await = None;
+        *self.prompt_snapshot.lock().await = None;
+        self.prompt_snapshot_resume
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -525,6 +537,13 @@ mod prompt_runtime_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .delivered_date = Some("2026-08-24".to_string());
+        *runtime.prompt_snapshot.lock().await = Some(platform_api::PromptSnapshot {
+            system_prompt: vec!["stale".to_string()],
+            ..Default::default()
+        });
+        runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
 
         runtime.reset_session_scoped().await;
 
@@ -566,6 +585,10 @@ mod prompt_runtime_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .delivered_date
             .is_none());
+        assert!(runtime.prompt_snapshot.lock().await.is_none());
+        assert!(!runtime
+            .prompt_snapshot_resume
+            .load(std::sync::atomic::Ordering::Acquire));
     }
 }
 

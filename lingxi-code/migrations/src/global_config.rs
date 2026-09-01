@@ -341,7 +341,7 @@ impl Drop for ConfigLockGuard {
     }
 }
 
-fn resolve_write_target(path: &Path) -> PathBuf {
+pub(crate) fn resolve_write_target(path: &Path) -> PathBuf {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     match std::fs::read_link(path) {
         Ok(link) if link.is_absolute() => link,

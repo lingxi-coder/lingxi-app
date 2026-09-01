@@ -1,7 +1,7 @@
-//! Locked constant tables of the 100 builtin command names + the 18 core names.
+//! Locked constant tables of the 86 builtin command names + the 19 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
-//! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
+//! Task 0 step 2 (name list) + Task 0 step 3 (19 core list).
 //!
 //! NOTE: The 2026-05-28 addendum locked the total at **99** (originally `102`
 //! in the plan prose). The 2026-06-20 slash-parity pass (findings #66/#67 vs
@@ -88,25 +88,24 @@
 //!   it never reaches the command table at all.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **108** for the current oracle.
+/// ASCII-sorted. Locked at length **86** for the current 2.1.252 parity
+/// surface. The latest oracle removed the stale internal command objects
+/// listed in the slash audit, including the policy-gated `heapdump` object
+/// which has no provider-neutral runtime analog.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 86] = &[
     "add-dir",
     "advisor",
     "agents",
-    "ant-trace",
     "auto-mode-setup",
     "autocompact",
     "autofix-pr",
-    "backfill-sessions",
     "background",
     "branch",
-    "break-cache",
-    "bridge",
     "brief",
     "btw",
     // SLASH-06: `bug` is its OWN command upstream, not an alias of `feedback`.
@@ -114,7 +113,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     // name:"bug",description:"Report a bug or share your conversation",
     // argumentHint:"[report]",immediate:!0,requires:{ink:!0}}`.
     "bug",
-    "bughunter",
     "cd",
     "chrome",
     "clear",
@@ -125,13 +123,10 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "config",
     "context",
     "copy",
-    "ctx-viz",
-    "debug-tool-call",
     "desktop",
     "diff",
     "doctor",
     "effort",
-    "env",
     "exit",
     "export",
     "extra-usage",
@@ -141,8 +136,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "focus",
     "fork",
     "goal",
-    "good-claude",
-    "heapdump",
     "help",
     "hooks",
     "ide",
@@ -152,26 +145,21 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "install",
     "install-github-app",
     "install-slack-app",
-    "issue",
     "keybindings",
     "login",
     "logout",
     "mcp",
     "memory",
     "mobile",
-    "mock-limits",
     "model",
-    "oauth-refresh",
-    "onboarding",
     "passes",
-    "perf-issue",
     "permissions",
     "plan",
     "plugin",
     // SLASH-13 (cc2.1.238 @296124285): ungated `local-jsx` member of the
     // `ijT()` command table — upstream advertises it in every interactive
-    // session. No LingXi body yet; pass-1 of `register_all_builtin_commands`
-    // gives it the shared stub handler, like the other body-less names.
+    // session. The provider-neutral lesson handler is registered after the
+    // pass-1 fallback, so it remains available to headless and TUI dispatch.
     "powerup",
     "privacy-settings",
     "rate-limit-options",
@@ -180,12 +168,9 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "reload-plugins",
     "reload-skills",
     "remote-env",
-    "remote-setup",
     "rename",
-    "reset-limits",
     "resume",
     "rewind",
-    "sandbox-toggle",
     "security-review",
     "session",
     // SLASH-06: `share` is NOT a command — it is `bug`'s alias (oracle
@@ -199,14 +184,10 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "stickers",
     "stop",
     "subtask",
-    "summary",
-    "tag",
     "tasks",
     "teleport",
     "terminal-setup",
     "theme",
-    "thinkback",
-    "thinkback-play",
     "tui",
     "ultraplan",
     "upgrade",
@@ -217,7 +198,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "workflows",
 ];
 
-/// The 18 core commands that ship with real implementations in M5-10 / M5-11.
+/// The 19 core commands that ship with real implementations in M5-10 / M5-11.
 /// Subset of [`BUILTIN_COMMAND_NAMES`], ASCII-sorted.
 ///
 /// In M5-09 each of these gets a per-name placeholder struct in
@@ -272,49 +253,12 @@ pub const BUILTIN_CORE_NAMES: &[&str; 19] = &[
 /// NOTE: this is purely additive documentation — it changes **no** runtime
 /// behavior and does **not** alter the locked command surface.
 pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
-    ("ant-trace", "USER_TYPE==='ant' (Anthropic-internal only)"),
     (
         "advisor",
         "compiled stub in claude-code (gated advisor surface)",
     ),
     ("autofix-pr", "compiled stub in claude-code"),
-    (
-        "backfill-sessions",
-        "compiled stub in claude-code (internal maintenance)",
-    ),
-    ("brief", "entitlement-gated in claude-code"),
-    ("bughunter", "compiled stub in claude-code"),
-    ("ctx-viz", "compiled stub in claude-code (internal debug)"),
-    (
-        "debug-tool-call",
-        "compiled stub in claude-code (internal debug)",
-    ),
-    ("env", "compiled stub in claude-code"),
-    ("good-claude", "compiled stub in claude-code (internal)"),
-    ("issue", "compiled stub in claude-code"),
-    (
-        "mock-limits",
-        "compiled stub in claude-code (internal rate-limit testing)",
-    ),
-    (
-        "oauth-refresh",
-        "compiled stub in claude-code (internal auth maintenance)",
-    ),
-    ("onboarding", "compiled stub in claude-code (internal)"),
-    ("perf-issue", "compiled stub in claude-code"),
-    (
-        "reset-limits",
-        "compiled stub in claude-code (internal rate-limit testing)",
-    ),
-    ("summary", "compiled stub in claude-code"),
-    ("tag", "USER_TYPE==='ant' (Anthropic-internal only)"),
     ("teleport", "compiled stub in claude-code (internal)"),
-    ("thinkback", "statsig-gated in claude-code"),
-    ("thinkback-play", "statsig-gated in claude-code"),
-    (
-        "break-cache",
-        "compiled stub in claude-code (internal cache control)",
-    ),
     // SLASH-06: `share` was listed here as a compiled stub. It is not a command
     // at all — it is the `bug` command's alias (oracle 2.1.238 @248164336), and
     // `name:"share"` has zero hits in the 2.1.220 and 2.1.238 binaries. The
@@ -353,70 +297,9 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
 ///
 /// This is now the complete [`INTENTIONALLY_DISABLED_COMMANDS`] set.
 pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
-    // --- 18 compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
-    (
-        "ant-trace",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
+    // --- compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
     (
         "autofix-pr",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "backfill-sessions",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "break-cache",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "bughunter",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "ctx-viz",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "debug-tool-call",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "env",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "good-claude",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "issue",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "mock-limits",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "oauth-refresh",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "onboarding",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "perf-issue",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    (
-        "reset-limits",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
-    // SLASH-06: `share` removed — it is `bug`'s alias, not a stub command.
-    (
-        "summary",
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
     ),
     (
@@ -424,23 +307,6 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
     ),
     // --- USER_TYPE==='ant' (Anthropic-internal only) ---
-    (
-        "tag",
-        "isEnabled:()=>process.env.USER_TYPE==='ant' (Anthropic-internal only)",
-    ),
-    // --- statsig / feature-gated OFF in the external build ---
-    (
-        "thinkback",
-        "isEnabled gated by statsig `tengu_thinkback` (off externally)",
-    ),
-    (
-        "thinkback-play",
-        "statsig `tengu_thinkback` + isHidden:true (off externally)",
-    ),
-    (
-        "brief",
-        "isEnabled:()=>feature('KAIROS')&&config — feature gate OFF externally",
-    ),
     // --- entitlement-gated OFF + hidden by default ---
     (
         "advisor",
@@ -465,7 +331,6 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[];
 ///
 /// ```text
 /// name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0,isEnabled:()=>pct()&&!kr()
-/// name:"heapdump",description:"Dump the JS heap to ~/Desktop",isHidden:!0,...
 /// name:"rate-limit-options",description:"Show options when rate limit is reached",isEnabled:()=>Ro()||!1,isHidden:!0
 /// ```
 ///
@@ -473,12 +338,8 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[];
 /// `commands.filter(c => !c.isHidden && !$te(c))` (3 confirmed sites:
 /// `!ne.isHidden&&!$te(ne)`, `!S.isHidden&&!$te(S)`, `!Ur.isHidden&&!$te(Ur)`),
 /// so any `isHidden:!0` command is dropped from both surfaces.
-pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &[
-    "auto-mode-setup",
-    "extra-usage",
-    "heapdump",
-    "rate-limit-options",
-];
+pub const HIDDEN_PALETTE_COMMANDS: &[&str] =
+    &["auto-mode-setup", "extra-usage", "rate-limit-options"];
 
 /// **`bnr()`-gated, hidden-by-default named commands** — real, conditionally
 /// enabled builtin command objects whose `isEnabled` resolves to `false` in a
@@ -633,20 +494,20 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// `commands.filter(c => !c.isHidden && !$te(c))` (where `$te` is the
 /// "isEnabled() resolves to off" gate). The set is the union of:
 ///
-/// - [`CORRECT_BY_DESIGN_STUBS`] — the 23 commands claude-code disables /
+/// - [`CORRECT_BY_DESIGN_STUBS`] — the 3 commands claude-code disables /
 ///   hides / feature-gates-OFF / ships as a compiled `name:'stub'`
 ///   (`isEnabled:()=>!1,isHidden:!0`) for ordinary users, so `$te(c)` is true
-///   (or, for `advisor`/`brief`/`teleport`/`autofix-pr`, the entitlement /
+///   (or, for `advisor`/`teleport`/`autofix-pr`, the entitlement /
 ///   statsig / remote gate is OFF by default, which also resolves `isHidden`
 ///   true and `isEnabled()` false); and
-/// - [`HIDDEN_PALETTE_COMMANDS`] — the 4 enabled-but-hidden named commands
-///   (`auto-mode-setup`, `extra-usage`, `heapdump`, `rate-limit-options`); and
+/// - [`HIDDEN_PALETTE_COMMANDS`] — the 3 enabled-but-hidden named commands
+///   (`auto-mode-setup`, `extra-usage`, `rate-limit-options`); and
 /// - [`USAGE_CREDITS_BNR_GATED`] — the 1 `bnr()`-gated command
 ///   (`usage-credits`), off-by-default in a fresh no-subscription session; and
 /// - [`STATICALLY_DISABLED_COMMANDS`] — the 1 command (`version`) whose every
 ///   upstream twin is `isEnabled:()=>!1` (SLASH-14).
 ///
-/// Total = 22 + 4 + 1 + 1 = **28** filtered names, leaving 108 − 28 = 80
+/// Total = 3 + 3 + 1 + 1 = **8** filtered names, leaving 86 − 8 = 78
 /// visible in `/help`. The host-bound `btw` command and the implemented
 /// `/reload-plugins` command remain visible. Likewise `install-slack-app`,
 /// `mobile`, and `desktop` carry no
@@ -710,7 +571,7 @@ pub fn is_command_env_disabled(name: &str) -> bool {
 }
 
 /// One-line descriptions for the builtin commands, used for slash-palette +
-/// `/help` rendering. The first 18 are the M5-10 core set; the remainder
+/// `/help` rendering. The first 19 are the M5-10 core set; the remainder
 /// (cp-01) are the real per-command `description:` strings ported from each
 /// claude-code `commands/<name>` object so no VISIBLE palette row shows the
 /// `"(unimplemented in v0.6.0)"` placeholder. Commands that are hidden/disabled
@@ -771,7 +632,7 @@ pub fn core_description(name: &str) -> &'static str {
         // verbatim from the 2.1.207 binary.
         "background" => "Send this session to the background and free the terminal",
         "branch" => "Create a branch of the current conversation at this point",
-        "bridge" => "Connect this terminal for remote-control sessions",
+        "brief" => "Toggle brief-only mode",
         "cd" => "Move this session to a new working directory",
         "btw" => "Ask a quick side question without interrupting the main conversation",
         // SLASH-06: byte-exact from oracle 2.1.238 @248164336. No product name
@@ -815,11 +676,9 @@ pub fn core_description(name: &str) -> &'static str {
         "release-notes" => "View release notes",
         "reload-plugins" => "Activate pending plugin changes in the current session",
         "remote-env" => "Configure the default remote environment for teleport sessions",
-        "remote-setup" => "Setup LingXi on the web (requires connecting your GitHub account)",
         "rename" => "Rename the current conversation",
         "resume" => "Resume a previous conversation",
         "rewind" => "Restore the code and/or conversation to a previous point",
-        "sandbox-toggle" => "Toggle sandbox mode for bash commands",
         "security-review" => "Complete a security review of the pending changes on the current branch",
         "session" => "Show remote session URL and QR code",
         "skills" => "List available skills",
@@ -871,9 +730,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_108() {
-        // 107 until SLASH-13 added the ungated `powerup` command object.
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
+    fn total_count_locked_at_86() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
+    }
+
+    #[test]
+    fn cc_2_1_252_removed_internal_names_stay_out_of_current_surface() {
+        // These exact command objects existed in older local oracle builds but
+        // have zero `name:"…"` hits in the current 2.1.252 binary. Keep the
+        // removals locked in both the advertised list and every stub bucket.
+        for name in [
+            "ant-trace",
+            "backfill-sessions",
+            "break-cache",
+            "bridge",
+            "bughunter",
+            "ctx-viz",
+            "debug-tool-call",
+            "env",
+            "good-claude",
+            "issue",
+            "mock-limits",
+            "oauth-refresh",
+            "onboarding",
+            "perf-issue",
+            "remote-setup",
+            "reset-limits",
+            "sandbox-toggle",
+            "summary",
+            "tag",
+            "thinkback",
+            "thinkback-play",
+        ] {
+            assert!(
+                !BUILTIN_COMMAND_NAMES.contains(&name),
+                "stale /{name} remains"
+            );
+            assert!(
+                !INTENTIONALLY_DISABLED_COMMANDS
+                    .iter()
+                    .any(|(candidate, _)| *candidate == name),
+                "stale /{name} remains in the disabled bucket"
+            );
+            assert!(
+                !CORRECT_BY_DESIGN_STUBS
+                    .iter()
+                    .any(|(candidate, _)| *candidate == name),
+                "stale /{name} remains in the faithful-stub bucket"
+            );
+        }
+
+        // `heapdump` is policy-gated and has no provider-neutral runtime
+        // analog in LingXi, so it is removed from typed recognition as well
+        // as the default advertised surface.
+        assert!(!BUILTIN_COMMAND_NAMES.contains(&"heapdump"));
+        assert!(!HIDDEN_PALETTE_COMMANDS.contains(&"heapdump"));
     }
 
     #[test]
@@ -1204,10 +1115,8 @@ mod tests {
     fn includes_known_canonical_names() {
         // Spot-check a few rare ones so a future name rename doesn't drift silently.
         assert!(!BUILTIN_COMMAND_NAMES.contains(&"x402"));
-        assert!(BUILTIN_COMMAND_NAMES.contains(&"ctx-viz"));
-        assert!(BUILTIN_COMMAND_NAMES.contains(&"thinkback-play"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"terminal-setup"));
-        assert!(BUILTIN_COMMAND_NAMES.contains(&"ant-trace"));
+        assert!(BUILTIN_COMMAND_NAMES.contains(&"powerup"));
     }
 
     // ========================================================================
@@ -1221,13 +1130,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn intentionally_disabled_count_is_22() {
+    fn intentionally_disabled_count_is_3() {
         assert_eq!(
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            22,
-            "disabled command classification is locked at 22 commands \
-             (23 until SLASH-06 removed `share`, which is not a command at all \
-             but the `bug` command's alias)"
+            3,
+            "only faithful disabled stubs remain after the 2.1.252 stale-name audit"
         );
     }
 
@@ -1266,7 +1173,7 @@ mod tests {
 
     #[test]
     fn intentionally_disabled_is_disjoint_from_core() {
-        // Bucket (d) commands are NOT implemented; the 18 core names ARE wired
+        // Bucket (d) commands are NOT implemented; the 19 core names ARE wired
         // to real handlers. The two sets must never overlap, otherwise a name is
         // both "implemented" and "intentionally stubbed" — a contradiction.
         let core: std::collections::HashSet<&str> = BUILTIN_CORE_NAMES.iter().copied().collect();
@@ -1280,41 +1187,11 @@ mod tests {
 
     #[test]
     fn intentionally_disabled_set_is_a_documented_non_goal() {
-        // Spot-check the three gating *kinds* from the spec so the rationale
-        // does not silently drift: USER_TYPE==='ant', statsig-gated, and the
-        // compiled `name: 'stub'` files. This asserts membership of the
-        // representative names — it is a documentation lock, not a behavior test.
+        // The remaining names are compiled no-op stubs. `share` used to be
+        // listed here; it is not a command at all (it is `bug`'s alias).
         let table: std::collections::HashMap<&str, &str> =
             INTENTIONALLY_DISABLED_COMMANDS.iter().copied().collect();
-
-        // USER_TYPE==='ant' (Anthropic-internal only).
-        assert!(table.contains_key("ant-trace"));
-        assert!(table.contains_key("tag"));
-        // statsig-gated.
-        assert!(table.contains_key("thinkback"));
-        assert!(table.contains_key("thinkback-play"));
-        // entitlement-gated.
-        assert!(table.contains_key("brief"));
-        // compiled `name: 'stub'` files. `share` used to be listed here; it is
-        // not a command at all (SLASH-06 — it is `bug`'s alias), so it was
-        // removed rather than re-pointed.
-        for n in [
-            "env",
-            "summary",
-            "teleport",
-            "autofix-pr",
-            "backfill-sessions",
-            "bughunter",
-            "ctx-viz",
-            "debug-tool-call",
-            "good-claude",
-            "issue",
-            "mock-limits",
-            "oauth-refresh",
-            "onboarding",
-            "perf-issue",
-            "reset-limits",
-        ] {
+        for n in ["advisor", "autofix-pr", "teleport"] {
             assert!(table.contains_key(n), "expected compiled-stub name '{n}'");
         }
     }
@@ -1325,7 +1202,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
     }
 
     // ========================================================================
@@ -1340,11 +1217,8 @@ mod tests {
     }
 
     #[test]
-    fn correct_by_design_count_is_22() {
-        // 23 until SLASH-06: `share` was classified as a compiled stub on the
-        // strength of the stale de-minified source. The shipped binary has no
-        // `name:"share"` command — it is `bug`'s alias.
-        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
+    fn correct_by_design_count_is_3() {
+        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 3);
     }
 
     #[test]
@@ -1433,7 +1307,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 86);
     }
 
     #[test]

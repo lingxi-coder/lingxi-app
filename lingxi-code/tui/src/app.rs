@@ -53,6 +53,10 @@ pub enum AppExit {
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
     SwitchSession(uuid::Uuid),
+    /// The agents view selected a session; the embedder must resolve its live
+    /// owner and attach/restart safely before deciding whether remounting is
+    /// permitted.
+    OpenAgentSession(crate::bottom_pane::view::AgentSessionTarget),
     /// `/branch`: fork the current conversation into a new session and switch
     /// into it. The embedder creates the branch transcript off-loop then
     /// re-mounts the new session in-process (same unwind path as
@@ -398,6 +402,10 @@ impl<'cb> RataApp<'cb> {
                         // session file the user just left. No-op when idle.
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::SwitchSession(uuid));
+                    }
+                    ChatOutcome::OpenAgentSession(target) => {
+                        self.chat_widget.cancel_active_turn();
+                        return Ok(AppExit::OpenAgentSession(target));
                     }
                     // `/branch`: same switch-safety as SwitchSession — stop any
                     // in-flight turn on the OUTGOING runtime before unwinding so
@@ -748,6 +756,9 @@ pub fn run_app(
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
     orchestrator: Option<std::sync::Arc<dyn platform_api::OrchestratorHandle>>,
+    // Live session-cwd reader used by native scrollback attachment links.
+    // `None` keeps hermetic/unit callers on the startup `SessionInfo` cwd.
+    hyperlink_cwd_provider: Option<std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
@@ -760,6 +771,10 @@ pub fn run_app(
     initial_permission_mode: permission::PermissionMode,
     bypass_available: bool,
     emoji_completion_enabled: bool,
+    startup_view_mode: Option<String>,
+    agents_snapshot_provider: Option<
+        std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>,
+    >,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>),
     on_switch_model: impl FnMut(String, Option<String>),
@@ -834,6 +849,9 @@ pub fn run_app(
             on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
+    if let Some(provider) = hyperlink_cwd_provider {
+        app.chat_widget.set_hyperlink_cwd_provider(provider);
+    }
     app.configure_fullscreen(
         fullscreen,
         tui_core::theme_persist::load_copy_on_select().unwrap_or(true),
@@ -848,6 +866,8 @@ pub fn run_app(
     );
     app.chat_widget
         .set_emoji_completion_enabled(emoji_completion_enabled);
+    app.chat_widget
+        .set_startup_view_mode(startup_view_mode.as_deref());
     if let Some(slot) = subscription {
         app.chat_widget.set_subscription(slot);
     }
@@ -899,6 +919,10 @@ pub fn run_app(
     if let Some(handle) = task_registry {
         app.chat_widget.set_task_registry(handle);
     }
+    app.chat_widget.set_agents_snapshot_provider(
+        agents_snapshot_provider
+            .unwrap_or_else(|| std::sync::Arc::new(ChatWidget::live_agents_snapshot)),
+    );
     // Agents-view settings (claude 2.1.220): `leftArrowOpensAgents`
     // (`kCt = Rt().leftArrowOpensAgents !== false`, default ON) gates the
     // ←-on-empty gesture; it is ANDed with the agent-view enablement gate,
@@ -1030,6 +1054,18 @@ mod tests {
             .as_any()
             .downcast_ref::<T>()
             .expect("concrete cell type")
+    }
+
+    fn last_system_text<'a>(app: &'a RataApp<'_>) -> &'a str {
+        cells(app)
+            .iter()
+            .rev()
+            .find_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<crate::history_cell::system::SystemTextCell>()
+            })
+            .expect("system cell")
+            .body()
     }
 
     #[test]
@@ -1382,9 +1418,20 @@ mod tests {
     }
 
     #[test]
-    fn esc_quits() {
+    fn idle_double_escape_routes_to_rewind() {
         let mut app = test_app(Vec::new());
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            last_system_text(&app),
+            "/rewind is unavailable (no engine handle wired)"
+        );
     }
 
     // ===== Layered Ctrl-C/Esc routing (acceptance criterion 14, plan Phase 7):
@@ -1412,8 +1459,20 @@ mod tests {
             ChatOutcome::Continue
         ));
         app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
-        // Idle only after the terminal event: Esc now reaches quit policy.
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+        // Idle only after the terminal event: Esc now arms, then fires the
+        // idle rewind chord on the second press.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            last_system_text(&app),
+            "/rewind is unavailable (no engine handle wired)"
+        );
     }
 
     #[test]
@@ -1442,8 +1501,20 @@ mod tests {
         assert!(token.is_cancelled());
         assert!(app.chat_widget.turn_running());
         app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
-        // And once the terminal boundary makes it idle, Esc quits.
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+        // And once the terminal boundary makes it idle, Esc arms the rewind
+        // chord, then the second press routes through `/rewind`.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            last_system_text(&app),
+            "/rewind is unavailable (no engine handle wired)"
+        );
     }
 
     #[test]
@@ -1689,6 +1760,7 @@ mod tests {
                     request_model: "claude-opus-4-8".into(),
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
+                    provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                     is_current: true,
                     supports_reasoning: true,
                     supports_multimodal: false,
@@ -1699,6 +1771,7 @@ mod tests {
                     request_model: "claude-sonnet-5".into(),
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
+                    provenance: platform_api::ModelProvenance::ProviderCatalogTier,
                     is_current: false,
                     supports_reasoning: true,
                     supports_multimodal: false,

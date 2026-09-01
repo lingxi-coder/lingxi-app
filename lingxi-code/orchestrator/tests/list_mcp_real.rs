@@ -4,15 +4,15 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use protocol::McpConnectionId as ConnId;
-use serde_json::Value;
-use std::sync::Arc;
 use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpStatus, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, OrchestratorHandle,
     ServerCapabilitiesDto,
 };
+use protocol::McpConnectionId as ConnId;
+use serde_json::Value;
+use std::sync::Arc;
 
 struct StubTransport;
 

@@ -46,13 +46,13 @@ use client_protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 use protocol::ConversationMessage;
 
 use permission::PromptDefault;
-use session::jsonl::loader::SessionMetadata;
 use platform_api::orchestrator::{
     AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
     McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
 };
 use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
 use platform_api::team_registry::WorkerInfo;
+use session::jsonl::loader::SessionMetadata;
 
 fn lower_reasoning_selection(
     selection: &platform_api::ReasoningSelection,
@@ -62,7 +62,9 @@ fn lower_reasoning_selection(
         platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
         platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
         platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::Level { id } => {
+            ReasoningSelectionDto::Level { id: id.clone() }
+        }
         platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
@@ -141,7 +143,10 @@ pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetails
             source: pricing.source.clone(),
         });
     ModelDetailsDto {
-        reference: platform_api::qualified_model_ref(&listing.request_model, Some(&listing.provider_id)),
+        reference: platform_api::qualified_model_ref(
+            &listing.request_model,
+            Some(&listing.provider_id),
+        ),
         provider_id: listing.provider_id.clone(),
         provider_label: listing.provider_label.clone(),
         display_name: listing.display_model.clone(),

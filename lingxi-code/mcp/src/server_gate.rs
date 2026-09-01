@@ -392,8 +392,8 @@ mod tests {
     #[test]
     fn apply_gate_marks_disabled_servers() {
         use crate::connection::ConfigScope;
-        use std::collections::HashMap;
         use platform_api::McpTransportSpec;
+        use std::collections::HashMap;
 
         let stdio = |name: &str| McpServerConfig {
             name: name.to_string(),
@@ -480,8 +480,8 @@ mod tests {
     #[test]
     fn apply_gate_rejects_disabled_mcpjson_project_server() {
         use crate::connection::ConfigScope;
-        use std::collections::HashMap;
         use platform_api::McpTransportSpec;
+        use std::collections::HashMap;
 
         let stdio = |name: &str, scope: ConfigScope| McpServerConfig {
             name: name.to_string(),
@@ -532,8 +532,8 @@ mod tests {
     #[test]
     fn apply_gate_missing_config_gates_only_builtin() {
         use crate::connection::ConfigScope;
-        use std::collections::HashMap;
         use platform_api::McpTransportSpec;
+        use std::collections::HashMap;
 
         let stdio = |name: &str| McpServerConfig {
             name: name.to_string(),

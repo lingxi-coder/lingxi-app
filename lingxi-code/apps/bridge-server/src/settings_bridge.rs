@@ -4,7 +4,7 @@
 //! `core` crate's dependencies are deliberately minimal (no `traits`, no
 //! `permission`), while `bridge-server` already depends on client-protocol,
 //! permission, migrations, traits and engine — `permission::mark_internal_write`
-//! is needed by [`apply_patch`], the writer below.
+//! is needed by [`apply_patch`] before the shared migrations writer publishes.
 //!
 //! This module reads and merges the layered settings files into one snapshot
 //! (the effective/merged values, plus which layer each value actually came
@@ -433,14 +433,10 @@ pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
 /// verbatim (`read_settings_map`'s semantics — this reads the file, edits the
 /// map in memory, and rewrites the whole thing).
 ///
-/// SIBLING IMPLEMENTATION — this reimplements the read/merge/serialize/write
-/// shape of `migrations::settings_update::update_settings` rather than
-/// calling it, because the [`permission::mark_internal_write`] call below must
-/// land at a precise point (immediately before the single write) and
-/// `migrations` cannot depend on `permission`. In particular this inherits
-/// that function's DOCUMENTED non-atomic-write divergence from TS (in-place
-/// `std::fs::write`, not tmp+rename) — if that gets fixed there, check
-/// whether this needs the same fix.
+/// The read-modify-write transaction is shared with
+/// `migrations::settings_update::update_settings`; its callback lets this
+/// crate mark the write for the desktop watcher immediately before publication
+/// while `migrations` remains independent of `permission`.
 ///
 /// # Errors
 /// The destination resolves to a non-writable layer (unreachable given
@@ -455,6 +451,23 @@ pub fn apply_patch(
     destination: SettingsDestinationDto,
     patch: Vec<(String, Option<Value>)>,
 ) -> Result<(), String> {
+    apply_patch_before_publish(paths, destination, patch, || {})
+}
+
+/// Internal test seam: invoke `before_publish` while the destination lock is
+/// held, after parsing, merging, and serializing the patch but before its
+/// atomic publication.
+/// Keeping this seam private lets tests prove the lock covers the complete
+/// read-modify-write transaction without widening the bridge API.
+fn apply_patch_before_publish<F>(
+    paths: &SettingsPaths,
+    destination: SettingsDestinationDto,
+    patch: Vec<(String, Option<Value>)>,
+    before_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
     for (key, _) in &patch {
         if let Some((reserved, replacement)) =
             RESERVED_KEYS.iter().find(|(reserved, _)| reserved == key)
@@ -467,33 +480,37 @@ pub fn apply_patch(
     }
 
     let path = writable_path(paths, destination_layer(destination))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    }
-    // A destination file that exists but fails to parse is refused here
-    // (before anything is marked or written), so a broken file is never
-    // silently overwritten.
-    let mut map = read_settings_map(&path)?;
-    for (key, value) in patch {
-        match value {
-            Some(v) => {
-                map.insert(key, v);
-            }
-            None => {
-                map.remove(&key);
-            }
+    migrations::settings_update::update_settings_with_before_publish(&path, patch, || {
+        // I2: mark BEFORE writing. `settings_watch.rs` consumes this mark
+        // within a 5-second window; skipping it makes the desktop's own
+        // save look like an external edit and fires an unwanted hook round.
+        permission::mark_internal_write(&path);
+        before_publish();
+    })
+    .map_err(bridge_settings_error)
+}
+
+/// Keep the bridge's established protocol-facing wording while delegating the
+/// transaction to the shared migrations writer. Read/parse errors already use
+/// the same text; only the writer's operation labels need their historical
+/// lowercase spelling restored here.
+fn bridge_settings_error(error: String) -> String {
+    for (shared, bridge) in [
+        ("Failed to create ", "failed to create "),
+        (
+            "Failed to serialize settings for ",
+            "failed to serialize settings for ",
+        ),
+        (
+            "Failed to write settings to ",
+            "failed to write settings to ",
+        ),
+    ] {
+        if let Some(rest) = error.strip_prefix(shared) {
+            return format!("{bridge}{rest}");
         }
     }
-    let serialized = serde_json::to_string_pretty(&Value::Object(map))
-        .map_err(|e| format!("failed to serialize settings for {}: {e}", path.display()))?;
-
-    // I2: mark BEFORE writing. `settings_watch.rs` consumes this mark within a
-    // 5-second window; skipping it makes the desktop's own save look like an
-    // external edit and fires an unwanted ConfigChange hook round.
-    permission::mark_internal_write(&path);
-    std::fs::write(&path, serialized + "\n")
-        .map_err(|e| format!("failed to write settings to {}: {e}", path.display()))
+    error
 }
 
 impl SettingsLayer {
@@ -647,6 +664,8 @@ fn to_json_or_empty_object<T: serde::Serialize>(what: &str, value: &T) -> String
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// Four layers could each define the same key; provenance must point at
     /// the layer the priority order actually produced, not a hardcoded
@@ -1497,7 +1516,285 @@ mod tests {
         );
     }
 
-    // ── Permission command routing (mapping layer) ────────────────────────
+    /// The lock must cover the read as well as the later publish. Holding the
+    /// first patch before publication makes a concurrent second patch wait;
+    /// once it proceeds, it reads the first patch's value and preserves both
+    /// keys.
+    #[test]
+    fn concurrent_patches_to_one_path_preserve_both_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        let path = home.join("settings.json");
+        let paths = SettingsPaths {
+            lingxi_home: home.clone(),
+            project_dir: project.clone(),
+        };
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("original".into(), Some(serde_json::json!(true)))],
+        )
+        .unwrap();
+        let _ = permission::consume_internal_write(&path, Duration::from_secs(5));
+
+        let (first_read_tx, first_read_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_paths = SettingsPaths {
+            lingxi_home: home.clone(),
+            project_dir: project.clone(),
+        };
+        let first = std::thread::spawn(move || {
+            apply_patch_before_publish(
+                &first_paths,
+                SettingsDestinationDto::User,
+                vec![("first".into(), Some(serde_json::json!(1)))],
+                move || {
+                    first_read_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+        });
+        first_read_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first patch must reach before publication before the second starts");
+
+        let (second_started_tx, second_started_rx) = mpsc::channel();
+        let (second_read_tx, second_read_rx) = mpsc::channel();
+        let second_paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let second = std::thread::spawn(move || {
+            second_started_tx.send(()).unwrap();
+            apply_patch_before_publish(
+                &second_paths,
+                SettingsDestinationDto::User,
+                vec![("second".into(), Some(serde_json::json!(2)))],
+                move || second_read_tx.send(()).unwrap(),
+            )
+        });
+        second_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second patch must start");
+        let second_read_while_first_held = second_read_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert!(
+            !second_read_while_first_held,
+            "same-path patch reached publication before the first RMW released the lock"
+        );
+
+        let map = read_settings_map(&path).unwrap();
+        assert_eq!(map["original"], serde_json::json!(true));
+        assert_eq!(map["first"], serde_json::json!(1));
+        assert_eq!(map["second"], serde_json::json!(2));
+    }
+
+    /// A lock is keyed by the destination path, not global to the bridge. A
+    /// blocked user-layer patch must not stall an independent project-layer
+    /// patch.
+    #[test]
+    fn patches_to_different_paths_proceed_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        let user_path = home.join("settings.json");
+        let project_path = project.join(branding::DOT_DIR).join("settings.json");
+
+        let (first_read_tx, first_read_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_paths = SettingsPaths {
+            lingxi_home: home.clone(),
+            project_dir: project.clone(),
+        };
+        let first = std::thread::spawn(move || {
+            apply_patch_before_publish(
+                &first_paths,
+                SettingsDestinationDto::User,
+                vec![("user".into(), Some(serde_json::json!(true)))],
+                move || {
+                    first_read_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+        });
+        first_read_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("user patch must reach before publication");
+
+        let (second_read_tx, second_read_rx) = mpsc::channel();
+        let second_paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let second = std::thread::spawn(move || {
+            apply_patch_before_publish(
+                &second_paths,
+                SettingsDestinationDto::Project,
+                vec![("project".into(), Some(serde_json::json!(true)))],
+                move || second_read_tx.send(()).unwrap(),
+            )
+        });
+        second_read_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("independent project patch must reach before publication immediately");
+        second.join().unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+
+        assert_eq!(read_settings_map(&user_path).unwrap()["user"], true);
+        assert_eq!(read_settings_map(&project_path).unwrap()["project"], true);
+    }
+
+    /// Broken JSON remains untouched and is returned as the same internal
+    /// settings-update failure that the router wraps in `ClientEvent::Error`.
+    #[test]
+    fn broken_settings_file_is_not_clobbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        let path = writable_path(&paths, SettingsLayer::User).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b"{ not valid json";
+        std::fs::write(&path, original).unwrap();
+
+        let error = apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("new".into(), Some(serde_json::json!(true)))],
+        )
+        .unwrap_err();
+        assert!(error.to_lowercase().contains("json"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(settings_temps(&path).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_preserves_mode_trailing_newline_and_temp_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        let path = writable_path(&paths, SettingsLayer::User).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{\"old\":true}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("new".into(), Some(serde_json::json!(true)))],
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        assert!(!bytes.ends_with(b"\n\n"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(settings_temps(&path).is_empty());
+        let _ = permission::consume_internal_write(&path, Duration::from_secs(5));
+    }
+
+    /// Final settings-file links are part of the bridge's existing direct-write
+    /// scope: follow the target and leave the link itself intact. This also
+    /// proves staging happens beside the resolved target, not beside the link.
+    #[cfg(unix)]
+    #[test]
+    fn patch_follows_final_symlink_target_without_replacing_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("settings.json");
+        let link = home.join("settings.json");
+        std::fs::write(&target, r#"{"keep":true}"#).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("patched".into(), Some(serde_json::json!(true)))],
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        let map = read_settings_map(&target).unwrap();
+        assert_eq!(map["keep"], true);
+        assert_eq!(map["patched"], true);
+        assert!(settings_temps(&target).is_empty());
+        let _ = permission::consume_internal_write(&link, Duration::from_secs(5));
+    }
+
+    /// Parent-directory links remain accepted by the direct settings path
+    /// policy; the staged file lands in that directory's resolved target.
+    #[cfg(unix)]
+    #[test]
+    fn patch_accepts_symlinked_settings_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home_target = dir.path().join("home-target");
+        let home_link = dir.path().join("home-link");
+        std::fs::create_dir_all(&home_target).unwrap();
+        symlink(&home_target, &home_link).unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: home_link,
+            project_dir: dir.path().join("repo"),
+        };
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("value".into(), Some(serde_json::json!(1)))],
+        )
+        .unwrap();
+        let target = home_target.join("settings.json");
+        assert_eq!(read_settings_map(&target).unwrap()["value"], 1);
+        assert!(settings_temps(&target).is_empty());
+    }
+
+    fn settings_temps(path: &std::path::Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.tmp.",
+            path.file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
+        );
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            })
+            .collect()
+    }
+
     //
     // `persist_permission_rule_set` / `persist_permission_mode` /
     // `persist_workspace_directories` are exercised end-to-end (through the

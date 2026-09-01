@@ -1,11 +1,10 @@
 //! MCP transport — POSIX.
 //!
-//! Supports the `Stdio`, `Sse`, and `Http` variants in M2. The `WebSocket`
-//! variant's low-level `connect_ws` helper is re-exported by M2-02c, but
-//! `PosixMcpTransport::connect` does NOT yet route `WebSocket` specs — that
-//! arm currently falls through to `McpError::UnsupportedTransport` and will
-//! be wired in a follow-up. Other variants (`InProcess`, `SseIde`,
-//! `SdkControl`) return `McpError::UnsupportedTransport`.
+//! Supports the `Stdio`, `Sse`, `Http`, `SseIde`, and `WsIde` variants. The
+//! generic `WebSocket` variant's low-level `connect_ws` helper is re-exported
+//! by M2-02c, but `PosixMcpTransport::connect` does NOT route generic
+//! `WebSocket` specs. Other variants (`InProcess`, `SdkControl`) return
+//! `McpError::UnsupportedTransport`.
 //!
 //! M2.02c also lands `spawn_stdio`: a low-level helper that spawns a child
 //! MCP server, frames its stdio with NDJSON, drains stderr into a 64 MB
@@ -15,6 +14,12 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
+use platform_api::{
+    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
+    McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
+    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 use platform_common::mcp_remote::{
     capabilities_from_wire, directory_read_capability, initialize_params_for_version, modern_meta,
     modern_probe_params, modern_request_requires_meta, validate_modern_envelope,
@@ -31,12 +36,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
-use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
-    McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
 
 /// `clientInfo.description` literal (debranded from claude-code's
 /// `"Anthropic's agentic coding tool"`). The canonical
@@ -108,10 +107,11 @@ pub(crate) enum PosixMcpConnection {
 
 /// POSIX MCP transport.
 ///
-/// Supports the `Stdio`, `Sse`, and `Http` variants in M2. Other transports
-/// (`WebSocket`, `InProcess`, `SseIde`, `SdkControl`) return
+/// Supports the `Stdio`, `Sse`, `Http`, `SseIde`, and `WsIde` variants. Generic
+/// `WebSocket`, `InProcess`, and `SdkControl` specs return
 /// `McpError::UnsupportedTransport`. Stdio owns process/reaper state while
-/// HTTP and SSE request handling is delegated to the shared remote transport.
+/// HTTP, SSE, and IDE request handling is delegated to the shared remote
+/// transport.
 #[derive(Default)]
 pub struct PosixMcpTransport {
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
@@ -485,26 +485,14 @@ struct RawTool {
     description: String,
     #[serde(rename = "inputSchema", default)]
     input_schema: Value,
+    #[serde(rename = "outputSchema", default)]
+    output_schema: Option<Value>,
+    #[serde(default)]
+    annotations: Option<platform_api::McpToolAnnotationsDto>,
+    #[serde(default)]
+    icons: Vec<platform_api::McpIconDto>,
     #[serde(default, rename = "_meta")]
-    meta: RawToolMeta,
-}
-
-/// The subset of a tool's `_meta` this transport forwards.
-///
-/// §27b — `anthropic/requiresUserInteraction` decides whether the permission
-/// dialog may offer a PERSISTENT "always allow" grant (oracle
-/// `requiresUserInteraction(){return Ee}` @182520425 →
-/// `suppressesAlwaysAllowRule` @182520462). This transport, not
-/// `mcp::client::McpClient`, is what fills
-/// `McpConnectionState::Connected { tools }` on the desktop connect path, so
-/// dropping the bit here made the whole §27b chain inert end to end.
-///
-/// `anthropic/searchHint` and `anthropic/alwaysLoad` are still dropped by this
-/// transport (pre-existing, out of this batch's scope — reported, not fixed).
-#[derive(Deserialize, Default)]
-struct RawToolMeta {
-    #[serde(default, rename = "anthropic/requiresUserInteraction")]
-    requires_user_interaction: bool,
+    meta: Option<Value>,
 }
 
 impl RawTool {
@@ -512,15 +500,36 @@ impl RawTool {
     /// token; `McpRegistry::connect` rewrites both once it knows the registry
     /// key.
     fn into_dto(self) -> McpToolDto {
+        let search_hint = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/searchHint"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let always_load = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/alwaysLoad"))
+            .and_then(Value::as_bool);
+        let requires_user_interaction = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         McpToolDto {
             full_name: format!("mcp____{}", self.name),
             server_name: String::new(),
             tool_name: self.name,
             description: self.description,
             input_schema: self.input_schema,
-            search_hint: None,
-            always_load: None,
-            requires_user_interaction: self.meta.requires_user_interaction,
+            output_schema: self.output_schema,
+            annotations: self.annotations,
+            icons: self.icons,
+            meta: self.meta,
+            search_hint,
+            always_load,
+            requires_user_interaction,
         }
     }
 }
@@ -551,8 +560,12 @@ struct RawResource {
     uri: String,
     #[serde(default)]
     name: String,
-    #[serde(rename = "mimeType")]
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 /// Wire response for `resources/templates/list` (§26a). Oracle
@@ -574,6 +587,10 @@ struct RawResourceTemplate {
     description: Option<String>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
+    #[serde(default)]
+    annotations: Option<Value>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -585,10 +602,12 @@ struct ResourceReadResult {
 #[derive(Deserialize)]
 struct RawResourceContent {
     uri: Option<String>,
-    #[serde(rename = "mimeType")]
+    #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
     text: Option<String>,
     blob: Option<String>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -732,7 +751,10 @@ impl McpTransport for PosixMcpTransport {
                     },
                 );
             }
-            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
+            McpTransportSpec::Sse { .. }
+            | McpTransportSpec::Http { .. }
+            | McpTransportSpec::SseIde { .. }
+            | McpTransportSpec::WsIde { .. } => {
                 // The shared remote-only transport owns all HTTP/SSE wire and
                 // JSON-RPC state. POSIX retains only the stdio process/reaper
                 // implementation below.
@@ -750,7 +772,10 @@ impl McpTransport for PosixMcpTransport {
     ) -> Result<McpConnectResult, McpError> {
         if matches!(
             spec,
-            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
+            McpTransportSpec::Sse { .. }
+                | McpTransportSpec::Http { .. }
+                | McpTransportSpec::SseIde { .. }
+                | McpTransportSpec::WsIde { .. }
         ) {
             return self.remote.connect_and_initialize(spec, options).await;
         }
@@ -939,7 +964,9 @@ impl McpTransport for PosixMcpTransport {
             .map(|r| McpResourceDto {
                 uri: r.uri,
                 name: r.name,
+                description: r.description,
                 mime_type: r.mime_type,
+                meta: r.meta,
             })
             .collect())
     }
@@ -964,6 +991,8 @@ impl McpTransport for PosixMcpTransport {
                 name: t.name,
                 description: t.description,
                 mime_type: t.mime_type,
+                annotations: t.annotations,
+                meta: t.meta,
             })
             .collect())
     }
@@ -1083,6 +1112,8 @@ impl McpTransport for PosixMcpTransport {
         Ok(McpResourceContentDto {
             uri: first.uri.unwrap_or_else(|| uri.to_string()),
             content,
+            mime_type: first.mime_type,
+            meta: first.meta,
         })
     }
 
@@ -1112,6 +1143,7 @@ impl McpTransport for PosixMcpTransport {
             .map(|c| mcp::RawResourceContentRich {
                 uri: c.uri.unwrap_or_else(|| uri.to_string()),
                 mime_type: c.mime_type,
+                meta: c.meta,
                 text: c.text,
                 blob: c.blob,
             })
@@ -1239,6 +1271,8 @@ impl McpTransport for PosixMcpTransport {
             McpTransportKind::Stdio,
             McpTransportKind::Sse,
             McpTransportKind::Http,
+            McpTransportKind::SseIde,
+            McpTransportKind::WsIde,
         ]
     }
 }
@@ -1554,9 +1588,9 @@ mod initialize_params_tests {
 mod error_mapping_tests {
     use super::{handshake_error, is_method_not_found, map_call_err};
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
+    use platform_api::McpError;
     use serde_json::json;
     use std::time::Duration;
-    use platform_api::McpError;
 
     /// Example seconds value for the Display-format assertion below. The
     /// production timeout is resolved at call time via
@@ -1692,7 +1726,7 @@ mod error_mapping_tests {
 
 #[cfg(test)]
 mod tool_meta_tests {
-    use super::{RawTool, ToolsListResult};
+    use super::{RawResourceTemplate, RawTool, ToolsListResult};
 
     /// §27b — the `_meta.anthropic/requiresUserInteraction` bit must survive
     /// THIS transport, because `McpRegistry::connect` fills
@@ -1716,7 +1750,17 @@ mod tool_meta_tests {
                     "name": "interactive",
                     "description": "needs a live consent step",
                     "inputSchema": { "type": "object" },
-                    "_meta": { "anthropic/requiresUserInteraction": true }
+                    "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } } },
+                    "annotations": { "title": "Interactive", "openWorldHint": true,
+                        "vendor/riskTier": "reviewed" },
+                    "icons": [{ "src": "https://example.invalid/icon.svg",
+                        "vendor/accent": "blue" }],
+                    "_meta": {
+                        "anthropic/searchHint": "interactive consent",
+                        "anthropic/alwaysLoad": true,
+                        "anthropic/requiresUserInteraction": true,
+                        "openai/outputTemplate": "ui://example/widget.html"
+                    }
                 }
             ]
         });
@@ -1729,10 +1773,63 @@ mod tool_meta_tests {
             "a tool with no _meta must default to false"
         );
         assert_eq!(dtos[1].tool_name, "interactive");
+        assert_eq!(dtos[1].search_hint.as_deref(), Some("interactive consent"));
+        assert_eq!(dtos[1].always_load, Some(true));
         assert!(
             dtos[1].requires_user_interaction,
             "_meta.anthropic/requiresUserInteraction must reach the DTO the registry stores"
         );
+        assert_eq!(
+            dtos[1].output_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } }
+            }))
+        );
+        assert_eq!(
+            dtos[1]
+                .annotations
+                .as_ref()
+                .and_then(|a| a.title.as_deref()),
+            Some("Interactive")
+        );
+        assert_eq!(dtos[1].icons.len(), 1);
+        assert_eq!(
+            dtos[1]
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.extra.get("vendor/riskTier")),
+            Some(&serde_json::json!("reviewed"))
+        );
+        assert_eq!(
+            dtos[1].icons[0].extra.get("vendor/accent"),
+            Some(&serde_json::json!("blue"))
+        );
+        assert_eq!(
+            dtos[1].meta,
+            Some(serde_json::json!({
+                "anthropic/searchHint": "interactive consent",
+                "anthropic/alwaysLoad": true,
+                "anthropic/requiresUserInteraction": true,
+                "openai/outputTemplate": "ui://example/widget.html"
+            }))
+        );
+    }
+
+    #[test]
+    fn resource_template_metadata_survives_the_posix_transport_decode() {
+        let raw: RawResourceTemplate = serde_json::from_value(serde_json::json!({
+            "uriTemplate": "file:///{path}",
+            "name": "file",
+            "description": "Workspace file",
+            "mimeType": "text/plain",
+            "annotations": { "audience": ["assistant"], "vendor/rank": 7 },
+            "_meta": { "vendor/template": "opaque" }
+        }))
+        .expect("decode resource template");
+
+        assert_eq!(raw.annotations.as_ref().unwrap()["vendor/rank"], 7);
+        assert_eq!(raw.meta.as_ref().unwrap()["vendor/template"], "opaque");
     }
 }
 

@@ -17,8 +17,8 @@
 //! documented-but-unwired `tengu_feature_bad` convention), so this guard mirrors
 //! only the observable refusal + byte-faithful message, not the telemetry.
 
-use std::path::Path;
 use platform_api::WorktreeError;
+use std::path::Path;
 
 /// Reject worktree creation when a committed symlink at the managed dot-dir
 /// could redirect the checkout outside the repository (CC 2.1.212 `yWi`).

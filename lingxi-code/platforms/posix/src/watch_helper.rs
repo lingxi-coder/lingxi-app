@@ -13,13 +13,13 @@
 use futures_core::stream::Stream;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind, Debouncer};
+use platform_api::{FileEvent, FileEventKind, FsError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use platform_api::{FileEvent, FileEventKind, FsError};
 
 /// Default stability threshold (chokidar 4 parity).
 pub const DEFAULT_STABILITY_THRESHOLD_MS: u64 = 500;

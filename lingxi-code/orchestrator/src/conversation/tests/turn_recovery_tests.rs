@@ -40,13 +40,13 @@ use hooks::registry::HookRegistry;
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use llm_client::ContentBlock as LlmContentBlock;
+use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
-use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 
 async fn wait_for_prewarm_capture(
     api: &MockApiClient,
@@ -143,7 +143,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _r: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _r: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

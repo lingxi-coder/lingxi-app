@@ -34,10 +34,10 @@
 
 use crate::oauth::{self, OnAuthorizationUrl};
 use crate::registry::{XaaConfigProvider, XaaInputs};
+use platform_api::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
 use protocol::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use platform_api::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
 
 /// IdP request deadline (xaaIdpLogin.ts `IDP_REQUEST_TIMEOUT_MS = 30000`).
 const IDP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1052,7 +1052,10 @@ mod tests {
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             let map = self.map.lock().await;
             Ok(map
                 .keys()

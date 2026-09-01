@@ -27,6 +27,7 @@ use hooks::registry::HookRegistry;
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use orchestrator::{ConversationOrchestrator, MemoryFile, OrchestratorConfig};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{HttpRequest, HttpResponse};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -36,7 +37,6 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tool_api::read_file_state::{ReadFileEntry, ReadFileStateMap};
 use tool_api::registry::ToolRegistry;
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct UnusedHttp;
 #[async_trait]
@@ -44,7 +44,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }

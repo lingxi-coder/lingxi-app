@@ -21,8 +21,8 @@
 //! subsystem — rather than the full enum, so it stays useful as the
 //! [`Effect`] enum grows without needing a churn-per-variant update.
 
-use protocol::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
 use platform_api::EffectHandler;
+use protocol::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
 
 /// Run the standard [`EffectHandler`] contract against an impl.
 ///

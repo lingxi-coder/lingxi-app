@@ -5,7 +5,7 @@
 use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_365_entries() {
+fn registry_is_exactly_395_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -106,12 +106,32 @@ fn registry_is_exactly_365_entries() {
     // §11 discovery-cache Stage 1 added mcp::NAMES's 4th entry
     // (tengu_mcp_discovery_source, DISCOVERY_SOURCE — see mcp.rs's module
     // doc for the two oracle call sites, `Ko`-gated on the miss side): mcp
-    // block 3 → 4, 364 + 1 = 365.
+    // block 3 → 4, 364 + 1 = 365. Registering the already-emitted
+    // tengu_mcp_tool_auto_backgrounded in the MCP global-tail block adds one:
+    // 365 + 1 = 366.
+    // 2.1.252 registry/catalog/connect slice adds 4 more MCP analytics names
+    // to the same MCP tail block:
+    //   - tengu_mcp_server_connection_succeeded
+    //   - tengu_mcp_server_connection_failed
+    //   - tengu_mcp_list_changed
+    //   - tengu_mcp_resource_templates_fetched
+    // MCP block 5 → 9, 366 + 4 = 370. `mcp serve` startup parity then appends
+    // one more MCP analytics name (`tengu_mcp_start`) at the same tail block's
+    // end, preserving append-only order: 370 + 1 = 371.
+    // Modern `subscriptions/listen` recovery plus `reset_mcpjson_choices`
+    // added 2 more MCP analytics names, and the provider-neutral OAuth/auth
+    // family adds 12 more (authenticate, clear, browser_open, flow
+    // start/success/error, refresh success/failure, token_persist_failed,
+    // issuer_echo_mismatch, server_needs_auth, tool_call_auth_error):
+    // 371 + 14 = 385.
+    // The plugin tail block later grew from 14 to 24 names (additional CLI
+    // entry points plus prune/state-file observability), so the compiled
+    // registry is now 385 + 10 = 395.
     //
-    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (4)
-    // and telemetry/src/tengu/plugin.rs::NAMES.len() (14), not pasted from a
+    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (24)
+    // and telemetry/src/tengu/plugin.rs::NAMES.len() (24), not pasted from a
     // failing assertion.
-    assert_eq!(ALL_EVENT_NAMES.len(), 365);
+    assert_eq!(ALL_EVENT_NAMES.len(), 395);
 }
 
 #[test]
@@ -352,20 +372,20 @@ fn category_ordering_preserved() {
         telemetry::tengu::oauth::AWS_AUTH_NAMES,
         "AWS auth-refresh trust-gate tail block",
     );
-    // MCP analytics-event block (4 events, 2.1.251 byte-alignment B8/§20a/
-    // §20b/§11) appended after the AWS auth-refresh block —
-    // tengu_mcp_server_config_invalid, tengu_mcp_tools_listed,
-    // tengu_mcp_degraded, tengu_mcp_discovery_source. Positions 347..351.
+    // MCP analytics-event block (24 events, 2.1.252 byte-alignment
+    // B8/§20a/§20b/§11 plus registry/catalog/connect, `mcp serve`, listen
+    // recovery, reset-choice, and provider-neutral OAuth/auth events) appended
+    // after the AWS auth-refresh block. Positions 347..371.
     assert_eq!(
-        &ALL_EVENT_NAMES[347..351],
+        &ALL_EVENT_NAMES[347..371],
         telemetry::tengu::mcp::NAMES,
         "MCP analytics-event tail block",
     );
-    // Plugin event block (14 events, 2.1.251 byte-alignment B8) appended
-    // after the MCP block — tengu_plugin_enabled_for_session and 13
-    // siblings. Positions 351..365.
+    // Plugin event block (24 events, 2.1.251 byte-alignment B8 plus CLI
+    // entry-point and prune/state-file observability) appended after the MCP
+    // block. Positions 371..395.
     assert_eq!(
-        &ALL_EVENT_NAMES[351..365],
+        &ALL_EVENT_NAMES[371..395],
         telemetry::tengu::plugin::NAMES,
         "plugin event tail block",
     );
@@ -374,9 +394,15 @@ fn category_ordering_preserved() {
 #[test]
 fn mcp_events_registered() {
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_server_config_invalid"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_server_connection_succeeded"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_server_connection_failed"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tools_listed"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_degraded"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_discovery_source"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_list_changed"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_resource_templates_fetched"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tool_auto_backgrounded"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_start"));
 }
 
 #[test]
@@ -387,7 +413,7 @@ fn plugin_events_registered() {
             "{n} must be registered in ALL_EVENT_NAMES"
         );
     }
-    assert_eq!(telemetry::tengu::plugin::NAMES.len(), 14);
+    assert_eq!(telemetry::tengu::plugin::NAMES.len(), 24);
 }
 
 #[test]

@@ -8,11 +8,11 @@
 //! This is NOT secure on shared systems.
 
 use async_trait::async_trait;
+use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use protocol::SecureStorageData;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Plain-text file-based secure storage rooted at a base directory.
 pub struct PlainTextSecureStorage {

@@ -60,7 +60,11 @@ const CHECKLIST: &[Entry] = &[
     // (`SessionRegistration::update_status` = binary `mvn`: busy/idle/waiting
     // + `waitingFor: "permission prompt"`, statusUpdatedAt on change).
     Entry { version: "2.1.198", item: "Notification hook agent_needs_input/agent_completed for claude agents sessions", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "/dataviz bundled skill", disposition: Divergence("bundled skill content, not core behavior") },
+    // M13 landed: `/dataviz` is registered as an unconditional, user-invocable
+    // bundled prompt with the oracle's menu label and optional user-request
+    // suffix; the provider-neutral body and reference assets are embedded in
+    // command-core.
+    Entry { version: "2.1.198", item: "/dataviz bundled skill", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Gateway: anthropicAws upstream provider", disposition: Divergence("no enterprise gateway runtime in lingxi; client-side model fallback (tengu_model_fallback_triggered) already ported") },
     Entry { version: "2.1.198", item: "Gateway: model-not-found advances failover chain", disposition: Divergence("no enterprise gateway runtime in lingxi; client-side model fallback (tengu_model_fallback_triggered) already ported") },
     // M8 landed: the binary implements this PROMPT-DRIVEN — `_ff()`
@@ -73,9 +77,9 @@ const CHECKLIST: &[Entry] = &[
     // `.lingxi/worktrees/`) as `orchestrator::prompt::bg_session`, gated on
     // `LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`, spliced after
     // output_style before `# Context management` (binary `cx()` order);
-    // byte-locked incl. the isolation-none no-shipping branch. Depth: the
-    // `--bg` dispatcher that SETS those envs is still open (the isolation
-    // config fallback of `HAo()` lands with it).
+    // byte-locked incl. the isolation-none no-shipping branch. The live
+    // `--bg` dispatcher now sets those envs and retains the prompt through the
+    // detached daemon launch; no separate programmatic git flow is implied.
     Entry { version: "2.1.198", item: "Background agents auto commit/push/draft PR on worktree completion", disposition: Disposition::Implemented },
     // M10 landed: 1:1 port of `GAe`/`obm`/`dPn` (binary: `qme` Explore def is
     // `model:"inherit"`; `GAe` returns `obm(sessionModel) ? "opus" : "inherit"`
@@ -121,21 +125,14 @@ const CHECKLIST: &[Entry] = &[
     // orchestrator streaming_transient_retry_test (thinking-only reset retries
     // & succeeds; a started tool forbids the retry; non-transient never retries).
     Entry { version: "2.1.198", item: "Mid-response transient network errors retry with backoff (ECONNRESET etc.)", disposition: Disposition::Implemented },
-    // M11 → Divergence (no lingxi surface). The binary dedupe is `createSandbox
-    // AskCallback`: a `Map<host, Promise<bool>>` that COALESCES concurrent
-    // same-host network requests into ONE interactive prompt (`sendRequest`
-    // subtype `can_use_tool`, `input:{host}`, `description:"Allow network
-    // connection to ${host}?"` via `requestUserDialog`), then persists the grant
-    // with `addSessionAllowedHost` so later requests match the allow-list and
-    // never re-ask. lingxi NEVER wires this interactive network-ask: the
-    // sandbox-runtime `AskFn` seam exists (matcher::filter_network_request_with_ask)
-    // but every production `SandboxManager::initialize` passes `ask_callback:
-    // None` (sandbox-runtime/bin/srt.rs, sandbox-runtime-runner/src/lib.rs), no
-    // code constructs an AskFn, and the live proxy runner is not even mounted
-    // (tool-api sandbox_runner defaults to LegacyWrapRunner = sync seatbelt/
-    // seccomp wrap, no network proxy). With no interactive host prompt, there are
-    // no repeated same-host asks to dedupe.
-    Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Divergence("no lingxi surface: the interactive sandbox network-ask callback (createSandboxAskCallback) is never wired — ask_callback is None at every production SandboxManager::initialize and the live proxy runner is unmounted (LegacyWrapRunner) — so there is no repeated host prompt to dedupe") },
+    // M11 landed: the oracle's `leafCerts`/`secureContexts` caches are
+    // get→build→set maps keyed by host. LingXi mirrors those maps with
+    // short-held Mutex-protected get/build/insert caches in the MITM CA; a
+    // first-miss thread race can mint an improvement-only duplicate, but the
+    // oracle's own map has the same get/build/set race and no stronger
+    // coalescing contract. Desktop network asks are also routed through the
+    // live session PermissionGate.
+    Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Disposition::Implemented },
     // M8 landed: REAL lingxi bug found + fixed — `register_self_contained_
     // handlers` registered `LocalBashHandler` with its default
     // `NoopStatusSink`, so a finished background bash task's registry status
@@ -170,13 +167,11 @@ const CHECKLIST: &[Entry] = &[
     // silently DISCARDED. Locked by agent::runner_test::persist_mode_message_
     // wakes_stuck_round_trip_and_carries_the_text.
     Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Disposition::Implemented },
-    // M13 N/A-with-evidence: the cc fix refreshes the interactive /diff
-    // PANEL when git state changes underneath it. lingxi has no diff panel —
-    // `/diff` is a headless InteractiveOnlyHandler stub (commands/core/src/
-    // register.rs `register_interactive_only_commands`) and no diff surface
-    // exists in tui-rata/tui (the only "diff" hit is a doc-comment word in
-    // tui-rata/src/render.rs). The refresh fix ports together with the panel.
-    Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Divergence("no /diff panel in lingxi: /diff is a headless interactive-only stub; the refresh fix targets UI that does not exist yet") },
+    // M13 landed: `/diff` opens a scrollable list/detail-style overlay backed
+    // by `git --no-optional-locks diff HEAD`. Its cached snapshot refreshes on
+    // the owner tick after external branch, commit, or edit changes, with a
+    // debounce so render/height paths never spawn git processes.
+    Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Disposition::Implemented },
     // M6 landed: tui_core::render::markdown_table vertical-format clamp
     // (long labels hard-broken, over-long words hard-wrapped, all lines ≤
     // frame − SAFETY_MARGIN); locked by overflow tests in markdown_table.rs +
@@ -232,12 +227,12 @@ const CHECKLIST: &[Entry] = &[
     // `symlinked_touched_file_matches_via_realpath_fallback` (matches) +
     // `symlink_resolving_outside_base_still_does_not_match` (does not over-match).
     Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Disposition::Implemented },
-    // M6 partial: tui_core::render::osc8 ports the binary's OSC 8 emitters
+    // M6 landed: tui_core::render::osc8 ports the binary's OSC 8 emitters
     // (`Bpl` hyperlink bytes, `jx()` support gate, URL wrapping incl. scheme)
-    // with byte-locked tests — but tui-rata draws through a ratatui cell
-    // Buffer that cannot carry escape sequences, so emission awaits a raw
-    // scrollback print path. Stays Mission until wired end-to-end.
-    Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Divergence("terminal-native OSC8 hyperlink + Warp selection behavior; lingxi's ratatui backend renders into a cell buffer with no raw-scrollback OSC8 print path (M6 osc8.rs utils exist but are unemitted), so URL click/select is the host terminal's job, not lingxi's") },
+    // with byte-locked tests. Native scrollback and the ratatui
+    // alternate-screen/fullscreen renderer emit gated URL links, including
+    // whole-URL targets for Warp Cmd-click/double-click behavior.
+    Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Disposition::Implemented },
     // M11: session-start (boot) plan mode auto-allows read-only tools. The
     // CLI `--permission-mode plan` (resolve_permission_mode) threads through
     // DesktopConfig into `PermissionPolicy::from_rules(Plan, rules)`
@@ -261,22 +256,15 @@ const CHECKLIST: &[Entry] = &[
     // compaction summary is named from the first REAL prompt; then the
     // `/branch`-specific `.replace(/\s+/g," ").trim().slice(0,100).trimEnd() ||
     // "Branched conversation"` tail (100-cap + fork fallback, vs the title
-    // path's 200-cap + "(session)"). Locked by session fork_name_test. NOTE:
-    // the interactive `/branch` fork+resume flow itself is still an
-    // interactive-only stub in lingxi; `derive_fork_name` is the faithful
-    // building block it will call.
+    // path's 200-cap + "(session)"). Locked by session fork_name_test. The
+    // interactive `/branch` fork+resume flow now mounts the new transcript
+    // through the CLI/TUI switch path and uses this derived title.
     Entry { version: "2.1.198", item: "/branch default fork name from first real prompt, not compaction summary", disposition: Disposition::Implemented },
-    // M10 verified-absent: cc's focus mode is a session display state
-    // (`focusMode`, voice-flow coupled) that folds mid-turn output — the
-    // binary carries `# Focus mode` system-prompt sections (Sff/bff) and a
-    // `focusMode` option consumed by the voice/notification pipeline. LingXi
-    // has NO focus-mode surface: zero `focusMode`/focus-mode state anywhere;
-    // the flag-gated `focus_mode` prompt section is explicitly un-ported
-    // (orchestrator/src/prompt/body_sections.rs docs), and the TUI's "focus
-    // mode" (tui/src/root.rs) is an unrelated tool-block navigation feature.
-    // With no surface, neither the activity-summary nor the notification-fold
-    // fix has anything to attach to.
-    Entry { version: "2.1.198", item: "Focus mode: subagents in activity summary; completed notifications fold to one count", disposition: Divergence("no focus-mode surface in lingxi (focus_mode prompt section un-ported by design; TUI 'focus mode' is unrelated tool-block navigation)") },
+    // M10 partial: the `/focus` command is now advertised, but its handler
+    // only toggles the fullscreen renderer. LingXi still has no focus-specific
+    // transcript/activity filtering, focus-mode prompt section, or folded
+    // completion notification surface from the oracle.
+    Entry { version: "2.1.198", item: "Focus mode: subagents in activity summary; completed notifications fold to one count", disposition: Divergence("LingXi advertises /focus but only toggles fullscreen; focus-specific transcript/activity filtering and folded completion notifications remain unimplemented") },
     Entry { version: "2.1.198", item: "Syntax highlighting upgraded to highlight.js 11", disposition: Divergence("lingxi renders via syntect; visual-equivalence accepted, highlight.js is a JS-runtime dependency") },
     // M6 landed: tui_core::key_hint ports the binary's `Pct()` probe (local
     // macOS, or LC_TERMINAL=iTerm2 / TERM_PROGRAM=Apple_Terminal|iTerm.app
@@ -303,7 +291,7 @@ const CHECKLIST: &[Entry] = &[
     // the full TUI runtime. Seam = a `/login` key route in
     // `AgentsScreenState::on_key` once an auth dialog is mountable from the
     // thin view loop.
-    Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Divergence("no in-app agents side panel in lingxi: M7 shipped a minimal `agents --json`/registry CLI view, not a mountable TUI panel, so there is no agents-view surface from which to open an auth dialog") },
+    Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Divergence("LingXi's agents/tasks views do not expose the oracle's in-view sign-in dialog; login remains a separate command/auth flow") },
     // M10 verify+lock (no code change needed): LingXi structurally separates
     // the two channels — permission approval reaches a pending prompt only
     // through the permission gate below the `ToolInvoker` seam (keyed
@@ -362,7 +350,7 @@ const CHECKLIST: &[Entry] = &[
     // (PolicySettings is permission-rule provenance only,
     // permission/src/rule.rs; engine-desktop settings_watch fires ConfigChange
     // hooks, parses no model). No org-policy seam exists to source the label.
-    Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Divergence("binary sources Org default from the claude.ai OAuth bootstrap orgModelDefaultCache (b6r @208724792) + managed model setting; lingxi has no claude.ai bootstrap/client-data cache and no policy-settings model source (grep: 0 hits outside a doc comment)") },
+    Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Divergence("LingXi now reads managed availableModels/modelOverrides policy, but has no claude.ai orgModelDefaultCache bootstrap or Org default/Role default entries in /model") },
     // M13 N/A-with-evidence: in the 2.1.198 binary the ONLY
     // default-name-at-creation generator is `ast()` = `${adjective}-${noun}`
     // (crypto-random picks from the `_pi`/`ypi` word lists, @207957524), and
@@ -373,13 +361,14 @@ const CHECKLIST: &[Entry] = &[
     // "remote-control" — and (b) plan-file slugs (`fCe` @219392307). Local
     // sessions still title via customTitle / AI rename
     // (`rename_generate_name`) / first-prompt extraction. So this changelog
-    // entry is the Remote Control bridge default title, and lingxi has no
-    // Remote Control bridge (LingXi has no Remote Control runtime).
+    // entry is the Remote Control bridge default title, and LingXi's local
+    // session names remain outside that unavailable bridge surface.
     Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Divergence("binary-verified: the readable default name (adjective-noun ast()) is minted only for Remote Control bridge sessions + plan slugs; lingxi has no Remote Control bridge") },
-    // M6 partial: tui_core::render::osc8::file_link ports the binary's `t2()`
-    // (file:// OSC 8 target, plain-path display) with byte-locked tests;
-    // wiring blocked on the same raw print path as the URL entry above.
-    Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Divergence("no reveal-in-Finder / GUI file-open seam in lingxi (grep: zero reveal_in_finder call sites); depends on the same unemitted OSC8 hyperlink path as the Warp-URL entry plus a native desktop file handler") },
+    // M6 landed: tui_core::render::osc8::file_link ports the binary's `t2()`
+    // (file:// OSC 8 target, plain-path display) with byte-locked tests and
+    // both native-scrollback and alternate-screen attachment wiring.
+    // Finder/Explorer reveal remains the host terminal's responsibility.
+    Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Disposition::Implemented },
     // M11: `mcp list`/`mcp get` surface unapproved (repo-self-approved) project
     // `.mcp.json` servers as the byte-exact binary status `SSc` = "\u23F8 Pending
     // approval (run `claude` to approve)" and NEVER spawn/health-check them —
@@ -393,15 +382,13 @@ const CHECKLIST: &[Entry] = &[
     // pending_approval_tests (byte-exact string, pending vs approved, user/local
     // neighbor never mislabelled, trust-reset reverts approved→pending).
     Entry { version: "2.1.196", item: "mcp list/get do not spawn repo-self-approved servers; Pending approval shown", disposition: Disposition::Implemented },
-    // M8 N/A-with-evidence: the cc fix is in the daemon's job-WAKE transcript
-    // probe — `s9e` (@206707678) renames an unreadable transcript to
-    // `<sid>.orphaned-<ts>-<uuid8>.jsonl` instead of deleting. lingxi has NO
-    // wake-that-probes-transcript path (jobs are read-only, M7) and the
-    // session crate + resume loader contain zero transcript
-    // unlink/remove_file calls — the deletion bug cannot exist here. The
-    // set-aside rename ports together with the `--bg` wake path when the job
-    // writer lands.
-    Entry { version: "2.1.196", item: "Waking a background job never deletes its transcript (set aside instead)", disposition: Divergence("no bg-job wake/transcript-probe path exists in lingxi (jobs read-only) and no code path deletes transcripts; binary set-aside rename (s9e @206707678) ports with the future --bg wake") },
+    // M8 equivalent: the cc fix quarantines an unreadable wake transcript
+    // instead of deleting it. LingXi's attach/respawn paths preserve the
+    // durable launch transcript across Fresh→Resume, and the session crate +
+    // resume loader contain no transcript unlink/remove_file path. The exact
+    // oracle quarantine filename is not observable in this architecture, but
+    // the safety contract (never delete the transcript) is closed.
+    Entry { version: "2.1.196", item: "Waking a background job never deletes its transcript (set aside instead)", disposition: Disposition::Implemented },
     // M12 landed (flicker) + divergence (telemetry): the FLICKER fix ports the
     // binary `Bha`/`Nha` monotonic guard (@210953352) into
     // `ApiService::record_rate_limit_from_headers_at` / `_from_429_at` — a
@@ -447,11 +434,11 @@ const CHECKLIST: &[Entry] = &[
     // (egrep_fgrep/git_diff_and_grep/quoted_pipe).
     Entry { version: "2.1.196", item: "PowerShell git diff/grep, egrep/fgrep, quoted | patterns: exit 1 is not failure", disposition: Disposition::Implemented },
     // M7 seam: this is the IN-APP side panel (task panel inside the running
-    // TUI), not the standalone `claude agents` view M7 landed. lingxi's
-    // in-app background-task footer/dialog reads `tui::multiagent::
-    // PollerFeed`; focus/subagent-type/running-status fixes apply there once
-    // the ratatui app grows the panel.
-    Entry { version: "2.1.196", item: "Agents side panel: focus, subagent types, running status fixes", disposition: Divergence("no in-app agents side panel in lingxi (grep: zero side_panel surface in tui-rata/tui-core); M7 shipped the registry + `agents --json` CLI view instead — the running-status/subagent-type data exists there, but the panel UI these fixes target does not") },
+    // TUI), not the standalone `claude agents` view. LingXi now has a generic
+    // `/tasks` picker and a type-aware one-line running-agent summary, but it
+    // does not yet expose the oracle's focus/subagent-type/running-status
+    // behavior in a live side panel with the same refresh contract.
+    Entry { version: "2.1.196", item: "Agents side panel: focus, subagent types, running status fixes", disposition: Divergence("LingXi now exposes `/tasks` and type-aware running-agent summaries, but the oracle's live in-app side-panel focus/subagent-type/status surface is still incomplete") },
     // M7 landed: `agents::run` gates the interactive view on the bypass
     // request (`Cli::bypass_requested` = binary `nis`), runs the root
     // refusal (`permission::enforce_bypass_safety`, byte-locked message =
@@ -464,39 +451,24 @@ const CHECKLIST: &[Entry] = &[
     // attach_forwards_bypass_to_dispatched_session`).
     Entry { version: "2.1.196", item: "claude agents --dangerously-skip-permissions shows disclaimer, applies bypass", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Remote sessions auto-resume after server restart", disposition: Divergence("Anthropic cloud/remote infra; LingXi has no remote-session backend") },
-    // M13 N/A-with-evidence: lingxi has no `/cd` command (not in the locked
-    // 94-name builtin surface; the binary's `name:"cd"` object @217314772
-    // postdates the lock) and no session-move bookkeeping — a session's JSONL
-    // lives under `projects/<project_dir_name(cwd)>/` fixed at creation
-    // (session/src/jsonl/path.rs), so a session can never "move" out of a
-    // directory's resume list and the stale-old-path escaping bug has no
-    // surface. Ports together with `/cd` itself.
-    Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Divergence("no /cd command or session-move bookkeeping in lingxi; sessions are keyed to their creation cwd and cannot reappear in an old dir's resume list") },
-    // M13 N/A-with-evidence: the cc fix is inside the binary's DEEP validate
-    // walker (`ESf`/`xZt`/`Eqo`/`nlr` @218090074-218111595: marketplace
-    // plugins[] source/path checks incl. local "." entries, per-component
-    // skill/agent/command frontmatter + hooks.json error classes). lingxi's
-    // `plugin validate` (apps/cli/src/commands/plugin.rs `run_validate`) is a
-    // shallow single-manifest validator (JSON parse + identity fields) with
-    // no marketplace-entry walk to skip anything from and no component
-    // validators whose error classes could be dropped. The fix ports together
-    // with the deep walker.
-    Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Divergence("lingxi plugin validate is a shallow single-manifest validator; the cc fix targets the deep marketplace/component walker that is not ported") },
-    // M6 partial: tui-rata Esc semantics now match cc 2.1.196/198 (Esc never
-    // quits; interrupts a running turn with the "esc to interrupt" hint;
-    // Esc-Esc clears composer text with "Esc again to clear"; double-tap Esc
-    // at an idle empty prompt reaches the rewind entry point). LingXi has no
-    // file-checkpoint/rewind subsystem, so the entry point surfaces the
-    // binary's "Nothing to rewind to yet." line instead of the messageSelector
-    // menu ("Restore code and conversation" / "Restore conversation" /
-    // Superseded by main's tui-rata codex-structure refactor (merged 2026-07-03):
-    // its app.rs uses a layered Esc policy (view-owned Esc → dismiss completion →
-    // interrupt the running turn → quit when idle), NOT the parity branch's
-    // Esc-Esc-at-idle → rewind-entry scaffold (which only showed "Nothing to
-    // rewind to yet." with no checkpoint subsystem behind it). The rewind-entry
-    // port was dropped in favor of main's Esc design during the merge; the
-    // rewind menu itself remains un-ported (no checkpoint subsystem).
-    Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Divergence("main tui-rata uses a layered Esc interrupt/quit policy (view→completion→interrupt→quit); the Esc-Esc rewind-entry scaffold was superseded by that refactor and no checkpoint/rewind subsystem exists") },
+    // M13 landed: `/cd` validates and confirms the target in the TUI, swaps
+    // the shared SessionCwd, atomically retargets the transcript writer, and
+    // emits a JSONL `relocated` marker. Resume discovery consumes the marker
+    // and the moved transcript as one session, so sanitized-directory
+    // collisions no longer resurrect the old location.
+    Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Disposition::Implemented },
+    // M13 landed: `plugin validate` walks local `.` plugins and marketplace
+    // manifests, validates declared/discovered skills, agents, commands,
+    // output styles, hooks, and MCP payloads, and aggregates every error
+    // class instead of stopping at the first shallow manifest failure.
+    Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Disposition::Implemented },
+    // M6 partial: tui-rata now has the real `/rewind` checkpoint subsystem —
+    // persisted file-history snapshots, transcript truncation, and an
+    // interactive restore-scope picker — but the live idle Esc path still
+    // follows the layered view/completion/interrupt/quit policy. It does not
+    // route a double-Esc gesture into that picker, so the exact changelog
+    // regression remains open even though `/rewind` itself is implemented.
+    Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Divergence("LingXi now has persisted /rewind checkpoints and a restore-scope picker, but idle Esc still follows the layered quit policy and does not open that picker on double-Esc") },
     Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Disposition::Implemented },
     // M13 landed as a regression LOCK: lingxi's `/context`
     // (commands/core/src/context.rs) renders
@@ -509,14 +481,15 @@ const CHECKLIST: &[Entry] = &[
     // context_window_usage_is_model_id_agnostic_bedrock_regression (Bedrock
     // inference-profile id + non-zero session usage → real token counts).
     Entry { version: "2.1.196", item: "/context shows real token counts on Bedrock", disposition: Disposition::Implemented },
-    Entry { version: "2.1.196", item: "/deep-research verifier failures reported as unverified, not all-refuted", disposition: Divergence("bundled skill content, not core behavior") },
-    // M13 N/A-with-evidence: lingxi's marketplace layer supports only
-    // git-URL catalogs with path-based entries (plugin/src/marketplace.rs —
-    // "HTTP-URL catalogs, installed_plugins.json persistence, and non-path
-    // plugin sources (git/url sub-sources) are follow-up work");
-    // `MarketplacePluginEntry` has no pin/commit field and there is no
-    // local-folder marketplace add path whose pins could be dishonored.
-    Entry { version: "2.1.196", item: "Plugin dependency pins honored for local-folder git-backed marketplaces", disposition: Divergence("no local-folder marketplace add path and no dependency-pin field in lingxi's marketplace layer; ports together with that machinery") },
+    // M13 landed: the manual-only `/deep-research` launcher and immutable
+    // built-in workflow enforce independent verification votes and omit claims
+    // without enough support, so verifier failures cannot become an all-refuted
+    // answer.
+    Entry { version: "2.1.196", item: "/deep-research verifier failures reported as unverified, not all-refuted", disposition: Disposition::Implemented },
+    // M13 landed: marketplace entries now carry dependency requirements and
+    // the installer resolves them across local-folder catalogs, enforcing
+    // every accumulated semver range and any allowed cross-marketplace pin.
+    Entry { version: "2.1.196", item: "Plugin dependency pins honored for local-folder git-backed marketplaces", disposition: Disposition::Implemented },
     // M7 landed: `cli::agents_registry::merged_state` ports the binary's
     // `mGf` (@223855350) — a terminal outcome beats a stale `blocked` tempo,
     // so a row can never flip Done ↔ Needs-input (locked by
@@ -527,21 +500,21 @@ const CHECKLIST: &[Entry] = &[
     // port (`extract_pr_number`, locked by `lines_show_pr_reference_on_row`).
     Entry { version: "2.1.196", item: "Agents view status: no Done/Needs-input flip; Needs attention; PR link", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Voice dictation: no swallowed spaces / spurious recording on fast typing", disposition: Divergence("platform voice input; LingXi voice stack differs (sherpa)") },
-    // M8 partial/deferred: survival requires the daemon-backed bg worker
-    // runtime (`--bg` dispatch + `jobs/<short>/state.json` writer) lingxi
-    // does not have — bg shells/tasks are in-process today and die with the
-    // process. What IS in place: the M7 registry's orphan hygiene
-    // (`read_live_sessions` reaps dead-pid records on every read, and the
-    // M8 status writer keeps records fresh). Seam: a job-store writer +
-    // detached worker process; Windows handoff = platform divergence.
-    Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Divergence("no daemon job-writer/worker runtime in lingxi: only daemon-backed job labels/filters are ported (agents_registry/agents_notify observe backend==\"daemon\"); nothing writes jobs to a store or respawns them across a process restart, so there is no survive-restart runtime to fix") },
-    // M8 deferred with the entry above: auto-resume = the FleetView respawn
+    // M8 partial/deferred: LingXi now has the durable `--bg` dispatch,
+    // `jobs/<short>/state.json`, and a detached daemon/`__bg-run` worker that
+    // a restarted supervisor can adopt. The supervisor deliberately fails a
+    // vanished worker closed rather than replaying its prompt, so full oracle
+    // survival across worker loss/update and the Windows handoff contract are
+    // still not proven.
+    Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Divergence("LingXi now persists --bg jobs and adopts detached daemon workers across supervisor restarts, but vanished-worker continuation, binary-update handoff, and Windows end-to-end survival remain unproven") },
+    // M8 remains a partial divergence: auto-resume = the FleetView respawn
     // (`needsRespawn`/`ees`: outcome failure|stopped && terminal && !exec,
-    // then `kon`→`vRt` relaunch) over daemon-backed jobs; without the job
-    // writer/worker runtime there is nothing to respawn. lingxi's agents
-    // view already re-attaches via `lingxi-cli --resume <sid>` on Enter.
-    Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Divergence("no daemon worker runtime and no in-app agents view to trigger from: same missing daemon subsystem as the survive-restart entry, plus M7's agents view is CLI-only (--json), so there is no view-open event to auto-resume on") },
-    Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Divergence("bundled workflow content, not core behavior") },
+    // then `kon`→`vRt` relaunch) over daemon-backed jobs. LingXi now has a
+    // durable daemon worker store and manual attach/respawn, but opening the
+    // agents view does not yet discover and relaunch a worker killed by a
+    // daemon restart.
+    Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Divergence("LingXi now has durable daemon workers and manual attach/respawn, but agents-view open still does not auto-resume a worker killed by daemon restart") },
+    Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
     // M12 landed: `llm_client::model::stream_watchdog` ports the binary's
     // default-ON idle watchdog (`jo = CLAUDE_ENABLE_STREAM_WATCHDOG ?? !0`,
@@ -560,15 +533,11 @@ const CHECKLIST: &[Entry] = &[
     // peer). With no bridge to start, the non-Anthropic-base-URL disable gate
     // has nothing to disable.
     Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Divergence("no Remote Control runtime in lingxi; the base-URL gate has no surface") },
-    // M7 seam: lingxi's foreground TUI composer has no ←-on-empty entry
-    // point yet (the binary's `[PERF:bg-leftarrow-start]` path respawns
-    // `claude agents`). What DID land is the attach side: leaving an
-    // attached session returns to the agents view instead of the shell
-    // (`agents::run_agents_view` remounts with fresh rows after the resumed
-    // child exits — the 2.1.198 half of the fix). Remaining seam: a Left-key
-    // route in the tui-rata composer that suspends the session and execs
-    // `lingxi-cli agents`.
-    Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Divergence("no in-app agents view/composer navigation in lingxi: the agents view is the CLI `agents --json`/registry surface, not a TUI screen reachable by a left-arrow from the foreground composer") },
+    // M7 landed: the foreground TUI's empty-composer Left key opens the
+    // agents/tasks view through the same path as `defaultToAgentsView`, with
+    // the editing guard and attached-session confirmation covered by
+    // bottom-pane and chat-widget tests.
+    Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Disposition::Implemented },
 ];
 
 /// Valid mission ids from the alignment plan.
@@ -618,6 +587,76 @@ fn no_mission_dispositions_remain_after_m14_closure() {
         parked.is_empty(),
         "M14 closure requires every entry resolved to Implemented/Divergence; still parked under Mission(...): {parked:?}"
     );
+}
+
+#[test]
+fn current_surface_audit_keeps_corrected_dispositions() {
+    let entry = |item: &str| {
+        CHECKLIST
+            .iter()
+            .find(|entry| entry.item == item)
+            .unwrap_or_else(|| panic!("missing checklist item: {item}"))
+    };
+
+    // These were stale Divergence rows: each corresponding subsystem now has
+    // a live implementation and its own lower-level regression coverage.
+    for item in [
+        "Sandbox classifier: dedupe repeated same-host requests",
+        "/deep-research verifier failures reported as unverified, not all-refuted",
+        "Plugin dependency pins honored for local-folder git-backed marketplaces",
+        "/code-review workflow: five cleanup finders merged into one (-25% tokens)",
+        "Agents view opens with single ← from foreground sessions",
+        "Waking a background job never deletes its transcript (set aside instead)",
+        "/diff panel refreshes on external branch switch/commit",
+        "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL",
+        "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)",
+        "/cd moved sessions don't reappear in old dir's resume list (special chars)",
+        "plugin validate: local '.' plugins included; all error classes reported",
+    ] {
+        assert_eq!(
+            entry(item).disposition,
+            Disposition::Implemented,
+            "{item} must stay implemented after the cross-version audit"
+        );
+    }
+
+    // These remain real gaps, but their reasons must describe the current
+    // partial surfaces rather than the pre-implementation stubs.
+    let current_gap_reasons = [
+        (
+            "Agents side panel: focus, subagent types, running status fixes",
+            "`/tasks`",
+        ),
+        (
+            "Esc Esc at idle prompt opens rewind menu (regression fix)",
+            "persisted /rewind checkpoints",
+        ),
+        (
+            "Background sessions survive process stop/restart/update (incl. Windows handoff)",
+            "daemon workers",
+        ),
+        (
+            "Workers killed by daemon restart auto-resume when agents view opens",
+            "daemon workers",
+        ),
+        (
+            "Org default models (Org default/Role default in /model)",
+            "managed availableModels/modelOverrides",
+        ),
+        (
+            "Focus mode: subagents in activity summary; completed notifications fold to one count",
+            "advertises /focus",
+        ),
+    ];
+    for (item, marker) in current_gap_reasons {
+        let Disposition::Divergence(reason) = entry(item).disposition else {
+            panic!("{item} must remain a documented divergence");
+        };
+        assert!(
+            reason.contains(marker),
+            "{item} divergence reason no longer records current surface marker {marker:?}: {reason}"
+        );
+    }
 }
 
 #[test]

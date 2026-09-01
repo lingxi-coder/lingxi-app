@@ -15,10 +15,10 @@
 //! (`service = ""`). When the backend is the plaintext fallback, the same
 //! call still works — the storage layer just hits the disk.
 
+use platform_api::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
 use protocol::SecureStorageData;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use platform_api::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
 
 /// Result delivered by the background prefetch task.
 type PrefetchResult = Result<Option<SecureStorageData>, SecureStorageError>;
@@ -77,10 +77,10 @@ impl KeychainPrefetch {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::{BackgroundTaskHandle, SecureStorageBackend};
     use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
     use std::sync::Mutex;
     use std::time::Duration;
-    use platform_api::{BackgroundTaskHandle, SecureStorageBackend};
 
     struct MockStorage {
         invocations: Mutex<Vec<(String, String)>>,

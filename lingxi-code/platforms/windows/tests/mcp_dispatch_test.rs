@@ -4,8 +4,8 @@
 //! specs to the shared connectors rather than returning
 //! `UnsupportedTransport`.
 
-use platform_windows::WindowsMcpTransport;
 use platform_api::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_windows::WindowsMcpTransport;
 
 #[tokio::test]
 async fn connect_sse_does_not_return_unsupported_transport() {

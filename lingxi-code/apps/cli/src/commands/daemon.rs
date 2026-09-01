@@ -43,8 +43,7 @@ use std::sync::Arc;
 const HEARTBEAT_MS: u64 = 2000;
 const STALL_TERMINATION_POLL_MS: u64 = 50;
 const STALL_TERMINATION_POLL_ATTEMPTS: usize = 20;
-const STALL_RESTART_CONFIRMATION_FAILED_REASON: &str =
-    "could not confirm stalled worker exited before resume restart";
+const CLAIM_RECOVERY_EXHAUSTED_REASON: &str = "background recovery budget exhausted";
 
 /// Spawns a detached `__bg-run <short>` worker process. Abstracted (like
 /// [`crate::background_dispatch::DaemonSpawner`]) so the supervise loop's
@@ -123,7 +122,12 @@ impl WorkerSpawner for RealWorkerSpawner {
 /// `isolation` is `"none"` (a `--bg` shell dispatch runs in place — the durable
 /// job carries no worktree binding) and `source` is `"shell"`; both match the
 /// `--bg` dispatch record `background_dispatch.rs` writes.
-fn bg_worker_env(runtime_dir: &Path, short: &str) -> BTreeMap<String, String> {
+fn bg_worker_env(
+    runtime_dir: &Path,
+    short: &str,
+    generation: &str,
+    claim_token: &str,
+) -> BTreeMap<String, String> {
     let job_dir = agents_registry::jobs_dir(runtime_dir).join(short);
     let mut env = BTreeMap::new();
     env.insert("LINGXI_SESSION_KIND".to_string(), "bg".to_string());
@@ -131,6 +135,14 @@ fn bg_worker_env(runtime_dir: &Path, short: &str) -> BTreeMap<String, String> {
     env.insert("LINGXI_BG_SOURCE".to_string(), "shell".to_string());
     env.insert("LINGXI_BG_ISOLATION".to_string(), "none".to_string());
     env.insert("LINGXI_JOB_DIR".to_string(), job_dir.display().to_string());
+    env.insert(
+        crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+        generation.to_string(),
+    );
+    env.insert(
+        crate::commands::respawn::BG_WORKER_CLAIM_TOKEN_ENV.to_string(),
+        claim_token.to_string(),
+    );
     env
 }
 
@@ -211,6 +223,122 @@ fn drain_undelivered_replies(runtime_dir: &Path, short: &str) -> Option<String> 
     ))
 }
 
+/// Fail the exact vanished owner before consuming its offline reply queue.
+///
+/// `queue_resume_if_matches` may already have failed the claimed row when its
+/// launch context is unusable. In either case, establish a terminal row first
+/// so a concurrent replacement cannot take ownership between draining the
+/// queue and surfacing its text. Exact CAS prevents a newer generation from
+/// being failed or having its replies stolen.
+fn fail_vanished_job_and_surface_replies(
+    runtime_dir: &Path,
+    short: &str,
+    observed: &agents_registry::JobState,
+) {
+    let Some(mut current) = agents_registry::read_job(runtime_dir, short) else {
+        return;
+    };
+    if current.phase.as_deref() == Some(crate::commands::respawn::PHASE_DELETING) {
+        return;
+    }
+    if current.state != "failed" {
+        let failed = agents_registry::patch_job_state_if_matches(
+            runtime_dir,
+            short,
+            agents_registry::JobStateMatch {
+                state: &observed.state,
+                phase: observed.phase.as_deref(),
+                worker_pid: observed.worker_pid,
+                worker_proc_start: observed.worker_proc_start.as_deref(),
+                worker_generation: observed.worker_generation.as_deref(),
+                claim_token: observed.claim_token.as_deref(),
+                claim_owner: observed.claim_owner.as_deref(),
+                claim_created_at: observed.claim_created_at,
+                claim_lease_ms: observed.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("failed"),
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(None),
+                worker_generation: Some(None),
+                claim_token: Some(None),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+                ..Default::default()
+            },
+        );
+        match failed {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!("lingxi-cli daemon: could not fail vanished job {short}: {error}");
+                return;
+            }
+        }
+        let Some(updated) = agents_registry::read_job(runtime_dir, short) else {
+            return;
+        };
+        current = updated;
+    }
+    if current.state != "failed"
+        || current.phase.as_deref() == Some(crate::commands::respawn::PHASE_DELETING)
+    {
+        return;
+    }
+    let Some(undelivered) = drain_undelivered_replies(runtime_dir, short) else {
+        return;
+    };
+
+    for _ in 0..3 {
+        let Some(failed) = agents_registry::read_job(runtime_dir, short) else {
+            return;
+        };
+        if failed.state != "failed"
+            || failed.phase.as_deref() == Some(crate::commands::respawn::PHASE_DELETING)
+        {
+            return;
+        }
+        let detail = match failed.detail.as_deref() {
+            Some(existing) if existing.contains(&undelivered) => existing.to_string(),
+            Some(existing) if !existing.is_empty() => format!("{existing}; {undelivered}"),
+            _ => undelivered.clone(),
+        };
+        match agents_registry::patch_job_state_if_matches(
+            runtime_dir,
+            short,
+            agents_registry::JobStateMatch {
+                state: &failed.state,
+                phase: failed.phase.as_deref(),
+                worker_pid: failed.worker_pid,
+                worker_proc_start: failed.worker_proc_start.as_deref(),
+                worker_generation: failed.worker_generation.as_deref(),
+                claim_token: failed.claim_token.as_deref(),
+                claim_owner: failed.claim_owner.as_deref(),
+                claim_created_at: failed.claim_created_at,
+                claim_lease_ms: failed.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                detail: Some(Some(&detail)),
+                ..Default::default()
+            },
+        ) {
+            Ok(true) => return,
+            Ok(false) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    "lingxi-cli daemon: could not surface undelivered replies for {short}: {error}"
+                );
+                return;
+            }
+        }
+    }
+    tracing::warn!(
+        "lingxi-cli daemon: job {short} kept changing while undelivered replies were surfaced"
+    );
+}
+
 /// `tengu_bg_spawn_cwd_gone` — a pending job's recorded working directory no
 /// longer exists, so the supervisor fails it closed instead of spawning a
 /// worker that would crash the moment it `chdir`s into the dead cwd. CC field
@@ -287,6 +415,124 @@ fn stop_all_workers(runtime_dir: &Path) {
     }
 }
 
+fn verified_live_worker_identity<PP: ProcProbe>(
+    record: &WorkerRecord,
+    probe: &PP,
+) -> Option<ObservedProcessIdentity> {
+    let expected = record.proc_start.as_deref()?;
+    if !probe.is_alive(record.pid) {
+        return None;
+    }
+    (probe.start_time(record.pid).as_deref() == Some(expected)).then(|| ObservedProcessIdentity {
+        pid: record.pid,
+        proc_start: Some(expected.to_string()),
+    })
+}
+
+fn job_live_identity(job: &agents_registry::JobState) -> Option<ObservedProcessIdentity> {
+    job.worker_pid.map(|pid| ObservedProcessIdentity {
+        pid,
+        proc_start: job.worker_proc_start.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrongWorkerIdentity {
+    LiveVerified,
+    LiveUnverified,
+    GoneOrRecycled,
+}
+
+fn strong_worker_identity<PP: ProcProbe>(
+    record: &WorkerRecord,
+    probe: &PP,
+) -> StrongWorkerIdentity {
+    strong_observed_identity(&ObservedProcessIdentity::from_worker(record), probe)
+}
+
+fn strong_observed_identity<PP: ProcProbe>(
+    identity: &ObservedProcessIdentity,
+    probe: &PP,
+) -> StrongWorkerIdentity {
+    if identity.pid <= 1 || !probe.is_alive(identity.pid) {
+        return StrongWorkerIdentity::GoneOrRecycled;
+    }
+    match (
+        identity.proc_start.as_deref(),
+        probe.start_time(identity.pid),
+    ) {
+        (Some(expected), Some(actual)) if actual == expected => StrongWorkerIdentity::LiveVerified,
+        (Some(expected), Some(actual)) if actual != expected => {
+            StrongWorkerIdentity::GoneOrRecycled
+        }
+        _ => StrongWorkerIdentity::LiveUnverified,
+    }
+}
+
+fn worker_record_matches_job(record: &WorkerRecord, job: &agents_registry::JobState) -> bool {
+    if job
+        .session_id
+        .as_deref()
+        .is_some_and(|session_id| session_id != record.session_id)
+    {
+        return false;
+    }
+    let record_generation = record
+        .dispatch
+        .env
+        .get(crate::commands::respawn::BG_WORKER_GENERATION_ENV)
+        .map(String::as_str);
+    if job.worker_generation.is_some() || record_generation.is_some() {
+        return job.worker_generation.as_deref() == record_generation;
+    }
+    if job.session_id.as_deref() == Some(record.session_id.as_str()) {
+        return true;
+    }
+    job.worker_pid == Some(record.pid)
+        && job.worker_proc_start.is_some()
+        && job.worker_proc_start == record.proc_start
+}
+
+fn roster_worker_publication_matches_disk(
+    runtime_dir: &Path,
+    short: &str,
+    expected: &WorkerRecord,
+) -> bool {
+    daemon_roster::read_roster(runtime_dir, 0, false)
+        .into_roster()
+        .workers
+        .get(short)
+        == Some(expected)
+}
+
+fn spawned_worker_still_owned(
+    runtime_dir: &Path,
+    short: &str,
+    session_id: Option<&str>,
+    generation: &str,
+    claim_token: &str,
+    child_pid: i32,
+) -> bool {
+    let Some(current) = agents_registry::read_job(runtime_dir, short) else {
+        return false;
+    };
+    if current.session_id.as_deref() != session_id
+        || current.worker_generation.as_deref() != Some(generation)
+    {
+        return false;
+    }
+    let launching = current.state == "working"
+        && current.phase.as_deref() == Some(crate::commands::respawn::PHASE_LAUNCHING)
+        && current.worker_pid.is_none()
+        && current.claim_token.as_deref() == Some(claim_token)
+        && current.claim_owner.as_deref() == Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH);
+    let worker_bound_first = current.state == "working"
+        && current.phase.as_deref() == Some(crate::commands::respawn::PHASE_RUNNING)
+        && current.worker_pid == Some(child_pid)
+        && current.claim_token.is_none();
+    launching || worker_bound_first
+}
+
 /// Stop one user-selected background job using the same worker and PTY
 /// primitives as daemon shutdown.  Keeping this seam here prevents the public
 /// `stop`/`kill` commands from inventing a second process-tree protocol.
@@ -295,6 +541,12 @@ pub(crate) fn stop_background_job(
     short: &str,
     job: &agents_registry::JobState,
 ) -> bool {
+    // Deletion owns quiescence and keeps an exact token until unlink. A
+    // concurrent user stop or daemon shutdown must not clear that absorbing
+    // claim after the deleting caller has already proved the worker gone.
+    if job.phase.as_deref() == Some(crate::commands::respawn::PHASE_DELETING) {
+        return false;
+    }
     // A terminal job is already stopped from the user's perspective.  Keep
     // its recorded outcome and never act on a stale terminal workerPid.
     if agents_registry::job_is_terminal(job) {
@@ -302,72 +554,278 @@ pub(crate) fn stop_background_job(
     }
 
     let probe = SystemProbe;
-    let roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
-    let record = roster.workers.get(short).cloned();
+    daemon_roster::with_roster_lock(runtime_dir, || {
+        let roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+        let record = roster.workers.get(short).cloned();
 
-    let stopped_record = match record {
-        Some(record) => {
-            // A state snapshot naming a different worker generation is stale.
-            // Fail closed instead of stopping the replacement process.
-            if job.worker_pid.is_some_and(|pid| pid != record.pid)
-                || record.proc_start.as_deref().is_none_or(str::is_empty)
-            {
-                return false;
+        let stopped_record = match record {
+            Some(record) => {
+                if !worker_record_matches_job(&record, job)
+                    || job.worker_pid.is_some_and(|pid| pid != record.pid)
+                    || job.worker_proc_start.as_deref() != record.proc_start.as_deref()
+                    || record.proc_start.as_deref().is_none_or(str::is_empty)
+                {
+                    return Ok(false);
+                }
+                let mut terminator = SystemStallTerminator;
+                if !terminate_stalled_worker(
+                    runtime_dir,
+                    short,
+                    &record,
+                    &probe,
+                    &mut terminator,
+                    StallTerminationMode::GracefulThenHard,
+                ) {
+                    return Ok(false);
+                }
+                Some(record)
             }
-            let mut terminator = SystemStallTerminator;
-            if !terminate_stalled_worker(
+            None => {
+                if job.worker_pid.is_some_and(|pid| probe.is_alive(pid)) {
+                    return Ok(false);
+                }
+                cleanup_orphaned_pty(runtime_dir, short, job.worker_pid, &probe);
+                if read_stall_pty_runtime(runtime_dir, short)
+                    .as_ref()
+                    .is_some_and(|runtime| !pty_runtime_is_gone(runtime, &probe))
+                {
+                    return Ok(false);
+                }
+                None
+            }
+        };
+
+        match agents_registry::patch_job_state_if_matches(
+            runtime_dir,
+            short,
+            agents_registry::JobStateMatch {
+                state: &job.state,
+                phase: job.phase.as_deref(),
+                worker_pid: job.worker_pid,
+                worker_proc_start: job.worker_proc_start.as_deref(),
+                worker_generation: job.worker_generation.as_deref(),
+                claim_token: job.claim_token.as_deref(),
+                claim_owner: job.claim_owner.as_deref(),
+                claim_created_at: job.claim_created_at,
+                claim_lease_ms: job.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("stopped"),
+                tempo: None,
+                cwd: None,
+                detail: Some(None),
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(None),
+                worker_generation: Some(None),
+                claim_token: Some(None),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+            },
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => {
+                tracing::warn!(
+                    "lingxi-cli daemon: could not persist stop state for {short}: {error}"
+                );
+                return Ok(false);
+            }
+        }
+
+        if let Some(stopped_record) = stopped_record {
+            let mut latest = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+            let same_generation = latest.workers.get(short).is_some_and(|current| {
+                current.pid == stopped_record.pid && current.proc_start == stopped_record.proc_start
+            });
+            if same_generation {
+                latest.workers.remove(short);
+                if let Err(error) =
+                    daemon_roster::write_roster_with_lock_held(runtime_dir, &latest)
+                {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not retire stopped worker record for {short}: {error}"
+                    );
+                }
+            }
+        }
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeleteClaim {
+    pub token: String,
+    pub job: agents_registry::JobState,
+}
+
+/// Claim and quiesce one job for deletion while holding the roster lock.
+///
+/// The daemon owns launch publication under this same lock, so a delete cannot
+/// slip between spawn and roster publication. The durable `deleting` claim is
+/// intentionally retained after the worker is gone; only the deleting caller
+/// holding the exact token may remove the job directory.
+pub(crate) fn claim_and_quiesce_background_job_for_delete(
+    runtime_dir: &Path,
+    short: &str,
+    expected: &agents_registry::JobState,
+) -> Result<DeleteClaim, String> {
+    let probe = SystemProbe;
+    let mut terminator = SystemStallTerminator;
+    claim_and_quiesce_background_job_for_delete_with(
+        runtime_dir,
+        short,
+        expected,
+        &probe,
+        &mut terminator,
+        now_millis(),
+    )
+}
+
+fn claim_and_quiesce_background_job_for_delete_with<PP: ProcProbe, ST: StallTerminator>(
+    runtime_dir: &Path,
+    short: &str,
+    expected: &agents_registry::JobState,
+    probe: &PP,
+    terminator: &mut ST,
+    claimed_at: i64,
+) -> Result<DeleteClaim, String> {
+    let _roster_lock =
+        daemon_roster::lock_roster(runtime_dir).map_err(|error| error.to_string())?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let claimed = agents_registry::patch_job_state_if_matches(
+        runtime_dir,
+        short,
+        agents_registry::JobStateMatch {
+            state: &expected.state,
+            phase: expected.phase.as_deref(),
+            worker_pid: expected.worker_pid,
+            worker_proc_start: expected.worker_proc_start.as_deref(),
+            worker_generation: expected.worker_generation.as_deref(),
+            claim_token: expected.claim_token.as_deref(),
+            claim_owner: expected.claim_owner.as_deref(),
+            claim_created_at: expected.claim_created_at,
+            claim_lease_ms: expected.claim_lease_ms,
+        },
+        agents_registry::JobStatePatch {
+            state: Some(&expected.state),
+            tempo: None,
+            cwd: None,
+            detail: Some(None),
+            worker_pid: None,
+            worker_proc_start: None,
+            phase: Some(Some(crate::commands::respawn::PHASE_DELETING)),
+            worker_generation: None,
+            claim_token: Some(Some(&token)),
+            claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DELETE)),
+            claim_created_at: Some(Some(claimed_at)),
+            claim_lease_ms: Some(Some(crate::commands::respawn::CLAIM_LEASE_MS)),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !claimed {
+        return Err("session state changed before deletion".to_string());
+    }
+    let claimed_job = agents_registry::read_job(runtime_dir, short)
+        .ok_or_else(|| "background job disappeared before deletion".to_string())?;
+
+    let mut roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+    let mut quiesced_record_identity = None;
+    if let Some(record) = roster.workers.get(short).cloned() {
+        let identity_state = strong_worker_identity(&record, probe);
+        if identity_state == StrongWorkerIdentity::LiveUnverified {
+            return Err("background worker generation could not be verified".to_string());
+        }
+        if identity_state == StrongWorkerIdentity::LiveVerified
+            && !worker_record_matches_job(&record, &claimed_job)
+        {
+            return Err("background worker generation changed before deletion".to_string());
+        }
+        if !terminate_stalled_worker(
+            runtime_dir,
+            short,
+            &record,
+            probe,
+            terminator,
+            StallTerminationMode::GracefulThenHard,
+        ) {
+            return Err("background worker did not stop".to_string());
+        }
+        roster.workers.remove(short);
+        quiesced_record_identity = Some(ObservedProcessIdentity::from_worker(&record));
+    }
+
+    if let Some(worker) = job_live_identity(&claimed_job) {
+        let already_quiesced = quiesced_record_identity.as_ref().is_some_and(|record| {
+            record.pid == worker.pid && record.proc_start == worker.proc_start
+        });
+        if !already_quiesced
+            && strong_observed_identity(&worker, probe) == StrongWorkerIdentity::LiveUnverified
+        {
+            return Err("background worker generation could not be verified".to_string());
+        }
+        if !already_quiesced
+            && !terminate_observed_worker(
                 runtime_dir,
                 short,
-                &record,
-                &probe,
-                &mut terminator,
+                &worker,
+                probe,
+                terminator,
                 StallTerminationMode::GracefulThenHard,
-            ) {
-                return false;
-            }
-            Some(record)
+            )
+        {
+            return Err("background worker did not stop".to_string());
         }
-        None => {
-            // `workerPid` alone has no creation-time identity and may have
-            // been recycled. It is safe to accept only a PID that is already
-            // gone; a live unverified numeric PID is never signalled.
-            if job.worker_pid.is_some_and(|pid| probe.is_alive(pid)) {
-                return false;
-            }
-            cleanup_orphaned_pty(runtime_dir, short, &probe);
-            if read_stall_pty_runtime(runtime_dir, short)
-                .as_ref()
-                .is_some_and(|runtime| !pty_runtime_is_gone(runtime, &probe))
-            {
-                return false;
-            }
-            None
-        }
-    };
-
-    if let Err(error) = agents_registry::update_job_state(runtime_dir, short, "stopped", None) {
-        tracing::warn!("lingxi-cli daemon: could not persist stop state for {short}: {error}");
-        return false;
-    }
-
-    // Remove only the generation we just stopped. A concurrent replacement
-    // must remain owned by the daemon and make this control operation fail on
-    // its next state read rather than being silently orphaned.
-    if let Some(stopped_record) = stopped_record {
-        let mut latest = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
-        let same_generation = latest.workers.get(short).is_some_and(|current| {
-            current.pid == stopped_record.pid && current.proc_start == stopped_record.proc_start
-        });
-        if same_generation {
-            latest.workers.remove(short);
-            if let Err(error) = daemon_roster::write_roster(runtime_dir, &latest) {
-                tracing::warn!(
-                    "lingxi-cli daemon: could not retire stopped worker record for {short}: {error}"
-                );
-            }
+    } else if quiesced_record_identity.is_none() {
+        cleanup_orphaned_pty(runtime_dir, short, None, probe);
+        if read_stall_pty_runtime(runtime_dir, short)
+            .as_ref()
+            .is_some_and(|runtime| !pty_runtime_is_gone(runtime, probe))
+        {
+            return Err("background PTY generation could not be verified".to_string());
         }
     }
-    true
+
+    let cleared = agents_registry::patch_job_state_if_matches(
+        runtime_dir,
+        short,
+        agents_registry::JobStateMatch {
+            state: &claimed_job.state,
+            phase: Some(crate::commands::respawn::PHASE_DELETING),
+            worker_pid: claimed_job.worker_pid,
+            worker_proc_start: claimed_job.worker_proc_start.as_deref(),
+            worker_generation: claimed_job.worker_generation.as_deref(),
+            claim_token: Some(&token),
+            claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_DELETE),
+            claim_created_at: Some(claimed_at),
+            claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
+        },
+        agents_registry::JobStatePatch {
+            state: Some(&claimed_job.state),
+            tempo: None,
+            cwd: None,
+            detail: Some(None),
+            worker_pid: Some(None),
+            worker_proc_start: Some(None),
+            phase: Some(Some(crate::commands::respawn::PHASE_DELETING)),
+            worker_generation: Some(claimed_job.worker_generation.as_deref()),
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !cleared {
+        return Err("session state changed while deletion was stopping it".to_string());
+    }
+    daemon_roster::write_roster_with_lock_held(runtime_dir, &roster)
+        .map_err(|error| error.to_string())?;
+    let job = agents_registry::read_job(runtime_dir, short)
+        .ok_or_else(|| "background job disappeared before deletion".to_string())?;
+    Ok(DeleteClaim { token, job })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,7 +853,13 @@ impl ObservedProcessIdentity {
             return true;
         }
         match self.proc_start.as_deref() {
-            Some(expected) => probe.start_time(self.pid).as_deref() != Some(expected),
+            // An unreadable live start time is UNKNOWN, not proof that the
+            // recorded process exited. Treating `None` as "gone" lets stop/rm
+            // retire the durable owner while an unverified worker keeps
+            // running, after which the daemon may launch a duplicate.
+            Some(expected) => probe
+                .start_time(self.pid)
+                .is_some_and(|actual| actual != expected),
             None => false,
         }
     }
@@ -536,6 +1000,17 @@ fn terminate_stalled_worker<PP: ProcProbe, ST: StallTerminator>(
     mode: StallTerminationMode,
 ) -> bool {
     let worker = ObservedProcessIdentity::from_worker(record);
+    terminate_observed_worker(runtime_dir, short, &worker, probe, terminator, mode)
+}
+
+fn terminate_observed_worker<PP: ProcProbe, ST: StallTerminator>(
+    runtime_dir: &Path,
+    short: &str,
+    worker: &ObservedProcessIdentity,
+    probe: &PP,
+    terminator: &mut ST,
+    mode: StallTerminationMode,
+) -> bool {
     let pty_runtime = read_stall_pty_runtime(runtime_dir, short);
     let pty_runtime_ref = pty_runtime.as_ref();
 
@@ -584,7 +1059,12 @@ fn terminate_stalled_worker<PP: ProcProbe, ST: StallTerminator>(
 /// Kill a PTY tree left behind by a vanished worker. Numeric identities are
 /// used only while the recorded creation time still matches, preventing stale
 /// `pty.json` files from targeting a recycled PID.
-fn cleanup_orphaned_pty<PP: ProcProbe>(runtime_dir: &Path, short: &str, probe: &PP) {
+fn cleanup_orphaned_pty<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    expected_worker_pid: Option<i32>,
+    probe: &PP,
+) {
     let Some(runtime) = read_stall_pty_runtime(runtime_dir, short) else {
         return;
     };
@@ -601,6 +1081,9 @@ fn cleanup_orphaned_pty<PP: ProcProbe>(runtime_dir: &Path, short: &str, probe: &
     let ObservedPtyRuntime::Verified(runtime) = runtime else {
         return;
     };
+    if expected_worker_pid.is_some_and(|pid| pid != runtime.worker_pid) {
+        return;
+    }
     signal_pty_tree(&runtime, probe, false);
     std::thread::sleep(std::time::Duration::from_millis(100));
     if verified_pty_runtime_state(&runtime, probe) == PtyRuntimeState::Gone {
@@ -825,6 +1308,19 @@ fn service_stall_requests_with_terminator<PP: ProcProbe, ST: StallTerminator>(
         let Some(record) = roster.workers.get(&short).cloned() else {
             continue;
         };
+        let Some(job) = agents_registry::read_job(runtime_dir, &short) else {
+            continue;
+        };
+        if !worker_record_matches_job(&record, &job)
+            || strong_worker_identity(&record, proc_probe) != StrongWorkerIdentity::LiveVerified
+            || !stall_pty_identity_is_safe_for_restart(runtime_dir, &short, &record, proc_probe)
+        {
+            // A stall request authorizes restarting this job, not signaling a
+            // same-short stale process or a PID whose generation cannot be
+            // proved. Keep both durable and in-memory ownership intact; a
+            // later verified heartbeat/request may retry safely.
+            continue;
+        }
 
         if attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET {
             // Budget spent. SIGKILL and fail closed with the oracle's reason —
@@ -838,27 +1334,52 @@ fn service_stall_requests_with_terminator<PP: ProcProbe, ST: StallTerminator>(
                 terminator,
                 StallTerminationMode::HardOnly,
             );
-            let _ = agents_registry::update_job_state_with_detail(
-                runtime_dir,
-                &short,
-                "failed",
-                None,
-                crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON,
-            );
             if stopped {
+                let _ = agents_registry::update_job_state_if_matches(
+                    runtime_dir,
+                    &short,
+                    &job.state,
+                    job.worker_pid,
+                    job.worker_proc_start.as_deref(),
+                    "failed",
+                    None,
+                    None,
+                    Some(crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON),
+                );
                 roster.workers.remove(&short);
                 claimed.remove(&short);
             }
             continue;
         }
 
-        // Flip the launch spec to a resume BEFORE killing, so a crash between
-        // the two never leaves a spec that would re-run the prompt.
-        if let Ok(mut spec) = crate::background_launch::read_launch_spec(runtime_dir, &short) {
-            if spec.launch == crate::background_launch::BackgroundLaunchKind::Fresh {
-                spec.launch = crate::background_launch::BackgroundLaunchKind::Resume;
-                let _ = crate::background_launch::write_launch_spec(runtime_dir, &short, &spec);
-            }
+        let claimed_resume = crate::commands::respawn::claim_resume_if_matches(
+            runtime_dir,
+            &short,
+            &job.state,
+            job.phase.as_deref(),
+            job.worker_pid,
+            job.worker_proc_start.as_deref(),
+            job.worker_generation.as_deref(),
+        );
+        let Ok(Some(claim)) = claimed_resume else {
+            continue;
+        };
+        let original_launch_spec =
+            crate::background_launch::read_launch_spec(runtime_dir, &short).ok();
+        // Prepare the durable resume BEFORE killing, so a crash between the
+        // two never leaves a spec that would replay the original prompt.
+        if let Err(_error) = crate::commands::respawn::prepare_resume(runtime_dir, &short) {
+            let _ = crate::commands::respawn::restore_claimed_resume(
+                runtime_dir,
+                &short,
+                &job.state,
+                job.phase.as_deref(),
+                job.worker_pid,
+                job.worker_proc_start.as_deref(),
+                job.worker_generation.as_deref(),
+                &claim,
+            );
+            continue;
         }
         write_respawn_count(runtime_dir, &short, attempt + 1);
         let stopped = terminate_stalled_worker(
@@ -870,22 +1391,71 @@ fn service_stall_requests_with_terminator<PP: ProcProbe, ST: StallTerminator>(
             StallTerminationMode::GracefulThenHard,
         );
         if !stopped {
-            let _ = agents_registry::update_job_state_with_detail(
+            if let Some(spec) = original_launch_spec.as_ref() {
+                if let Err(error) =
+                    crate::background_launch::write_launch_spec(runtime_dir, &short, spec)
+                {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not restore launch context for {short}: {error}"
+                    );
+                }
+            }
+            write_respawn_count(runtime_dir, &short, attempt);
+            let _ = crate::commands::respawn::restore_claimed_resume(
                 runtime_dir,
                 &short,
-                "failed",
-                None,
-                STALL_RESTART_CONFIRMATION_FAILED_REASON,
+                &job.state,
+                job.phase.as_deref(),
+                job.worker_pid,
+                job.worker_proc_start.as_deref(),
+                job.worker_generation.as_deref(),
+                &claim,
             );
             continue;
         }
 
-        crate::bg_attach_stall::emit_stall_respawn("starting", "daemon", attempt);
-        // Drop the record and the claim only AFTER the old writer is confirmed
-        // gone, so the same heartbeat cannot double-spawn concurrent writers.
-        roster.workers.remove(&short);
-        claimed.remove(&short);
-        let _ = agents_registry::update_job_state(runtime_dir, &short, "working", None);
+        match crate::commands::respawn::queue_prepared_resume(runtime_dir, &short, &claim) {
+            Ok(()) => {
+                crate::bg_attach_stall::emit_stall_respawn("starting", "daemon", attempt);
+                // Drop the record and the claim only AFTER the old writer is confirmed
+                // gone, so the same heartbeat cannot double-spawn concurrent writers.
+                roster.workers.remove(&short);
+                claimed.remove(&short);
+            }
+            Err(error) => {
+                roster.workers.remove(&short);
+                claimed.remove(&short);
+                let _ = crate::commands::respawn::fail_claimed_resume(
+                    runtime_dir,
+                    &short,
+                    &claim,
+                    Some(error.as_str()),
+                );
+            }
+        }
+    }
+}
+
+/// A stall request may only act on a PTY identity that is either already gone
+/// or can be tied to the same verified worker record. A legacy/unreadable PTY
+/// record is not permission to signal the worker: doing so could strand an
+/// unverified writer while making its durable job runnable again.
+fn stall_pty_identity_is_safe_for_restart<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    record: &WorkerRecord,
+    proc_probe: &PP,
+) -> bool {
+    let Some(runtime) = read_stall_pty_runtime(runtime_dir, short) else {
+        return true;
+    };
+    match pty_runtime_state(&runtime, proc_probe) {
+        PtyRuntimeState::Gone => true,
+        PtyRuntimeState::Unknown => false,
+        PtyRuntimeState::LiveVerified => matches!(
+            runtime,
+            ObservedPtyRuntime::Verified(ref runtime) if runtime.worker_pid == record.pid
+        ),
     }
 }
 
@@ -961,25 +1531,289 @@ fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
     spawner: &mut WS,
     claimed: &mut HashSet<String>,
 ) {
-    let mut roster = daemon_roster::read_roster(runtime_dir, pid, true).into_roster();
-    let _dropped = daemon_roster::retain_adoptable(&mut roster, proc_probe);
-    // P1-12: service attach-stall respawn requests BEFORE spawning, so a
-    // request handled this heartbeat is re-spawned in the same pass rather
-    // than leaving the user staring at a dead session for another cycle.
-    service_stall_requests(runtime_dir, &mut roster, proc_probe, claimed);
-    // Spawn detached workers for pending jobs (mutates the roster with each new
-    // live worker record so the NEXT `retain_adoptable` keeps it while alive).
-    spawn_pending_workers(
+    let _ = daemon_roster::with_roster_lock(runtime_dir, || {
+        let mut roster = daemon_roster::read_roster(runtime_dir, pid, true).into_roster();
+        let _dropped = daemon_roster::retain_adoptable(&mut roster, proc_probe);
+        recover_stale_job_claims(runtime_dir, &mut roster, proc_probe, claimed, now_millis());
+        service_stall_requests(runtime_dir, &mut roster, proc_probe, claimed);
+        spawn_pending_workers(
+            runtime_dir,
+            &mut roster,
+            version,
+            proc_probe,
+            spawner,
+            claimed,
+        );
+        roster.supervisor_pid = pid;
+        roster.updated_at = now_millis();
+        daemon_roster::write_roster_with_lock_held(runtime_dir, &roster)
+    });
+}
+
+fn claim_is_stale(job: &agents_registry::JobState, now_ms: i64) -> bool {
+    let Some(created_at) = job.claim_created_at else {
+        // Transitional rows written by older builds predate lease metadata.
+        // Treat them as recoverable legacy claims; each phase-specific recovery
+        // path still proves roster/PTY state before making work runnable.
+        return matches!(
+            job.phase.as_deref(),
+            Some(
+                crate::commands::respawn::PHASE_CREATING
+                    | crate::commands::respawn::PHASE_LAUNCHING
+                    | crate::commands::respawn::PHASE_RESTARTING
+            )
+        );
+    };
+    let lease = job
+        .claim_lease_ms
+        .unwrap_or(crate::commands::respawn::CLAIM_LEASE_MS)
+        .max(0);
+    now_ms.saturating_sub(created_at) >= lease
+}
+
+fn clear_claim_to_queued(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+) -> std::io::Result<bool> {
+    agents_registry::patch_job_state_if_matches(
         runtime_dir,
-        &mut roster,
-        version,
-        proc_probe,
-        spawner,
-        claimed,
+        short,
+        agents_registry::JobStateMatch {
+            state: &job.state,
+            phase: job.phase.as_deref(),
+            worker_pid: job.worker_pid,
+            worker_proc_start: job.worker_proc_start.as_deref(),
+            worker_generation: job.worker_generation.as_deref(),
+            claim_token: job.claim_token.as_deref(),
+            claim_owner: job.claim_owner.as_deref(),
+            claim_created_at: job.claim_created_at,
+            claim_lease_ms: job.claim_lease_ms,
+        },
+        agents_registry::JobStatePatch {
+            state: Some("working"),
+            tempo: None,
+            cwd: None,
+            detail: Some(None),
+            worker_pid: Some(None),
+            worker_proc_start: Some(None),
+            phase: Some(Some(crate::commands::respawn::PHASE_QUEUED)),
+            worker_generation: None,
+            claim_token: Some(None),
+            claim_owner: Some(None),
+            claim_created_at: Some(None),
+            claim_lease_ms: Some(None),
+        },
+    )
+}
+
+fn fail_stale_claim(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+    detail: &str,
+) {
+    let _ = agents_registry::patch_job_state_if_matches(
+        runtime_dir,
+        short,
+        agents_registry::JobStateMatch {
+            state: &job.state,
+            phase: job.phase.as_deref(),
+            worker_pid: job.worker_pid,
+            worker_proc_start: job.worker_proc_start.as_deref(),
+            worker_generation: job.worker_generation.as_deref(),
+            claim_token: job.claim_token.as_deref(),
+            claim_owner: job.claim_owner.as_deref(),
+            claim_created_at: job.claim_created_at,
+            claim_lease_ms: job.claim_lease_ms,
+        },
+        agents_registry::JobStatePatch {
+            state: Some("failed"),
+            tempo: None,
+            cwd: None,
+            detail: Some(Some(detail)),
+            worker_pid: Some(None),
+            worker_proc_start: Some(None),
+            phase: Some(None),
+            worker_generation: Some(None),
+            claim_token: Some(None),
+            claim_owner: Some(None),
+            claim_created_at: Some(None),
+            claim_lease_ms: Some(None),
+        },
     );
-    roster.supervisor_pid = pid;
-    roster.updated_at = now_millis();
-    let _ = daemon_roster::write_roster(runtime_dir, &roster);
+}
+
+fn recover_stale_creating_job<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+) {
+    if let Some(record) = roster.workers.get(short) {
+        match strong_worker_identity(record, proc_probe) {
+            StrongWorkerIdentity::LiveVerified | StrongWorkerIdentity::LiveUnverified => {
+                return;
+            }
+            StrongWorkerIdentity::GoneOrRecycled => {}
+        }
+    }
+    if durable_owner_may_still_be_live(runtime_dir, short, job, proc_probe) {
+        return;
+    }
+    roster.workers.remove(short);
+    if crate::background_launch::read_launch_spec(runtime_dir, short).is_ok() {
+        if clear_claim_to_queued(runtime_dir, short, job).unwrap_or(false) {
+            claimed.remove(short);
+        }
+    } else {
+        fail_stale_claim(
+            runtime_dir,
+            short,
+            job,
+            "background launch context is missing or incompatible",
+        );
+        claimed.remove(short);
+    }
+}
+
+fn durable_owner_may_still_be_live<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+    proc_probe: &PP,
+) -> bool {
+    if job_live_identity(job).as_ref().is_some_and(|identity| {
+        strong_observed_identity(identity, proc_probe) != StrongWorkerIdentity::GoneOrRecycled
+    }) {
+        return true;
+    }
+    let Some(runtime) = read_stall_pty_runtime(runtime_dir, short) else {
+        return false;
+    };
+    match pty_runtime_state(&runtime, proc_probe) {
+        PtyRuntimeState::LiveVerified | PtyRuntimeState::Unknown => true,
+        PtyRuntimeState::Gone => {
+            crate::background_launch::remove_pty_runtime(runtime_dir, short);
+            false
+        }
+    }
+}
+
+fn recover_stale_restarting_job<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+) {
+    if let Some(record) = roster.workers.get(short) {
+        match strong_worker_identity(record, proc_probe) {
+            StrongWorkerIdentity::LiveVerified | StrongWorkerIdentity::LiveUnverified => {
+                // A live-but-unverifiable PID is never evidence that a new
+                // generation may start. A verified record from another
+                // generation is also left blocked rather than killed/adopted.
+                return;
+            }
+            StrongWorkerIdentity::GoneOrRecycled => {}
+        }
+    }
+    if durable_owner_may_still_be_live(runtime_dir, short, job, proc_probe) {
+        return;
+    }
+    let attempt = read_respawn_count(runtime_dir, short);
+    if attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET {
+        fail_stale_claim(runtime_dir, short, job, CLAIM_RECOVERY_EXHAUSTED_REASON);
+        claimed.remove(short);
+        return;
+    }
+    match crate::commands::respawn::prepare_resume(runtime_dir, short) {
+        Ok(()) => {
+            if clear_claim_to_queued(runtime_dir, short, job).unwrap_or(false) {
+                write_respawn_count(runtime_dir, short, attempt + 1);
+                claimed.remove(short);
+            }
+        }
+        Err(error) => {
+            fail_stale_claim(runtime_dir, short, job, &error);
+            claimed.remove(short);
+        }
+    }
+}
+
+fn recover_stale_launching_job<PP: ProcProbe>(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+) {
+    if let Some(record) = roster.workers.get(short) {
+        match strong_worker_identity(record, proc_probe) {
+            StrongWorkerIdentity::LiveVerified if worker_record_matches_job(record, job) => {
+                return;
+            }
+            StrongWorkerIdentity::LiveVerified | StrongWorkerIdentity::LiveUnverified => {
+                // The PID exists but does not carry enough exact generation
+                // proof. Keep the claim blocked; removing the roster here lets
+                // this same heartbeat spawn a second writer.
+                return;
+            }
+            StrongWorkerIdentity::GoneOrRecycled => {}
+        }
+    }
+    if durable_owner_may_still_be_live(runtime_dir, short, job, proc_probe) {
+        return;
+    }
+    roster.workers.remove(short);
+    let attempt = read_respawn_count(runtime_dir, short);
+    if attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET {
+        fail_stale_claim(runtime_dir, short, job, CLAIM_RECOVERY_EXHAUSTED_REASON);
+        claimed.remove(short);
+        return;
+    }
+    if clear_claim_to_queued(runtime_dir, short, job).unwrap_or(false) {
+        write_respawn_count(runtime_dir, short, attempt + 1);
+        claimed.remove(short);
+    }
+}
+
+fn recover_stale_job_claims<PP: ProcProbe>(
+    runtime_dir: &Path,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+    now_ms: i64,
+) {
+    let jobs = agents_registry::read_jobs(&agents_registry::jobs_dir(runtime_dir));
+    for (short, job) in jobs {
+        if agents_registry::job_is_terminal(&job) || !claim_is_stale(&job, now_ms) {
+            continue;
+        }
+        match job.phase.as_deref() {
+            Some(crate::commands::respawn::PHASE_CREATING) => {
+                recover_stale_creating_job(runtime_dir, &short, &job, roster, proc_probe, claimed);
+            }
+            Some(crate::commands::respawn::PHASE_RESTARTING) => {
+                recover_stale_restarting_job(
+                    runtime_dir,
+                    &short,
+                    &job,
+                    roster,
+                    proc_probe,
+                    claimed,
+                );
+            }
+            Some(crate::commands::respawn::PHASE_LAUNCHING) => {
+                recover_stale_launching_job(runtime_dir, &short, &job, roster, proc_probe, claimed);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Scan the durable job store and spawn a detached `__bg-run` worker for each
@@ -993,10 +1827,12 @@ fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
 /// worker listed while alive and reaps it once it exits).
 ///
 /// CRASH HANDLING: a `working` job whose recorded `workerPid` is NO LONGER alive
-/// (the worker died before writing its own terminal state) is failed closed.
-/// The live attach socket is only valid while the worker process exists; after
-/// the process is gone LingXi must not pseudo-resume by re-running the original
-/// prompt, because that risks duplicate side effects.
+/// (the worker died before writing its own terminal state) is re-queued only
+/// when its recorded transcript can be safely reopened under the same session
+/// id. Otherwise it fails closed. The live attach socket is only valid while
+/// the worker process exists; after the process is gone LingXi must never
+/// replay the original launch prompt, because that risks duplicate side
+/// effects.
 ///
 /// `runtime_dir` == the config home (`daemon_runtime_dir()`), so the jobs live
 /// at `jobs_dir(runtime_dir)`.
@@ -1009,98 +1845,149 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
     claimed: &mut HashSet<String>,
 ) {
     let jobs = agents_registry::read_jobs(&agents_registry::jobs_dir(runtime_dir));
-    for (short, job) in jobs {
+    for (short, mut job) in jobs {
         if agents_registry::job_is_terminal(&job) {
             continue;
         }
         if job.state != "working" {
             continue;
         }
-        // A worker can be fully registered in the owner-only roster even when
-        // the subsequent `state.json` workerPid update was lost (for example,
-        // ENOSPC followed by a daemon restart).  Adopt that authenticated live
-        // endpoint and repair the job instead of launching the initial prompt a
-        // second time.  Placeholder foreground dispatch records never carry a
-        // PTY endpoint/auth pair, so they are deliberately ineligible here.
-        if job.worker_pid.is_none() {
-            let adoptable_pid = roster.workers.get(&short).and_then(|record| {
-                let has_endpoint = record
-                    .pty_sock
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-                    && record
-                        .pty_auth
-                        .as_deref()
-                        .is_some_and(|value| !value.is_empty());
-                let identity_verified = record.proc_start.as_deref().is_some_and(|stored| {
-                    proc_probe.is_alive(record.pid)
-                        && proc_probe
-                            .start_time(record.pid)
-                            .as_deref()
-                            .is_some_and(|live| live == stored)
-                });
-                (has_endpoint && identity_verified).then_some(record.pid)
-            });
-            if let Some(worker_pid) = adoptable_pid {
-                if let Err(e) = agents_registry::update_job_state(
+        let phase = job
+            .phase
+            .clone()
+            .unwrap_or_else(|| crate::commands::respawn::PHASE_QUEUED.to_string());
+        if matches!(
+            phase.as_str(),
+            crate::commands::respawn::PHASE_CREATING
+                | crate::commands::respawn::PHASE_RESTARTING
+                | crate::commands::respawn::PHASE_DELETING
+        ) {
+            continue;
+        }
+        if let Some(identity) = roster
+            .workers
+            .get(&short)
+            .filter(|record| worker_record_matches_job(record, &job))
+            .and_then(|record| verified_live_worker_identity(record, proc_probe))
+        {
+            if job.worker_pid != Some(identity.pid)
+                || job.worker_proc_start.as_deref() != identity.proc_start.as_deref()
+                || job.phase.as_deref() != Some(crate::commands::respawn::PHASE_RUNNING)
+            {
+                match agents_registry::patch_job_state_if_matches(
                     runtime_dir,
                     &short,
-                    "working",
-                    Some(worker_pid),
+                    agents_registry::JobStateMatch {
+                        state: &job.state,
+                        phase: job.phase.as_deref(),
+                        worker_pid: job.worker_pid,
+                        worker_proc_start: job.worker_proc_start.as_deref(),
+                        worker_generation: job.worker_generation.as_deref(),
+                        claim_token: job.claim_token.as_deref(),
+                        claim_owner: job.claim_owner.as_deref(),
+                        claim_created_at: job.claim_created_at,
+                        claim_lease_ms: job.claim_lease_ms,
+                    },
+                    agents_registry::JobStatePatch {
+                        state: Some("working"),
+                        tempo: None,
+                        cwd: None,
+                        detail: Some(None),
+                        worker_pid: Some(Some(identity.pid)),
+                        worker_proc_start: Some(identity.proc_start.as_deref()),
+                        phase: Some(Some(crate::commands::respawn::PHASE_RUNNING)),
+                        worker_generation: None,
+                        claim_token: Some(None),
+                        claim_owner: Some(None),
+                        claim_created_at: Some(None),
+                        claim_lease_ms: Some(None),
+                    },
                 ) {
-                    tracing::warn!(
-                        "lingxi-cli daemon: could not repair workerPid for adopted job {short}: {e}"
-                    );
+                    Ok(true) => {
+                        job.worker_pid = Some(identity.pid);
+                        job.worker_proc_start = identity.proc_start;
+                        job.phase = Some(crate::commands::respawn::PHASE_RUNNING.to_string());
+                        job.claim_token = None;
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        "lingxi-cli daemon: could not repair live worker identity for {short}: {error}"
+                    ),
                 }
-                claimed.insert(short);
-                continue;
             }
+            claimed.insert(short.clone());
+            continue;
+        }
+        if roster
+            .workers
+            .get(&short)
+            .is_some_and(|record| proc_probe.is_alive(record.pid))
+        {
+            continue;
         }
         // OWNED job: it has a recorded worker pid, or we spawned it this
         // supervisor lifetime (`claimed`). Its next step depends on whether
         // that worker is still alive.
-        if let Some(worker_pid) = job.worker_pid {
+        if let Some(identity) = job_live_identity(&job) {
             // Cross-restart guard: a recorded, still-live worker pid means a
             // worker is already running this job — adopt (claim) it, don't
             // re-spawn.
-            if proc_probe.is_alive(worker_pid) {
-                claimed.insert(short);
+            if identity.matches_live_process(proc_probe) {
+                claimed.insert(short.clone());
+                continue;
+            }
+            if proc_probe.is_alive(identity.pid) && identity.proc_start.is_none() {
                 continue;
             }
             // The recorded worker DIED without writing a terminal state. LingXi
-            // cannot yet live-attach/continue that process, and re-running the
-            // recorded prompt would duplicate side effects. Fail closed.
+            // cannot live-attach that process anymore. If a recorded transcript
+            // still exists, reopen it under the same session id; otherwise fail
+            // closed rather than replaying the original launch prompt.
             emit_worker_vanished(&short);
-            cleanup_orphaned_pty(runtime_dir, &short, proc_probe);
-            // The vanished worker is failed closed and never respawns, so the
-            // offline reply queue's only in-worker drain site never runs for this
-            // job again. Drain + surface any follow-up replies the attach
-            // fallback persisted mid-flight here, so the user's input is recorded
-            // as undelivered instead of stranded on disk forever.
-            let undelivered = drain_undelivered_replies(runtime_dir, &short);
-            let failed = match undelivered.as_deref() {
-                Some(detail) => agents_registry::update_job_state_with_detail(
+            cleanup_orphaned_pty(runtime_dir, &short, Some(identity.pid), proc_probe);
+            let attempt = read_respawn_count(runtime_dir, &short);
+            let budget_spent = attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET;
+            let queued = if !budget_spent {
+                crate::commands::respawn::queue_resume_if_matches(
                     runtime_dir,
                     &short,
-                    "failed",
-                    None,
-                    detail,
-                ),
-                None => agents_registry::update_job_state(runtime_dir, &short, "failed", None),
+                    &job.state,
+                    job.phase.as_deref(),
+                    job.worker_pid,
+                    job.worker_proc_start.as_deref(),
+                    job.worker_generation.as_deref(),
+                )
+            } else {
+                Ok(false)
             };
-            if let Err(e) = failed {
-                tracing::warn!(
-                    "lingxi-cli daemon: could not mark vanished job {short} failed: {e}"
-                );
+            if let Ok(true) = queued {
+                write_respawn_count(runtime_dir, &short, attempt + 1);
+                if let Some(updated) = agents_registry::read_job(runtime_dir, &short) {
+                    job = updated;
+                } else {
+                    job.worker_pid = None;
+                    job.worker_proc_start = None;
+                    job.phase = Some(crate::commands::respawn::PHASE_QUEUED.to_string());
+                }
+            } else if matches!(queued, Ok(false)) && !budget_spent {
+                continue;
+            } else {
+                // The vanished worker is failed closed and never respawns, so
+                // the offline reply queue's only in-worker drain site never
+                // runs for this job again. Claim the exact terminal ownership
+                // before draining, then surface any follow-up replies the
+                // attach fallback persisted mid-flight. This prevents a newer
+                // generation from losing replies to an old vanish decision.
+                fail_vanished_job_and_surface_replies(runtime_dir, &short, &job);
+                // NB: do NOT emit `tengu_bg_respawn_exhausted` here. CC 2.1.208 emits
+                // that event only from scheduleRespawn once the respawn budget
+                // (Jpp=20) is reached; the fail-closed daemon never respawns, so there
+                // is no budget to exhaust and firing it on the first vanish (with a
+                // constant attempts:0) is a spurious signal. The vanish is already
+                // recorded via `tengu_bg_worker_vanished` above.
+                claimed.remove(&short);
+                continue;
             }
-            // NB: do NOT emit `tengu_bg_respawn_exhausted` here. CC 2.1.208 emits
-            // that event only from scheduleRespawn once the respawn budget
-            // (Jpp=20) is reached; the fail-closed daemon never respawns, so there
-            // is no budget to exhaust and firing it on the first vanish (with a
-            // constant attempts:0) is a spurious signal. The vanish is already
-            // recorded via `tengu_bg_worker_vanished` above.
-            claimed.remove(&short);
-            continue;
         }
         // No recorded worker pid. If we already claimed it this lifetime the
         // pid simply hasn't been persisted yet (or its write failed) — protect
@@ -1114,6 +2001,13 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             // heartbeats. Once both durable PID and roster generation are
             // absent, release the in-memory claim so a queued resume can run.
             claimed.remove(&short);
+        }
+        let spawn_phase = job
+            .phase
+            .as_deref()
+            .unwrap_or(crate::commands::respawn::PHASE_QUEUED);
+        if spawn_phase != crate::commands::respawn::PHASE_QUEUED {
+            continue;
         }
 
         // CWD-GONE guard: never spawn a worker into a working directory that no
@@ -1142,12 +2036,76 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             }
         }
 
-        let mut worker_env = roster
-            .workers
-            .get(&short)
-            .map(|record| record.dispatch.env.clone())
-            .unwrap_or_default();
-        worker_env.extend(bg_worker_env(runtime_dir, &short));
+        // The owner-only launch spec is the canonical handoff for provider
+        // credentials and other child-only environment. A dead foreground
+        // roster row is deliberately reaped before this point, so relying on
+        // that row silently strips the environment from the detached worker.
+        // Retain the roster fallback only for legacy jobs without a launch
+        // spec; the spawned roster record itself is sanitized below.
+        let mut worker_env = crate::background_launch::read_launch_spec(runtime_dir, &short)
+            .map(|spec| spec.env)
+            .unwrap_or_else(|_| {
+                roster
+                    .workers
+                    .get(&short)
+                    .map(|record| record.dispatch.env.clone())
+                    .unwrap_or_default()
+            });
+        let worker_generation = job
+            .worker_generation
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let claim_token = uuid::Uuid::new_v4().to_string();
+        let claimed_launch = match agents_registry::patch_job_state_if_matches(
+            runtime_dir,
+            &short,
+            agents_registry::JobStateMatch {
+                state: &job.state,
+                phase: job.phase.as_deref(),
+                worker_pid: job.worker_pid,
+                worker_proc_start: job.worker_proc_start.as_deref(),
+                worker_generation: job.worker_generation.as_deref(),
+                claim_token: job.claim_token.as_deref(),
+                claim_owner: job.claim_owner.as_deref(),
+                claim_created_at: job.claim_created_at,
+                claim_lease_ms: job.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: Some(None),
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some(&worker_generation)),
+                claim_token: Some(Some(&claim_token)),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(now_millis())),
+                claim_lease_ms: Some(Some(crate::commands::respawn::CLAIM_LEASE_MS)),
+            },
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                tracing::warn!("lingxi-cli daemon: could not claim queued job {short}: {error}");
+                continue;
+            }
+        };
+        if !claimed_launch {
+            continue;
+        }
+        job.phase = Some(crate::commands::respawn::PHASE_LAUNCHING.to_string());
+        job.worker_generation = Some(worker_generation.clone());
+        job.claim_token = Some(claim_token.clone());
+        job.claim_owner = Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH.to_string());
+        job.claim_created_at = Some(now_millis());
+        job.claim_lease_ms = Some(crate::commands::respawn::CLAIM_LEASE_MS);
+        worker_env.extend(bg_worker_env(
+            runtime_dir,
+            &short,
+            &worker_generation,
+            &claim_token,
+        ));
         let attach_sock = crate::bg_attach::socket_path(runtime_dir, &short);
         let attach_sock_s = attach_sock.display().to_string();
         let attach_auth = uuid::Uuid::new_v4().to_string();
@@ -1174,13 +2132,30 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                     &short,
                     &job,
                     child_pid,
-                    proc_start,
+                    proc_start.clone(),
                     version,
                     runtime_dir,
                     previous_dispatch,
                     attach_sock_s,
                     attach_auth,
                 );
+                // The child may bind this claim before `spawn_worker` returns.
+                // Accept that exact running generation, but revoke any spawn
+                // whose durable state moved elsewhere (notably `deleting`)
+                // before exposing a roster endpoint.
+                if !spawned_worker_still_owned(
+                    runtime_dir,
+                    &short,
+                    job.session_id.as_deref(),
+                    &worker_generation,
+                    &claim_token,
+                    child_pid,
+                ) {
+                    kill_worker(child_pid, true);
+                    cleanup_orphaned_pty(runtime_dir, &short, Some(child_pid), proc_probe);
+                    claimed.remove(&short);
+                    continue;
+                }
                 if let Some(worktree) = record.dispatch.worktree.as_ref() {
                     if let Err(e) = crate::daemon_roster::write_worktree_ownership_marker(
                         Path::new(&worktree.path),
@@ -1194,21 +2169,91 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                     }
                 }
                 roster.workers.insert(short.clone(), record);
-                if let Err(e) = daemon_roster::write_roster(runtime_dir, roster) {
+                let publication = daemon_roster::write_roster_with_lock_held(runtime_dir, roster)
+                    .and_then(|()| {
+                        let expected = roster.workers.get(&short).ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "spawned worker vanished from the in-memory roster",
+                            )
+                        })?;
+                        if roster_worker_publication_matches_disk(runtime_dir, &short, expected) {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::WriteZero,
+                                "spawned worker roster publication was not durable",
+                            ))
+                        }
+                    });
+                if let Err(e) = publication {
                     tracing::warn!(
                         "lingxi-cli daemon: could not persist live endpoint for {short}: {e}"
                     );
-                }
-                // Durable pid record (state stays "working").
-                if let Err(e) = agents_registry::update_job_state(
-                    runtime_dir,
-                    &short,
-                    "working",
-                    Some(child_pid),
-                ) {
-                    tracing::warn!(
-                        "lingxi-cli daemon: could not record workerPid for {short}: {e}"
+                    roster.workers.remove(&short);
+                    let spawned_identity = ObservedProcessIdentity {
+                        pid: child_pid,
+                        proc_start: proc_start.clone(),
+                    };
+                    // This PID came directly from our spawn call, so it is
+                    // safe to signal even if the host cannot read its start
+                    // identity. Confirmation remains identity/PTY-aware.
+                    kill_worker(child_pid, true);
+                    let mut terminator = SystemStallTerminator;
+                    let stopped = terminate_observed_worker(
+                        runtime_dir,
+                        &short,
+                        &spawned_identity,
+                        proc_probe,
+                        &mut terminator,
+                        StallTerminationMode::HardOnly,
                     );
+                    let expected = agents_registry::JobStateMatch {
+                        state: "working",
+                        phase: Some(crate::commands::respawn::PHASE_LAUNCHING),
+                        worker_pid: None,
+                        worker_proc_start: None,
+                        worker_generation: Some(&worker_generation),
+                        claim_token: Some(&claim_token),
+                        claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH),
+                        claim_created_at: None,
+                        claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
+                    };
+                    if stopped {
+                        let _ = agents_registry::patch_job_state_if_matches(
+                            runtime_dir,
+                            &short,
+                            expected,
+                            agents_registry::JobStatePatch {
+                                state: Some("working"),
+                                tempo: None,
+                                cwd: None,
+                                detail: None,
+                                worker_pid: Some(None),
+                                worker_proc_start: Some(None),
+                                phase: Some(Some(crate::commands::respawn::PHASE_QUEUED)),
+                                worker_generation: Some(Some(&worker_generation)),
+                                claim_token: Some(None),
+                                claim_owner: Some(None),
+                                claim_created_at: Some(None),
+                                claim_lease_ms: Some(None),
+                            },
+                        );
+                        claimed.remove(&short);
+                    } else {
+                        let _ = agents_registry::patch_job_state_if_matches(
+                            runtime_dir,
+                            &short,
+                            expected,
+                            agents_registry::JobStatePatch {
+                                worker_pid: Some(Some(child_pid)),
+                                worker_proc_start: Some(proc_start.as_deref()),
+                                ..Default::default()
+                            },
+                        );
+                        claimed.insert(short.clone());
+                    }
+                    continue;
                 }
                 claimed.insert(short);
             }
@@ -1216,6 +2261,35 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                 // Best-effort: the durable job stays "working"; the next
                 // heartbeat retries the spawn.
                 tracing::warn!("lingxi-cli daemon: could not spawn worker for {short}: {e}");
+                let _ = agents_registry::patch_job_state_if_matches(
+                    runtime_dir,
+                    &short,
+                    agents_registry::JobStateMatch {
+                        state: "working",
+                        phase: Some(crate::commands::respawn::PHASE_LAUNCHING),
+                        worker_pid: None,
+                        worker_proc_start: None,
+                        worker_generation: Some(&worker_generation),
+                        claim_token: Some(&claim_token),
+                        claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH),
+                        claim_created_at: None,
+                        claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
+                    },
+                    agents_registry::JobStatePatch {
+                        state: Some("working"),
+                        tempo: None,
+                        cwd: None,
+                        detail: None,
+                        worker_pid: Some(None),
+                        worker_proc_start: Some(None),
+                        phase: Some(Some(crate::commands::respawn::PHASE_QUEUED)),
+                        worker_generation: Some(Some(&worker_generation)),
+                        claim_token: Some(None),
+                        claim_owner: Some(None),
+                        claim_created_at: Some(None),
+                        claim_lease_ms: Some(None),
+                    },
+                );
             }
         }
     }
@@ -1371,6 +2445,15 @@ fn worker_record_for_job(
     dispatch.cols = cols;
     dispatch.rows = rows;
     dispatch.env.clear();
+    // Keep only the non-secret generation attestation required to prove that
+    // roster ownership and state.json still name the same writer. Child-only
+    // provider credentials remain exclusively in the owner-mode launch spec.
+    if let Some(generation) = job.worker_generation.as_deref() {
+        dispatch.env.insert(
+            crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+            generation.to_string(),
+        );
+    }
 
     WorkerRecord {
         pid,
@@ -1666,6 +2749,53 @@ mod tests {
         }
     }
 
+    struct DeleteDuringSpawn {
+        runtime_dir: PathBuf,
+        called: bool,
+    }
+
+    impl WorkerSpawner for DeleteDuringSpawn {
+        fn spawn_worker(
+            &mut self,
+            short: &str,
+            _env: &BTreeMap<String, String>,
+        ) -> std::io::Result<i32> {
+            self.called = true;
+            let current = agents_registry::read_job(&self.runtime_dir, short).unwrap();
+            let updated = agents_registry::patch_job_state_if_matches(
+                &self.runtime_dir,
+                short,
+                agents_registry::JobStateMatch {
+                    state: &current.state,
+                    phase: current.phase.as_deref(),
+                    worker_pid: current.worker_pid,
+                    worker_proc_start: current.worker_proc_start.as_deref(),
+                    worker_generation: current.worker_generation.as_deref(),
+                    claim_token: current.claim_token.as_deref(),
+                    claim_owner: current.claim_owner.as_deref(),
+                    claim_created_at: current.claim_created_at,
+                    claim_lease_ms: current.claim_lease_ms,
+                },
+                agents_registry::JobStatePatch {
+                    state: Some("working"),
+                    tempo: None,
+                    cwd: None,
+                    detail: None,
+                    worker_pid: Some(None),
+                    worker_proc_start: Some(None),
+                    phase: Some(Some(crate::commands::respawn::PHASE_DELETING)),
+                    worker_generation: None,
+                    claim_token: Some(Some("delete-during-spawn")),
+                    claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DELETE)),
+                    claim_created_at: Some(Some(10)),
+                    claim_lease_ms: Some(Some(crate::commands::respawn::CLAIM_LEASE_MS)),
+                },
+            )?;
+            assert!(updated);
+            Ok(99_001)
+        }
+    }
+
     /// A spawner that must never be called (asserts no spawn happens).
     struct NeverSpawner;
     impl WorkerSpawner for NeverSpawner {
@@ -1705,8 +2835,56 @@ mod tests {
             initial_prompt: Some("do the thing"),
             detail: None,
             worker_pid: None,
+            worker_proc_start: None,
+            phase: Some("queued"),
+            worker_generation: None,
+            claim_token: None,
+            claim_owner: None,
+            claim_created_at: None,
+            claim_lease_ms: None,
         };
         agents_registry::write_job_state(home, short, &job).unwrap();
+    }
+
+    fn seed_resumable_launch_spec(home: &Path, short: &str) -> PathBuf {
+        use crate::background_launch::{
+            self, BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec,
+            TerminalSize, LAUNCH_SPEC_VERSION,
+        };
+
+        let session_id = "11111111-1111-1111-1111-111111111111";
+        let cwd = home.display().to_string();
+        let transcript = session::jsonl::path::session_path(home, &cwd, session_id);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        )
+        .unwrap();
+        background_launch::write_launch_spec(
+            home,
+            short,
+            &BackgroundLaunchSpec {
+                schema_version: LAUNCH_SPEC_VERSION,
+                short: short.to_string(),
+                created_at: 1_700_000_000_000,
+                preflight_approved: true,
+                launch: BackgroundLaunchKind::Fresh,
+                session_id: session_id.to_string(),
+                transcript_path: transcript.display().to_string(),
+                cwd: cwd.clone(),
+                origin_cwd: cwd,
+                worktree_path: None,
+                worktree_ownership_token: None,
+                initial_prompt: Some("do the thing".to_string()),
+                handoff: None,
+                options: BackgroundLaunchOptions::default(),
+                env: BTreeMap::new(),
+                terminal: TerminalSize::default(),
+            },
+        )
+        .unwrap();
+        transcript
     }
 
     fn worker(pid: i32) -> WorkerRecord {
@@ -1843,6 +3021,32 @@ mod tests {
     }
 
     #[test]
+    fn roster_publication_requires_exact_read_back_identity() {
+        let dir = tmpdir();
+        let expected = worker(4_242);
+        assert!(!roster_worker_publication_matches_disk(
+            &dir, "feed0001", &expected
+        ));
+
+        let mut roster = empty_roster(1);
+        roster
+            .workers
+            .insert("feed0001".to_string(), expected.clone());
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+        assert!(roster_worker_publication_matches_disk(
+            &dir, "feed0001", &expected
+        ));
+
+        let mut wrong_generation = expected;
+        wrong_generation.pid = 4_243;
+        assert!(!roster_worker_publication_matches_disk(
+            &dir,
+            "feed0001",
+            &wrong_generation
+        ));
+    }
+
+    #[test]
     fn heartbeat_loop_runs_once_then_stops() {
         let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
@@ -1974,15 +3178,856 @@ mod tests {
 
         // Exactly one spawn, for our job.
         assert_eq!(spawner.spawned, vec!["bc7c6b33".to_string()]);
-        // The child pid was recorded into the durable job (state still working).
+        // The worker publishes its own pid after it validates the launch claim.
         let job = agents_registry::read_job(&dir, "bc7c6b33").unwrap();
         assert_eq!(job.state, "working");
-        assert_eq!(job.worker_pid, Some(90_000));
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(job.worker_pid, None);
+        assert!(job.worker_generation.is_some());
+        assert!(job.claim_token.is_some());
         assert!(!agents_registry::job_is_terminal(&job));
         // …and a live-worker roster record exists carrying that pid.
         let roster = read_roster(&dir, 0, false).into_roster();
         let rec = roster.workers.get("bc7c6b33").expect("worker record");
         assert_eq!(rec.pid, 90_000);
+    }
+
+    #[test]
+    fn deleting_phase_job_is_not_respawned_by_heartbeat() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0001");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "dead0001",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some(crate::commands::respawn::PHASE_QUEUED),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_DELETING)),
+                worker_generation: Some(Some("gen-delete")),
+                claim_token: Some(Some("claim-delete")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DELETE)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(crate::commands::respawn::CLAIM_LEASE_MS)),
+            },
+        )
+        .unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert!(spawner.spawned.is_empty());
+        let deleting = agents_registry::read_job(&dir, "dead0001").unwrap();
+        assert!(!stop_background_job(&dir, "dead0001", &deleting));
+        let preserved = agents_registry::read_job(&dir, "dead0001").unwrap();
+        assert_eq!(preserved.state, "working");
+        assert_eq!(
+            preserved.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_DELETING)
+        );
+        assert_eq!(preserved.claim_token.as_deref(), Some("claim-delete"));
+    }
+
+    #[test]
+    fn delete_transition_during_spawn_revokes_roster_publication() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0002");
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let mut spawner = DeleteDuringSpawn {
+            runtime_dir: dir.clone(),
+            called: false,
+        };
+
+        spawn_pending_workers(
+            &dir,
+            &mut roster,
+            "0.0.0",
+            &proc,
+            &mut spawner,
+            &mut claimed,
+        );
+
+        assert!(spawner.called);
+        assert!(!roster.workers.contains_key("dead0002"));
+        let job = agents_registry::read_job(&dir, "dead0002").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_DELETING)
+        );
+        assert_eq!(job.claim_token.as_deref(), Some("delete-during-spawn"));
+    }
+
+    #[test]
+    fn delete_claim_quiesces_published_launch_and_remains_absorbing() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0003");
+        let queued = agents_registry::read_job(&dir, "dead0003").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "dead0003",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("generation-delete-race")),
+                claim_token: Some(Some("launch-before-delete")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(crate::commands::respawn::CLAIM_LEASE_MS)),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let launching = agents_registry::read_job(&dir, "dead0003").unwrap();
+        let mut record = worker(44_503);
+        record.proc_start = Some("START-44503".to_string());
+        record.dispatch.short = "dead0003".to_string();
+        record.dispatch.env.insert(
+            crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+            "generation-delete-race".to_string(),
+        );
+        let mut roster = empty_roster(1);
+        roster.workers.insert("dead0003".to_string(), record);
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+
+        let proc = ScriptedProc::default();
+        proc.set_process(44_503, "START-44503");
+        proc.schedule_exit(44_503, 1);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let claim = claim_and_quiesce_background_job_for_delete_with(
+            &dir,
+            "dead0003",
+            &launching,
+            &proc,
+            &mut terminator,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(proc.worker_signals(), vec![(44_503, false)]);
+        assert!(!read_roster(&dir, 0, false)
+            .into_roster()
+            .workers
+            .contains_key("dead0003"));
+        let job = agents_registry::read_job(&dir, "dead0003").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_DELETING)
+        );
+        assert_eq!(job.claim_token.as_deref(), Some(claim.token.as_str()));
+        assert_eq!(
+            job.worker_generation.as_deref(),
+            Some("generation-delete-race")
+        );
+        assert_eq!(job.worker_pid, None);
+    }
+
+    #[test]
+    fn delete_claim_quiesces_distinct_roster_and_job_identities() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0005");
+        let queued = agents_registry::read_job(&dir, "dead0005").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "dead0005",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                worker_pid: Some(Some(44_505)),
+                worker_proc_start: Some(Some("JOB-START-44505")),
+                phase: Some(Some(crate::commands::respawn::PHASE_RUNNING)),
+                worker_generation: Some(Some("generation-split-brain")),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let running = agents_registry::read_job(&dir, "dead0005").unwrap();
+
+        let mut record = worker(44_506);
+        record.proc_start = Some("ROSTER-START-44506".to_string());
+        record.dispatch.short = "dead0005".to_string();
+        record.dispatch.env.insert(
+            crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+            "generation-split-brain".to_string(),
+        );
+        let mut roster = empty_roster(1);
+        roster.workers.insert("dead0005".to_string(), record);
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+
+        let proc = ScriptedProc::default();
+        proc.set_process(44_506, "ROSTER-START-44506");
+        proc.set_process(44_505, "JOB-START-44505");
+        proc.schedule_exit(44_506, 1);
+        proc.schedule_exit(44_505, 2);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let claim = claim_and_quiesce_background_job_for_delete_with(
+            &dir,
+            "dead0005",
+            &running,
+            &proc,
+            &mut terminator,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(
+            proc.worker_signals(),
+            vec![(44_506, false), (44_505, false)]
+        );
+        assert!(!read_roster(&dir, 0, false)
+            .into_roster()
+            .workers
+            .contains_key("dead0005"));
+        assert_eq!(
+            claim.job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_DELETING)
+        );
+        assert_eq!(claim.job.worker_pid, None);
+    }
+
+    #[test]
+    fn terminal_job_is_also_claimed_before_delete() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0004");
+        agents_registry::update_job_state(&dir, "dead0004", "completed", None).unwrap();
+        let terminal = agents_registry::read_job(&dir, "dead0004").unwrap();
+        let mut terminator = FakeStallTerminator::new(&ScriptedProc::default());
+        let claim = claim_and_quiesce_background_job_for_delete_with(
+            &dir,
+            "dead0004",
+            &terminal,
+            &stall_probe(),
+            &mut terminator,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(claim.job.state, "completed");
+        assert_eq!(
+            claim.job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_DELETING)
+        );
+        assert_eq!(claim.job.claim_token.as_deref(), Some(claim.token.as_str()));
+    }
+
+    #[test]
+    fn stale_creating_job_with_launch_spec_becomes_queued() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0001");
+        seed_resumable_launch_spec(&dir, "5a1e0001");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0001",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_CREATING)),
+                worker_generation: Some(Some("gen-create")),
+                claim_token: Some(None),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DISPATCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+
+        let mut roster = empty_roster(1);
+        let mut claimed: HashSet<String> = ["5a1e0001".to_string()].into_iter().collect();
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0001").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(job.claim_owner, None);
+        assert_eq!(job.claim_created_at, None);
+        assert_eq!(job.claim_lease_ms, None);
+        assert!(!claimed.contains("5a1e0001"));
+    }
+
+    #[test]
+    fn legacy_creating_claim_with_live_pty_never_requeues() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0011");
+        seed_resumable_launch_spec(&dir, "5a1e0011");
+        let queued = agents_registry::read_job(&dir, "5a1e0011").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0011",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                phase: Some(Some(crate::commands::respawn::PHASE_CREATING)),
+                worker_generation: Some(Some("legacy-create-generation")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DISPATCH)),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        write_test_pty_runtime(&dir, "5a1e0011", 44_511, 90_011, "PTY-START-90011");
+        let proc = FakeProc {
+            alive: HashMap::from([(90_011, true)]),
+            start: HashMap::from([(90_011, "PTY-START-90011".to_string())]),
+        };
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+
+        recover_stale_job_claims(&dir, &mut roster, &proc, &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0011").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_CREATING)
+        );
+        assert_eq!(job.claim_created_at, None);
+        assert!(crate::background_launch::pty_runtime_path(&dir, "5a1e0011").exists());
+    }
+
+    #[test]
+    fn stale_launching_job_without_live_record_requeues_and_bumps_budget() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0002");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0002",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("gen-launch")),
+                claim_token: Some(Some("claim-launch")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+
+        let mut roster = empty_roster(1);
+        let mut claimed: HashSet<String> = ["5a1e0002".to_string()].into_iter().collect();
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0002").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(read_respawn_count(&dir, "5a1e0002"), 1);
+        assert!(!claimed.contains("5a1e0002"));
+    }
+
+    #[test]
+    fn stale_launching_live_unverifiable_pid_never_requeues() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0007");
+        let queued = agents_registry::read_job(&dir, "5a1e0007").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0007",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("gen-unverified")),
+                claim_token: Some(Some("claim-unverified")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let mut record = worker(44_507);
+        record.proc_start = Some("EXPECTED-START".to_string());
+        record.dispatch.env.insert(
+            crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+            "gen-unverified".to_string(),
+        );
+        let mut roster = empty_roster(1);
+        roster.workers.insert("5a1e0007".to_string(), record);
+        let proc = FakeProc {
+            alive: HashMap::from([(44_507, true)]),
+            start: HashMap::new(),
+        };
+        let mut claimed = HashSet::new();
+
+        recover_stale_job_claims(&dir, &mut roster, &proc, &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0007").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(job.claim_token.as_deref(), Some("claim-unverified"));
+        assert!(roster.workers.contains_key("5a1e0007"));
+        assert_eq!(read_respawn_count(&dir, "5a1e0007"), 0);
+    }
+
+    #[test]
+    fn stale_launching_live_pty_without_roster_never_requeues() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0009");
+        let queued = agents_registry::read_job(&dir, "5a1e0009").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0009",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("gen-live-pty")),
+                claim_token: Some(Some("claim-live-pty")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        write_test_pty_runtime(&dir, "5a1e0009", 44_509, 90_009, "PTY-START-90009");
+        let proc = FakeProc {
+            alive: HashMap::from([(90_009, true)]),
+            start: HashMap::from([(90_009, "PTY-START-90009".to_string())]),
+        };
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+
+        recover_stale_job_claims(&dir, &mut roster, &proc, &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0009").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(job.claim_token.as_deref(), Some("claim-live-pty"));
+        assert!(crate::background_launch::pty_runtime_path(&dir, "5a1e0009").exists());
+        assert_eq!(read_respawn_count(&dir, "5a1e0009"), 0);
+    }
+
+    #[test]
+    fn stale_launching_unverifiable_job_pid_without_roster_never_requeues() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0010");
+        let queued = agents_registry::read_job(&dir, "5a1e0010").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0010",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                worker_pid: Some(Some(44_510)),
+                worker_proc_start: Some(Some("EXPECTED-START-44510")),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("gen-job-unverified")),
+                claim_token: Some(Some("claim-job-unverified")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let proc = FakeProc {
+            alive: HashMap::from([(44_510, true)]),
+            start: HashMap::new(),
+        };
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+
+        recover_stale_job_claims(&dir, &mut roster, &proc, &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0010").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(job.claim_token.as_deref(), Some("claim-job-unverified"));
+        assert_eq!(read_respawn_count(&dir, "5a1e0010"), 0);
+    }
+
+    #[test]
+    fn legacy_launch_claim_without_timestamp_is_recovered() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0008");
+        let queued = agents_registry::read_job(&dir, "5a1e0008").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0008",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("legacy-generation")),
+                claim_token: Some(Some("legacy-claim")),
+                claim_owner: Some(None),
+                claim_created_at: Some(None),
+                claim_lease_ms: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let mut roster = empty_roster(1);
+        let mut claimed: HashSet<String> = ["5a1e0008".to_string()].into_iter().collect();
+
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0008").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(job.claim_token, None);
+        assert!(!claimed.contains("5a1e0008"));
+    }
+
+    #[test]
+    fn stale_restarting_job_with_resumable_transcript_requeues() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0003");
+        seed_resumable_launch_spec(&dir, "5a1e0003");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0003",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_RESTARTING)),
+                worker_generation: Some(Some("gen-restart")),
+                claim_token: Some(Some("claim-restart")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_RESTART)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+
+        let mut roster = empty_roster(1);
+        let mut claimed: HashSet<String> = ["5a1e0003".to_string()].into_iter().collect();
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0003").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(read_respawn_count(&dir, "5a1e0003"), 1);
+        let launch = crate::background_launch::read_launch_spec(&dir, "5a1e0003").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Resume
+        );
+        assert_eq!(launch.initial_prompt, None);
+        assert!(!claimed.contains("5a1e0003"));
+    }
+
+    #[test]
+    fn stale_creating_job_without_launch_spec_fails_closed() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0004");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0004",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_CREATING)),
+                worker_generation: Some(Some("gen-create")),
+                claim_token: Some(None),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_DISPATCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0004").unwrap();
+        assert_eq!(job.state, "failed");
+        assert!(job
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("launch context")));
+    }
+
+    #[test]
+    fn stale_launching_job_with_verified_live_record_is_preserved() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0005");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0005",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_LAUNCHING)),
+                worker_generation: Some(Some("gen-launch")),
+                claim_token: Some(Some("claim-launch")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_LAUNCH)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+        let mut roster = empty_roster(1);
+        let mut record = worker(4300);
+        record.proc_start = Some("LIVE-START".to_string());
+        roster.workers.insert("5a1e0005".to_string(), record);
+        let mut alive = HashMap::new();
+        alive.insert(4300, true);
+        let mut start = HashMap::new();
+        start.insert(4300, "LIVE-START".to_string());
+        let proc = FakeProc { alive, start };
+        let mut claimed = HashSet::new();
+
+        recover_stale_job_claims(&dir, &mut roster, &proc, &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0005").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(read_respawn_count(&dir, "5a1e0005"), 0);
+    }
+
+    #[test]
+    fn stale_restarting_job_over_budget_fails_closed() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "5a1e0006");
+        seed_resumable_launch_spec(&dir, "5a1e0006");
+        agents_registry::patch_job_state_if_matches(
+            &dir,
+            "5a1e0006",
+            agents_registry::JobStateMatch {
+                state: "working",
+                phase: Some("queued"),
+                worker_pid: None,
+                worker_proc_start: None,
+                worker_generation: None,
+                claim_token: None,
+                claim_owner: None,
+                claim_created_at: None,
+                claim_lease_ms: None,
+            },
+            agents_registry::JobStatePatch {
+                state: Some("working"),
+                tempo: None,
+                cwd: None,
+                detail: None,
+                worker_pid: Some(None),
+                worker_proc_start: Some(None),
+                phase: Some(Some(crate::commands::respawn::PHASE_RESTARTING)),
+                worker_generation: Some(Some("gen-restart")),
+                claim_token: Some(Some("claim-restart")),
+                claim_owner: Some(Some(crate::commands::respawn::CLAIM_OWNER_RESTART)),
+                claim_created_at: Some(Some(1)),
+                claim_lease_ms: Some(Some(10)),
+            },
+        )
+        .unwrap();
+        write_respawn_count(
+            &dir,
+            "5a1e0006",
+            crate::bg_attach_stall::STALL_RESPAWN_BUDGET,
+        );
+
+        let mut roster = empty_roster(1);
+        let mut claimed = HashSet::new();
+        recover_stale_job_claims(&dir, &mut roster, &stall_probe(), &mut claimed, 100);
+
+        let job = agents_registry::read_job(&dir, "5a1e0006").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.detail.as_deref(), Some(CLAIM_RECOVERY_EXHAUSTED_REASON));
     }
 
     #[test]
@@ -2204,13 +4249,14 @@ mod tests {
         assert_eq!(spawner.spawned, vec!["ffff6666".to_string()]);
     }
 
-    // ---- crashed-worker recovery (fail-closed) -----------------------------
+    // ---- crashed-worker recovery -------------------------------------------
 
     #[test]
-    fn crashed_worker_is_marked_failed_without_respawn() {
+    fn crashed_worker_with_resumable_transcript_is_respawned_without_replaying_prompt() {
         let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "cafe0001");
+        seed_resumable_launch_spec(&dir, "cafe0001");
         // Record a worker pid on the job, then let the worker "die": the proc
         // probe reports it NOT alive and it never wrote a terminal state.
         agents_registry::update_job_state(&dir, "cafe0001", "working", Some(4321)).unwrap();
@@ -2222,8 +4268,6 @@ mod tests {
         let lockp = FakeLockProbe {
             alive_daemon: HashMap::new(),
         };
-        // Without a live attach transport, a vanished worker must fail closed
-        // rather than re-running the original prompt.
         let mut spawner = FakeWorkerSpawner::default();
         let code = run_supervisor(
             &dir,
@@ -2238,24 +4282,79 @@ mod tests {
         );
         assert_eq!(code, exit_codes::SUCCESS);
 
+        assert_eq!(spawner.spawned, vec!["cafe0001".to_string()]);
+        let job = agents_registry::read_job(&dir, "cafe0001").unwrap();
+        assert_eq!(
+            job.state, "working",
+            "resumable vanished worker stays queued"
+        );
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING),
+            "same-heartbeat respawn is claimed for launch"
+        );
+        assert_eq!(job.worker_pid, None, "worker publishes its own pid");
+        assert!(job.worker_generation.is_some());
+        assert!(job.claim_token.is_some());
+        assert!(!agents_registry::job_is_terminal(&job));
+        let launch = crate::background_launch::read_launch_spec(&dir, "cafe0001").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Resume
+        );
+        assert_eq!(
+            launch.initial_prompt, None,
+            "original prompt must never replay"
+        );
+        let roster = read_roster(&dir, 0, false).into_roster();
+        let record = roster.workers.get("cafe0001").expect("worker record");
+        assert!(
+            matches!(record.dispatch.launch, Launch::Resume { .. }),
+            "respawned worker must reopen the recorded session, not relaunch the prompt"
+        );
+    }
+
+    #[test]
+    fn vanished_worker_without_resumable_transcript_fails_closed_without_respawn() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0004");
+        agents_registry::update_job_state(&dir, "cafe0004", "working", Some(4321)).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
         assert!(
             spawner.spawned.is_empty(),
-            "vanished worker must not respawn"
+            "missing transcript must fail closed"
         );
-        let job = agents_registry::read_job(&dir, "cafe0001").unwrap();
-        assert_eq!(job.state, "failed", "vanished worker → job failed");
-        assert!(
-            agents_registry::job_is_terminal(&job),
-            "failed job is terminal (won't re-render as working)"
-        );
-        assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+        let job = agents_registry::read_job(&dir, "cafe0004").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.worker_pid, None);
     }
 
     #[test]
     fn vanished_worker_does_not_emit_respawn_exhausted() {
         let _supervisor_guard = supervisor_lock();
-        // Regression (RV9): the daemon fails a vanished worker CLOSED and never
-        // respawns it, so there is no respawn budget to exhaust. CC 2.1.208
+        // Regression (RV9): when auto-resume is impossible, the daemon fails a
+        // vanished worker CLOSED and never respawns it, so there is no respawn budget to exhaust. CC 2.1.208
         // emits `tengu_bg_respawn_exhausted` ONLY from scheduleRespawn once the
         // respawn budget (Jpp=20) is reached — never on the first crash. LingXi
         // used to emit it unconditionally on the very first vanish with a
@@ -2433,21 +4532,15 @@ mod tests {
         // prompt section and `/stop` can locate the job.
         let dir = tmpdir();
         seed_working_job(&dir, "bead0001");
-        let mut roster = empty_roster(999);
-        let mut dispatch_record = worker(1234);
-        dispatch_record.dispatch.short = "bead0001".to_string();
-        dispatch_record
-            .dispatch
-            .env
-            .insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
-        roster
-            .workers
-            .insert("bead0001".to_string(), dispatch_record);
-        daemon_roster::write_roster(&dir, &roster).unwrap();
-        let mut alive = HashMap::new();
-        alive.insert(1234, true);
+        seed_resumable_launch_spec(&dir, "bead0001");
+        let mut launch = crate::background_launch::read_launch_spec(&dir, "bead0001").unwrap();
+        launch.env.insert(
+            "TEST_PROVIDER_TOKEN".to_string(),
+            "provider-secret".to_string(),
+        );
+        crate::background_launch::write_launch_spec(&dir, "bead0001", &launch).unwrap();
         let proc = FakeProc {
-            alive,
+            alive: HashMap::new(),
             start: HashMap::new(),
         };
         let lockp = FakeLockProbe {
@@ -2501,8 +4594,8 @@ mod tests {
             .expect("attach auth env is generated");
         assert_eq!(attach_auth.len(), 36, "uuid v4 auth token");
         assert_eq!(
-            env.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("sk-test")
+            env.get("TEST_PROVIDER_TOKEN").map(String::as_str),
+            Some("provider-secret")
         );
 
         let roster = read_roster(&dir, 4242, true).into_roster();
@@ -2517,6 +4610,19 @@ mod tests {
         );
         assert_eq!(record.rv_auth.as_ref(), Some(attach_auth));
         assert_eq!(record.pty_auth.as_ref(), Some(attach_auth));
+        assert!(
+            !record.dispatch.env.contains_key("TEST_PROVIDER_TOKEN"),
+            "provider credentials must not be copied into the roster"
+        );
+        let job = agents_registry::read_job(&dir, "bead0001").unwrap();
+        assert_eq!(
+            record
+                .dispatch
+                .env
+                .get(crate::commands::respawn::BG_WORKER_GENERATION_ENV),
+            job.worker_generation.as_ref(),
+            "the non-secret generation attestation must survive roster sanitization"
+        );
     }
 
     #[test]
@@ -2600,6 +4706,194 @@ mod tests {
         assert_eq!(job.state, "working");
     }
 
+    #[test]
+    fn live_legacy_roster_without_generation_blocks_duplicate_spawn() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0005");
+
+        let mut roster = empty_roster(999);
+        let mut live_record = worker(7779);
+        live_record.dispatch.short = "cafe0005".to_string();
+        roster.workers.insert("cafe0005".to_string(), live_record);
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::from([(7779, true)]),
+            start: HashMap::from([(7779, "UNVERIFIED-START".to_string())]),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        let job = agents_registry::read_job(&dir, "cafe0005").unwrap();
+        assert_eq!(job.state, "working");
+        assert_eq!(job.worker_pid, None);
+        assert_eq!(job.worker_proc_start, None);
+    }
+
+    #[test]
+    fn verified_live_roster_generation_repairs_state_and_preserves_newer_pty() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0006");
+        agents_registry::update_job_state_with_generation(
+            &dir,
+            "cafe0006",
+            "working",
+            Some(7777),
+            Some("OLD-START"),
+        )
+        .unwrap();
+
+        let mut roster = empty_roster(999);
+        let mut live_record = worker(7778);
+        live_record.dispatch.short = "cafe0006".to_string();
+        live_record.proc_start = Some("START-7778".to_string());
+        roster.workers.insert("cafe0006".to_string(), live_record);
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+        write_test_pty_runtime(&dir, "cafe0006", 7778, 9006, "CHILD-START");
+
+        let proc = FakeProc {
+            alive: HashMap::from([(7778, true), (9006, true)]),
+            start: HashMap::from([
+                (7778, "START-7778".to_string()),
+                (9006, "CHILD-START".to_string()),
+            ]),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        let job = agents_registry::read_job(&dir, "cafe0006").unwrap();
+        assert_eq!(job.state, "working");
+        assert_eq!(job.worker_pid, Some(7778));
+        assert_eq!(job.worker_proc_start.as_deref(), Some("START-7778"));
+        assert!(crate::background_launch::pty_runtime_path(&dir, "cafe0006").exists());
+    }
+
+    #[test]
+    fn recycled_live_job_pid_is_resumed_instead_of_hanging_forever() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0007");
+        seed_resumable_launch_spec(&dir, "cafe0007");
+        agents_registry::update_job_state_with_generation(
+            &dir,
+            "cafe0007",
+            "working",
+            Some(7777),
+            Some("OLD-START"),
+        )
+        .unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::from([(7777, true)]),
+            start: HashMap::from([
+                (7777, "RECYCLED-START".to_string()),
+                (90_000, "START-90000".to_string()),
+            ]),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert_eq!(spawner.spawned, vec!["cafe0007".to_string()]);
+        let job = agents_registry::read_job(&dir, "cafe0007").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_LAUNCHING)
+        );
+        assert_eq!(job.worker_pid, None);
+        assert_eq!(job.worker_proc_start, None);
+        assert!(job.worker_generation.is_some());
+        assert!(job.claim_token.is_some());
+    }
+
+    #[test]
+    fn vanished_worker_auto_resume_stops_after_budget() {
+        let _supervisor_guard = supervisor_lock();
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0008");
+        seed_resumable_launch_spec(&dir, "cafe0008");
+        agents_registry::update_job_state_with_generation(
+            &dir,
+            "cafe0008",
+            "working",
+            Some(4321),
+            Some("OLD-START"),
+        )
+        .unwrap();
+        write_respawn_count(
+            &dir,
+            "cafe0008",
+            crate::bg_attach_stall::STALL_RESPAWN_BUDGET,
+        );
+
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert!(spawner.spawned.is_empty());
+        let job = agents_registry::read_job(&dir, "cafe0008").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.worker_pid, None);
+    }
+
     // ── P1-12: attach-stall respawn requests ─────────────────────────────────
 
     fn stall_probe() -> FakeProc {
@@ -2614,13 +4908,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0001");
+        seed_resumable_launch_spec(root, "cafe0001");
         let mut roster = empty_roster(1);
-        roster.workers.insert("cafe0001".to_string(), worker(4242));
+        let mut record = worker(4242);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0001".to_string(), record);
         let jobs = agents_registry::jobs_dir(root);
         crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0001");
 
+        let proc = ScriptedProc::default();
+        proc.set_process(4242, "WORKER-START");
+        proc.schedule_exit(4242, 1);
+        let mut terminator = FakeStallTerminator::new(&proc);
         let mut claimed: HashSet<String> = ["cafe0001".to_string()].into_iter().collect();
-        service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
 
         // The request is consumed, so the next heartbeat does not restart again.
         assert!(!crate::bg_attach_stall::take_stall_request(
@@ -2632,6 +4939,7 @@ mod tests {
         assert!(!claimed.contains("cafe0001"));
         // The durable counter advanced — this is what the budget is applied to.
         assert_eq!(read_respawn_count(root, "cafe0001"), 1);
+        assert_eq!(proc.worker_signals(), vec![(4242, false)]);
     }
 
     #[test]
@@ -2639,6 +4947,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0101");
+        seed_resumable_launch_spec(root, "cafe0101");
         let mut roster = empty_roster(1);
         let mut record = worker(4242);
         record.proc_start = Some("WORKER-START".to_string());
@@ -2670,13 +4979,20 @@ mod tests {
         assert_eq!(proc.pty_signals(), vec![(9001, false)]);
         assert_eq!(proc.sleep_count(), 3);
         assert!(!crate::background_launch::pty_runtime_path(root, "cafe0101").exists());
+        let launch = crate::background_launch::read_launch_spec(root, "cafe0101").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Resume
+        );
+        assert_eq!(launch.initial_prompt, None);
     }
 
     #[test]
-    fn a_stall_request_fails_closed_if_restart_barrier_cannot_clear_the_old_writer() {
+    fn a_stall_request_preserves_owner_if_restart_barrier_cannot_clear_the_old_writer() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0102");
+        seed_resumable_launch_spec(root, "cafe0102");
         let mut roster = empty_roster(1);
         let mut record = worker(4243);
         record.proc_start = Some("WORKER-START".to_string());
@@ -2701,7 +5017,7 @@ mod tests {
 
         assert!(roster.workers.contains_key("cafe0102"));
         assert!(claimed.contains("cafe0102"));
-        assert_eq!(read_respawn_count(root, "cafe0102"), 1);
+        assert_eq!(read_respawn_count(root, "cafe0102"), 0);
         assert_eq!(proc.worker_signals(), vec![(4243, false), (4243, true)]);
         assert_eq!(proc.pty_signals(), vec![(9002, false), (9002, true)]);
         assert!(
@@ -2709,11 +5025,18 @@ mod tests {
             "the runtime identity stays in place while the old writer is unconfirmed"
         );
         let job = agents_registry::read_job(root, "cafe0102").unwrap();
-        assert_eq!(job.state, "failed");
+        assert_eq!(job.state, "working");
         assert_eq!(
-            job.detail.as_deref(),
-            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
         );
+        assert_eq!(job.detail, None);
+        let launch = crate::background_launch::read_launch_spec(root, "cafe0102").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Fresh
+        );
+        assert!(launch.initial_prompt.is_some());
     }
 
     #[test]
@@ -2721,6 +5044,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0103");
+        seed_resumable_launch_spec(root, "cafe0103");
         let mut roster = empty_roster(1);
         let mut record = worker(4244);
         record.proc_start = Some("WORKER-START".to_string());
@@ -2759,6 +5083,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0104");
+        seed_resumable_launch_spec(root, "cafe0104");
         let mut roster = empty_roster(1);
         let mut record = worker(4245);
         record.proc_start = Some("WORKER-START".to_string());
@@ -2781,13 +5106,19 @@ mod tests {
             &mut terminator,
         );
 
-        assert!(!roster.workers.contains_key("cafe0104"));
-        assert!(!claimed.contains("cafe0104"));
+        assert!(roster.workers.contains_key("cafe0104"));
+        assert!(claimed.contains("cafe0104"));
         assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
         assert_eq!(proc.pty_signals(), Vec::<(i32, bool)>::new());
         assert_eq!(proc.sleep_count(), 0);
-        assert_eq!(read_respawn_count(root, "cafe0104"), 1);
-        assert!(!crate::background_launch::pty_runtime_path(root, "cafe0104").exists());
+        assert_eq!(read_respawn_count(root, "cafe0104"), 0);
+        assert!(crate::background_launch::pty_runtime_path(root, "cafe0104").exists());
+        let job = agents_registry::read_job(root, "cafe0104").unwrap();
+        assert_eq!(job.state, "working");
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
     }
 
     #[test]
@@ -2795,6 +5126,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0105");
+        seed_resumable_launch_spec(root, "cafe0105");
         let mut roster = empty_roster(1);
         let mut record = worker(4246);
         record.proc_start = Some("WORKER-START".to_string());
@@ -2806,7 +5138,6 @@ mod tests {
         let proc = ScriptedProc::default();
         proc.set_process(4246, "WORKER-START");
         proc.set_process(9005, "CHILD-START");
-        proc.schedule_exit(4246, 1);
         let mut terminator = FakeStallTerminator::new(&proc);
         let mut claimed: HashSet<String> = ["cafe0105".to_string()].into_iter().collect();
 
@@ -2820,19 +5151,22 @@ mod tests {
 
         assert!(roster.workers.contains_key("cafe0105"));
         assert!(claimed.contains("cafe0105"));
-        assert_eq!(proc.worker_signals(), vec![(4246, false)]);
+        assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
         assert_eq!(proc.pty_signals(), Vec::<(i32, bool)>::new());
-        assert!(
-            proc.sleep_count() >= STALL_TERMINATION_POLL_ATTEMPTS,
-            "the barrier waited instead of assuming the legacy PTY was gone"
-        );
-        assert_eq!(read_respawn_count(root, "cafe0105"), 1);
+        assert_eq!(proc.sleep_count(), 0);
+        assert_eq!(read_respawn_count(root, "cafe0105"), 0);
         assert!(crate::background_launch::pty_runtime_path(root, "cafe0105").exists());
         let job = agents_registry::read_job(root, "cafe0105").unwrap();
-        assert_eq!(job.state, "failed");
+        assert_eq!(job.state, "working");
         assert_eq!(
-            job.detail.as_deref(),
-            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(job.detail, None);
+        let launch = crate::background_launch::read_launch_spec(root, "cafe0105").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Fresh
         );
     }
 
@@ -2848,7 +5182,7 @@ mod tests {
         start.insert(9006, "CHILD-START".to_string());
         let proc = FakeProc { alive, start };
 
-        cleanup_orphaned_pty(root, "cafe0106", &proc);
+        cleanup_orphaned_pty(root, "cafe0106", Some(4247), &proc);
 
         assert!(crate::background_launch::pty_runtime_path(root, "cafe0106").exists());
     }
@@ -2858,6 +5192,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         seed_working_job(root, "cafe0107");
+        seed_resumable_launch_spec(root, "cafe0107");
         let mut roster = empty_roster(1);
         roster.workers.insert("cafe0107".to_string(), worker(4248));
         let jobs = agents_registry::jobs_dir(root);
@@ -2879,12 +5214,90 @@ mod tests {
         assert!(roster.workers.contains_key("cafe0107"));
         assert!(claimed.contains("cafe0107"));
         assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
-        assert_eq!(proc.sleep_count(), STALL_TERMINATION_POLL_ATTEMPTS * 2);
+        assert_eq!(proc.sleep_count(), 0);
+        assert_eq!(read_respawn_count(root, "cafe0107"), 0);
         let job = agents_registry::read_job(root, "cafe0107").unwrap();
-        assert_eq!(job.state, "failed");
+        assert_eq!(job.state, "working");
         assert_eq!(
-            job.detail.as_deref(),
-            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_QUEUED)
+        );
+        assert_eq!(job.detail, None);
+        let launch = crate::background_launch::read_launch_spec(root, "cafe0107").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Fresh
+        );
+    }
+
+    #[test]
+    fn a_stall_request_never_signals_a_stale_worker_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0108");
+        seed_resumable_launch_spec(root, "cafe0108");
+        let queued = agents_registry::read_job(root, "cafe0108").unwrap();
+        assert!(agents_registry::patch_job_state_if_matches(
+            root,
+            "cafe0108",
+            agents_registry::JobStateMatch {
+                state: &queued.state,
+                phase: queued.phase.as_deref(),
+                worker_pid: queued.worker_pid,
+                worker_proc_start: queued.worker_proc_start.as_deref(),
+                worker_generation: queued.worker_generation.as_deref(),
+                claim_token: queued.claim_token.as_deref(),
+                claim_owner: queued.claim_owner.as_deref(),
+                claim_created_at: queued.claim_created_at,
+                claim_lease_ms: queued.claim_lease_ms,
+            },
+            agents_registry::JobStatePatch {
+                worker_pid: Some(Some(4_249)),
+                worker_proc_start: Some(Some("WORKER-START")),
+                phase: Some(Some(crate::commands::respawn::PHASE_RUNNING)),
+                worker_generation: Some(Some("job-generation")),
+                ..Default::default()
+            },
+        )
+        .unwrap());
+        let mut record = worker(4_249);
+        record.proc_start = Some("WORKER-START".to_string());
+        record.dispatch.env.insert(
+            crate::commands::respawn::BG_WORKER_GENERATION_ENV.to_string(),
+            "stale-roster-generation".to_string(),
+        );
+        let mut roster = empty_roster(1);
+        roster.workers.insert("cafe0108".to_string(), record);
+        crate::bg_attach_stall::request_stall_respawn(&agents_registry::jobs_dir(root), "cafe0108");
+        let proc = ScriptedProc::default();
+        proc.set_process(4_249, "WORKER-START");
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0108".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(roster.workers.contains_key("cafe0108"));
+        assert!(claimed.contains("cafe0108"));
+        assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
+        assert_eq!(proc.pty_signals(), Vec::<(i32, bool)>::new());
+        assert_eq!(proc.sleep_count(), 0);
+        assert_eq!(read_respawn_count(root, "cafe0108"), 0);
+        let job = agents_registry::read_job(root, "cafe0108").unwrap();
+        assert_eq!(
+            job.phase.as_deref(),
+            Some(crate::commands::respawn::PHASE_RUNNING)
+        );
+        assert_eq!(job.worker_generation.as_deref(), Some("job-generation"));
+        let launch = crate::background_launch::read_launch_spec(root, "cafe0108").unwrap();
+        assert_eq!(
+            launch.launch,
+            crate::background_launch::BackgroundLaunchKind::Fresh
         );
     }
 
@@ -2892,18 +5305,31 @@ mod tests {
     fn the_budget_gives_up_instead_of_respawning_forever() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        seed_working_job(root, "cafe0002");
         write_respawn_count(
             root,
             "cafe0002",
             crate::bg_attach_stall::STALL_RESPAWN_BUDGET,
         );
         let mut roster = empty_roster(1);
-        roster.workers.insert("cafe0002".to_string(), worker(4243));
+        let mut record = worker(4243);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0002".to_string(), record);
         let jobs = agents_registry::jobs_dir(root);
         crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0002");
 
-        let mut claimed = HashSet::new();
-        service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
+        let proc = ScriptedProc::default();
+        proc.set_process(4243, "WORKER-START");
+        proc.schedule_exit(4243, 1);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0002".to_string()].into_iter().collect();
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
 
         // Budget spent: the counter must NOT keep climbing, and the job is
         // failed closed rather than restarted a third time.
@@ -2912,6 +5338,14 @@ mod tests {
             crate::bg_attach_stall::STALL_RESPAWN_BUDGET
         );
         assert!(!roster.workers.contains_key("cafe0002"));
+        assert!(!claimed.contains("cafe0002"));
+        assert_eq!(proc.worker_signals(), vec![(4243, true)]);
+        let job = agents_registry::read_job(root, "cafe0002").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(
+            job.detail.as_deref(),
+            Some(crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON)
+        );
     }
 
     #[test]

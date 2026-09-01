@@ -10,6 +10,9 @@ branding = { workspace = true }
 protocol = { path = "../../protocol" }
 platform-api = { path = "../../platform-api" }
 jsonrpc = { path = "../../jsonrpc" }
+# Bridge the transport-owned JSON-RPC connections into `McpRegistry`'s live
+# client path, matching the POSIX platform implementation.
+mcp = { path = "../../mcp" }
 lsp = { path = "../../lsp" }
 platform-common = { path = "../common" }
 http-client = { path = "../../http-client" }
@@ -30,7 +33,7 @@ tokio-stream = "0.1"
 
 [dev-dependencies]
 tempfile = "3.13"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 
 [lints]
 workspace = true

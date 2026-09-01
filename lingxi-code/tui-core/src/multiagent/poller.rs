@@ -6,8 +6,8 @@ use crate::multiagent::adapter::MultiAgentFeed;
 use crate::multiagent::event::MultiAgentEvent;
 use crate::multiagent::state::{TaskRow, WorkflowRow};
 use async_trait::async_trait;
-use std::sync::Arc;
 use platform_api::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord};
+use std::sync::Arc;
 
 /// Maps a `TaskRecord` (the trait's wire shape) onto a `TaskRow` (the TUI's
 /// presentation shape). Total — every `TaskRecord` field has a `TaskRow` home.

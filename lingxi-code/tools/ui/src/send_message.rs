@@ -30,12 +30,12 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
 use serde_json::{json, Map, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED};
 use telemetry::AnalyticsBus;
-use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -583,7 +583,8 @@ impl SendMessageTool {
                 "notify_when_idle is only supported for local live sessions".into(),
             ));
         };
-        let from_name = platform_api::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
+        let from_name =
+            platform_api::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
         let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
         dir.append_idle_subscription(
             peer.sid(),
@@ -1379,14 +1380,14 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::mailbox::{MailboxError, RouteAck};
     use platform_api::process::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use std::sync::{Mutex, OnceLock};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

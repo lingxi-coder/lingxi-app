@@ -11,8 +11,8 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use std::sync::Arc;
 use platform_api::OrchestratorHandle;
+use std::sync::Arc;
 
 fn build_orch(cwd: std::path::PathBuf) -> ConversationOrchestrator {
     ConversationOrchestrator::new(

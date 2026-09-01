@@ -342,6 +342,31 @@ body {
 .sidebar-row-action:hover:not(:disabled) {
   background: color-mix(in oklab, currentColor 10%, transparent) !important;
 }
+.sidebar-resize-handle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after,
+aside[data-resizing='true'] > .sidebar-resize-handle::after { opacity: .72; }
 
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
@@ -365,7 +390,8 @@ textarea, input { font-family: inherit; }
   .sidebar-header-action,
   .sidebar-tree-row > button:first-child,
   .sidebar-project-menu button,
-  .sidebar-row-action { transition-duration: 0ms; }
+  .sidebar-row-action,
+  .sidebar-resize-handle::after { transition-duration: 0ms; }
   .running-sweep {
     animation: none;
     background-image: none;

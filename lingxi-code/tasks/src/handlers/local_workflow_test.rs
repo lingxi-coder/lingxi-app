@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use platform_api::{BudgetError, SubagentUsage};
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
@@ -12,9 +15,6 @@ use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -243,13 +243,15 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
         let agent_id = protocol::AgentId::new();
         if let Some(observer) = observer {
             observer
-                .on_event(platform_api::subagent_spawn::SubagentObservation::Allocated {
-                    agent_id,
-                    agent_type: request.subagent_type,
-                    name: request.name,
-                    model: request.model.unwrap_or_else(|| "inherited".to_string()),
-                    model_profile: request.model_profile,
-                })
+                .on_event(
+                    platform_api::subagent_spawn::SubagentObservation::Allocated {
+                        agent_id,
+                        agent_type: request.subagent_type,
+                        name: request.name,
+                        model: request.model.unwrap_or_else(|| "inherited".to_string()),
+                        model_profile: request.model_profile,
+                    },
+                )
                 .await;
         }
         Ok(completed_probe_result(agent_id))
@@ -413,7 +415,8 @@ impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
 
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError> {
+    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
+    {
         Ok(Vec::new())
     }
 
@@ -1228,6 +1231,29 @@ fn make_request_maps_effort_opt() {
         Some(serde_json::json!(8000))
     );
     assert!(make_request("general-purpose", "p", "{}").effort.is_none());
+}
+
+#[test]
+fn make_request_applies_workflow_stage_tool_denies() {
+    let request = make_request(
+        "general-purpose",
+        "stage",
+        r#"{"agentType":"builder","disallowedTools":["LocalAppGet","LocalAppScaffold","LocalAppRuntime"]}"#,
+    );
+    for tool in ["LocalAppGet", "LocalAppScaffold", "LocalAppRuntime"] {
+        assert!(
+            request
+                .additional_disallowed_tools
+                .contains(&tool.to_string()),
+            "missing stage deny for {tool}"
+        );
+    }
+    assert!(
+        request
+            .additional_disallowed_tools
+            .contains(&"Workflow".to_string()),
+        "workflow-subagent denies must still be unioned"
+    );
 }
 
 #[test]

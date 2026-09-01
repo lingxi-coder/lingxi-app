@@ -26,6 +26,7 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::result::{PermissionPrompt, SandboxOverrideReason};
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::process::ProcessOutputFile;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -725,19 +726,21 @@ fn bash_model_content(
 /// (pure metadata; the model-facing render rides on `ToolCallResult.model_content`,
 /// NOT inside `data`). Field order mirrors the binary's `return{data:{…}}`
 /// construction (`preserve_order` is on): `stdout, stderr, interrupted, isImage,
-/// returnCodeInterpretation?, noOutputExpected, backgroundTaskId?`. The two
-/// `?`-fields are OPTIONAL in the schema and are OMITTED when absent — the binary
-/// sets them to `p?.message` / `undefined`, which `JSON.stringify` drops. The
+/// returnCodeInterpretation?, noOutputExpected, backgroundTaskId?,
+/// outputTaskId?, outputFilePath?, outputFileSize?`. Every `?`-field is
+/// omitted when absent, matching the binary's `undefined` values that
+/// `JSON.stringify` drops. The
 /// telemetry-only fields LingXi used to carry here (`exit_code`, `is_error`,
 /// `timed_out`, `truncated`) are NOT part of the result data — they live in the
 /// `tengu`/`BASH_COMPLETED` analytics payload only.
 ///
+/// `output_file` is set only when a completed foreground process spilled to its
+/// rooted task-output file. Its three fields are emitted together, immediately
+/// after `backgroundTaskId` (when present), so a completed auto-backgrounded
+/// task can clear `backgroundTaskId` while retaining the output identity.
 /// `timed_out_after_ms` is set only when the command hit its timeout and was
 /// auto-moved to the background (claude-code 2.1.210+ `timedOutAfterMs`); it
-/// carries the exceeded timeout in ms and is placed right after
-/// `backgroundTaskId` to match the binary's `return{data:{…}}` field order
-/// (`…,backgroundTaskId,backgroundedByUser,timedOutAfterMs,…`; the omitted
-/// `backgroundedByUser` sits between). Omitted (undefined ⇒ dropped) otherwise.
+/// carries the exceeded timeout in ms and follows the output identity fields.
 fn bash_result_data(
     stdout: &str,
     stderr: &str,
@@ -746,6 +749,7 @@ fn bash_result_data(
     return_code_interpretation: Option<&str>,
     no_output_expected: bool,
     background_task_id: Option<&str>,
+    output_file: Option<&ProcessOutputFile>,
     timed_out_after_ms: Option<u64>,
     background_ends_with_final_response: bool,
 ) -> serde_json::Value {
@@ -774,6 +778,20 @@ fn bash_result_data(
         m.insert(
             "backgroundTaskId".into(),
             serde_json::Value::String(bid.to_string()),
+        );
+    }
+    if let Some(output_file) = output_file {
+        m.insert(
+            "outputTaskId".into(),
+            serde_json::Value::String(output_file.task_id.clone()),
+        );
+        m.insert(
+            "outputFilePath".into(),
+            serde_json::Value::String(output_file.path.clone()),
+        );
+        m.insert(
+            "outputFileSize".into(),
+            serde_json::Value::Number(output_file.size.into()),
         );
     }
     if let Some(ms) = timed_out_after_ms {
@@ -965,6 +983,7 @@ fn build_interrupted_result(
             false,
             None,
             crate::silent::is_silent_bash_command(cmd_str),
+            None,
             None,
             None,
             false,
@@ -2223,8 +2242,8 @@ impl Tool for BashTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use platform_api::sandbox::ProcessCommand as SbxCommand;
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         // PHASE-2: tool-abort `CancellationToken` threaded in by the streaming
         // executor (a child of `tool_abort`). When the turn is discarded
@@ -2446,6 +2465,7 @@ impl Tool for BashTool {
                             crate::silent::is_silent_bash_command(&cmd_str),
                             Some(&handle.task_id),
                             None,
+                            None,
                             reaped,
                         ),
                         model_content: Some(model_content),
@@ -2534,7 +2554,10 @@ impl Tool for BashTool {
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
         // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
-        let run_fut = self.ctx.process.run_foreground(&sandboxed);
+        let run_fut = self
+            .ctx
+            .process
+            .run_foreground_with_output_limit(&sandboxed, Some(bash_max_output_length()));
         let run_result = match &cancel {
             Some(token) => {
                 tokio::select! {
@@ -2570,7 +2593,10 @@ impl Tool for BashTool {
             // the background" note + `backgroundTaskId`/`timedOutAfterMs` (the
             // binary's `l !== void 0` mapper branch), exactly like an explicit
             // background launch except for the message and the extra field.
-            Ok(platform_api::ForegroundOutcome::MovedToBackground(handle)) => {
+            Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::MovedToBackground(handle),
+                ..
+            }) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -2607,6 +2633,7 @@ impl Tool for BashTool {
                         None,
                         crate::silent::is_silent_bash_command(&cmd_str),
                         Some(&handle.task_id),
+                        None,
                         Some(timeout_ms),
                         reaped,
                     ),
@@ -2617,7 +2644,10 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Ok(platform_api::ForegroundOutcome::Completed(out)) if out.timed_out => {
+            Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::Completed(out),
+                ..
+            }) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -2636,7 +2666,10 @@ impl Tool for BashTool {
                     &sandbox_violation_lines,
                 ))
             }
-            Ok(platform_api::ForegroundOutcome::Completed(out)) => {
+            Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::Completed(out),
+                output_file,
+            }) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
                 // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
                 // The main thread has no `agent_id`; a subagent call carries one.
@@ -2848,6 +2881,7 @@ impl Tool for BashTool {
                                 crate::silent::is_silent_bash_command(&cmd_str),
                                 None,
                                 None,
+                                None,
                                 false,
                             ),
                             // Display-only (egress ignores it when content_blocks
@@ -2962,6 +2996,7 @@ impl Tool for BashTool {
                         interp.message.as_deref(),
                         crate::silent::is_silent_bash_command(&cmd_str),
                         None,
+                        output_file.as_ref(),
                         None,
                         false,
                     ),
@@ -3004,8 +3039,8 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_tx, shell_test_ctx};
     use platform_api::process::ProcessOutput;
+    use tool_api::test_support::{fresh_tx, shell_test_ctx};
 
     fn use_ctx() -> ToolUseContext {
         tool_api::test_support::fresh_ctx()
@@ -3535,7 +3570,8 @@ mod tests {
         async fn spawn_background(
             &self,
             _: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+        {
             unreachable!()
         }
         async fn kill(
@@ -3804,7 +3840,8 @@ mod tests {
             async fn spawn_background(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+            {
                 unreachable!()
             }
             async fn kill(
@@ -3858,7 +3895,8 @@ mod tests {
             async fn run_foreground(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::ForegroundOutcome, platform_api::process::ProcessError> {
+            ) -> Result<platform_api::ForegroundOutcome, platform_api::process::ProcessError>
+            {
                 Ok(platform_api::ForegroundOutcome::MovedToBackground(
                     platform_api::process::ProcessHandle {
                         task_id: "local_bash_dead".into(),
@@ -3869,7 +3907,8 @@ mod tests {
             async fn spawn_background(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+            {
                 unreachable!()
             }
             async fn kill(
@@ -4368,6 +4407,7 @@ mod tests {
             None,
             false,
             Some("t1"),
+            None,
             Some(5000),
             true,
         );
@@ -4380,7 +4420,18 @@ mod tests {
             .collect::<Vec<_>>();
         let idx = |k: &str| keys.iter().position(|x| x == k).expect(k);
         assert!(idx("backgroundEndsWithFinalResponse") > idx("timedOutAfterMs"));
-        let survives = bash_result_data("", "", false, false, None, false, Some("t1"), None, false);
+        let survives = bash_result_data(
+            "",
+            "",
+            false,
+            false,
+            None,
+            false,
+            Some("t1"),
+            None,
+            None,
+            false,
+        );
         assert!(
             survives.get("backgroundEndsWithFinalResponse").is_none(),
             "`false` must be OMITTED, not serialised"
@@ -4719,6 +4770,95 @@ mod tests {
             format!("{head}{}tail", "\n".repeat(5)),
             "stdout must reach the result mapper verbatim"
         );
+        assert!(res.data.get("outputTaskId").is_none());
+    }
+
+    /// A completed task that was auto-backgrounded briefly retains its rooted
+    /// output identity after the background id is cleared. The result map keeps
+    /// the three optional fields together and in stable insertion order.
+    #[tokio::test]
+    async fn completed_auto_background_keeps_output_identity_without_background_id() {
+        struct SpilledStub;
+        #[async_trait]
+        impl ProcessRunner for SpilledStub {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!("Bash uses the foreground spill seam")
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                Ok(ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: "inline preview".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        timed_out: false,
+                    }),
+                    // The runner has already rooted and pinned this path; the
+                    // test models the auto-background completion transition by
+                    // omitting any background handle while retaining it.
+                    output_file: Some(ProcessOutputFile {
+                        task_id: "local_bash_spilled".into(),
+                        path: "/tmp/lingxi-task-output/local_bash_spilled.out".into(),
+                        size: 30_001,
+                    }),
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(SpilledStub);
+        let result = BashTool::new(ctx)
+            .call(json!({"command": "printf output"}), use_ctx(), fresh_tx())
+            .await
+            .expect("spilled completion");
+
+        assert!(result.data.get("backgroundTaskId").is_none());
+        assert_eq!(result.data["outputTaskId"], "local_bash_spilled");
+        assert_eq!(
+            result.data["outputFilePath"],
+            "/tmp/lingxi-task-output/local_bash_spilled.out"
+        );
+        assert_eq!(result.data["outputFileSize"], 30_001);
+        let keys = result
+            .data
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "stdout",
+                "stderr",
+                "interrupted",
+                "isImage",
+                "noOutputExpected",
+                "outputTaskId",
+                "outputFilePath",
+                "outputFileSize",
+            ]
+        );
     }
 
     /// The threshold the orchestrator's persistence layer reads for Bash —
@@ -4739,9 +4879,11 @@ mod tests {
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----
 
-    use std::sync::Arc;
-    use platform_api::process::{ProcessError, ProcessHandle, ProcessRunner};
+    use platform_api::process::{
+        ForegroundRunResult, ProcessError, ProcessHandle, ProcessOutputFile, ProcessRunner,
+    };
     use platform_api::sandbox::SandboxedCommand;
+    use std::sync::Arc;
 
     struct BgStub;
     #[async_trait]
@@ -5169,23 +5311,26 @@ mod tests {
 
     #[test]
     fn user_facing_name_is_bash_without_the_indicator_env() {
+        let _g = shell_env_lock();
+        let previous = std::env::var_os("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
         let tool = BashTool::new(sandboxing_on_ctx());
         // `if(!e) return "Bash"`.
-        assert_eq!(
-            tool.user_facing_name_for_input(&Value::Null).as_deref(),
-            Some("Bash")
-        );
+        let empty_input = tool.user_facing_name_for_input(&Value::Null);
         // Indicator unset ⇒ "Bash" even for a command that WILL be wrapped.
-        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
-        assert_eq!(
-            tool.user_facing_name_for_input(&json!({"command": "echo hi"}))
-                .as_deref(),
-            Some("Bash")
-        );
+        let sandboxed_input = tool.user_facing_name_for_input(&json!({"command": "echo hi"}));
+        match previous {
+            Some(value) => std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", value),
+            None => std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR"),
+        }
+        assert_eq!(empty_input.as_deref(), Some("Bash"));
+        assert_eq!(sandboxed_input.as_deref(), Some("Bash"));
     }
 
     #[test]
     fn user_facing_name_is_sandboxed_bash_with_the_indicator_env() {
+        let _g = shell_env_lock();
+        let previous = std::env::var_os("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
         let tool = BashTool::new(sandboxing_on_ctx());
         // JS truthiness, NOT `isEnvTruthy`: `"0"` is a non-empty string and so
         // ENABLES the indicator.
@@ -5195,7 +5340,10 @@ mod tests {
         let unwrapped = tool.user_facing_name_for_input(
             &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
         );
-        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        match previous {
+            Some(value) => std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", value),
+            None => std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR"),
+        }
         assert_eq!(sandboxed.as_deref(), Some("SandboxedBash"));
         assert_eq!(unwrapped.as_deref(), Some("Bash"));
     }

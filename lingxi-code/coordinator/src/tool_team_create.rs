@@ -18,6 +18,8 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
+use platform_api::team_spawn::TeamSpawnSeam;
+use platform_api::{OutputStream, RuntimeSpawner};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::coordinator::TEAM_CREATED;
 use telemetry::AnalyticsBus;
@@ -27,8 +29,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
-use platform_api::team_spawn::TeamSpawnSeam;
-use platform_api::{OutputStream, RuntimeSpawner};
 
 use crate::mode::CoordinatorMode;
 use crate::team_file::{self, TeamFile, TeamMember};
@@ -700,7 +700,10 @@ mod tests {
             *self.last_args.lock().unwrap() = Some((agent_id, name, team_name, description));
             Ok(self.task_id.clone())
         }
-        async fn kill(&self, _task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+        async fn kill(
+            &self,
+            _task_id: &str,
+        ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
             Ok(())
         }
         async fn send_message(

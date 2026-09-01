@@ -362,9 +362,13 @@ impl McpPolicyTool for platform_api::McpConfiguredToolPolicyDto {
 
     fn policy_permission(&self) -> Option<McpToolPermissionPolicy> {
         self.permission_policy.map(|policy| match policy {
-            platform_api::McpToolPermissionPolicy::AlwaysAllow => McpToolPermissionPolicy::AlwaysAllow,
+            platform_api::McpToolPermissionPolicy::AlwaysAllow => {
+                McpToolPermissionPolicy::AlwaysAllow
+            }
             platform_api::McpToolPermissionPolicy::AlwaysAsk => McpToolPermissionPolicy::AlwaysAsk,
-            platform_api::McpToolPermissionPolicy::AlwaysDeny => McpToolPermissionPolicy::AlwaysDeny,
+            platform_api::McpToolPermissionPolicy::AlwaysDeny => {
+                McpToolPermissionPolicy::AlwaysDeny
+            }
         })
     }
 }

@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use platform_api::OrchestratorHandle;
 
 /// The user-visible `/compact` result, byte-faithful to claude-code's
 /// non-verbose `buildDisplayText` (`commands/compact/compact.ts:247`):

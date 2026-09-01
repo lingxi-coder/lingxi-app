@@ -146,9 +146,9 @@ mod session_end_batch_deadline_tests {
     use crate::events::{HookEvent, HookEventType};
     use crate::registry::{HookContext, HookRegistry};
     use crate::response::{HookOutcome, HookResult};
+    use platform_api::RuntimeError;
     use protocol::HookId;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use platform_api::RuntimeError;
 
     /// `HttpTransport` stub — the Builtin arm never touches HTTP.
     struct UnusedHttp;
@@ -179,7 +179,10 @@ mod session_end_batch_deadline_tests {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(
+            &self,
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -337,12 +340,14 @@ mod command_arm_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{
+        ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand,
+    };
     use protocol::{HookId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand};
 
     /// Mock `ProcessRunner` that returns a canned `ProcessOutput` (or
     /// `ProcessError`) and records the `SandboxedCommand` it was handed so the
@@ -466,7 +471,10 @@ mod command_arm_tests {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(&self, _handle: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        async fn cancel(
+            &self,
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -2447,6 +2455,11 @@ mod async_path_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{
+        BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
+        RuntimeSpawner, SandboxPolicy, SandboxedCommand,
+    };
     use protocol::{HookId, ToolUseId};
     use std::collections::HashMap;
     use std::future::Future;
@@ -2454,11 +2467,6 @@ mod async_path_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Notify};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
-        BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
-        RuntimeSpawner, SandboxPolicy, SandboxedCommand,
-    };
 
     #[derive(Default)]
     struct AsyncRecordingSink {
@@ -4215,15 +4223,15 @@ mod http_agent_dispatch_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use protocol::{HookId, HttpResponse, ToolUseId};
-    use serde_json::json;
-    use std::sync::Mutex;
     use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
     use platform_api::subagent_spawn::{
         SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
         SubagentUsage,
     };
     use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use protocol::{HookId, HttpResponse, ToolUseId};
+    use serde_json::json;
+    use std::sync::Mutex;
 
     /// `RuntimeSpawner` stub — never exercised by these tests.
     struct UnusedRuntime;

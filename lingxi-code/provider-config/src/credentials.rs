@@ -214,7 +214,10 @@ mod tests {
                 .remove(&(service.into(), account.into()));
             Ok(())
         }
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()

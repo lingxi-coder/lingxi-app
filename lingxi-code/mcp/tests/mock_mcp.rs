@@ -493,26 +493,51 @@ async fn list_tools_truncates_oversized_descriptions() {
 
 #[tokio::test]
 async fn raw_tool_decodes_anthropic_meta_block() {
-    // Locks the `_meta.anthropic/searchHint` and `_meta.anthropic/alwaysLoad`
-    // wire keys directly via serde — important because slashes in field
-    // names cannot be expressed in Rust identifiers and rely on the
-    // serde(rename) attributes.
-    let raw_json = serde_json::json!({
-        "name": "x",
-        "description": "y",
-        "inputSchema": {},
-        "_meta": {
+    // Lock the `_meta.anthropic/searchHint` and `_meta.anthropic/alwaysLoad`
+    // wire keys through the public list-tools behavior. The production
+    // decoder intentionally keeps `_meta` opaque JSON; the client extracts
+    // the supported hints while preserving the complete value on the DTO.
+    let (client, _captured, _h) =
+        make_client_against_mock("meta-srv", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [{
+                        "name": "x",
+                        "description": "y",
+                        "inputSchema": {},
+                        "_meta": {
+                            "anthropic/searchHint": "shell",
+                            "anthropic/alwaysLoad": true,
+                            "vendor/opaque": { "preserved": [1, 2, 3] }
+                        }
+                    }]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].search_hint.as_deref(), Some("shell"));
+    assert_eq!(tools[0].always_load, Some(true));
+    assert_eq!(
+        tools[0].meta,
+        Some(json!({
             "anthropic/searchHint": "shell",
-            "anthropic/alwaysLoad": true
-        }
-    });
-    // Use a public alias-import trick to reach the private RawTool — for
-    // black-box testing we serialize a `ToolMeta` directly via the public
-    // re-export and assert symmetric encoding/decoding.
-    let meta: mcp::client::ToolMeta =
-        serde_json::from_value(raw_json["_meta"].clone()).expect("decode meta");
-    assert_eq!(meta.search_hint.as_deref(), Some("shell"));
-    assert_eq!(meta.always_load, Some(true));
+            "anthropic/alwaysLoad": true,
+            "vendor/opaque": { "preserved": [1, 2, 3] }
+        }))
+    );
 }
 
 #[tokio::test]

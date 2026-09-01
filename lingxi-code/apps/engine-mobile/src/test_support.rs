@@ -31,11 +31,11 @@ use client_adapter::{ClientEventListener, PermissionRequestSink};
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use orchestrator::StreamingApiClient;
-use tokio::sync::Mutex;
 use platform_api::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
     SecureStorage, SharingService, VoiceRecorder, WorktreeManager,
 };
+use tokio::sync::Mutex;
 
 pub use crate::host::{
     build_mobile_engine_inner, MobileConfig, MobileEngineError, MobileEngineHandle,

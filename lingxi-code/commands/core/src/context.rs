@@ -18,8 +18,8 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use std::sync::Arc;
 use platform_api::OrchestratorHandle;
+use std::sync::Arc;
 
 /// `/context` handler — renders the context-usage header panel.
 #[derive(Clone)]

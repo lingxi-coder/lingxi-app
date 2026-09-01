@@ -294,7 +294,9 @@ async fn handle_connection(
         Ok(response)
     };
 
-    match tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(websocket_config())).await {
+    match tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(websocket_config()))
+        .await
+    {
         Ok(ws) => {
             tracing::debug!(?addr, "bridge: client connected");
             match pump {

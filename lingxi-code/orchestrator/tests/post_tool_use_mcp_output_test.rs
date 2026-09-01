@@ -28,6 +28,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
@@ -40,7 +41,6 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---- unused HTTP / Runtime stubs ----
 struct UnusedHttp;
@@ -49,7 +49,10 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<platform_api::http::SseStream, HttpError> {
+    async fn stream_sse(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<platform_api::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -256,14 +259,17 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
 }
 
 /// The model-facing tool-result content lands in the turn-2 history (the
-/// `ToolResult` block sent back to the model). Serialize the last turn-2 message
-/// and return it for substring assertions.
+/// `ToolResult` block sent back to the model). Find that message rather than
+/// assuming it is last because transient reminders may trail it.
 async fn turn2_result_payload(api: &MockApiClient) -> String {
     let captured = api.captured_msgs().await;
     assert_eq!(captured.len(), 2, "expected 2 API turns");
     let turn2 = &captured[1];
-    let last = turn2.last().expect("turn-2 history has a message");
-    serde_json::to_string(last).unwrap()
+    turn2
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .find(|payload| payload.contains("tool_result"))
+        .expect("turn-2 history has a tool-result message")
 }
 
 #[tokio::test]

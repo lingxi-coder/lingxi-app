@@ -22,8 +22,9 @@
     {
       "name": "Command",
       "executor_variant": "Command",
-      "expected_outcome_on_deferred_stub": "Error",
-      "notes": "Deferred gap from M5-06: stdin payload support not yet wired. Returns HookOutcome::Error with stderr containing 'command executor not yet wired'."
+      "expected_outcome_with_runner": "Success",
+      "expected_outcome_without_runner": "Error",
+      "notes": "The Command arm is wired through ProcessRunner + Sandbox and sends the serialized hook envelope on stdin. An executor without those platform seams still returns the structured 'command executor not wired' error."
     },
     {
       "name": "Agent",

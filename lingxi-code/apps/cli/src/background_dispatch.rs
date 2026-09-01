@@ -340,6 +340,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         },
         None => uuid::Uuid::new_v4().to_string(),
     };
+    let worker_generation = uuid::Uuid::new_v4().to_string();
 
     // 2. Fields.
     let cwd = std::env::current_dir()
@@ -361,7 +362,9 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         }
     };
 
-    // 3. WRITE THE JOB (the primary visibility artifact).
+    // 3. Persist launch + state under the stable per-job lock. Launch lands
+    // first, the non-runnable `creating` row lands second, and the runnable
+    // `queued` phase is published last.
     let respawn_flags: Vec<String> = Vec::new();
     let job = JobStateWrite {
         state: "working",
@@ -382,12 +385,14 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         detail: None,
         // No live worker yet — the supervisor records the worker pid on spawn.
         worker_pid: None,
+        worker_proc_start: None,
+        phase: Some("creating"),
+        worker_generation: Some(&worker_generation),
+        claim_token: None,
+        claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_DISPATCH),
+        claim_created_at: Some(now),
+        claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
     };
-    if let Err(e) = agents_registry::write_job_state(config_home, &short, &job) {
-        eprintln!("lingxi-cli: could not write background job: {e}");
-        return exit_codes::RUNTIME_ERROR;
-    }
-
     let launch_spec = BackgroundLaunchSpec {
         schema_version: LAUNCH_SPEC_VERSION,
         short: short.clone(),
@@ -408,15 +413,33 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         env: launch_env(),
         terminal,
     };
+    let _job_lock = match agents_registry::lock_job_state(config_home, &short) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("lingxi-cli: could not lock background job state: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
     if let Err(e) = crate::background_launch::write_launch_spec(config_home, &short, &launch_spec) {
-        let _ = agents_registry::update_job_state_with_detail(
-            config_home,
-            &short,
-            "failed",
-            None,
-            "could not persist background launch context",
-        );
         eprintln!("lingxi-cli: could not write background launch context: {e}");
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if let Err(e) = agents_registry::write_job_state_with_lock_held(config_home, &short, &job) {
+        eprintln!("lingxi-cli: could not write background job: {e}");
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if let Err(e) = agents_registry::patch_job_state_with_lock_held(
+        config_home,
+        &short,
+        agents_registry::JobStatePatch {
+            phase: Some(Some("queued")),
+            claim_owner: Some(None),
+            claim_created_at: Some(None),
+            claim_lease_ms: Some(None),
+            ..Default::default()
+        },
+    ) {
+        eprintln!("lingxi-cli: could not publish background job: {e}");
         return exit_codes::RUNTIME_ERROR;
     }
 
@@ -557,6 +580,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
     let now = now_millis();
 
     let short = agents_registry::mint_short_id(config_home);
+    let worker_generation = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let seed_prompt = (!prompt.trim().is_empty()).then(|| prompt.to_string());
     let intent = intent_from_prompt(seed_prompt.as_deref());
@@ -593,10 +617,14 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         initial_prompt: None,
         detail: None,
         worker_pid: None,
+        worker_proc_start: None,
+        phase: Some("creating"),
+        worker_generation: Some(&worker_generation),
+        claim_token: None,
+        claim_owner: Some(crate::commands::respawn::CLAIM_OWNER_DISPATCH),
+        claim_created_at: Some(now),
+        claim_lease_ms: Some(crate::commands::respawn::CLAIM_LEASE_MS),
     };
-    agents_registry::write_job_state(config_home, &short, &job)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
     // Persist the exact resume/fork context. The daemon creates the live roster
     // record only after it has spawned the PTY supervisor.
     let mut options = context.options.clone().unwrap_or_default();
@@ -639,7 +667,20 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
         env: launch_env(),
         terminal,
     };
+    let _job_lock = agents_registry::lock_job_state(config_home, &short)?;
     crate::background_launch::write_launch_spec(config_home, &short, &launch_spec)?;
+    agents_registry::write_job_state_with_lock_held(config_home, &short, &job)?;
+    agents_registry::patch_job_state_with_lock_held(
+        config_home,
+        &short,
+        agents_registry::JobStatePatch {
+            phase: Some(Some("queued")),
+            claim_owner: Some(None),
+            claim_created_at: Some(None),
+            claim_lease_ms: Some(None),
+            ..Default::default()
+        },
+    )?;
     ensure_daemon(runtime_dir, lock_probe, spawner);
     Ok(short)
 }

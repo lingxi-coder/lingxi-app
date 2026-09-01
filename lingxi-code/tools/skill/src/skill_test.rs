@@ -5,9 +5,9 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_api::process::ProcessOutput;
     use protocol::{AgentId, SessionId};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
-    use platform_api::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -908,7 +908,8 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError> {
+        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+        {
             Err(platform_api::process::ProcessError::Unsupported)
         }
         async fn kill(
@@ -1361,8 +1362,6 @@ this turn, the skill is loaded — follow it directly rather than calling again.
 #[cfg(test)]
 mod fork_dispatch_tests {
     use super::*;
-    use std::sync::Arc;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
     use platform_api::process::ProcessOutput;
     use platform_api::subagent_spawn::{
@@ -1373,6 +1372,8 @@ mod fork_dispatch_tests {
         TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,
     };
+    use std::sync::Arc;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn out() -> ProcessOutput {
         ProcessOutput {

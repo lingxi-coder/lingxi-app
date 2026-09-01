@@ -145,6 +145,19 @@ final class LocalAppsWidgetTests: XCTestCase {
                 + "would get a menu item the store refuses to act on")
     }
 
+    func testTheDetailScreenHostsManagedMcpControlsInsideTheLocalAppFlow() throws {
+        let source = try clientSource("Sources/LocalApps/LocalAppDetailView.swift")
+
+        XCTAssertTrue(source.contains("case mcp"))
+        XCTAssertTrue(source.contains("LocalAppMcpControlsCard("))
+        XCTAssertTrue(source.contains("Toggle(\"\", isOn: serviceEnabled)"))
+        XCTAssertTrue(source.contains("TextEditor(text: $goal)"))
+        XCTAssertTrue(source.contains("store.setManagedMcpEnabled(appID: appID, enabled: enabled)"))
+        XCTAssertTrue(source.contains("store.setManagedMcpToolEnabled("))
+        XCTAssertTrue(source.contains("store.startManagedMcpAuthoring(appID: appID, userGoal: goal)"))
+        XCTAssertFalse(source.contains("MCPConfigurationRepository"))
+    }
+
     // ── Source-level helpers ──────────────────────────────────────────────
 
     /// A file from the iOS client tree, located relative to THIS test file so

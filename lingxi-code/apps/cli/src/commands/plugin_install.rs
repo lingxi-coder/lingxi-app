@@ -28,16 +28,40 @@
 //! filesystem tests.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
+use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
 
 use crate::commands::plugin_policy;
 use crate::commands::plugin_settings::Scope;
 
+fn registry_error_kind(error: &str) -> &'static str {
+    if error.contains("expected value")
+        || error.contains("EOF while parsing")
+        || error.contains("trailing characters")
+        || error.contains("key must be a string")
+    {
+        "parse"
+    } else if error.contains("lock") {
+        "lock"
+    } else {
+        "io"
+    }
+}
+
 /// Now as ISO-8601 with milliseconds + `Z`.
 fn iso_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn current_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread tokio runtime")
 }
 
 /// `<plugins>/installed_plugins.json` path.
@@ -49,15 +73,8 @@ fn installed_path(plugins_dir: &Path) -> PathBuf {
 /// Load the v2 installed DB (`{version:2, plugins:{...}}`); missing/malformed ⇒
 /// a fresh empty v2 doc.
 pub(crate) fn load_installed(plugins_dir: &Path) -> Value {
-    platform_api::rooted_fs::read_to_string_limited(
-        plugins_dir,
-        Path::new("installed_plugins.json"),
-        16 * 1024 * 1024,
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .filter(|v| v.get("plugins").is_some())
-    .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}))
+    plugin::installed::load_normalized(plugins_dir)
+        .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}))
 }
 
 /// Write the installed DB (pretty, no trailing newline).
@@ -121,6 +138,22 @@ fn marketplace_entry_source_path(
     name: &str,
     plugins_dir: &Path,
 ) -> Result<Option<PathBuf>, String> {
+    current_thread_runtime().block_on(marketplace_entry_source_path_with_bus(
+        market_root,
+        marketplace,
+        name,
+        plugins_dir,
+        None,
+    ))
+}
+
+async fn marketplace_entry_source_path_with_bus(
+    market_root: &Path,
+    marketplace: &str,
+    name: &str,
+    plugins_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<Option<PathBuf>, String> {
     use plugin::marketplace::{MarketplaceExternalSource, MarketplacePluginSource};
 
     let Some(raw_entry) = marketplace_entry(market_root, name) else {
@@ -141,8 +174,15 @@ fn marketplace_entry_source_path(
             | MarketplaceExternalSource::GitSubdir { .. }
             | MarketplaceExternalSource::Archive { .. }
             | MarketplaceExternalSource::Npm { .. } => {
-                return materialize_external_plugin_source(plugins_dir, marketplace, name, source)
-                    .map(Some);
+                return materialize_external_plugin_source_with_bus(
+                    plugins_dir,
+                    marketplace,
+                    name,
+                    source,
+                    analytics_bus,
+                )
+                .await
+                .map(Some);
             }
             MarketplaceExternalSource::File { .. }
             | MarketplaceExternalSource::Directory { .. } => {}
@@ -349,101 +389,387 @@ fn materialize_npm_source(
     confined_source_subdir(&root.join("node_modules"), package_path.to_str())
 }
 
+fn remote_fetch_source_kind(
+    source: &plugin::marketplace::MarketplaceExternalSource,
+) -> Option<&'static str> {
+    use plugin::marketplace::MarketplaceExternalSource;
+
+    match source {
+        MarketplaceExternalSource::Github { .. } => Some("github"),
+        MarketplaceExternalSource::Git { .. } => Some("git"),
+        MarketplaceExternalSource::Url { .. } => Some("url"),
+        MarketplaceExternalSource::GitSubdir { .. } => Some("git-subdir"),
+        MarketplaceExternalSource::Archive { .. } => Some("archive"),
+        MarketplaceExternalSource::Npm { .. } => Some("npm"),
+        MarketplaceExternalSource::File { .. }
+        | MarketplaceExternalSource::Directory { .. }
+        | MarketplaceExternalSource::Unsupported { .. } => None,
+    }
+}
+
+fn remote_fetch_host(source: &plugin::marketplace::MarketplaceExternalSource) -> String {
+    use plugin::marketplace::MarketplaceExternalSource;
+
+    let url_like = match source {
+        MarketplaceExternalSource::Github { .. } => return "github.com".to_string(),
+        MarketplaceExternalSource::Git { url, .. }
+        | MarketplaceExternalSource::Url { url, .. }
+        | MarketplaceExternalSource::GitSubdir { url, .. }
+        | MarketplaceExternalSource::Archive { url, .. } => url.as_str(),
+        MarketplaceExternalSource::Npm { registry, .. } => {
+            return registry
+                .as_deref()
+                .and_then(|registry| registry.split("://").nth(1).or(Some(registry)))
+                .and_then(|value| value.split('/').next())
+                .unwrap_or("registry.npmjs.org")
+                .trim_start_matches("git@")
+                .trim_end_matches(':')
+                .to_string();
+        }
+        MarketplaceExternalSource::File { .. }
+        | MarketplaceExternalSource::Directory { .. }
+        | MarketplaceExternalSource::Unsupported { .. } => return String::new(),
+    };
+
+    if url_like.starts_with("file://") {
+        return "file".to_string();
+    }
+    if let Some(rest) = url_like.strip_prefix("git@") {
+        return rest.split(':').next().unwrap_or("ssh").to_string();
+    }
+    url_like
+        .split("://")
+        .nth(1)
+        .unwrap_or(url_like)
+        .split('/')
+        .next()
+        .unwrap_or(url_like)
+        .to_string()
+}
+
+fn remote_fetch_error_kind(error: &str) -> &'static str {
+    if error.contains("SHA pin verification failed") {
+        "sha_pin"
+    } else if error.contains("Failed to checkout commit") {
+        "git_checkout"
+    } else if error.contains("failed to initialize plugin download") {
+        "download_init"
+    } else if error.contains("failed to install npm plugin source") {
+        "npm_install"
+    } else if error.contains("failed to clone") {
+        "git_clone"
+    } else if error.contains("failed to download") {
+        "download"
+    } else {
+        "other"
+    }
+}
+
+fn remote_fetch_metadata(
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    started: Instant,
+    result: &Result<PathBuf, String>,
+) -> Option<LogEventMetadata> {
+    let source_kind = remote_fetch_source_kind(source)?;
+    let mut metadata = LogEventMetadata::new();
+    metadata.insert(
+        "source".into(),
+        AnalyticsValue::String(source_kind.to_string()),
+    );
+    metadata.insert(
+        "host".into(),
+        AnalyticsValue::String(remote_fetch_host(source)),
+    );
+    metadata.insert(
+        "outcome".into(),
+        AnalyticsValue::String(if result.is_ok() { "success" } else { "failure" }.to_string()),
+    );
+    metadata.insert(
+        "duration_ms".into(),
+        AnalyticsValue::Int(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)),
+    );
+    metadata.insert(
+        "error_kind".into(),
+        AnalyticsValue::String(
+            result
+                .as_ref()
+                .err()
+                .map(|error| remote_fetch_error_kind(error))
+                .unwrap_or("")
+                .to_string(),
+        ),
+    );
+    Some(metadata)
+}
+
+async fn emit_remote_fetch(
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    started: Instant,
+    result: &Result<PathBuf, String>,
+) {
+    let Some(bus) = analytics_bus else {
+        return;
+    };
+    let Some(metadata) = remote_fetch_metadata(source, started, result) else {
+        return;
+    };
+    bus.log_event(telemetry::tengu::plugin::REMOTE_FETCH, metadata)
+        .await;
+}
+
+fn official_marketplace_source(entry: &Value) -> bool {
+    match plugin_policy::MarketplaceSourceIdentity::from_value(entry) {
+        Some(plugin_policy::MarketplaceSourceIdentity::Github { repo, .. }) => {
+            repo.eq_ignore_ascii_case("anthropics/claude-plugins-official")
+        }
+        Some(plugin_policy::MarketplaceSourceIdentity::Git { url, .. })
+        | Some(plugin_policy::MarketplaceSourceIdentity::Url { url }) => {
+            let lowered = url.to_ascii_lowercase();
+            lowered.contains("github.com/anthropics/claude-plugins-official")
+                || lowered.contains("github.com:anthropics/claude-plugins-official")
+        }
+        Some(
+            plugin_policy::MarketplaceSourceIdentity::Npm { .. }
+            | plugin_policy::MarketplaceSourceIdentity::File { .. }
+            | plugin_policy::MarketplaceSourceIdentity::Directory { .. },
+        )
+        | None => false,
+    }
+}
+
+const PLUGIN_ID_HASH_SALT: &str = "claude-plugin-telemetry-v1";
+
+struct InstalledEventContext {
+    name: String,
+    marketplace_name: String,
+    is_official: bool,
+    version: Option<String>,
+}
+
+fn telemetry_plugin_id_hash(name: &str, marketplace: Option<&str>) -> String {
+    let key = marketplace
+        .map(|marketplace| format!("{name}@{}", marketplace.to_ascii_lowercase()))
+        .unwrap_or_else(|| name.to_string());
+    plugin::plugin_source_sha256(format!("{key}{PLUGIN_ID_HASH_SALT}").as_bytes())[..16].to_string()
+}
+
+async fn installed_event_context(arg: &str, plugins_dir: &Path) -> Option<InstalledEventContext> {
+    let (name, requested_marketplace) = split_id(arg);
+    let registry = load_registry(plugins_dir);
+    let (marketplace_name, entry, raw_entry) = match requested_marketplace {
+        Some(marketplace) => {
+            let entry = registry.get(marketplace)?;
+            let root = install_location(entry)?;
+            Some((marketplace, entry, marketplace_entry(&root, name)?))
+        }
+        None => registry.iter().find_map(|(marketplace, entry)| {
+            let root = install_location(entry)?;
+            marketplace_entry(&root, name).map(|raw_entry| (marketplace.as_str(), entry, raw_entry))
+        }),
+    }?;
+    Some(InstalledEventContext {
+        name: name.to_string(),
+        marketplace_name: marketplace_name.to_string(),
+        is_official: official_marketplace_source(entry),
+        version: raw_entry
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+    })
+}
+
+fn installed_event_metadata(context: &InstalledEventContext) -> LogEventMetadata {
+    let mut metadata = LogEventMetadata::new();
+    metadata.insert(
+        "_PROTO_plugin_name".into(),
+        AnalyticsValue::String(context.name.clone()),
+    );
+    metadata.insert(
+        "_PROTO_marketplace_name".into(),
+        AnalyticsValue::String(context.marketplace_name.clone()),
+    );
+    metadata.insert(
+        "plugin_id_hash".into(),
+        AnalyticsValue::String(telemetry_plugin_id_hash(
+            &context.name,
+            Some(&context.marketplace_name),
+        )),
+    );
+    metadata.insert(
+        "plugin_scope".into(),
+        AnalyticsValue::String(
+            if context.is_official {
+                "official"
+            } else {
+                "user-local"
+            }
+            .to_string(),
+        ),
+    );
+    metadata.insert(
+        "plugin_name_redacted".into(),
+        AnalyticsValue::String(if context.is_official {
+            context.name.clone()
+        } else {
+            "third-party".into()
+        }),
+    );
+    metadata.insert(
+        "marketplace_name_redacted".into(),
+        AnalyticsValue::String(if context.is_official {
+            context.marketplace_name.clone()
+        } else {
+            "third-party".into()
+        }),
+    );
+    metadata.insert(
+        "is_official_plugin".into(),
+        AnalyticsValue::Bool(context.is_official),
+    );
+    metadata.insert(
+        "plugin_id".into(),
+        AnalyticsValue::String(if context.is_official {
+            format!("{}@{}", context.name, context.marketplace_name)
+        } else {
+            "third-party".into()
+        }),
+    );
+    metadata.insert(
+        "trigger".into(),
+        AnalyticsValue::String("cli-explicit".into()),
+    );
+    metadata.insert(
+        "install_source".into(),
+        AnalyticsValue::String("cli-explicit".into()),
+    );
+    if let Some(version) = context.version.as_ref() {
+        metadata.insert("version".into(), AnalyticsValue::String(version.clone()));
+    }
+    metadata
+}
+
+async fn emit_installed_event(bus: Arc<AnalyticsBus>, arg: &str, plugins_dir: &Path) {
+    let Some(context) = installed_event_context(arg, plugins_dir).await else {
+        return;
+    };
+    bus.log_event(
+        telemetry::tengu::plugin::INSTALLED,
+        installed_event_metadata(&context),
+    )
+    .await;
+}
+
 /// Fetch/clone one external plugin-entry `source` into a scratch subdirectory
 /// of `work` and return the resolved plugin-root directory to copy from.
 fn resolve_external_plugin_source(
     source: &plugin::marketplace::MarketplaceExternalSource,
     work: &Path,
 ) -> Result<PathBuf, String> {
+    current_thread_runtime().block_on(resolve_external_plugin_source_with_bus(source, work, None))
+}
+
+async fn resolve_external_plugin_source_with_bus(
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    work: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<PathBuf, String> {
     use plugin::marketplace::MarketplaceExternalSource;
 
-    match source {
-        MarketplaceExternalSource::Github {
-            repo,
-            git_ref,
-            path,
-            sha,
-        } => {
-            let checkout = work.join("checkout");
-            let head = plugin::clone_plugin_git_pinned(
-                &format!("https://github.com/{repo}.git"),
-                git_ref.as_deref().unwrap_or_default(),
-                sha.as_deref(),
-                &checkout,
-            )?;
-            verify_sha_pin(sha.as_deref(), &head)?;
-            confined_source_subdir(&checkout, path.as_deref())
-        }
-        MarketplaceExternalSource::Git {
-            url,
-            git_ref,
-            path,
-            sha,
-        } => {
-            let checkout = work.join("checkout");
-            let head = plugin::clone_plugin_git_pinned(
+    let started = Instant::now();
+    let result = (|| -> Result<PathBuf, String> {
+        match source {
+            MarketplaceExternalSource::Github {
+                repo,
+                git_ref,
+                path,
+                sha,
+            } => {
+                let checkout = work.join("checkout");
+                let head = plugin::clone_plugin_git_pinned(
+                    &format!("https://github.com/{repo}.git"),
+                    git_ref.as_deref().unwrap_or_default(),
+                    sha.as_deref(),
+                    &checkout,
+                )?;
+                verify_sha_pin(sha.as_deref(), &head)?;
+                confined_source_subdir(&checkout, path.as_deref())
+            }
+            MarketplaceExternalSource::Git {
                 url,
-                git_ref.as_deref().unwrap_or_default(),
-                sha.as_deref(),
-                &checkout,
-            )?;
-            verify_sha_pin(sha.as_deref(), &head)?;
-            confined_source_subdir(&checkout, path.as_deref())
-        }
-        // Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY
-        // ("Full git repository URL (https:// or git@)"), not an archive —
-        // that is the separate `archive` arm below. The whole checkout is
-        // the plugin root (this arm has no `path`).
-        MarketplaceExternalSource::Url { url, git_ref, sha } => {
-            let checkout = work.join("checkout");
-            let head = plugin::clone_plugin_git_pinned(
+                git_ref,
+                path,
+                sha,
+            } => {
+                let checkout = work.join("checkout");
+                let head = plugin::clone_plugin_git_pinned(
+                    url,
+                    git_ref.as_deref().unwrap_or_default(),
+                    sha.as_deref(),
+                    &checkout,
+                )?;
+                verify_sha_pin(sha.as_deref(), &head)?;
+                confined_source_subdir(&checkout, path.as_deref())
+            }
+            // Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY
+            // ("Full git repository URL (https:// or git@)"), not an archive —
+            // that is the separate `archive` arm below. The whole checkout is
+            // the plugin root (this arm has no `path`).
+            MarketplaceExternalSource::Url { url, git_ref, sha } => {
+                let checkout = work.join("checkout");
+                let head = plugin::clone_plugin_git_pinned(
+                    url,
+                    git_ref.as_deref().unwrap_or_default(),
+                    sha.as_deref(),
+                    &checkout,
+                )?;
+                verify_sha_pin(sha.as_deref(), &head)?;
+                Ok(checkout)
+            }
+            // A subdirectory of a larger repository (monorepo). The oracle
+            // partial-clones (`--filter=tree:0`); this port does a full clone
+            // and confines to `path` (same result, more bandwidth — see the
+            // `GitSubdir` doc comment).
+            MarketplaceExternalSource::GitSubdir {
                 url,
-                git_ref.as_deref().unwrap_or_default(),
-                sha.as_deref(),
-                &checkout,
-            )?;
-            verify_sha_pin(sha.as_deref(), &head)?;
-            Ok(checkout)
+                path,
+                git_ref,
+                sha,
+            } => {
+                let checkout = work.join("checkout");
+                let head = plugin::clone_plugin_git_pinned(
+                    url,
+                    git_ref.as_deref().unwrap_or_default(),
+                    sha.as_deref(),
+                    &checkout,
+                )?;
+                verify_sha_pin(sha.as_deref(), &head)?;
+                confined_source_subdir(&checkout, Some(path.as_str()))
+            }
+            MarketplaceExternalSource::Archive { url, sha256 } => {
+                download_external_plugin_archive(url, sha256.as_deref(), work)
+            }
+            MarketplaceExternalSource::Npm {
+                package,
+                version,
+                registry,
+            } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
+            MarketplaceExternalSource::File { .. }
+            | MarketplaceExternalSource::Directory { .. } => {
+                Err("local marketplace source must stay inside its catalog root".to_string())
+            }
+            MarketplaceExternalSource::Unsupported { error } => Err(format!(
+                "plugin source type unsupported{}",
+                error
+                    .as_deref()
+                    .map(|e| format!(": {e}"))
+                    .unwrap_or_default()
+            )),
         }
-        // A subdirectory of a larger repository (monorepo). The oracle
-        // partial-clones (`--filter=tree:0`); this port does a full clone
-        // and confines to `path` (same result, more bandwidth — see the
-        // `GitSubdir` doc comment).
-        MarketplaceExternalSource::GitSubdir {
-            url,
-            path,
-            git_ref,
-            sha,
-        } => {
-            let checkout = work.join("checkout");
-            let head = plugin::clone_plugin_git_pinned(
-                url,
-                git_ref.as_deref().unwrap_or_default(),
-                sha.as_deref(),
-                &checkout,
-            )?;
-            verify_sha_pin(sha.as_deref(), &head)?;
-            confined_source_subdir(&checkout, Some(path.as_str()))
-        }
-        MarketplaceExternalSource::Archive { url, sha256 } => {
-            download_external_plugin_archive(url, sha256.as_deref(), work)
-        }
-        MarketplaceExternalSource::Npm {
-            package,
-            version,
-            registry,
-        } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
-        MarketplaceExternalSource::File { .. } | MarketplaceExternalSource::Directory { .. } => {
-            Err("local marketplace source must stay inside its catalog root".to_string())
-        }
-        MarketplaceExternalSource::Unsupported { error } => Err(format!(
-            "plugin source type unsupported{}",
-            error
-                .as_deref()
-                .map(|e| format!(": {e}"))
-                .unwrap_or_default()
-        )),
-    }
+    })();
+    emit_remote_fetch(analytics_bus, source, started, &result).await;
+    result
 }
 
 fn materialize_external_plugin_source(
@@ -451,6 +777,22 @@ fn materialize_external_plugin_source(
     marketplace: &str,
     name: &str,
     source: &plugin::marketplace::MarketplaceExternalSource,
+) -> Result<PathBuf, String> {
+    current_thread_runtime().block_on(materialize_external_plugin_source_with_bus(
+        plugins_dir,
+        marketplace,
+        name,
+        source,
+        None,
+    ))
+}
+
+async fn materialize_external_plugin_source_with_bus(
+    plugins_dir: &Path,
+    marketplace: &str,
+    name: &str,
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<PathBuf, String> {
     let cache_key = external_source_cache_key(source);
     let destination = plugins_dir
@@ -476,8 +818,9 @@ fn materialize_external_plugin_source(
     std::fs::create_dir_all(&work)
         .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
 
+    let resolved = resolve_external_plugin_source_with_bus(source, &work, analytics_bus).await;
     let result = (|| -> Result<(), String> {
-        let resolved = resolve_external_plugin_source(source, &work)?;
+        let resolved = resolved?;
         copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
         plugin::ensure_plugin_manifest(&payload)?;
         if let Err(error) = std::fs::rename(&payload, &destination) {
@@ -512,6 +855,14 @@ fn resolve_plugin_source(
     arg: &str,
     plugins_dir: &Path,
 ) -> Result<Option<(String, String, PathBuf)>, String> {
+    current_thread_runtime().block_on(resolve_plugin_source_with_bus(arg, plugins_dir, None))
+}
+
+async fn resolve_plugin_source_with_bus(
+    arg: &str,
+    plugins_dir: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<Option<(String, String, PathBuf)>, String> {
     let (name, requested_marketplace) = split_id(arg);
     let registry = load_registry(plugins_dir);
     match requested_marketplace {
@@ -524,8 +875,14 @@ fn resolve_plugin_source(
             let Some(root) = install_location(entry) else {
                 return Ok(None);
             };
-            let Some(source) =
-                marketplace_entry_source_path(&root, marketplace, name, plugins_dir)?
+            let Some(source) = marketplace_entry_source_path_with_bus(
+                &root,
+                marketplace,
+                name,
+                plugins_dir,
+                analytics_bus,
+            )
+            .await?
             else {
                 return Ok(None);
             };
@@ -548,8 +905,14 @@ fn resolve_plugin_source(
                     Some(marketplace),
                     identity.as_ref(),
                 )?;
-                if let Some(source) =
-                    marketplace_entry_source_path(&root, marketplace, name, plugins_dir)?
+                if let Some(source) = marketplace_entry_source_path_with_bus(
+                    &root,
+                    marketplace,
+                    name,
+                    plugins_dir,
+                    analytics_bus,
+                )
+                .await?
                 {
                     return Ok(Some((
                         format!("{name}@{marketplace}"),
@@ -854,41 +1217,6 @@ fn persist_plugin_options(
     )
 }
 
-/// `deletePluginOptions` parity (settings half): clear a plugin's non-sensitive
-/// userConfig (`settings.pluginConfigs[<plugin_key>]`) at `scope` on uninstall.
-/// Keyed by the install-time config identity (`name@marketplace` for installed
-/// marketplace/cache plugins, bare name for local-only plugins). A missing key
-/// is a no-op; a write failure logs claude-code's
-/// byte-faithful warn. Clearing the plugin's secure-storage `pluginSecrets` is a
-/// documented follow-up (the sync CLI writes no secrets, so none linger).
-fn clear_plugin_config(scope: Scope, home: &Path, cwd: &Path, plugin_key: &str) {
-    let path = scope.path(home, cwd);
-    let Ok(settings) = read_settings_map(&path) else {
-        return;
-    };
-    let Some(mut plugin_configs) = settings
-        .get("pluginConfigs")
-        .and_then(Value::as_object)
-        .cloned()
-    else {
-        return;
-    };
-    if plugin_configs.remove(plugin_key).is_none() {
-        return;
-    }
-    if let Err(e) = update_settings(
-        &path,
-        vec![(
-            "pluginConfigs".to_string(),
-            Some(Value::Object(plugin_configs)),
-        )],
-    ) {
-        tracing::warn!(
-            "deletePluginOptions: failed to clear settings.pluginConfigs[{plugin_key}]: {e}"
-        );
-    }
-}
-
 /// The `projectPath` an install record carries at this scope: the realpath of
 /// `cwd` for `project`/`local`, `None` for `user` (which is cwd-independent).
 /// Records are keyed per (scope, projectPath), so this identifies the slot.
@@ -926,17 +1254,68 @@ pub fn run_install(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    current_thread_runtime().block_on(run_install_async(
+        arg,
+        scope,
+        config,
+        plugins_dir,
+        home,
+        cwd,
+        None,
+    ))
+}
+
+pub fn run_install_with_bus(
+    arg: &str,
+    scope: Option<&str>,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
+    current_thread_runtime().block_on(run_install_async(
+        arg,
+        scope,
+        config,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+    ))
+}
+
+async fn run_install_async(
+    arg: &str,
+    scope: Option<&str>,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
     let parsed_scope = parse_scope(scope)?;
+    let telemetry_scope = super::plugin::telemetry_scope(Some(parsed_scope.label()));
     let settings_path = parsed_scope.path(home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
-    let previous_installed = platform_api::rooted_fs::read_to_string_limited(
-        plugins_dir,
-        Path::new("installed_plugins.json"),
-        16 * 1024 * 1024,
-    )
-    .ok()
-    .map(String::into_bytes);
-    let previous_db = load_installed(plugins_dir);
+    let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
+    {
+        Ok(tx) => tx,
+        Err(error) => {
+            super::plugin::emit_plugin_state_file_error(
+                analytics_bus,
+                "install",
+                "transaction_begin",
+                registry_error_kind(&error),
+            )
+            .await;
+            return Err(format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &error)
+            ));
+        }
+    };
+    let previous_db = installed_tx.document().clone();
     let mut created_paths = Vec::new();
     let result = run_install_inner(
         arg,
@@ -945,25 +1324,37 @@ pub fn run_install(
         plugins_dir,
         home,
         cwd,
+        &mut installed_tx,
         false,
         None,
         &mut Vec::new(),
         &mut created_paths,
-    );
+        analytics_bus,
+    )
+    .await;
     if result.is_err() {
         rollback_install_transaction(
             plugins_dir,
             &settings_path,
             previous_settings.as_deref(),
-            previous_installed.as_deref(),
+            &installed_tx,
             &previous_db,
             &created_paths,
         );
+    } else {
+        super::plugin::emit_plugin_cli_result(
+            analytics_bus,
+            telemetry::tengu::plugin::INSTALLED_CLI,
+            super::plugin::PluginCommandOutcome::Success,
+            telemetry_scope,
+            1,
+        )
+        .await;
     }
     result
 }
 
-fn restore_file(path: &Path, previous: Option<&[u8]>) {
+pub(crate) fn restore_file(path: &Path, previous: Option<&[u8]>) {
     match previous {
         Some(bytes) => {
             if let Some(parent) = path.parent() {
@@ -1053,11 +1444,273 @@ pub(crate) fn confined_plugin_data_path(plugins_dir: &Path, id: &str) -> Option<
     )
 }
 
+pub(crate) fn rollback_installed_registry(
+    installed_tx: &plugin::installed::InstalledRegistryTransaction,
+) {
+    if let Err(error) = installed_tx.restore_previous() {
+        tracing::warn!(%error, "failed to restore installed plugin registry");
+    }
+}
+
+fn strict_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
+    if !path.exists() {
+        return Ok(Map::new());
+    }
+    read_settings_map(path).map_err(|error| error.to_string())
+}
+
+pub(crate) fn edit_enabled_strict(
+    scope: Scope,
+    home: &Path,
+    cwd: &Path,
+    id: &str,
+    value: Option<bool>,
+) -> Result<(), String> {
+    let path = scope.path(home, cwd);
+    let mut settings = strict_settings_map(&path)?;
+    let mut enabled = settings
+        .remove("enabledPlugins")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    match value {
+        Some(enabled_value) => {
+            enabled.insert(id.to_string(), Value::Bool(enabled_value));
+        }
+        None => {
+            enabled.remove(id);
+        }
+    }
+    update_settings(
+        &path,
+        vec![("enabledPlugins".to_string(), Some(Value::Object(enabled)))],
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn clear_plugin_config_strict(
+    scope: Scope,
+    home: &Path,
+    cwd: &Path,
+    plugin_key: &str,
+) -> Result<(), String> {
+    let path = scope.path(home, cwd);
+    if !path.exists() {
+        return Ok(());
+    }
+    let settings = strict_settings_map(&path)?;
+    let Some(mut plugin_configs) = settings
+        .get("pluginConfigs")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    if plugin_configs.remove(plugin_key).is_none() {
+        return Ok(());
+    }
+    update_settings(
+        &path,
+        vec![(
+            "pluginConfigs".to_string(),
+            Some(Value::Object(plugin_configs)),
+        )],
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn canonical_record_install_path(plugins_dir: &Path, record: &Value) -> Option<PathBuf> {
+    record
+        .get("installPath")
+        .and_then(Value::as_str)
+        .and_then(|path| confined_cache_record_path(plugins_dir, Path::new(path)))
+}
+
+pub(crate) fn document_references_install_path(
+    doc: &Value,
+    plugins_dir: &Path,
+    candidate: &Path,
+) -> bool {
+    doc.get("plugins")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|plugins| plugins.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|record| canonical_record_install_path(plugins_dir, record))
+        .any(|path| path == candidate)
+}
+
+pub(crate) fn plugin_has_records(doc: &Value, id: &str) -> bool {
+    doc.get("plugins")
+        .and_then(|plugins| plugins.get(id))
+        .and_then(Value::as_array)
+        .is_some_and(|records| !records.is_empty())
+}
+
+pub(crate) fn unreferenced_removed_record_paths(
+    plugins_dir: &Path,
+    doc: &Value,
+    removed_records: &[Value],
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in removed_records
+        .iter()
+        .filter_map(|record| canonical_record_install_path(plugins_dir, record))
+    {
+        if !document_references_install_path(doc, plugins_dir, &path) && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn mark_orphaned_cache_paths(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::write(path.join(".orphaned_at"), iso_now());
+    }
+}
+
+fn ensure_confined_cache_parent(root: &Path, parent: &Path) -> Result<PathBuf, String> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| "Refusing to publish a plugin outside its cache root".to_string())?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("Refusing to publish a plugin outside its cache root".to_string());
+    }
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("Refusing to use a symlinked plugin cache root".to_string());
+            }
+            if !metadata.file_type().is_dir() {
+                return Err("Plugin cache root is not a directory".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(root).map_err(|create_error| {
+                format!("Failed to create plugin cache root: {create_error}")
+            })?;
+        }
+        Err(error) => {
+            return Err(format!("Failed to inspect plugin cache root: {error}"));
+        }
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if let Ok(metadata) = std::fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                return Err("Refusing to use a symlinked plugin cache path".to_string());
+            }
+            if !metadata.file_type().is_dir() {
+                return Err(format!(
+                    "Plugin cache path component is not a directory: {}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create plugin cache path: {error}"))?;
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("Failed to resolve plugin cache root: {error}"))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|error| format!("Failed to resolve plugin cache path: {error}"))?;
+    if canonical_parent == canonical_root || canonical_parent.starts_with(&canonical_root) {
+        Ok(canonical_parent)
+    } else {
+        Err("Refusing to publish a plugin outside its cache root".to_string())
+    }
+}
+
+struct PublishedCacheDir {
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+impl PublishedCacheDir {
+    fn rollback(self) {
+        if let Some(backup) = self.backup {
+            let _ = std::fs::remove_dir_all(&self.destination);
+            let _ = std::fs::rename(backup, self.destination);
+        } else {
+            let _ = std::fs::remove_dir_all(self.destination);
+        }
+    }
+
+    fn finalize(self) {
+        if let Some(backup) = self.backup {
+            let _ = std::fs::remove_dir_all(backup);
+        }
+    }
+}
+
+fn stage_and_publish_cache_dir(
+    plugins_dir: &Path,
+    source: &Path,
+    destination: &Path,
+) -> Result<PublishedCacheDir, String> {
+    let cache_root = plugins_dir.join("cache");
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "invalid plugin cache destination".to_string())?;
+    let canonical_parent = ensure_confined_cache_parent(&cache_root, parent)?;
+    if destination.exists() && confined_cache_record_path(plugins_dir, destination).is_none() {
+        return Err("Refusing to replace a plugin cache outside its root".to_string());
+    }
+    let staging = parent.join(format!(
+        ".staged-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(error) = copy_dir(source, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error.to_string());
+    }
+    plugin::ensure_plugin_manifest(&staging)?;
+    let canonical_staged = std::fs::canonicalize(&staging)
+        .map_err(|error| format!("Failed to resolve staged plugin cache: {error}"))?;
+    if canonical_staged.parent() != Some(canonical_parent.as_path()) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("Refusing to publish a plugin outside its cache root".to_string());
+    }
+    if canonical_staged == destination {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("Plugin staging path collides with its destination".to_string());
+    }
+    let backup = destination.exists().then(|| {
+        parent.join(format!(
+            ".backup-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    });
+    if let Some(backup_path) = &backup {
+        std::fs::rename(destination, backup_path)
+            .map_err(|error| format!("Failed to stage existing plugin cache: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&canonical_staged, destination) {
+        if let Some(backup_path) = &backup {
+            let _ = std::fs::rename(backup_path, destination);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("Failed to publish plugin cache: {error}"));
+    }
+    Ok(PublishedCacheDir {
+        destination: destination.to_path_buf(),
+        backup,
+    })
+}
+
 fn rollback_install_transaction(
     plugins_dir: &Path,
     settings_path: &Path,
     previous_settings: Option<&[u8]>,
-    previous_installed: Option<&[u8]>,
+    installed_tx: &plugin::installed::InstalledRegistryTransaction,
     previous_db: &Value,
     created_paths: &[PathBuf],
 ) {
@@ -1067,7 +1720,7 @@ fn rollback_install_transaction(
         }
     }
     let previous_paths = install_paths(previous_db);
-    for path in install_paths(&load_installed(plugins_dir)) {
+    for path in install_paths(installed_tx.document()) {
         if !previous_paths.contains(&path) {
             if let Some(path) = confined_cache_record_path(plugins_dir, &path) {
                 let _ = std::fs::remove_dir_all(path);
@@ -1075,36 +1728,23 @@ fn rollback_install_transaction(
         }
     }
     restore_file(settings_path, previous_settings);
-    match previous_installed {
-        Some(bytes) => {
-            if let Err(error) = platform_api::rooted_fs::atomic_write(
-                plugins_dir,
-                Path::new("installed_plugins.json"),
-                bytes,
-                platform_api::AtomicWriteOptions::default(),
-            ) {
-                tracing::warn!(%error, "failed to restore installed plugin registry");
-            }
-        }
-        None => {
-            let _ =
-                platform_api::rooted_fs::remove_file(plugins_dir, Path::new("installed_plugins.json"));
-        }
-    }
+    rollback_installed_registry(installed_tx);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_install_inner(
+async fn run_install_inner(
     arg: &str,
     scope: Option<&str>,
     config: &[String],
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
+    installed_tx: &mut plugin::installed::InstalledRegistryTransaction,
     auto_installed: bool,
     required_by: Option<&str>,
     dependency_stack: &mut Vec<String>,
     created_paths: &mut Vec<PathBuf>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
     // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
@@ -1123,12 +1763,14 @@ fn run_install_inner(
 
     // Resolve only after the marketplace policy gate. External typed sources
     // are materialized into a confined source cache by the same resolver.
-    let resolved = resolve_plugin_source(arg, plugins_dir).map_err(|reason| {
-        format!(
-            "Installing plugin \"{arg}\"...{}",
-            fail("install", arg, &reason)
-        )
-    })?;
+    let resolved = resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus)
+        .await
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
     let Some((_, market_name, plugin_src)) = resolved else {
         let reason = match market {
             Some(market) => format!(
@@ -1176,9 +1818,12 @@ fn run_install_inner(
         plugins_dir,
         home,
         cwd,
+        installed_tx,
         dependency_stack,
         created_paths,
-    );
+        analytics_bus,
+    )
+    .await;
     dependency_stack.pop();
     dependency_result?;
 
@@ -1207,19 +1852,25 @@ fn run_install_inner(
     .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
     .unwrap_or_else(|| "unknown".to_string());
 
-    let mut installed = load_installed(plugins_dir);
     let proj = project_path(scope, cwd);
     // Already installed AT THIS (scope, projectPath) slot? A record at a
     // different scope does NOT block — install appends a second per-scope record.
-    if installed
+    if installed_tx
+        .document()
         .get("plugins")
         .and_then(|p| p.get(&full_id))
         .and_then(Value::as_array)
         .is_some_and(|a| a.iter().any(|r| record_matches(r, scope, &proj)))
     {
         if auto_installed {
-            add_required_by_metadata(&mut installed, &full_id, scope, &proj, required_by);
-            write_installed(plugins_dir, &installed)?;
+            add_required_by_metadata(
+                installed_tx.document_mut(),
+                &full_id,
+                scope,
+                &proj,
+                required_by,
+            );
+            installed_tx.persist()?;
             edit_enabled(scope, home, cwd, &full_id, Some(true))?;
         }
         return Ok(format!(
@@ -1304,7 +1955,11 @@ fn run_install_inner(
         record.insert("projectPath".to_string(), Value::String(p.clone()));
     }
     // Append to the plugin's record array (create it if this is the first scope).
-    if let Some(plugins) = installed.get_mut("plugins").and_then(Value::as_object_mut) {
+    if let Some(plugins) = installed_tx
+        .document_mut()
+        .get_mut("plugins")
+        .and_then(Value::as_object_mut)
+    {
         let arr = plugins
             .entry(full_id.clone())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -1312,7 +1967,8 @@ fn run_install_inner(
             a.push(Value::Object(record));
         }
     }
-    write_installed(plugins_dir, &installed)
+    installed_tx
+        .persist()
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
     edit_enabled(
         scope,
@@ -1334,7 +1990,7 @@ fn run_install_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn install_declared_dependencies(
+async fn install_declared_dependencies(
     owner_id: &str,
     owner_marketplace: &str,
     plugin_source: &Path,
@@ -1342,8 +1998,10 @@ fn install_declared_dependencies(
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
+    installed_tx: &mut plugin::installed::InstalledRegistryTransaction,
     dependency_stack: &mut Vec<String>,
     created_paths: &mut Vec<PathBuf>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<(), String> {
     let registry = load_registry(plugins_dir);
     let market_root = registry
@@ -1401,8 +2059,10 @@ fn install_declared_dependencies(
                 "Plugin \"{owner_id}\" cannot install cross-marketplace dependency \"{dependency_id}\""
             ));
         }
-        let (_, _, dependency_source) = resolve_plugin_source(&dependency_id, plugins_dir)?
-            .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
+        let (_, _, dependency_source) =
+            resolve_plugin_source_with_bus(&dependency_id, plugins_dir, analytics_bus)
+                .await?
+                .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
         let available = plugin_version(&dependency_source);
         if !plugin::version_satisfies_all(&available, &requirements)? {
             return Err(format!(
@@ -1410,18 +2070,21 @@ fn install_declared_dependencies(
                 requirements.join(", ")
             ));
         }
-        run_install_inner(
+        Box::pin(run_install_inner(
             &dependency_id,
             scope,
             &[],
             plugins_dir,
             home,
             cwd,
+            installed_tx,
             true,
             Some(owner_id),
             dependency_stack,
             created_paths,
-        )?;
+            analytics_bus,
+        ))
+        .await?;
     }
     Ok(())
 }
@@ -1471,13 +2134,46 @@ fn add_required_by_metadata(
 pub async fn run_install_secure(
     arg: &str,
     scope: Option<&str>,
+    yes: bool,
     config: &[String],
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
-    let Some((plugin_key, _, plugin_source)) = resolve_plugin_source(arg, plugins_dir)? else {
-        return run_install(arg, scope, config, plugins_dir, home, cwd);
+    run_install_secure_with_bus(arg, scope, yes, config, plugins_dir, home, cwd, None).await
+}
+
+/// Async production wrapper that can share the caller's analytics bus for
+/// install-complete telemetry.
+pub async fn run_install_secure_with_bus(
+    arg: &str,
+    scope: Option<&str>,
+    _yes: bool,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<Arc<AnalyticsBus>>,
+) -> Result<String, String> {
+    let Some((plugin_key, _, plugin_source)) =
+        resolve_plugin_source_with_bus(arg, plugins_dir, analytics_bus.as_ref()).await?
+    else {
+        let result = run_install_async(
+            arg,
+            scope,
+            config,
+            plugins_dir,
+            home,
+            cwd,
+            analytics_bus.as_ref(),
+        )
+        .await;
+        if result.is_ok() {
+            if let Some(bus) = analytics_bus.clone() {
+                emit_installed_event(bus, arg, plugins_dir).await;
+            }
+        }
+        return result;
     };
     let schema = read_user_config_schema(&plugin_source);
     let pairs = parse_config_pairs(config, &schema)?;
@@ -1486,7 +2182,22 @@ pub async fn run_install_secure(
         .filter(|pair| field_is_sensitive(&schema, &pair.key))
         .collect();
     if sensitive.is_empty() {
-        return run_install(arg, scope, config, plugins_dir, home, cwd);
+        let result = run_install_async(
+            arg,
+            scope,
+            config,
+            plugins_dir,
+            home,
+            cwd,
+            analytics_bus.as_ref(),
+        )
+        .await;
+        if result.is_ok() {
+            if let Some(bus) = analytics_bus.clone() {
+                emit_installed_event(bus, arg, plugins_dir).await;
+            }
+        }
+        return result;
     }
 
     let stack = engine_desktop::build_shared_credential_stack(home, false)
@@ -1513,9 +2224,22 @@ pub async fn run_install_secure(
         }
     }
 
-    let result = run_install(arg, scope, config, plugins_dir, home, cwd);
+    let result = run_install_async(
+        arg,
+        scope,
+        config,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus.as_ref(),
+    )
+    .await;
     if result.is_err() {
         rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
+    } else {
+        if let Some(bus) = analytics_bus {
+            emit_installed_event(bus, arg, plugins_dir).await;
+        }
     }
     result
 }
@@ -1541,116 +2265,167 @@ pub fn run_uninstall(
     arg: &str,
     scope: Option<&str>,
     keep_data: bool,
+    prune: bool,
+    yes: bool,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    current_thread_runtime().block_on(run_uninstall_with_bus(
+        arg,
+        scope,
+        keep_data,
+        prune,
+        yes,
+        plugins_dir,
+        home,
+        cwd,
+        None,
+    ))
+}
+
+pub async fn run_uninstall_with_bus(
+    arg: &str,
+    scope: Option<&str>,
+    keep_data: bool,
     _prune: bool,
     _yes: bool,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
     let scope = parse_scope(scope)?;
+    let telemetry_scope = super::plugin::telemetry_scope(Some(scope.label()));
     let proj = project_path(scope, cwd);
+    let settings_path = scope.path(home, cwd);
+    let previous_settings = std::fs::read(&settings_path).ok();
     let (name, market) = split_id(arg);
-    let mut installed = load_installed(plugins_dir);
+    let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
+    {
+        Ok(tx) => tx,
+        Err(error) => {
+            super::plugin::emit_plugin_state_file_error(
+                analytics_bus,
+                "uninstall",
+                "transaction_begin",
+                registry_error_kind(&error),
+            )
+            .await;
+            return Err(fail("uninstall", arg, &error));
+        }
+    };
+    let result = async {
+        // Resolve the full id: explicit `@market`, else the first installed key
+        // whose name-part matches.
+        let full_id = match market {
+            Some(market) => format!("{name}@{market}"),
+            None => installed_tx
+                .document()
+                .get("plugins")
+                .and_then(Value::as_object)
+                .and_then(|p| p.keys().find(|k| name_of(k) == name).cloned())
+                .unwrap_or_else(|| name.to_string()),
+        };
 
-    // Resolve the full id: explicit `@market`, else the first installed key
-    // whose name-part matches.
-    let full_id = match market {
-        Some(market) => format!("{name}@{market}"),
-        None => installed
+        let records = installed_tx
+            .document()
             .get("plugins")
-            .and_then(Value::as_object)
-            .and_then(|p| p.keys().find(|k| name_of(k) == name).cloned())
-            .unwrap_or_else(|| name.to_string()),
-    };
+            .and_then(|p| p.get(&full_id))
+            .and_then(Value::as_array)
+            .filter(|a| !a.is_empty());
+        let Some(records) = records else {
+            return Err(fail(
+                "uninstall",
+                arg,
+                &format!("Plugin \"{full_id}\" not found in installed plugins"),
+            ));
+        };
 
-    let records = installed
-        .get("plugins")
-        .and_then(|p| p.get(&full_id))
-        .and_then(Value::as_array)
-        .filter(|a| !a.is_empty());
-    let Some(records) = records else {
-        return Err(fail(
-            "uninstall",
-            arg,
-            &format!("Plugin \"{full_id}\" not found in installed plugins"),
-        ));
-    };
-
-    // Records at the requested (scope, projectPath) slot. If none, the plugin is
-    // installed at some OTHER scope — name it, matching the binary.
-    let matching: Vec<Value> = records
-        .iter()
-        .filter(|r| record_matches(r, scope, &proj))
-        .cloned()
-        .collect();
-    if matching.is_empty() {
-        let mut other: Vec<&str> = Vec::new();
-        for s in records
+        // Records at the requested (scope, projectPath) slot. If none, the plugin is
+        // installed at some OTHER scope — name it, matching the binary.
+        let matching: Vec<Value> = records
             .iter()
-            .filter_map(|r| r.get("scope").and_then(Value::as_str))
+            .filter(|r| record_matches(r, scope, &proj))
+            .cloned()
+            .collect();
+        if matching.is_empty() {
+            let mut other: Vec<&str> = Vec::new();
+            for s in records
+                .iter()
+                .filter_map(|r| r.get("scope").and_then(Value::as_str))
+            {
+                if !other.contains(&s) {
+                    other.push(s);
+                }
+            }
+            let installed_in = other.join(", ");
+            let first = other.first().copied().unwrap_or("user");
+            return Err(fail(
+                "uninstall",
+                arg,
+                &format!(
+                    "Plugin \"{full_id}\" is installed in {installed_in} scope, not {}. \
+                     Use --scope {first} to uninstall.",
+                    scope.label()
+                ),
+            ));
+        }
+
+        // Drop only the matched records; remove the key once the array is empty.
+        if let Some(plugins) = installed_tx
+            .document_mut()
+            .get_mut("plugins")
+            .and_then(Value::as_object_mut)
         {
-            if !other.contains(&s) {
-                other.push(s);
+            if let Some(arr) = plugins.get_mut(&full_id).and_then(Value::as_array_mut) {
+                arr.retain(|r| !record_matches(r, scope, &proj));
+                if arr.is_empty() {
+                    plugins.remove(&full_id);
+                }
             }
         }
-        let installed_in = other.join(", ");
-        let first = other.first().copied().unwrap_or("user");
-        return Err(fail(
-            "uninstall",
-            arg,
-            &format!(
-                "Plugin \"{full_id}\" is installed in {installed_in} scope, not {}. \
-                 Use --scope {first} to uninstall.",
-                scope.label()
-            ),
+
+        installed_tx
+            .persist()
+            .map_err(|error| fail("uninstall", arg, &error))?;
+        edit_enabled_strict(scope, home, cwd, &full_id, None)
+            .map_err(|error| fail("uninstall", arg, &error))?;
+        clear_plugin_config_strict(scope, home, cwd, &full_id)
+            .map_err(|error| fail("uninstall", arg, &error))?;
+
+        mark_orphaned_cache_paths(&unreferenced_removed_record_paths(
+            plugins_dir,
+            installed_tx.document(),
+            &matching,
         ));
-    }
-
-    // Orphan only the matched records' cache dirs (marker; deferred sweep deletes).
-    for rec in &matching {
-        if let Some(path) = rec.get("installPath").and_then(Value::as_str) {
-            if let Some(path) = confined_cache_record_path(plugins_dir, Path::new(path)) {
-                let _ = std::fs::write(path.join(".orphaned_at"), iso_now());
+        if !keep_data && !plugin_has_records(installed_tx.document(), &full_id) {
+            if let Some(path) = confined_plugin_data_path(plugins_dir, &full_id) {
+                let _ = std::fs::remove_dir_all(path);
             }
         }
+
+        super::plugin::emit_plugin_cli_result(
+            analytics_bus,
+            telemetry::tengu::plugin::UNINSTALLED_CLI,
+            super::plugin::PluginCommandOutcome::Success,
+            telemetry_scope,
+            1,
+        )
+        .await;
+
+        Ok(format!(
+            "✔ Successfully uninstalled plugin: {} (scope: {})",
+            name_of(&full_id),
+            scope.label()
+        ))
     }
-
-    // Drop only the matched records; remove the key once the array is empty.
-    if let Some(plugins) = installed.get_mut("plugins").and_then(Value::as_object_mut) {
-        if let Some(arr) = plugins.get_mut(&full_id).and_then(Value::as_array_mut) {
-            arr.retain(|r| !record_matches(r, scope, &proj));
-            if arr.is_empty() {
-                plugins.remove(&full_id);
-            }
-        }
+    .await;
+    if result.is_err() {
+        restore_file(&settings_path, previous_settings.as_deref());
+        rollback_installed_registry(&installed_tx);
     }
-    write_installed(plugins_dir, &installed).map_err(|e| fail("uninstall", arg, &e))?;
-
-    let has_remaining_records = installed
-        .get("plugins")
-        .and_then(|plugins| plugins.get(&full_id))
-        .and_then(Value::as_array)
-        .is_some_and(|records| !records.is_empty());
-    if !keep_data && !has_remaining_records {
-        if let Some(path) = confined_plugin_data_path(plugins_dir, &full_id) {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
-
-    // DELETE the enabledPlugins key at THIS scope only (uninstall removes the
-    // entry entirely, unlike `disable` which sets it to false).
-    let _ = edit_enabled(scope, home, cwd, &full_id, None);
-
-    // deletePluginOptions parity: clear the plugin's persisted non-sensitive
-    // userConfig (`settings.pluginConfigs[<name@marketplace>]`) at this scope so
-    // stale options don't linger for a later re-install.
-    clear_plugin_config(scope, home, cwd, &full_id);
-
-    Ok(format!(
-        "✔ Successfully uninstalled plugin: {} (scope: {})",
-        name_of(&full_id),
-        scope.label()
-    ))
+    result
 }
 
 /// Async production uninstall wrapper. Credential cleanup is independent from
@@ -1664,6 +2439,7 @@ pub async fn run_uninstall_secure(
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
     let scope_value = parse_scope(scope)?;
     let project = project_path(scope_value, cwd);
@@ -1736,7 +2512,18 @@ pub async fn run_uninstall_secure(
             }
         }
     }
-    let mut message = match run_uninstall(arg, scope, keep_data, prune, yes, plugins_dir, home, cwd)
+    let mut message = match run_uninstall_with_bus(
+        arg,
+        scope,
+        keep_data,
+        prune,
+        yes,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+    )
+    .await
     {
         Ok(message) => message,
         Err(error) => {
@@ -1747,14 +2534,16 @@ pub async fn run_uninstall_secure(
         }
     };
     if prune {
-        let prune_message = crate::commands::plugin_prune::run_prune(
+        let prune_message = crate::commands::plugin_prune::run_prune_with_bus(
             false,
             yes,
             scope_value.label(),
             plugins_dir,
             home,
             cwd,
-        )?;
+            analytics_bus,
+        )
+        .await?;
         message.push('\n');
         message.push_str(&prune_message);
     } else {
@@ -1806,6 +2595,14 @@ fn scope_project_path(scope: &str, cwd: &Path) -> Option<PathBuf> {
 /// dir (mirrors `iP`): a bare id (no `@`) or a market/plugin the registry can't
 /// resolve ⇒ `None` (⇒ the caller's `Plugin "<name>" not found`).
 fn resolve_source(plugins_dir: &Path, id: &str) -> Result<Option<(String, PathBuf)>, String> {
+    current_thread_runtime().block_on(resolve_source_with_bus(plugins_dir, id, None))
+}
+
+async fn resolve_source_with_bus(
+    plugins_dir: &Path,
+    id: &str,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<Option<(String, PathBuf)>, String> {
     let (name, market) = split_id(id);
     let Some(market) = market else {
         return Ok(None);
@@ -1820,7 +2617,8 @@ fn resolve_source(plugins_dir: &Path, id: &str) -> Result<Option<(String, PathBu
         return Ok(None);
     };
     Ok(
-        marketplace_entry_source_path(&root, market, name, plugins_dir)?
+        marketplace_entry_source_path_with_bus(&root, market, name, plugins_dir, analytics_bus)
+            .await?
             .map(|source| (market.to_string(), source)),
     )
 }
@@ -1866,186 +2664,247 @@ pub fn run_update(
     _home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
+    current_thread_runtime().block_on(run_update_async(arg, scope, plugins_dir, _home, cwd, None))
+}
+
+pub fn run_update_with_bus(
+    arg: &str,
+    scope: &str,
+    plugins_dir: &Path,
+    _home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
+    current_thread_runtime().block_on(run_update_async(
+        arg,
+        scope,
+        plugins_dir,
+        _home,
+        cwd,
+        analytics_bus,
+    ))
+}
+
+pub async fn run_update_async(
+    arg: &str,
+    scope: &str,
+    plugins_dir: &Path,
+    _home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
     let scope = parse_update_scope(scope)?;
+    let telemetry_scope = super::plugin::telemetry_scope(Some(scope));
     let header = format!("Checking for updates for plugin \"{arg}\" at {scope} scope\u{2026}\n");
-    match update_inner(arg, scope, plugins_dir, cwd) {
-        Ok(msg) => Ok(format!("{header}\u{2714} {msg}")),
+    match update_inner(arg, scope, plugins_dir, cwd, analytics_bus).await {
+        Ok(msg) => {
+            if !msg.contains("already at the latest version") {
+                super::plugin::emit_plugin_cli_result(
+                    analytics_bus,
+                    telemetry::tengu::plugin::UPDATED_CLI,
+                    super::plugin::PluginCommandOutcome::Success,
+                    telemetry_scope,
+                    1,
+                )
+                .await;
+            }
+            Ok(format!("{header}\u{2714} {msg}"))
+        }
         Err(reason) => Err(format!("{header}{}", fail("update", arg, &reason))),
     }
 }
 
 /// The core update resolution + materialization (sans the header/`✔`/`✘`
 /// framing). `Ok` carries the bare success sentence; `Err` the bare reason.
-fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Result<String, String> {
+async fn update_inner(
+    arg: &str,
+    scope: &str,
+    plugins_dir: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<String, String> {
     // Display name for every message = the ORIGINAL arg's name-part (matches the
     // binary's `n` from `zo(e)`, which case-resolution does not rewrite).
     let (name, market) = split_id(arg);
 
     // Resolve the id against the installed keys (exact, then case-insensitive —
     // `Loe`); a bare name that matches no key stays bare (⇒ "not found").
-    let mut installed = load_installed(plugins_dir);
-    let base = match market {
-        Some(m) => format!("{name}@{m}"),
-        None => arg.to_string(),
+    let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
+    {
+        Ok(tx) => tx,
+        Err(error) => {
+            super::plugin::emit_plugin_state_file_error(
+                analytics_bus,
+                "update",
+                "transaction_begin",
+                registry_error_kind(&error),
+            )
+            .await;
+            return Err(error);
+        }
     };
-    let id = installed
-        .get("plugins")
-        .and_then(Value::as_object)
-        .and_then(|p| {
-            p.keys()
-                .find(|k| k.as_str() == base)
-                .cloned()
-                .or_else(|| p.keys().find(|k| k.eq_ignore_ascii_case(&base)).cloned())
-        })
-        .unwrap_or(base);
+    let mut committed = false;
+    let result = async {
+        let base = match market {
+            Some(m) => format!("{name}@{m}"),
+            None => arg.to_string(),
+        };
+        let id = installed_tx
+            .document()
+            .get("plugins")
+            .and_then(Value::as_object)
+            .and_then(|p| {
+                p.keys()
+                    .find(|k| k.as_str() == base)
+                    .cloned()
+                    .or_else(|| p.keys().find(|k| k.eq_ignore_ascii_case(&base)).cloned())
+            })
+            .unwrap_or(base);
 
-    if let Some(marketplace) = marketplace_of(&id) {
-        let registry = load_registry(plugins_dir);
-        let source = registry
-            .get(marketplace)
-            .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
-        plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())?;
-    }
+        if let Some(marketplace) = marketplace_of(&id) {
+            let registry = load_registry(plugins_dir);
+            let source = registry
+                .get(marketplace)
+                .and_then(plugin_policy::MarketplaceSourceIdentity::from_value);
+            plugin_policy::ensure_marketplace_source_allowed(Some(marketplace), source.as_ref())?;
+        }
 
-    // `iP`: the plugin must resolve to a marketplace source, else "not found".
-    let Some((market_name, plugin_src)) = resolve_source(plugins_dir, &id)? else {
-        return Err(format!("Plugin \"{name}\" not found"));
-    };
+        let Some((market_name, plugin_src)) =
+            resolve_source_with_bus(plugins_dir, &id, analytics_bus).await?
+        else {
+            return Err(format!("Plugin \"{name}\" not found"));
+        };
 
-    // Must have at least one installed record for the id.
-    let has_records = installed
-        .get("plugins")
-        .and_then(|p| p.get(&id))
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty());
-    if !has_records {
-        return Err(format!("Plugin \"{name}\" is not installed"));
-    }
-
-    // Filter by scope; the projectPath only disambiguates WHICH record when
-    // several share the scope (an empty scope set ⇒ "not installed at scope").
-    let project_path = scope_project_path(scope, cwd);
-    let want_pp = project_path.as_ref().map(|p| p.display().to_string());
-    let (idx, old_version, old_path) = {
-        let records = installed
+        let has_records = installed_tx
+            .document()
             .get("plugins")
             .and_then(|p| p.get(&id))
             .and_then(Value::as_array)
-            .unwrap();
-        let scoped: Vec<usize> = records
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.get("scope").and_then(Value::as_str) == Some(scope))
-            .map(|(i, _)| i)
-            .collect();
-        if scoped.is_empty() {
-            let disp = match &want_pp {
-                Some(p) => format!("{scope} ({p})"),
-                None => scope.to_string(),
-            };
-            return Err(format!(
-                "Plugin \"{name}\" is not installed at scope {disp}"
+            .is_some_and(|a| !a.is_empty());
+        if !has_records {
+            return Err(format!("Plugin \"{name}\" is not installed"));
+        }
+
+        let project_path = scope_project_path(scope, cwd);
+        let want_pp = project_path.as_ref().map(|p| p.display().to_string());
+        let (idx, old_version, old_path) = {
+            let records = installed_tx
+                .document()
+                .get("plugins")
+                .and_then(|p| p.get(&id))
+                .and_then(Value::as_array)
+                .unwrap();
+            let scoped: Vec<usize> = records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.get("scope").and_then(Value::as_str) == Some(scope))
+                .map(|(i, _)| i)
+                .collect();
+            if scoped.is_empty() {
+                let disp = match &want_pp {
+                    Some(p) => format!("{scope} ({p})"),
+                    None => scope.to_string(),
+                };
+                return Err(format!(
+                    "Plugin \"{name}\" is not installed at scope {disp}"
+                ));
+            }
+            let idx = scoped
+                .iter()
+                .copied()
+                .find(|&i| {
+                    let rp = records[i].get("projectPath").and_then(Value::as_str);
+                    match &want_pp {
+                        Some(w) => rp == Some(w.as_str()),
+                        None => rp.is_none(),
+                    }
+                })
+                .unwrap_or(scoped[0]);
+            let ov = records[idx]
+                .get("version")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let op = records[idx]
+                .get("installPath")
+                .and_then(Value::as_str)
+                .map(String::from);
+            (idx, ov, op)
+        };
+
+        let new_version = plugin_version(&plugin_src);
+        let id_name = split_id(&id).0;
+        let dest = plugins_dir
+            .join("cache")
+            .join(sanitize(&market_name, false))
+            .join(sanitize(id_name, false))
+            .join(sanitize(&new_version, true));
+        let dest_str = dest.display().to_string();
+
+        if new_version != "unknown"
+            && (old_version.as_deref() == Some(new_version.as_str())
+                || old_path.as_deref() == Some(dest_str.as_str()))
+        {
+            return Ok(format!(
+                "{name} is already at the latest version ({new_version})."
             ));
         }
-        let idx = scoped
-            .iter()
-            .copied()
-            .find(|&i| {
-                let rp = records[i].get("projectPath").and_then(Value::as_str);
-                match &want_pp {
-                    Some(w) => rp == Some(w.as_str()),
-                    None => rp.is_none(),
-                }
-            })
-            .unwrap_or(scoped[0]);
-        let ov = records[idx]
-            .get("version")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let op = records[idx]
-            .get("installPath")
-            .and_then(Value::as_str)
-            .map(String::from);
-        (idx, ov, op)
-    };
 
-    // The marketplace's current version + the cache dir it would land in.
-    let new_version = plugin_version(&plugin_src);
-    let id_name = split_id(&id).0;
-    let dest = plugins_dir
-        .join("cache")
-        .join(sanitize(&market_name, false))
-        .join(sanitize(id_name, false))
-        .join(sanitize(&new_version, true));
-    let dest_str = dest.display().to_string();
+        let published = stage_and_publish_cache_dir(plugins_dir, &plugin_src, &dest)?;
+        let now = iso_now();
+        if let Some(rec) = installed_tx
+            .document_mut()
+            .get_mut("plugins")
+            .and_then(Value::as_object_mut)
+            .and_then(|p| p.get_mut(&id))
+            .and_then(Value::as_array_mut)
+            .and_then(|a| a.get_mut(idx))
+            .and_then(Value::as_object_mut)
+        {
+            rec.insert("installPath".to_string(), Value::String(dest_str.clone()));
+            rec.insert("version".to_string(), Value::String(new_version.clone()));
+            rec.insert("lastUpdated".to_string(), Value::String(now));
+        }
+        if let Err(error) = installed_tx.persist() {
+            published.rollback();
+            return Err(error);
+        }
+        committed = true;
+        published.finalize();
 
-    // Already current (same version, or the record already points at the target
-    // cache dir) — no copy, no record change.
-    if new_version != "unknown"
-        && (old_version.as_deref() == Some(new_version.as_str())
-            || old_path.as_deref() == Some(dest_str.as_str()))
-    {
-        return Ok(format!(
-            "{name} is already at the latest version ({new_version})."
-        ));
-    }
-
-    // Re-materialize into the (new) versioned cache.
-    let _ = std::fs::remove_dir_all(&dest);
-    copy_dir(&plugin_src, &dest).map_err(|e| e.to_string())?;
-
-    // Bump the record in place (installPath/version/lastUpdated; installedAt and
-    // scope are preserved).
-    let now = iso_now();
-    if let Some(rec) = installed
-        .get_mut("plugins")
-        .and_then(Value::as_object_mut)
-        .and_then(|p| p.get_mut(&id))
-        .and_then(Value::as_array_mut)
-        .and_then(|a| a.get_mut(idx))
-        .and_then(Value::as_object_mut)
-    {
-        rec.insert("installPath".to_string(), Value::String(dest_str.clone()));
-        rec.insert("version".to_string(), Value::String(new_version.clone()));
-        rec.insert("lastUpdated".to_string(), Value::String(now));
-    }
-    write_installed(plugins_dir, &installed)?;
-
-    // Orphan the previous cache dir when it changed and no other record still
-    // references it (marker only; the deferred sweep that deletes it is not
-    // ported — same as uninstall).
-    if let Some(old) = old_path.as_deref() {
-        if old != dest_str {
-            let still_referenced = installed
-                .get("plugins")
-                .and_then(Value::as_object)
-                .is_some_and(|p| {
-                    p.values()
-                        .filter_map(Value::as_array)
-                        .flatten()
-                        .any(|r| r.get("installPath").and_then(Value::as_str) == Some(old))
-                });
-            if !still_referenced {
+        if let Some(old) = old_path.as_deref() {
+            if old != dest_str {
                 if let Some(path) = confined_cache_record_path(plugins_dir, Path::new(old)) {
-                    let _ = std::fs::write(path.join(".orphaned_at"), iso_now());
+                    if !document_references_install_path(installed_tx.document(), plugins_dir, &path)
+                    {
+                        mark_orphaned_cache_paths(&[path]);
+                    }
                 }
             }
         }
-    }
 
-    let scope_disp = match &want_pp {
-        Some(p) => format!("{scope} ({p})"),
-        None => scope.to_string(),
-    };
-    let old_disp = old_version.as_deref().unwrap_or("unknown");
-    Ok(format!(
-        "Plugin \"{name}\" updated from {old_disp} to {new_version} for scope {scope_disp}. Restart to apply changes."
-    ))
+        let scope_disp = match &want_pp {
+            Some(p) => format!("{scope} ({p})"),
+            None => scope.to_string(),
+        };
+        let old_disp = old_version.as_deref().unwrap_or("unknown");
+        Ok(format!(
+            "Plugin \"{name}\" updated from {old_disp} to {new_version} for scope {scope_disp}. Restart to apply changes."
+        ))
+    }
+    .await;
+    if result.is_err() && !committed {
+        rollback_installed_registry(&installed_tx);
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::plugin::telemetry_test_support::{capture_events, event};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use telemetry::{AnalyticsValue, InMemorySink};
 
     struct Env {
         _tmp: tempfile::TempDir,
@@ -2113,6 +2972,50 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
     }
 
+    fn write_legacy_only_installed(e: &Env, doc: &Value) {
+        std::fs::write(
+            e.plugins.join("installed_plugins_v2.json"),
+            serde_json::to_string(doc).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn string_field<'a>(metadata: &'a telemetry::LogEventMetadata, key: &str) -> &'a str {
+        match metadata.get(key) {
+            Some(AnalyticsValue::String(value)) => value.as_str(),
+            other => panic!("missing string field {key}: {other:?}"),
+        }
+    }
+
+    fn bool_field(metadata: &telemetry::LogEventMetadata, key: &str) -> bool {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Bool(value)) => *value,
+            other => panic!("missing bool field {key}: {other:?}"),
+        }
+    }
+
+    fn int_field(metadata: &telemetry::LogEventMetadata, key: &str) -> i64 {
+        match metadata.get(key) {
+            Some(AnalyticsValue::Int(value)) => *value,
+            other => panic!("missing int field {key}: {other:?}"),
+        }
+    }
+
+    fn runtime_bus() -> (
+        tokio::runtime::Runtime,
+        Arc<AnalyticsBus>,
+        Arc<InMemorySink>,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        runtime.block_on(bus.attach_sink(sink.clone() as Arc<dyn telemetry::AnalyticsSink>));
+        (runtime, bus, sink)
+    }
+
     /// Tiny recursive file walk (test-only) yielding every file path under
     /// `root` as a String.
     fn walkdir(root: &Path) -> Vec<String> {
@@ -2158,6 +3061,201 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn install_failure_restores_legacy_only_registry() {
+        let e = env();
+        let legacy = serde_json::json!({
+            "plugins": {
+                "oldmkt": {
+                    "weather": {
+                        "version": "1.0.0",
+                        "installPath": "cache/oldmkt/weather/1.0.0",
+                        "added": "2026-08-31T00:00:00.000Z"
+                    }
+                }
+            }
+        });
+        std::fs::write(
+            e.plugins.join("installed_plugins_v2.json"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+
+        let err = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("settings write failure must roll back the migrated registry");
+
+        assert!(
+            err.contains("Failed to install plugin")
+                || err.contains("Is a directory")
+                || err.contains("Not a directory"),
+            "got: {err}"
+        );
+        assert!(!installed_path(&e.plugins).exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn install_begin_io_failure_emits_state_file_error() {
+        let e = env();
+        std::fs::remove_dir_all(&e.plugins).unwrap();
+        std::fs::write(&e.plugins, "not-a-directory").unwrap();
+
+        let (result, events) =
+            capture_events(|| run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd));
+
+        assert!(result.is_err());
+        let record = event(&events, telemetry::tengu::plugin::STATE_FILE_ERROR);
+        assert_eq!(record["outcome"], "failure");
+        assert_eq!(record["command"], "install");
+        assert_eq!(record["operation"], "transaction_begin");
+        assert_eq!(record["error_kind"], "io");
+    }
+
+    #[test]
+    fn install_secure_emits_installed_to_analytics_bus() {
+        let e = env();
+        let (runtime, bus, sink) = runtime_bus();
+
+        let result = runtime.block_on(run_install_secure_with_bus(
+            "hello@mymkt",
+            None,
+            false,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+            Some(bus),
+        ));
+
+        assert!(result.is_ok(), "install should succeed: {result:?}");
+        let events = runtime.block_on(sink.events());
+        let installed = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::plugin::INSTALLED)
+            .expect("installed event");
+        assert_eq!(
+            string_field(&installed.metadata, "_PROTO_plugin_name"),
+            "hello"
+        );
+        assert_eq!(
+            string_field(&installed.metadata, "_PROTO_marketplace_name"),
+            "mymkt"
+        );
+        assert_eq!(
+            string_field(&installed.metadata, "plugin_id_hash"),
+            telemetry_plugin_id_hash("hello", Some("mymkt"))
+        );
+        assert_eq!(
+            string_field(&installed.metadata, "plugin_scope"),
+            "user-local"
+        );
+        assert_eq!(
+            string_field(&installed.metadata, "plugin_name_redacted"),
+            "third-party"
+        );
+        assert_eq!(
+            string_field(&installed.metadata, "marketplace_name_redacted"),
+            "third-party"
+        );
+        assert!(!bool_field(&installed.metadata, "is_official_plugin"));
+        assert_eq!(
+            string_field(&installed.metadata, "plugin_id"),
+            "third-party"
+        );
+        assert_eq!(string_field(&installed.metadata, "trigger"), "cli-explicit");
+        assert_eq!(
+            string_field(&installed.metadata, "install_source"),
+            "cli-explicit"
+        );
+        assert!(!installed.metadata.contains_key("version"));
+        assert!(!installed.metadata.contains_key("marketplace.is_official"));
+        assert!(!installed.metadata.contains_key("install.trigger"));
+        assert!(!installed
+            .metadata
+            .contains_key("install.disabled_by_default"));
+    }
+
+    #[test]
+    fn concurrent_install_and_migration_preserve_both_records() {
+        let e = env();
+        let legacy_cache = e.plugins.join("cache/oldmkt/weather/1.0.0");
+        std::fs::create_dir_all(legacy_cache.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            legacy_cache
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"weather","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            e.plugins.join("installed_plugins_v2.json"),
+            serde_json::to_string(&serde_json::json!({
+                "plugins": {
+                    "oldmkt": {
+                        "weather": {
+                            "version": "1.0.0",
+                            "installPath": "cache/oldmkt/weather/1.0.0",
+                            "added": "2026-08-31T00:00:00.000Z"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let discover_plugins = e.plugins.clone();
+        let discover_barrier = barrier.clone();
+        let discover = thread::spawn(move || {
+            discover_barrier.wait();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(plugin::discover_recorded_plugins(&discover_plugins))
+        });
+
+        let install_plugins = e.plugins.clone();
+        let install_home = e.home.clone();
+        let install_cwd = e.cwd.clone();
+        let install_barrier = barrier;
+        let install = thread::spawn(move || {
+            install_barrier.wait();
+            run_install(
+                "hello@mymkt",
+                None,
+                &[],
+                &install_plugins,
+                &install_home,
+                &install_cwd,
+            )
+        });
+
+        let discovered = discover.join().unwrap();
+        let install_result = install.join().unwrap().unwrap();
+
+        assert!(
+            discovered
+                .iter()
+                .any(|(_, manifest, _)| manifest.name == "weather"),
+            "discovered plugin set must retain the legacy record"
+        );
+        assert_eq!(
+            install_result,
+            "Installing plugin \"hello@mymkt\"...✔ Successfully installed plugin: hello@mymkt (scope: user)"
+        );
+        assert!(installed_db(&e)["plugins"].get("weather@oldmkt").is_some());
+        assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_some());
     }
 
     #[test]
@@ -2395,6 +3493,7 @@ mod tests {
         let e = env();
         let repository = e._tmp.path().join("url-source");
         let (repository, _head) = init_git_plugin_fixture(&repository);
+        let (runtime, bus, sink) = runtime_bus();
 
         let source = plugin::marketplace::MarketplaceExternalSource::Url {
             url: format!("file://{}", repository.display()),
@@ -2402,13 +3501,38 @@ mod tests {
             sha: None,
         };
 
-        let materialized =
-            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo", &source).unwrap();
+        let materialized = runtime
+            .block_on(materialize_external_plugin_source_with_bus(
+                &e.plugins,
+                "mymkt",
+                "urlrepo",
+                &source,
+                Some(&bus),
+            ))
+            .unwrap();
+        let events = runtime.block_on(sink.events());
 
         assert!(materialized
             .join(branding::PLUGIN_MANIFEST_DIR)
             .join("plugin.json")
             .is_file());
+        let record = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::plugin::REMOTE_FETCH)
+            .expect("remote fetch event");
+        assert_eq!(string_field(&record.metadata, "source"), "url");
+        assert_eq!(string_field(&record.metadata, "host"), "file");
+        assert_eq!(string_field(&record.metadata, "outcome"), "success");
+        assert_eq!(string_field(&record.metadata, "error_kind"), "");
+        assert!(int_field(&record.metadata, "duration_ms") >= 0);
+        for value in record.metadata.values() {
+            if let AnalyticsValue::String(value) = value {
+                assert!(
+                    !value.contains(&repository.display().to_string()),
+                    "remote fetch metadata must not leak repository path: {value}"
+                );
+            }
+        }
     }
 
     /// Oracle `ohr`: a `sha` that is not in the repository at all reaches
@@ -2421,6 +3545,7 @@ mod tests {
         let e = env();
         let repository = e._tmp.path().join("url-source-pinned");
         let (repository, head) = init_git_plugin_fixture(&repository);
+        let (runtime, bus, sink) = runtime_bus();
         let wrong_sha = if head.starts_with('f') {
             "0".repeat(40)
         } else {
@@ -2433,12 +3558,52 @@ mod tests {
             sha: Some(wrong_sha),
         };
 
-        let error =
-            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-pinned", &source)
-                .expect_err("a mismatched sha pin must refuse the install");
+        let error = runtime
+            .block_on(materialize_external_plugin_source_with_bus(
+                &e.plugins,
+                "mymkt",
+                "urlrepo-pinned",
+                &source,
+                Some(&bus),
+            ))
+            .expect_err("a mismatched sha pin must refuse the install");
+        let events = runtime.block_on(sink.events());
         assert!(
             error.contains("Failed to checkout commit"),
             "expected the pinned checkout to fail, got: {error}"
+        );
+        let record = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::plugin::REMOTE_FETCH)
+            .expect("remote fetch event");
+        assert_eq!(string_field(&record.metadata, "source"), "url");
+        assert_eq!(string_field(&record.metadata, "host"), "file");
+        assert_eq!(string_field(&record.metadata, "outcome"), "failure");
+        assert_eq!(string_field(&record.metadata, "error_kind"), "git_checkout");
+        assert!(int_field(&record.metadata, "duration_ms") >= 0);
+    }
+
+    #[test]
+    fn local_external_source_does_not_emit_remote_fetch() {
+        let e = env();
+        let (runtime, bus, sink) = runtime_bus();
+        let source = plugin::marketplace::MarketplaceExternalSource::Directory {
+            path: "./plugins/hello".to_string(),
+        };
+
+        let error = runtime
+            .block_on(materialize_external_plugin_source_with_bus(
+                &e.plugins,
+                "mymkt",
+                "hello",
+                &source,
+                Some(&bus),
+            ))
+            .expect_err("directory sources should not route through remote fetch");
+        assert!(error.contains("local marketplace source"));
+        assert!(
+            runtime.block_on(sink.events()).is_empty(),
+            "local source must not emit remote fetch"
         );
     }
 
@@ -3625,5 +4790,212 @@ mod tests {
         let arr = db["plugins"]["hello@mymkt"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["scope"], "user");
+    }
+
+    #[test]
+    fn uninstall_keeps_shared_cache_and_data_when_another_scope_still_references_it() {
+        let e = env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let data_dir = e.plugins.join("data").join(sanitize("hello@mymkt", false));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("sentinel"), "keep").unwrap();
+
+        run_uninstall(
+            "hello@mymkt",
+            Some("project"),
+            false,
+            false,
+            true,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+
+        let shared_cache = e.plugins.join("cache/mymkt/hello/1.2.3");
+        assert!(shared_cache.join("commands/hi.md").exists());
+        assert!(!shared_cache.join(".orphaned_at").exists());
+        assert!(data_dir.join("sentinel").exists());
+    }
+
+    #[test]
+    fn uninstall_settings_failure_restores_registry_and_skips_cleanup() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let data_dir = e.plugins.join("data").join(sanitize("hello@mymkt", false));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("sentinel"), "keep").unwrap();
+        std::fs::remove_file(e.home.join("settings.json")).unwrap();
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+
+        let err = run_uninstall(
+            "hello@mymkt",
+            None,
+            false,
+            false,
+            true,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Failed to uninstall plugin"), "{err}");
+        assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_some());
+        assert!(!e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/.orphaned_at")
+            .exists());
+        assert!(data_dir.join("sentinel").exists());
+    }
+
+    #[test]
+    fn uninstall_failure_restores_legacy_only_registry() {
+        let e = env();
+        let legacy = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "hello@mymkt": [{
+                    "scope": "user",
+                    "installPath": e.plugins.join("cache/mymkt/hello/1.2.3").display().to_string(),
+                    "version": "1.2.3",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z"
+                }]
+            }
+        });
+        write_legacy_only_installed(&e, &legacy);
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+
+        let err = run_uninstall(
+            "hello@mymkt",
+            None,
+            false,
+            false,
+            true,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Failed to uninstall plugin"), "{err}");
+        assert!(!installed_path(&e.plugins).exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_symlinked_cache_root_restores_legacy_only_registry() {
+        use std::os::unix::fs::symlink;
+
+        let e = env();
+        let legacy = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "hello@mymkt": [{
+                    "scope": "user",
+                    "installPath": "cache/mymkt/hello/1.2.3",
+                    "version": "1.2.3",
+                    "installedAt": "2026-01-01T00:00:00.000Z",
+                    "lastUpdated": "2026-01-01T00:00:00.000Z"
+                }]
+            }
+        });
+        write_legacy_only_installed(&e, &legacy);
+        let outside = e._tmp.path().join("outside-cache");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, e.plugins.join("cache")).unwrap();
+        bump_market_hello(&e, "2.0.0");
+
+        let err = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap_err();
+
+        assert!(
+            err.contains("Refusing to use a symlinked plugin cache root"),
+            "{err}"
+        );
+        assert!(!installed_path(&e.plugins).exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn update_versionless_shared_cache_leaves_no_staging_or_backup_dirs() {
+        let e = env();
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"hello"}"#,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join("commands")
+                .join("new.md"),
+            "# new",
+        )
+        .unwrap();
+
+        run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+
+        let parent = e.plugins.join("cache/mymkt/hello");
+        let leftovers: Vec<String> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".staged-") || name.starts_with(".backup-"))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
     }
 }

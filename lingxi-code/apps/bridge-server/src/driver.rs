@@ -871,7 +871,8 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::runtime::RuntimeError> {
+        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::runtime::RuntimeError>
+        {
             tokio::spawn(task);
             Ok(platform_api::BackgroundTaskHandle {
                 task_name: name.to_string(),

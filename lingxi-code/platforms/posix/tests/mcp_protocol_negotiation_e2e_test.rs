@@ -6,11 +6,11 @@
 //! request/result contract together.
 
 use axum::{extract::State, routing::post, Json, Router};
+use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 #[derive(Clone, Copy)]
 enum DiscoveryMode {
@@ -288,7 +288,10 @@ async fn remote_auth_error_is_not_treated_as_compatibility() {
         .await
         .expect_err("remote auth must be reported");
     assert!(
-        matches!(error, platform_api::McpError::HttpResponse { status: 401, .. }),
+        matches!(
+            error,
+            platform_api::McpError::HttpResponse { status: 401, .. }
+        ),
         "unexpected remote auth classification: {error:?}"
     );
 }

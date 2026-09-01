@@ -33,11 +33,11 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use permission::gate::{PermissionDecision, PermissionGate};
 use permission::loader::permission_rules_from_settings_json;
 use permission::{PermissionMode, PermissionPolicy, PermissionRuleSource, PolicyPermissionGate};
+use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
 use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
-use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
 
 // ============================================================================
 // Helpers (mirror parity_mcp_invocation.rs)

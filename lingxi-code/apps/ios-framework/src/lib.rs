@@ -51,12 +51,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
-#[cfg(feature = "uniffi")]
-use std::sync::{Mutex as StdMutex, OnceLock};
 #[cfg(feature = "uniffi")]
 use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
 use platform_api::{CameraControl, SharingService, VoiceRecorder};
+use std::sync::Arc;
+#[cfg(feature = "uniffi")]
+use std::sync::{Mutex as StdMutex, OnceLock};
 // `Platform` is named only inside the `cfg(target_os = "ios")` constructor body;
 // importing it unconditionally warns on the host build, so scope it to iOS.
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
@@ -718,10 +718,14 @@ fn ios_mobile_config_from_launch_config(
                         IosExecutionTargetFfi::Simulator => {
                             platform_api::MobileExecutionTarget::Simulator
                         }
-                        IosExecutionTargetFfi::Unknown => platform_api::MobileExecutionTarget::Unknown,
+                        IosExecutionTargetFfi::Unknown => {
+                            platform_api::MobileExecutionTarget::Unknown
+                        }
                     },
                     match environment.launch_mode {
-                        IosLaunchModeFfi::Interactive => platform_api::MobileLaunchMode::Interactive,
+                        IosLaunchModeFfi::Interactive => {
+                            platform_api::MobileLaunchMode::Interactive
+                        }
                         IosLaunchModeFfi::ScheduledHeadless => {
                             platform_api::MobileLaunchMode::ScheduledHeadless
                         }
@@ -942,7 +946,9 @@ fn capability_to_ffi(capability: platform_api::MobileLinuxCapability) -> MobileL
         backend: mobile_linux_backend_name(capability.backend),
         mode: match capability.mode {
             platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => {
+                MobileLinuxRuntimeModeFfi::MobileLinux
+            }
         },
         reason: capability.reason,
         streaming_output: capability.streaming_output,
@@ -960,7 +966,9 @@ fn status_to_ffi(status: platform_api::RootfsStatus) -> MobileLinuxStatusFfi {
         backend: mobile_linux_backend_name(status.backend),
         mode: match status.mode {
             platform_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            platform_api::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux => {
+                MobileLinuxRuntimeModeFfi::MobileLinux
+            }
         },
         platform: status.platform,
         abi: status.abi,
@@ -1161,7 +1169,9 @@ fn mount_spec_from_ffi(value: MobileLinuxMountSpecFfi) -> platform_api::MountSpe
 }
 
 #[cfg(feature = "uniffi")]
-fn command_request_from_ffi(value: MobileLinuxCommandRequestFfi) -> platform_api::LinuxCommandRequest {
+fn command_request_from_ffi(
+    value: MobileLinuxCommandRequestFfi,
+) -> platform_api::LinuxCommandRequest {
     platform_api::LinuxCommandRequest {
         command: value.command,
         args: value.args,
@@ -1211,9 +1221,8 @@ fn task_snapshot_to_ffi(value: platform_api::MobileLinuxTaskSnapshot) -> MobileL
             | platform_api::MobileLinuxTaskStatus::Running
             | platform_api::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Running,
             platform_api::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
-            platform_api::MobileLinuxTaskStatus::Failed | platform_api::MobileLinuxTaskStatus::TimedOut => {
-                MobileLinuxTaskStateFfi::Failed
-            }
+            platform_api::MobileLinuxTaskStatus::Failed
+            | platform_api::MobileLinuxTaskStatus::TimedOut => MobileLinuxTaskStateFfi::Failed,
             platform_api::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
         },
         detail: value.detail,
@@ -1289,17 +1298,19 @@ fn event_to_ffi(value: platform_api::MobileLinuxEvent) -> Option<MobileLinuxStre
             exit_code: None,
             timed_out: false,
         },
-        platform_api::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxStreamEventFfi {
-            sequence: value.sequence,
-            task_id: value.task_id,
-            stream_id: session_id,
-            source: MobileLinuxStreamSourceFfi::Pty,
-            kind: MobileLinuxStreamEventKindFfi::StdoutLine,
-            text: Some(String::from_utf8_lossy(&data).into_owned()),
-            data: Some(data),
-            exit_code: None,
-            timed_out: false,
-        },
+        platform_api::MobileLinuxEventKind::PtyOutput { session_id, data } => {
+            MobileLinuxStreamEventFfi {
+                sequence: value.sequence,
+                task_id: value.task_id,
+                stream_id: session_id,
+                source: MobileLinuxStreamSourceFfi::Pty,
+                kind: MobileLinuxStreamEventKindFfi::StdoutLine,
+                text: Some(String::from_utf8_lossy(&data).into_owned()),
+                data: Some(data),
+                exit_code: None,
+                timed_out: false,
+            }
+        }
         platform_api::MobileLinuxEventKind::PtyClosed {
             session_id,
             exit_code,
@@ -1330,7 +1341,9 @@ fn event_to_ffi(value: platform_api::MobileLinuxEvent) -> Option<MobileLinuxStre
 }
 
 #[cfg(feature = "uniffi")]
-fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLinuxOperationFfiError {
+fn mobile_linux_error_to_ffi(
+    error: platform_api::MobileLinuxError,
+) -> MobileLinuxOperationFfiError {
     match error {
         platform_api::MobileLinuxError::Unsupported => MobileLinuxOperationFfiError::Unsupported,
         platform_api::MobileLinuxError::Unavailable(message) => {
@@ -1832,7 +1845,9 @@ struct IosLocationBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl platform_api::LocationProvider for IosLocationBridge {
-    async fn current_location(&self) -> Result<platform_api::LocationFix, platform_api::LocationError> {
+    async fn current_location(
+        &self,
+    ) -> Result<platform_api::LocationFix, platform_api::LocationError> {
         match self.inner.current_location().await {
             Ok(fix) => Ok(platform_api::LocationFix {
                 latitude: fix.latitude,
@@ -1840,10 +1855,14 @@ impl platform_api::LocationProvider for IosLocationBridge {
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
-            Err(LocationFfiError::PermissionDenied) => Err(platform_api::LocationError::PermissionDenied),
+            Err(LocationFfiError::PermissionDenied) => {
+                Err(platform_api::LocationError::PermissionDenied)
+            }
             Err(LocationFfiError::Unavailable) => Err(platform_api::LocationError::Unavailable),
             Err(LocationFfiError::Timeout) => Err(platform_api::LocationError::Timeout),
-            Err(LocationFfiError::Other { message }) => Err(platform_api::LocationError::Other(message)),
+            Err(LocationFfiError::Other { message }) => {
+                Err(platform_api::LocationError::Other(message))
+            }
         }
     }
 }
@@ -2043,14 +2062,19 @@ impl platform_api::DeviceStatusProvider for IosDeviceControlBridge {
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl platform_api::HapticService for IosDeviceControlBridge {
-    async fn trigger(&self, style: platform_api::HapticStyle) -> Result<(), platform_api::HapticError> {
+    async fn trigger(
+        &self,
+        style: platform_api::HapticStyle,
+    ) -> Result<(), platform_api::HapticError> {
         self.inner
             .trigger_haptic(ios_haptic_style_to_wire(style).to_string())
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::HapticError::Unavailable,
                 DeviceControlFfiError::Rejected { message }
-                | DeviceControlFfiError::Other { message } => platform_api::HapticError::Other(message),
+                | DeviceControlFfiError::Other { message } => {
+                    platform_api::HapticError::Other(message)
+                }
             })
     }
 }
@@ -2081,8 +2105,12 @@ impl platform_api::CalendarProvider for IosDeviceControlBridge {
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::CalendarError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => platform_api::CalendarError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => platform_api::CalendarError::Other(message),
+                DeviceControlFfiError::Rejected { .. } => {
+                    platform_api::CalendarError::PermissionDenied
+                }
+                DeviceControlFfiError::Other { message } => {
+                    platform_api::CalendarError::Other(message)
+                }
             })?;
         serde_json::from_str(&body).map_err(|error| {
             platform_api::CalendarError::Other(format!("invalid native calendar response: {error}"))
@@ -2105,8 +2133,12 @@ impl platform_api::ContactsProvider for IosDeviceControlBridge {
             .await
             .map_err(|error| match error {
                 DeviceControlFfiError::Unavailable => platform_api::ContactsError::Unavailable,
-                DeviceControlFfiError::Rejected { .. } => platform_api::ContactsError::PermissionDenied,
-                DeviceControlFfiError::Other { message } => platform_api::ContactsError::Other(message),
+                DeviceControlFfiError::Rejected { .. } => {
+                    platform_api::ContactsError::PermissionDenied
+                }
+                DeviceControlFfiError::Other { message } => {
+                    platform_api::ContactsError::Other(message)
+                }
             })?;
         serde_json::from_str(&body).map_err(|error| {
             platform_api::ContactsError::Other(format!("invalid native contacts response: {error}"))
@@ -2140,7 +2172,9 @@ fn ios_device_control_error(error: DeviceControlFfiError) -> platform_api::Devic
 fn ios_deep_link_error(error: DeviceControlFfiError) -> platform_api::DeepLinkError {
     match error {
         DeviceControlFfiError::Unavailable => platform_api::DeepLinkError::Unavailable,
-        DeviceControlFfiError::Rejected { message } => platform_api::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Rejected { message } => {
+            platform_api::DeepLinkError::Rejected(message)
+        }
         DeviceControlFfiError::Other { message } => platform_api::DeepLinkError::Other(message),
     }
 }
@@ -2249,7 +2283,9 @@ impl platform_api::CameraControl for IosCameraBridge {
             Err(e) => Err(camera_error_from_ffi(e)),
         }
     }
-    async fn pick_from_library(&self) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+    async fn pick_from_library(
+        &self,
+    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
         match self.inner.pick_from_library().await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -2406,14 +2442,19 @@ impl platform_api::SecureStorage for IosSecureStorageBridge {
             .map_err(securestorage_error_from_ffi)?
         {
             Some(blob) => {
-                let data = serde_json::from_slice(&blob)
-                    .map_err(|e| platform_api::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                let data = serde_json::from_slice(&blob).map_err(|e| {
+                    platform_api::SecureStorageError::Io(format!("deserialize: {e}"))
+                })?;
                 Ok(Some(data))
             }
             None => Ok(None),
         }
     }
-    async fn delete(&self, service: &str, account: &str) -> Result<(), platform_api::SecureStorageError> {
+    async fn delete(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<(), platform_api::SecureStorageError> {
         self.inner
             .delete(service.to_string(), account.to_string())
             .await
@@ -2535,7 +2576,9 @@ impl platform_api::VoiceRecorder for IosVoiceBridge {
             .await
             .map_err(voice_error_from_ffi)
     }
-    async fn stop_recording(&self) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
+    async fn stop_recording(
+        &self,
+    ) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
         match self.inner.stop_recording().await {
             Ok(rec) => Ok(platform_api::VoiceRecording {
                 audio_bytes: rec.audio_bytes,
@@ -2630,7 +2673,9 @@ impl platform_api::TextToSpeech for IosTtsBridge {
                 // Audio-session contention is real for playback too, but
                 // `TtsError` has no busy variant; keep it recognizable in
                 // the message rather than folding it into a bare "other".
-                SpeechFfiError::Busy => platform_api::TtsError::Other("audio session busy".to_string()),
+                SpeechFfiError::Busy => {
+                    platform_api::TtsError::Other("audio session busy".to_string())
+                }
             }),
         }
     }
@@ -2720,7 +2765,8 @@ pub fn build_ios_engine_with_config(
         let contacts = device_control
             .clone()
             .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
-        let deep_link = device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
+        let deep_link =
+            device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
         // The app generator uses the bundled runtime independently of the
@@ -2759,7 +2805,8 @@ pub fn build_ios_engine_with_config(
             calendar,
             contacts,
             secure_storage: secure_storage.map(|s| {
-                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn platform_api::SecureStorage>
+                Arc::new(IosSecureStorageBridge { inner: s })
+                    as Arc<dyn platform_api::SecureStorage>
             }),
             location: location.map(|l| {
                 Arc::new(IosLocationBridge { inner: l }) as Arc<dyn platform_api::LocationProvider>
@@ -3647,11 +3694,11 @@ mod tests {
     use client_protocol::events::ClientEvent;
     use client_protocol::permission::PermissionRequest as PermissionRequestDto;
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
-    use tokio::sync::Mutex;
     use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
         SharingService, VoiceRecorder, WorktreeManager,
     };
+    use tokio::sync::Mutex;
 
     /// Off-device fake [`Platform`] shim (portable `platform-posix-minimal`
     /// handles over a temp root). Lets the SHARED `build_mobile_engine` build a
@@ -4268,7 +4315,10 @@ mod tests {
         let environment = cfg.host_environment.expect("host environment");
         assert_eq!(environment.host_os, platform_api::MobileHostOs::Ios);
         assert_eq!(environment.host_os_version.as_deref(), Some("19.0"));
-        assert_eq!(environment.device_class, platform_api::MobileDeviceClass::Tablet);
+        assert_eq!(
+            environment.device_class,
+            platform_api::MobileDeviceClass::Tablet
+        );
         assert_eq!(
             environment.execution_target,
             platform_api::MobileExecutionTarget::Simulator

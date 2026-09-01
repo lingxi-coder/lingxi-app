@@ -29,8 +29,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-use platform_posix::mcp::PosixMcpTransport;
 use platform_api::{McpTransport, McpTransportSpec};
+use platform_posix::mcp::PosixMcpTransport;
 
 #[derive(Clone)]
 struct MockState {

@@ -5,19 +5,34 @@
 //! `enable` materialises commands, hooks, agents (frontmatter-gated),
 //! skills, output-styles, LSP servers, and MCP servers (live-connected
 //! through the same `McpRegistry::connect_all` path as normal configured
-//! `.mcp.json` servers). `disable` symmetrically removes them. `install`'s local-path arm discovers + enables a
-//! pre-fetched plugin dir; the network arms (git clone, marketplace
-//! download, `.mcpb` unpack) return a typed, capability-named error until
-//! the fetch + marketplace-policy machinery is ported.
+//! `.mcp.json` servers). `disable` symmetrically removes them.
+//!
+//! `install`'s local-path arm discovers + enables a pre-fetched plugin dir in
+//! place — the only arm anything outside this crate's own tests calls. The
+//! network arms (`Marketplace`/`Git`/`Mcpb`) deliberately return a
+//! "use the CLI installer" error rather than fetching anything: production
+//! installs a plugin exclusively through
+//! `apps/cli/src/commands/plugin_install.rs`'s own git-clone / npm-install /
+//! archive-download materialization, which writes the real V2
+//! `installed_plugins.json` shape. An earlier revision of this module
+//! duplicated that fetch machinery end-to-end (git clone, marketplace-catalog
+//! resolution, `.mcpb` unpack, and its own `installed_plugins.json` writer)
+//! with zero production callers; its writer used an INCOMPATIBLE
+//! `{version, added}` record shape that would have corrupted the real file
+//! had anything ever wired it up (spec §25d). It was deleted rather than
+//! kept "just in case" once analysis showed every guard it uniquely had —
+//! the marketplace cache-escape check — already has an equivalent in the
+//! production path (see `marketplace_entry_source_path` in
+//! `plugin_install.rs`).
 //!
 //! See spec §15.3.
 
-use crate::blocklist::PluginBlocklist;
 use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
 use crate::strict_policy::StrictPluginOnlyPolicy;
+use crate::theme_registry::PluginThemeRegistry;
 use crate::user_config;
 use serde_json::{Map, Value};
 
@@ -44,9 +59,6 @@ pub enum PluginManagerError {
     /// No plugin with this id is currently installed.
     #[error("plugin not found: {0}")]
     NotFound(PluginId),
-    /// Blocklist matched the plugin (static or remote).
-    #[error("plugin blocked: {0}")]
-    Blocked(String),
     /// Manifest validation rejected the plugin.
     #[error("validation: {0}")]
     Validation(String),
@@ -71,8 +83,8 @@ pub enum PluginManagerError {
 /// The plugin lifecycle coordinator.
 ///
 /// Holds a state map keyed by [`PluginId`], references to every engine
-/// registry the manager materialises into, the credential manager (for
-/// sensitive user-config values), and the blocklist.
+/// registry the manager materialises into, and the credential manager (for
+/// sensitive user-config values).
 ///
 /// The `fs`, `http`, and `runtime` fields are reserved for Plan 16's
 /// install/fetch code; they are not used by the M1.21 stub.
@@ -87,7 +99,6 @@ pub struct PluginManager {
     #[allow(dead_code)] // Used by Plan 16 install paths.
     runtime: Arc<dyn RuntimeSpawner>,
     credentials: Arc<CredentialManager>,
-    blocklist: Arc<PluginBlocklist>,
     /// Persisted non-sensitive `userConfig` state, keyed by plugin identity
     /// (`name@marketplace` for cache-installed plugins, bare `name` for local
     /// ones). Read from the settings `pluginConfigs` scope at construction (via
@@ -116,11 +127,24 @@ pub struct PluginManager {
     /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
     /// exactly those entries (the registry has no plugin-ownership index).
     plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
-    /// Optional live plugin-workflow registry shared with the Workflow tool
-    /// and nested workflow resolver. The composition root supplies the same
-    /// Arc to every consumer; keeping the table out of this crate avoids the
-    /// branch-only duplicate resolver that previously had no production path.
+    /// Optional live plugin-workflow registry shared with `tool-workflow`'s
+    /// resolver and `tasks::handlers::local_workflow`'s nested `workflow()`
+    /// resolver (see [`workflow::PluginWorkflowRegistry`]). The composition
+    /// root supplies the same `Arc` to every consumer; keeping the table out
+    /// of this crate avoids a duplicate resolver and preserves collision-safe
+    /// unload by opaque plugin owner id.
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Live registry of plugin-declared custom themes (§14,
+    /// [`theme_registry::PluginThemeRegistry`]). Unlike `plugin_workflows`,
+    /// this port has no OTHER crate that needs to share the same `Arc` yet
+    /// (no TUI theme-selection surface exists to consume it — see the
+    /// module's deferral note), so `PluginManager` owns it directly rather
+    /// than taking it as an optional externally-constructed dependency.
+    plugin_themes: Arc<PluginThemeRegistry>,
+    /// Namespaced theme slugs (`{plugin}:{name}`) each plugin seeded into
+    /// [`Self::plugin_themes`], so [`Self::unload_plugin`] can remove exactly
+    /// those entries.
+    plugin_theme_slugs: RwLock<HashMap<PluginId, Vec<String>>>,
 }
 
 impl PluginManager {
@@ -133,7 +157,6 @@ impl PluginManager {
         http: Arc<dyn HttpTransport>,
         runtime: Arc<dyn RuntimeSpawner>,
         credentials: Arc<CredentialManager>,
-        blocklist: Arc<PluginBlocklist>,
         _strict: Arc<StrictPluginOnlyPolicy>,
         command_registry: Arc<RwLock<CommandRegistry>>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
@@ -150,7 +173,6 @@ impl PluginManager {
             http,
             runtime,
             credentials,
-            blocklist,
             plugin_configs: RwLock::new(HashMap::new()),
             blocked_marketplaces: RwLock::new(HashSet::new()),
             command_registry,
@@ -164,6 +186,8 @@ impl PluginManager {
             plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
             plugin_workflows: None,
+            plugin_themes: Arc::new(PluginThemeRegistry::new()),
+            plugin_theme_slugs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -174,8 +198,13 @@ impl PluginManager {
         self
     }
 
-    /// Share the live plugin-workflow table with the Workflow tool and task
-    /// resolver. All three surfaces must observe the same Arc.
+    /// Share the host's live plugin-workflow registry with the plugin
+    /// lifecycle. The SAME `Arc` must also be handed to
+    /// `tool_workflow::WorkflowTool::with_plugin_workflows` and
+    /// `tasks::handlers::local_workflow::LocalWorkflowHandler::with_plugin_workflows`
+    /// so a plugin's saved workflow, once materialized here, is resolvable by
+    /// name through the SAME `Workflow` tool call and `workflow()` nested-call
+    /// path as a built-in/project/user workflow.
     #[must_use]
     pub fn with_plugin_workflows(
         mut self,
@@ -196,6 +225,31 @@ impl PluginManager {
         self.plugin_workflows
             .as_ref()
             .is_some_and(|wired| Arc::ptr_eq(wired, registry))
+    }
+
+    /// The live plugin-theme registry (§14, [`theme_registry::PluginThemeRegistry`]).
+    /// `PluginManager` is the sole owner today (see the field doc), but hands
+    /// out the same `Arc` so a future TUI theme-selection surface can read
+    /// it without `PluginManager` growing an `Option`-wrapped setter the way
+    /// [`Self::with_plugin_workflows`] needed for a registry built OUTSIDE
+    /// this crate.
+    ///
+    /// ⚠️ **This registry has no production reader yet.** Nothing under
+    /// `apps/`, `tui/`, `tui-core/`, or `traits/` calls this accessor or
+    /// `theme_registry::resolve_theme`, and `tui_core::ThemeName::ALL` is a
+    /// closed set of six palettes with no registry hook — so a plugin theme
+    /// is registered and then unreachable. Unlike the workflow registry
+    /// (which `engine-desktop::build` wires into four participants), the
+    /// theme half CANNOT be made reachable by wiring alone: it needs the
+    /// deferred TUI theme-selection feature (a `/theme` picker, a persisted
+    /// choice, the oracle's `custom:` wire encoding `IW`/`Lb`, and a real
+    /// user-theme store for `Aon`'s other half). Until then `load_plugin`'s
+    /// theme block costs one stat + read + parse per declared file per
+    /// enable, and can emit `[theme]` warnings for a feature the user cannot
+    /// yet see.
+    #[must_use]
+    pub fn plugin_themes(&self) -> Arc<PluginThemeRegistry> {
+        Arc::clone(&self.plugin_themes)
     }
 
     /// Seed the persisted `userConfig` state (settings `pluginConfigs`) the
@@ -263,13 +317,17 @@ impl PluginManager {
                     )))
                 }
             }
-            // The network-backed arms each name the specific fetch capability
-            // that is not yet ported, so the error is actionable. The actual
-            // machinery (`marketplace.rs` is a placeholder with no HTTP/clone/
-            // unzip code) plus the marketplace-policy gates
-            // (`getStrictKnownMarketplaces` / blocklist) are residual — until
-            // then, install a pre-fetched plugin directory via
-            // `PluginSource::LocalPath`.
+            // Every arm below is a deliberate stub, not a placeholder for
+            // future fetch machinery: production installs a plugin only
+            // through `apps/cli/src/commands/plugin_install.rs`, which owns
+            // the real git-clone / npm-install / archive-download
+            // materialization AND the only writer of the real V2
+            // `installed_plugins.json` shape. This method previously
+            // duplicated that fetch machinery (see spec §25d) with zero
+            // production callers and a writer that used an INCOMPATIBLE
+            // record shape — deleted rather than kept, since every guard it
+            // uniquely had already exists on the production path (see
+            // `marketplace_entry_source_path` in `plugin_install.rs`).
             PluginSource::OfficialMarketplace { name } => Err(PluginManagerError::Io(format!(
                 "install of '{name}' from the official marketplace requires the \
                  marketplace fetch loop (HTTP listing + signed-manifest download); \
@@ -277,135 +335,23 @@ impl PluginManager {
                  PluginSource::LocalPath"
             ))),
             PluginSource::Marketplace { url, name } => {
-                let source = PluginSource::Marketplace {
-                    url: url.clone(),
-                    name: name.clone(),
-                };
-                let mkt = crate::marketplace::MarketplaceManager::new(self.install_dir.clone());
-                // 1. Clone + parse the marketplace catalog (keyed by the marketplace
-                //    repo identity so distinct marketplaces don't collide).
-                let mkt_name = repo_dir_for_url(&url);
-                let (index, clone_dir) = mkt
-                    .resolve_index_via_git(&url, &mkt_name)
-                    .await
-                    .map_err(PluginManagerError::Marketplace)?;
-                // 2. Find the plugin entry by name (byte-exact not-found message).
-                let entry = index
-                    .plugins
-                    .iter()
-                    .find(|p| p.name == name)
-                    .ok_or_else(|| {
-                        let avail = index
-                            .plugins
-                            .iter()
-                            .map(|p| p.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        PluginManagerError::Marketplace(format!(
-                            "Marketplace '{name}' not found. Available marketplaces: {avail}"
-                        ))
-                    })?;
-                // 3. Resolve the plugin dir inside the clone (lexical guard), then
-                //    canonicalize and assert it is STILL inside the clone — a
-                //    120000 symlink in the untrusted repo (e.g. `path` pointing at
-                //    `~/.ssh`) would otherwise let the copy follow it out of the
-                //    clone and exfiltrate host files into the cache.
-                let src_dir =
-                    crate::marketplace::MarketplaceManager::plugin_dir_in_clone(&clone_dir, entry)
-                        .map_err(PluginManagerError::Marketplace)?;
-                let real_src = tokio::fs::canonicalize(&src_dir).await.map_err(|_| {
-                    PluginManagerError::Marketplace(format!(
-                        "Marketplace name '{name}' resolves to a path outside the cache directory"
-                    ))
-                })?;
-                let real_clone = tokio::fs::canonicalize(&clone_dir).await.map_err(|e| {
-                    PluginManagerError::Marketplace(format!("marketplace clone unreadable: {e}"))
-                })?;
-                if !real_src.starts_with(&real_clone) {
-                    return Err(PluginManagerError::Marketplace(format!(
-                        "Marketplace name '{name}' resolves to a path outside the cache directory"
-                    )));
-                }
-                // 4. Materialize under the catalog's DECLARED name (the segment
-                //    reboot discovery resolves `plugin@<marketplace-name>` to),
-                //    not the URL slug.
-                let landed = self.copy_into_cache(&real_src, &index.name).await?;
-                // 5. Finalize (load manifest + components, stamp source, enable).
-                self.finalize_install(source, landed).await
+                Err(PluginManagerError::Marketplace(format!(
+                    "install of '{name}' from marketplace '{url}' is not supported by \
+                     PluginManager::install; run the `plugin install` CLI command, which \
+                     resolves marketplace sources through the production install pipeline"
+                )))
             }
-            PluginSource::Git { url, ref_ } => {
-                let source = PluginSource::Git {
-                    url: url.clone(),
-                    ref_: ref_.clone(),
-                };
-                // Clone under `repos/<host>/<owner>/<repo>/` (a fresh checkout —
-                // remove any stale clone first, matching re-install semantics).
-                let repo_subpath = repo_dir_for_url(&url);
-                let clone_dir = self.install_dir.join("repos").join(&repo_subpath);
-                if clone_dir.exists() {
-                    tokio::fs::remove_dir_all(&clone_dir).await.ok();
-                }
-                if let Some(parent) = clone_dir.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        PluginManagerError::Fetch(format!("Failed to clone repository: {e}"))
-                    })?;
-                }
-                // git2 is synchronous + blocks on the network → spawn_blocking.
-                let (u, r, cd) = (url.clone(), ref_.clone(), clone_dir.clone());
-                tokio::task::spawn_blocking(move || crate::git::clone_plugin_git(&u, &r, &cd))
-                    .await
-                    .map_err(|e| {
-                        PluginManagerError::Fetch(format!("Failed to clone repository: {e}"))
-                    })?
-                    .map_err(PluginManagerError::Fetch)?;
-                // The clone IS the plugin dir (single-plugin repo). Materialize it
-                // into the versioned cache, then finalize like the local arm.
-                let landed = self.copy_into_cache(&clone_dir, &repo_subpath).await?;
-                self.finalize_install(source, landed).await
-            }
-            PluginSource::Mcpb { path, hash } => {
-                let source = PluginSource::Mcpb {
-                    path: path.clone(),
-                    hash: hash.clone(),
-                };
-                // 1. Read the bundle bytes (local file; remote download deferred).
-                let bytes = tokio::fs::read(&path).await.map_err(|e| {
-                    PluginManagerError::Fetch(format!(
-                        "Failed to download MCPB {}: {e}",
-                        path.display()
-                    ))
-                })?;
-                // 2. Integrity: the content hash is the ONLY tamper check (claude-
-                //    code has no signature). Verified before extraction.
-                if !hash.is_empty() && crate::mcpb::sha256_hex(&bytes) != *hash {
-                    return Err(PluginManagerError::Unpack(format!(
-                        "MCPB manifest invalid at {} (hash mismatch)",
-                        path.display()
-                    )));
-                }
-                // 3. mkdtemp → extract (path-traversal / too-many-files / zip-bomb
-                //    guarded), on a blocking thread.
-                let tmp = tempfile::tempdir().map_err(|e| {
-                    PluginManagerError::Unpack(format!(
-                        "Failed to extract MCPB {}: {e}",
-                        path.display()
-                    ))
-                })?;
-                let tmp_path = tmp.path().to_path_buf();
-                tokio::task::spawn_blocking(move || {
-                    crate::mcpb::unpack_mcpb(&bytes, &tmp_path)?;
-                    // 4. Normalize: ensure a `.lingxi-plugin/plugin.json` exists
-                    //    (translate a root `manifest.json` if needed).
-                    crate::mcpb::ensure_plugin_manifest(&tmp_path)
-                })
-                .await
-                .map_err(|e| PluginManagerError::Unpack(e.to_string()))?
-                .map_err(PluginManagerError::Unpack)?;
-                // 5. Land into the versioned cache + finalize.
-                let bundle = mcpb_bundle_name(&path);
-                let landed = self.copy_into_cache(tmp.path(), &bundle).await?;
-                self.finalize_install(source, landed).await
-            }
+            PluginSource::Git { url, .. } => Err(PluginManagerError::Fetch(format!(
+                "install of a plugin from git repository '{url}' is not supported by \
+                 PluginManager::install; run the `plugin install` CLI command, which \
+                 clones + materializes git plugin sources through the production install \
+                 pipeline"
+            ))),
+            PluginSource::Mcpb { path, .. } => Err(PluginManagerError::Unpack(format!(
+                "install of the .mcpb bundle at {} is not supported by \
+                 PluginManager::install; run the `plugin install` CLI command instead",
+                path.display()
+            ))),
             PluginSource::BuiltIn => Err(PluginManagerError::Io(
                 "BuiltIn plugins are compiled into the engine and are not \
                  installed via PluginManager::install"
@@ -414,104 +360,15 @@ impl PluginManager {
         }
     }
 
-    /// Shared tail for every network install arm: a valid plugin directory is
-    /// now on disk at `landed_dir`. Load its manifest + auto-detected components
-    /// (reusing the local-path loader), stamp the REAL fetch `source` (so trust
-    /// + provenance match the origin rather than defaulting to `LocalPath`), and
-    /// enable it.
-    async fn finalize_install(
-        &self,
-        source: PluginSource,
-        landed_dir: PathBuf,
-    ) -> Result<PluginId, PluginManagerError> {
-        let Some((id, mut manifest)) = crate::discovery::load_plugin_from_path(&landed_dir).await
-        else {
-            return Err(PluginManagerError::Io(format!(
-                "no plugin manifest found at {}",
-                landed_dir.display()
-            )));
-        };
-        manifest.source = source.clone();
-        manifest.trust_level = crate::trust::default_trust_for_source(&source);
-        self.enable(&id, manifest, landed_dir).await?;
-        Ok(id)
-    }
-
-    /// Materialize a freshly-fetched plugin tree at `src_dir` into the versioned
-    /// cache layout `cache/<marketplace>/<plugin>/<version>/` that
-    /// [`crate::discovery::discover_enabled_plugins`] resolves. `<marketplace>`
-    /// is the sanitized source identity (`repo_subpath`); `<plugin>`/`<version>`
-    /// come from the just-fetched `.lingxi-plugin/plugin.json` (version falls
-    /// back to `"unknown"` when absent). Returns the landed `<version>/` dir.
-    async fn copy_into_cache(
-        &self,
-        src_dir: &Path,
-        repo_subpath: &str,
-    ) -> Result<PathBuf, PluginManagerError> {
-        // Read name + version from the fetched manifest to compute the path.
-        let manifest_path = src_dir
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json");
-        let raw = tokio::fs::read_to_string(&manifest_path)
-            .await
-            .map_err(|_| {
-                PluginManagerError::Io(format!("no plugin manifest found at {}", src_dir.display()))
-            })?;
-        let json: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| PluginManagerError::Validation(format!("invalid plugin.json: {e}")))?;
-        let name = json
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| PluginManagerError::Validation("plugin.json missing name".into()))?;
-        let version = json
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown");
-
-        let dest = self
-            .install_dir
-            .join("cache")
-            .join(crate::discovery::sanitize_segment(repo_subpath, false))
-            .join(crate::discovery::sanitize_segment(name, false))
-            .join(crate::discovery::sanitize_segment(version, true));
-        if dest.exists() {
-            tokio::fs::remove_dir_all(&dest).await.ok();
-        }
-        copy_dir_recursive(src_dir, &dest).await.map_err(|e| {
-            PluginManagerError::Io(format!("failed to materialize plugin cache: {e}"))
-        })?;
-        // Durably record the install (marketplace → plugin → version) so a later
-        // launch can re-discover the exact cache dir. Best-effort: a record-write
-        // failure must not fail an otherwise-successful install.
-        if let Err(e) = crate::installed::record(
-            &self.install_dir,
-            repo_subpath,
-            name,
-            version,
-            crate::installed::now_ms(),
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "failed to write installed_plugins.json record");
-        }
-        Ok(dest)
-    }
-
     /// Mark `id` as `Loaded` and inject its components into the engine
     /// registries.
     ///
-    /// Returns [`PluginManagerError::Blocked`] when the blocklist matches.
     pub async fn enable(
         &self,
         id: &PluginId,
         manifest: PluginManifest,
         install_dir: PathBuf,
     ) -> Result<(), PluginManagerError> {
-        if let Some(reason) = self.blocklist.is_blocked(id).await {
-            return Err(PluginManagerError::Blocked(reason));
-        }
         if let Some(marketplace) = cache_marketplace_name(&install_dir) {
             if self
                 .blocked_marketplaces
@@ -1031,13 +888,41 @@ impl PluginManager {
             }
         }
 
-        // (d2) Workflows — validate each declared/auto-scanned `.js` file
-        //      before adding it to the shared workflow registry. The script's
-        //      own literal `meta.name` is authoritative; a missing/invalid
-        //      meta block is dropped rather than exposed under a filename
-        //      that the runtime would later reject. This mirrors main's
-        //      production loader and keeps the plugin module from owning a
-        //      second, incompatible resolver.
+        // (d2) Workflows — read each declared/auto-scanned `.js` file
+        //      (`manifest.components.workflows`, §14), extract its own
+        //      `meta.name` and namespace `{plugin}:{name}` (oracle plugin-
+        //      workflow loader `v()` @169045500: `${pluginName}:${meta.name}`
+        //      — the SAME "parse the component's own declared name" rule (d)
+        //      applies to output styles, here reading the name from the
+        //      script's `export const meta = {…}` block instead of
+        //      frontmatter).
+        //
+        //      `v()` gates a file THREE ways before it may join the table,
+        //      and every gate DROPS the file rather than falling back:
+        //        `let e = await ZI(c,o,um); if (e===null) return
+        //           warn(`Plugin workflow ${o}: not a regular file or exceeds
+        //           ${um} bytes — skipping`), null;`
+        //        `let r = bf(e,{validateBody:!1}); if ("error" in r) return
+        //           warn(`Plugin workflow ${o} has invalid meta: ${r.error}
+        //           — skipping`), null;`
+        //      There is NO filename fallback on either branch: a shared
+        //      helper module dropped in `workflows/` (no `export const meta`)
+        //      is simply not a workflow. Registering it under its file stem
+        //      would put a name in the `Workflow` tool's `Available:` list
+        //      that then dies at `workflow::validate_meta` inside the
+        //      launcher — an accept-then-fail the oracle never produces —
+        //      so the port applies the same three gates.
+        //      `workflow::validate_meta` is this port's `bf(…,{validateBody:
+        //      !1})`: it parses the `meta` block only (first-statement, pure
+        //      literal, non-empty `name`/`description`) and is the very gate
+        //      the launcher already runs, so nothing can pass here and fail
+        //      there.
+        //
+        //      Only collected when a registry is actually wired — the common
+        //      case (no composition root has called `with_plugin_workflows`
+        //      yet) does zero extra file I/O. Canonicalizing here preserves
+        //      the Local App v2 invariant that a workflow cannot escape the
+        //      plugin install root between discovery and enable.
         let mut workflow_entries: Vec<workflow::PluginWorkflowEntry> = Vec::new();
         if self.plugin_workflows.is_some() {
             let canonical_install_dir = tokio::fs::canonicalize(install_dir).await.ok();
@@ -1111,6 +996,30 @@ impl PluginManager {
             }
         }
 
+        // (d3) Themes — read each declared/auto-scanned `.json` file
+        //      (`manifest.components.themes`, §14), validate it the way the
+        //      oracle's `j(e,t,r)` does (256KB size cap checked BEFORE the
+        //      read, JSON validity, `base`/`name`/`overrides` shape — see
+        //      `theme_registry`'s module doc for the one place this port's
+        //      validation is thinner than the oracle's), and namespace
+        //      `{plugin}:{basename}` (oracle `w0e`: `H=${P.name}:` + the
+        //      file's basename minus `.json` — the SAME namespacing rule (c)
+        //      applies to skills/output-styles/workflows). A file that
+        //      cannot be stat'd/read is skipped without a warning (the
+        //      common oracle case, a file discovery already verified exists
+        //      going missing between discovery and enable); oversized or
+        //      invalid-JSON files ARE warned, matching the oracle's two
+        //      warning sites.
+        let mut theme_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for tp in &manifest.components.themes {
+            let abs = if tp.path.is_absolute() {
+                tp.path.clone()
+            } else {
+                install_dir.join(&tp.path)
+            };
+            let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            theme_paths.push((format!("{plugin_name}:{stem}"), abs));
+        }
         // (e) MCP servers — scope each `.mcp.json` entry as
         //     `plugin:{plugin}:{server}` so it is keyed identically to a
         //     normal configured server (`addPluginScopeToServers`,
@@ -1279,6 +1188,23 @@ impl PluginManager {
             registry.register(&manifest.id.to_string(), workflow_entries);
         }
 
+        // 10. Themes — join the live plugin-theme registry (§14). Remember
+        //     the namespaced slugs FIRST so `unload_plugin` can remove
+        //     exactly these entries regardless of what else the registry
+        //     holds.
+        //     Loading is LAZY: only the (slug, path) pairs are recorded here;
+        //     the stat + read + parse happen on the registry's first `get` for
+        //     a slug. Nothing reads the registry yet, so eager loading would
+        //     spend I/O and emit `[theme]` warnings for an invisible feature.
+        if !theme_paths.is_empty() {
+            let slugs: Vec<String> = theme_paths.iter().map(|(slug, _)| slug.clone()).collect();
+            self.plugin_themes.register_paths(theme_paths);
+            self.plugin_theme_slugs
+                .write()
+                .await
+                .insert(manifest.id, slugs);
+        }
+
         Ok(())
     }
 
@@ -1316,6 +1242,11 @@ impl PluginManager {
         }
         if let Some(registry) = &self.plugin_workflows {
             registry.unregister(&id.to_string());
+        }
+        // Theme cleanup: remove exactly the namespaced slugs this plugin
+        // seeded into the plugin-theme registry.
+        if let Some(slugs) = self.plugin_theme_slugs.write().await.remove(id) {
+            self.plugin_themes.unregister(&slugs);
         }
         Ok(())
     }
@@ -1384,8 +1315,8 @@ fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
 /// transport spec, in place. Covers the substitutable string surfaces: the
 /// Stdio `command` / `args` / `env` values, and remote (`Sse` / `Http` /
 /// `WebSocket`) `url` + `headers` values. Non-substitutable specs (`InProcess`,
-/// `SseIde`, `SdkControl`) carry no userConfig-derived string and are left
-/// untouched. A no-op when the substitution context is empty (the common
+/// `SseIde`, `WsIde`, `SdkControl`) carry no userConfig-derived string and are
+/// left untouched. A no-op when the substitution context is empty (the common
 /// no-userConfig case), so a plugin without userConfig is byte-unchanged.
 fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
     use traits::McpTransportSpec;
@@ -1420,6 +1351,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
         }
         McpTransportSpec::InProcess { .. }
         | McpTransportSpec::SseIde { .. }
+        | McpTransportSpec::WsIde { .. }
         | McpTransportSpec::SdkControl { .. } => {}
     }
 }
@@ -1607,87 +1539,6 @@ async fn ensure_plugin_data_dir(
     })?;
     Ok(path)
 }
-
-/// Derive a stable, sanitized `host/owner/repo` sub-path from a git URL, used as
-/// both the `repos/<…>/` clone destination and the cache `<marketplace>`
-/// identity. Strips a trailing `.git`, the `git@host:owner/repo` SSH form, and
-/// any URL scheme; each path segment is sanitized to `[A-Za-z0-9._-]`.
-fn repo_dir_for_url(url: &str) -> String {
-    // Normalize the SSH `git@host:owner/repo` form to `host/owner/repo`.
-    let stripped = if let Some(rest) = url.strip_prefix("git@") {
-        rest.replacen(':', "/", 1)
-    } else {
-        // Drop the scheme (`https://`, `file://`, `ssh://`, …).
-        url.split("://").last().unwrap_or(url).to_string()
-    };
-    let stripped = stripped.trim_end_matches('/').trim_end_matches(".git");
-    let joined: Vec<String> = stripped
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .map(|seg| crate::discovery::sanitize_segment(seg, true))
-        .collect();
-    if joined.is_empty() {
-        "repo".to_string()
-    } else {
-        joined.join("/")
-    }
-}
-
-/// Derive a stable cache `<marketplace>` segment for a `.mcpb` bundle from its
-/// file name (the stem, sanitized). e.g. `/x/my-plugin.mcpb` → `my-plugin`.
-fn mcpb_bundle_name(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("mcpb");
-    crate::discovery::sanitize_segment(stem, true)
-}
-
-/// Recursively copy the directory tree at `src` to `dst` (creating `dst`).
-/// Symlink-safe: only regular files and directories are copied (matching
-/// claude-code's `copyDir`, which skips special entries); symlinks and other
-/// non-regular entries are silently skipped so a malicious clone cannot plant a
-/// dangling/escaping link in the cache.
-async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    // Refuse to copy a symlinked ROOT: `read_dir` follows it to the target
-    // (potentially outside the source tree), which an untrusted clone could
-    // abuse to exfiltrate arbitrary host files into the cache. Entries
-    // discovered INSIDE a directory are already skipped if they are symlinks,
-    // but the walk's own root is not covered by that check.
-    if tokio::fs::symlink_metadata(src)
-        .await?
-        .file_type()
-        .is_symlink()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to copy a symlinked directory",
-        ));
-    }
-    tokio::fs::create_dir_all(dst).await?;
-    // Iterative DFS over (src, dst) pairs to avoid boxing for async recursion.
-    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
-    while let Some((from, to)) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&from).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            // `file_type()` does NOT follow symlinks → a symlink reports neither
-            // is_dir nor is_file here and is skipped.
-            let ft = entry.file_type().await?;
-            let child_from = entry.path();
-            let child_to = to.join(entry.file_name());
-            if ft.is_dir() {
-                tokio::fs::create_dir_all(&child_to).await?;
-                stack.push((child_from, child_to));
-            } else if ft.is_file() {
-                tokio::fs::copy(&child_from, &child_to).await?;
-            }
-            // else: symlink / device / fifo → skipped.
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod user_config_tests {
     use super::*;
@@ -1895,7 +1746,6 @@ mod agent_privilege_tests {
             Arc::new(PosixHttp::new()),
             Arc::new(PosixRuntime::new()),
             credentials,
-            Arc::new(PluginBlocklist::new(String::new())),
             Arc::new(StrictPluginOnlyPolicy::empty()),
             Arc::new(RwLock::new(CommandRegistry::new())),
             Arc::new(RwLock::new(SkillRegistry::new())),
@@ -2144,7 +1994,6 @@ mod register_verified_builtin_tests {
             Arc::new(PosixHttp::new()),
             Arc::new(PosixRuntime::new()),
             credentials,
-            Arc::new(PluginBlocklist::new(String::new())),
             Arc::new(StrictPluginOnlyPolicy::empty()),
             Arc::new(RwLock::new(CommandRegistry::new())),
             Arc::new(RwLock::new(SkillRegistry::new())),

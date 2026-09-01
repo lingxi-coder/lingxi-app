@@ -788,6 +788,11 @@ impl InProcessTeammateHandler {
                     denied,
                     self.default_model.as_deref(),
                     0,
+                    // §24b agent-scoped MCP servers are a Task-tool-spawn-only
+                    // concern (claude `Agr`); an in-process teammate has no
+                    // equivalent connect step, so this is always empty
+                    // (byte-identical to before this feature).
+                    &[],
                 )
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?

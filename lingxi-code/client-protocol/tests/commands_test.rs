@@ -23,7 +23,7 @@ use client_protocol::controls::ReasoningSelectionDto;
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
-    AppRuntimeProfileDto, AppSurfaceDto,
+    AppSurfaceDto, PluginCommandDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -80,6 +80,51 @@ fn send_prompt_optional_fields_skip_when_none() {
         serde_json::from_str(r#"{"type":"send_prompt","text":"hi","images":[]}"#)
             .expect("deserialize minimal SendPrompt");
     assert_eq!(from_minimal, cmd);
+}
+
+#[test]
+fn plugin_command_phase8_operations_round_trip_nested_under_command() {
+    let commands = [
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::GetInventory {
+                plugin_id: "lingxi-local-app".to_string(),
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::ResolveCreateConfirmation {
+                request_id: "create-0001".to_string(),
+                approved: true,
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::ResolveMcpProposalApproval {
+                request_id: "proposal-0001".to_string(),
+                approved: false,
+            },
+        },
+        ClientCommand::PluginCommand {
+            command: PluginCommandDto::GetManagedMcpInventory,
+        },
+    ];
+
+    let expected_tags = [
+        "get_inventory",
+        "resolve_create_confirmation",
+        "resolve_mcp_proposal_approval",
+        "get_managed_mcp_inventory",
+    ];
+
+    for (command, expected_tag) in commands.into_iter().zip(expected_tags) {
+        let json = serde_json::to_value(&command).expect("serialize plugin command");
+        assert_eq!(json["type"], "plugin_command");
+        assert_eq!(json["command"]["type"], expected_tag);
+        assert!(
+            json.get("request_id").is_none() && json.get("plugin_id").is_none(),
+            "nested plugin command fields must not flatten onto ClientCommand: {json}"
+        );
+        let back: ClientCommand = serde_json::from_value(json).expect("deserialize plugin command");
+        assert_eq!(back, command);
+    }
 }
 
 /// `PromptModeDto` — every prompt-input mode round-trips with its `snake_case`
@@ -561,10 +606,6 @@ fn extended_local_app_commands_round_trip() {
             request_id: "cap-1".to_string(),
             decision: AppAuthorizationDecisionDto::AllowAlways,
         },
-        ClientCommand::ResolveAppRuntimeProfileSelection {
-            request_id: "runtime-1".to_string(),
-            selected_family: Some(AppRuntimeProfileDto::Three3d),
-        },
         ClientCommand::ResetAppPermissions {
             app_id: "habits-1a2b".to_string(),
         },
@@ -575,7 +616,6 @@ fn extended_local_app_commands_round_trip() {
         "execute_app_bridge_request",
         "resolve_app_ui_request",
         "resolve_app_capability_request",
-        "resolve_app_runtime_profile_selection",
         "reset_app_permissions",
     ];
     for (command, expected_type) in commands.into_iter().zip(expected_types) {

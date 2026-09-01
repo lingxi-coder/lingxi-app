@@ -236,15 +236,15 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 | workspace 成员 / default-members | 88 / 74（`engine-mobile` 被排除） |
 | `plugin` crate 的 fixture 目录 / 品牌归一化 | 都不存在 |
 | `git remote -v` | 空 —— **没有 CI**，每一条门必须是签入的脚本 |
-| `drive_local_workflow("local-canvas-build")` 调用点 | 1（`tools/workflow/src/builtins.rs`） |
-| Canvas 两个具名门 | `builtins.rs:1944`、`:2509`，都在 |
+| 旧 `drive_local_workflow("local-canvas-build")` / builtin 调用点 | `0`；Phase 9 后不再有 standalone builtin Local App workflow，统一由 `lingxi-local-app:local-app-build` 启动 |
+| Canvas 两个具名门 | Plugin `workflows/local-app-build.js` 的 `render_check` / `motion_check`，都在 |
 | `profile_file!` 调用点 | 112 |
 | `runtime-profiles/` 已跟踪文件 / 字节 | 124 / 387,943 |
 | `templates/` 全目录已跟踪 / 磁盘占用 | 156 文件 / **524 MiB** |
 | `babylon-3d` / `phaser-2d` 磁盘文件数 | 20,093 / 13,014（`mcpb.rs:16` `MAX_FILES = 10_000`） |
 | `skills/` | 10 目录 / 44 md；`bundled.rs` 里 44 个 `include_str!` |
-| `CLIENT_PROTOCOL_VERSION` / `APPS_SCHEMA_VERSION` | `9.0.0` / `2` |
-| `blessed_major.txt` / `contract_index.json` | `9` / 925 条 @ `391d89fff` |
+| `CLIENT_PROTOCOL_VERSION` / `APPS_SCHEMA_VERSION` | `10.0.0` / `3` |
+| `blessed_major.txt` / `contract_index.json` | `10` / 1,068 条 |
 | MCP 版本常量 | `mcp/src/initialize_params.rs:9` = `2025-11-25`；`apps/cli/src/commands/mcp.rs:358` = `2025-06-18`（分歧） |
 
 ## 用法

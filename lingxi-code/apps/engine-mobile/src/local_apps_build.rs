@@ -142,9 +142,8 @@ impl LocalAppBuildTarget {
     }
 
     /// The scaffold id reported back to the model. Derived, never spelled at
-    /// the emission site: a hardcoded `"vite-react-static-v1"` told a canvas
-    /// app it was the routed scaffold, and a model that believes it goes
-    /// looking for screens and a router that workspace does not contain.
+    /// the emission site: hardcoding the routed DOM scaffold id told a canvas
+    /// app it owned screens and a router its workspace does not contain.
     pub(crate) fn template_id(self) -> &'static str {
         match self {
             Self::ReactDomR1 => "runtime-profile/react-dom/r1",

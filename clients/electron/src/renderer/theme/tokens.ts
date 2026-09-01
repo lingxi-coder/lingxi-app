@@ -1,6 +1,6 @@
 // ─── DESIGN TOKENS — Lingxi Code dark/light ─────────────────
-// Ported verbatim from the design prototype's `tokens(dark)` factory.
-// Colors are CSS oklch(...) values and are kept exactly as-is.
+// Shared renderer palette. Colors are CSS oklch(...) values so the light
+// surfaces can keep the same quiet, neutral hierarchy as the Codex reference.
 
 import type { SyntaxClassDto } from '@lingxi/bridge-client';
 
@@ -121,20 +121,22 @@ export const tokens = (dark: boolean): Tokens =>
         syntax: SYNTAX_LIGHT,
         appBg: '#dcd7e4',
         windowBg: '#ffffff',
-        sidebarBg: '#fcfcfc',
+        sidebarBg: 'oklch(94% 0.012 270)',
         stageBg: '#ffffff',
         transcriptBg: '#ffffff',
         surface: '#ffffff',
-        surfaceHover: 'oklch(96% 0.008 270)',
-        surfaceActive: 'oklch(92% 0.020 270)',
-        border: 'oklch(88% 0.008 270)',
-        borderStrong: 'oklch(82% 0.012 270)',
-        text: 'oklch(20% 0.018 270)',
-        text2: 'oklch(40% 0.020 270)',
-        text3: 'oklch(58% 0.020 270)',
+        surfaceHover: 'oklch(96% 0.010 270)',
+        surfaceActive: 'oklch(90% 0.015 270)',
+        border: 'oklch(88% 0.012 270 / 0.78)',
+        borderStrong: 'oklch(82% 0.015 270)',
+        text: 'oklch(22% 0.018 270)',
+        text2: 'oklch(50% 0.018 270)',
+        text3: 'oklch(60% 0.018 270)',
         text4: 'oklch(70% 0.015 270)',
         accent: 'oklch(50% 0.22 268)',
-        accentBg: 'oklch(50% 0.22 268 / 0.10)',
+        // Codex-style selection surfaces stay neutral; saturated accent is
+        // reserved for actions and status so the transcript remains quiet.
+        accentBg: 'oklch(89% 0.014 270 / 0.92)',
         accentBorder: 'oklch(50% 0.22 268 / 0.30)',
         accent2: 'oklch(55% 0.22 320)',
         accent3: 'oklch(52% 0.18 195)',

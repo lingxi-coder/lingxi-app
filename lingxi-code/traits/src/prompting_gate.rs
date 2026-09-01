@@ -39,6 +39,15 @@ pub enum PermissionRequest {
         tool_input: Value,
         /// Default decision when the user presses Enter only.
         default_decision: PromptDefault,
+        /// §27b — oracle `suppressesAlwaysAllowRule` (client.ts factory,
+        /// @182520462). `true` when the tool needs fresh interaction on every
+        /// call (`_meta.anthropic/requiresUserInteraction`), so a stored
+        /// "always allow" grant would be recorded but then ignored by the
+        /// tool. The dialog must omit the "Yes, allow always" option in that
+        /// case (`tui/src/bottom_pane/permission_view.rs`), and the gate that
+        /// builds this request must never persist a rule from a resolution
+        /// against a suppressed request (`tui/src/permission_gate.rs`).
+        suppress_always_allow_rule: bool,
     },
     /// Plan-mode exit — user must approve a proposed plan markdown body.
     ExitPlanMode {
@@ -132,6 +141,7 @@ mod tests {
             tool_name: "Read".to_string(),
             tool_input: json!({ "path": "/tmp/foo" }),
             default_decision: PromptDefault::AllowByDefault,
+            suppress_always_allow_rule: false,
         };
         match req {
             PermissionRequest::ToolUseConfirm {
@@ -152,6 +162,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             tool_input: json!({ "command": "rm -rf /" }),
             default_decision: PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
         };
         match req {
             PermissionRequest::ToolUseConfirm {

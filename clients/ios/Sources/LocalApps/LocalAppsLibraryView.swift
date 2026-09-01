@@ -5,6 +5,32 @@ enum LocalAppsRoute: Hashable {
     case preview(String)
 }
 
+struct LocalAppPublicationBadgeView: View {
+    @Environment(\.theme) private var theme
+    let badge: LocalAppStatusBadge
+
+    var body: some View {
+        Label(badge.label, systemImage: badge.systemImageName)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.12), in: Capsule())
+            .accessibilityLabel(badge.accessibilityLabel)
+    }
+
+    private var tint: Color {
+        switch badge.tintName {
+        case "green":
+            theme.ok
+        case "orange":
+            .orange
+        default:
+            theme.text3
+        }
+    }
+}
+
 struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
@@ -62,14 +88,6 @@ struct LocalAppsRootView: View {
             )
         ) { prompt in
             LocalAppPermissionSheet(store: store, prompt: prompt)
-        }
-        .sheet(
-            item: Binding(
-                get: { store.pendingRuntimeProfileSelection },
-                set: { _ in }
-            )
-        ) { prompt in
-            LocalAppRuntimeProfileSelectionSheet(store: store, prompt: prompt)
         }
         .sheet(
             item: Binding(
@@ -197,167 +215,6 @@ struct LocalAppPermissionSheet: View {
         }
         .tint(decision == .deny ? .red : nil)
         .accessibilityIdentifier("local-apps.permission.\(decision.rawValue)")
-    }
-}
-
-struct LocalAppRuntimeProfileSelectionSheet: View {
-    @Bindable var store: LocalAppsStore
-    let prompt: LocalAppRuntimeProfileSelectionPrompt
-
-    var body: some View {
-        NavigationStack {
-            content
-            .navigationTitle("local_apps_runtime_profile_title")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("common_cancel") {
-                        cancelSelection()
-                    }
-                }
-            }
-        }
-        .interactiveDismissDisabled()
-        .presentationDetents([.large])
-        .accessibilityIdentifier("local-apps.runtime-profile.\(prompt.id)")
-    }
-
-    private var content: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                promptHeader
-                optionList
-            }
-            .padding(24)
-        }
-    }
-
-    private var promptHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(String(localized: "local_apps_runtime_profile_prompt_title"), systemImage: "shippingbox.fill")
-                .font(.title3.bold())
-            Text(prompt.reason)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var optionList: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach(prompt.options) { option in
-                RuntimeProfileOptionCard(
-                    option: option,
-                    isRecommended: prompt.recommendedFamily == option.family,
-                    onSelect: { select(option.family) }
-                )
-            }
-        }
-    }
-
-    private func select(_ family: LocalAppRuntimeProfileFamily) {
-        Task { await store.resolvePendingRuntimeProfileSelection(family) }
-    }
-
-    private func cancelSelection() {
-        Task { await store.resolvePendingRuntimeProfileSelection(nil) }
-    }
-}
-
-private struct RuntimeProfileOptionCard: View {
-    let option: LocalAppRuntimeProfileOption
-    let isRecommended: Bool
-    let onSelect: () -> Void
-
-    private var availabilityText: String {
-        option.available
-            ? String(localized: "local_apps_runtime_profile_available")
-            : String(localized: "local_apps_runtime_profile_unavailable")
-    }
-
-    private var availabilityColor: Color {
-        option.available ? .secondary : .red
-    }
-
-    private var revisionSurfaceText: String {
-        String(
-            format: String(localized: "local_apps_runtime_profile_revision_surface"),
-            Int(option.revision),
-            option.surface.title
-        )
-    }
-
-    private var packageListText: String {
-        option.corePackages
-            .map { "\($0.name)@\($0.version)" }
-            .joined(separator: "\n")
-    }
-
-    private var contractText: String {
-        String(format: String(localized: "local_apps_runtime_profile_contract"), option.contractSHA256)
-    }
-
-    private var cacheDownloadText: String {
-        String(
-            format: String(localized: "local_apps_runtime_profile_cache_download"),
-            localizedRuntimeProfileStatus(option.cacheStatus),
-            localizedRuntimeProfileStatus(option.downloadStatus)
-        )
-    }
-
-    private var actionText: String {
-        option.available
-            ? String(localized: "local_apps_runtime_profile_select")
-            : String(localized: "local_apps_runtime_profile_unavailable_action")
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(option.family.title)
-                    .font(.headline)
-                Spacer()
-                if isRecommended {
-                    Text(String(localized: "local_apps_runtime_profile_recommended"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                Text(availabilityText)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(availabilityColor)
-            }
-            Text(revisionSurfaceText)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text(packageListText)
-                .font(.system(.footnote, design: .monospaced))
-                .textSelection(.enabled)
-            Text(contractText)
-                .font(.system(.footnote, design: .monospaced))
-                .textSelection(.enabled)
-            Text(cacheDownloadText)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            if let reason = option.reason {
-                Text(reason)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            if option.available {
-                Button(action: onSelect) {
-                    Text(actionText)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button(action: onSelect) {
-                    Text(actionText)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(true)
-            }
-        }
-        .padding(16)
-        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -764,9 +621,19 @@ private struct LocalAppLibraryRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // `displayName`, never `name`: a shell's name is an engine
                     // placeholder the user never chose.
-                    Text(app.displayName)
-                        .font(.headline)
-                        .foregroundStyle(theme.text)
+                    HStack(spacing: 8) {
+                        Text(app.displayName)
+                            .font(.headline)
+                            .foregroundStyle(theme.text)
+                            .lineLimit(1)
+                        LocalAppPublicationBadgeView(badge: app.workflow.statusBadge)
+                        if let uiVerification = app.uiVerification {
+                            LocalAppPublicationBadgeView(badge: uiVerification.badge)
+                        }
+                        if let mcpVerification = app.mcpVerification {
+                            LocalAppPublicationBadgeView(badge: mcpVerification.badge)
+                        }
+                    }
                     HStack(spacing: 6) {
                         Circle()
                             .fill(runtimeColor)

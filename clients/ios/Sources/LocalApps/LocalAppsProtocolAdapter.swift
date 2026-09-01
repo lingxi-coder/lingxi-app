@@ -54,7 +54,8 @@ enum LocalAppsProtocolAdapter {
     static func workflow(_ dto: AppWorkflowStateDto) -> LocalAppWorkflow {
         switch dto {
         case .draft: .draft
-        case .ready: .ready
+        case .publishedUnverified: .publishedUnverified
+        case .publishedVerified: .publishedVerified
         }
     }
 
@@ -104,7 +105,6 @@ enum LocalAppsProtocolAdapter {
         case .uiControl: .uiControl
         case .networkDomain: .networkDomain
         case .restoreCheckpoint: .restoreCheckpoint
-        case .runtimeProfileSelection: .runtimeProfileSelection
         case .dependencyChange: .dependencyChange
         case .camera: .camera
         case .photoLibrary: .photoLibrary
@@ -206,35 +206,6 @@ enum LocalAppsProtocolAdapter {
         }
     }
 
-    static func runtimeProfileSelection(
-        _ dto: AppRuntimeProfileSelectionRequestDto
-    ) -> LocalAppRuntimeProfileSelectionPrompt {
-        LocalAppRuntimeProfileSelectionPrompt(
-            id: dto.requestId,
-            appID: dto.appId,
-            reason: dto.reason,
-            recommendedFamily: dto.recommendedFamily.map(runtimeProfileFamily),
-            options: dto.options.map { option in
-                LocalAppRuntimeProfileOption(
-                    family: runtimeProfileFamily(option.family),
-                    revision: option.revision,
-                    contractSHA256: option.contractSha256,
-                    surface: option.surface == .dom ? .dom : .canvas,
-                    corePackages: option.corePackages.map { package in
-                        LocalAppRuntimeProfilePackage(
-                            name: package.name,
-                            version: package.version
-                        )
-                    },
-                    cacheStatus: option.cacheStatus,
-                    downloadStatus: option.downloadStatus,
-                    available: option.available,
-                    reason: option.reason
-                )
-            }
-        )
-    }
-
     static func dependencyChangeConfirmation(
         _ dto: AppDependencyChangeConfirmationRequestDto
     ) -> LocalAppDependencyChangeConfirmationPrompt {
@@ -267,6 +238,217 @@ enum LocalAppsProtocolAdapter {
         case .update: .update
         case .remove: .remove
         }
+    }
+
+    static func runtimeProfileSurface(_ dto: AppSurfaceDto) -> LocalAppRuntimeProfileSurface {
+        switch dto {
+        case .dom:
+            .dom
+        case .canvas:
+            .canvas
+        }
+    }
+
+    static func verificationStatus(_ dto: LocalAppVerificationStatusDto) -> LocalAppVerificationStatus {
+        switch dto {
+        case .pending:
+            .pending
+        case .passed:
+            .passed
+        case .failed:
+            .failed
+        case .unverified:
+            .unverified
+        case .unavailable:
+            .unavailable
+        }
+    }
+
+    static func verificationSummary(_ dto: LocalAppVerificationSummaryDto) -> LocalAppVerificationSummary {
+        LocalAppVerificationSummary(
+            status: verificationStatus(dto.status),
+            summary: dto.summary,
+            code: dto.code
+        )
+    }
+
+    static func gateStatus(_ dto: LocalAppGateStatusDto) -> LocalAppGateStatus {
+        LocalAppGateStatus(
+            gateID: dto.gateId,
+            label: dto.label,
+            status: verificationStatus(dto.status),
+            available: dto.available,
+            detail: dto.detail
+        )
+    }
+
+    static func builtinPluginInventory(_ dto: LocalAppPluginInventoryDto) -> LocalAppBuiltinPluginInventory {
+        LocalAppBuiltinPluginInventory(
+            pluginID: dto.pluginId,
+            displayName: dto.displayName,
+            source: dto.source,
+            version: dto.version,
+            bundleDigest: dto.bundleSha256,
+            manifestDefaultEnabled: dto.manifestDefaultEnabled,
+            skillCount: Int(dto.counts.skills),
+            agentCount: Int(dto.counts.agents),
+            workflowCount: Int(dto.counts.workflows),
+            templateCount: Int(dto.counts.templates),
+            validationError: dto.validationError
+        )
+    }
+
+    static func templateSummary(_ dto: LocalAppTemplateSummaryDto) -> LocalAppTemplateSummary {
+        LocalAppTemplateSummary(
+            templateID: dto.templateId,
+            surface: runtimeProfileSurface(dto.surface),
+            summary: dto.summary
+        )
+    }
+
+    static func rejectedCandidate(_ dto: LocalAppRejectedCandidateDto) -> LocalAppRejectedCandidate {
+        LocalAppRejectedCandidate(
+            templateID: dto.templateId,
+            reason: dto.reason
+        )
+    }
+
+    static func receiptStatus(_ dto: LocalAppReceiptStatusDto) -> LocalAppReceiptStatus {
+        LocalAppReceiptStatus(
+            receiptID: dto.receiptId,
+            appID: dto.appId,
+            workflowRunID: dto.workflowRunId,
+            approvalContractSHA256: dto.approvalContractSha256,
+            candidateDigest: dto.candidateDigest,
+            issuedAt: Date(timeIntervalSince1970: TimeInterval(dto.issuedAtMs) / 1_000),
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(dto.expiresAtMs) / 1_000),
+            consumed: dto.consumed,
+            superseded: dto.superseded
+        )
+    }
+
+    static func mcpToolSurface(_ dto: LocalAppMcpToolSurfaceDto) -> LocalAppMcpToolSurface {
+        LocalAppMcpToolSurface(
+            name: dto.name,
+            title: dto.title,
+            description: dto.description,
+            inputSchemaSummary: dto.inputSchemaJson,
+            outputSchemaSummary: dto.outputSchemaJson,
+            annotationsSummary: dto.annotationsJson,
+            executionSummary: dto.executionJson,
+            visibleMetaSummary: dto.visibleMetaJson,
+            semanticFlowSummary: dto.semanticFlowJson,
+            ceilingSummary: dto.permissionCeiling
+        )
+    }
+
+    static func createConfirmation(_ dto: LocalAppCreateConfirmationRequestDto) -> LocalAppCreateConfirmationPrompt {
+        LocalAppCreateConfirmationPrompt(
+            requestID: dto.requestId,
+            appID: dto.appId,
+            name: dto.name,
+            brief: dto.brief,
+            selectedTemplate: templateSummary(dto.selectedTemplate),
+            runtimeProfile: LocalAppRuntimeProfileOption(
+                family: runtimeProfileFamily(dto.runtimeProfile.family),
+                revision: dto.runtimeProfile.revision,
+                contractSHA256: dto.runtimeProfile.contractSha256,
+                surface: runtimeProfileSurface(dto.runtimeProfile.surface),
+                corePackages: dto.runtimeProfile.corePackages.map {
+                    LocalAppRuntimeProfilePackage(name: $0.name, version: $0.version)
+                },
+                cacheStatus: dto.runtimeProfile.cacheStatus,
+                downloadStatus: dto.runtimeProfile.downloadStatus,
+                available: dto.runtimeProfile.available,
+                reason: dto.runtimeProfile.reason
+            ),
+            reason: dto.reason,
+            rejected: dto.rejected.map(rejectedCandidate),
+            initialTools: dto.initialTools.map(mcpToolSurface),
+            requiredGates: dto.requiredGates.map(gateStatus),
+            receipt: dto.receipt.map(receiptStatus)
+        )
+    }
+
+    static func mcpToolField(_ dto: LocalAppMcpToolFieldDto) -> LocalAppMcpToolField {
+        switch dto {
+        case .name:
+            .name
+        case .title:
+            .title
+        case .description:
+            .description
+        case .inputSchema:
+            .inputSchema
+        case .outputSchema:
+            .outputSchema
+        case .annotations:
+            .annotations
+        case .execution:
+            .execution
+        case .visibleMeta:
+            .visibleMeta
+        case .semanticFlow:
+            .semanticFlow
+        case .permissionCeiling:
+            .permissionCeiling
+        }
+    }
+
+    static func mcpToolChangeKind(_ dto: LocalAppMcpToolChangeKindDto) -> LocalAppMcpToolChangeKind {
+        switch dto {
+        case .added:
+            .added
+        case .removed:
+            .removed
+        case .changed:
+            .changed
+        }
+    }
+
+    static func mcpToolDiff(_ dto: LocalAppMcpToolDiffDto) -> LocalAppMcpToolDiff {
+        LocalAppMcpToolDiff(
+            kind: mcpToolChangeKind(dto.kind),
+            name: dto.name,
+            before: dto.before.map(mcpToolSurface),
+            after: dto.after.map(mcpToolSurface),
+            changedFields: dto.changedFields.map(mcpToolField)
+        )
+    }
+
+    static func mcpProposalApproval(
+        _ dto: LocalAppMcpProposalApprovalRequestDto
+    ) -> LocalAppMcpProposalApprovalPrompt {
+        LocalAppMcpProposalApprovalPrompt(
+            requestID: dto.requestId,
+            appID: dto.appId,
+            workflowRunID: dto.workflowRunId,
+            summary: dto.summary,
+            proposalSHA256: dto.proposalSha256,
+            approvalContractSHA256: dto.approvalContractSha256,
+            toolSurfaceSHA256: dto.toolSurfaceSha256,
+            toolDiffs: dto.toolDiffs.map(mcpToolDiff),
+            requiredFlowChanges: dto.requiredFlowChanges,
+            excludedCapabilities: dto.excludedCapabilities,
+            pendingGates: dto.pendingGates.map(gateStatus),
+            receipt: dto.receipt.map(receiptStatus)
+        )
+    }
+
+    static func managedMcpInventory(_ dto: ManagedLocalAppMcpServerDto) -> LocalAppManagedMcpInventory {
+        LocalAppManagedMcpInventory(
+            serverName: dto.serverName,
+            appID: dto.appId,
+            appName: dto.appName,
+            buildID: dto.buildId,
+            catalogDigest: dto.catalogSha256,
+            toolSurfaceDigest: dto.toolSurfaceSha256,
+            authoringRevision: dto.authoringRevision,
+            publicationState: workflow(dto.publicationState),
+            mcpVerification: verificationSummary(dto.mcpVerification),
+            uiVerification: verificationSummary(dto.uiVerification),
+            tools: dto.tools.map(mcpToolSurface)
+        )
     }
 }
 #endif

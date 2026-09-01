@@ -145,6 +145,8 @@ tempfile = "3"
 filetime = "0.2"
 # WIZARD-06 auto-mode-setup e2e: compute the proposal's --expect-sha256.
 sha2 = "0.10"
+# `archive` marketplace-source download tests build a real plugin zip fixture.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 # Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS

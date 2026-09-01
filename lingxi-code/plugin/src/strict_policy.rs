@@ -101,7 +101,7 @@ fn component_from_slot(slot: &str) -> Option<PluginComponent> {
         "agents" => PluginComponent::Agents,
         "skills" => PluginComponent::Skills,
         "hooks" => PluginComponent::Hooks,
-        "mcp" | "mcpServers" => PluginComponent::McpServers,
+        "mcp" => PluginComponent::McpServers,
         _ => return None,
     })
 }
@@ -145,6 +145,20 @@ mod tests {
         ]);
 
         assert_eq!(policy.locked, HashSet::from([PluginComponent::Skills]));
+    }
+
+    #[test]
+    fn mcp_servers_alias_is_not_recognized_the_oracle_enum_is_mcp_only() {
+        // Oracle: $pe = ["skills","agents","hooks","mcp"]; the array form is
+        // pre-filtered by `r.filter(c => $pe.includes(c))`, so "mcpServers"
+        // is dropped upstream and never locks anything. This port must match:
+        // an unrecognized slot name locks nothing.
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":["mcpServers"]}"#,
+        ]);
+
+        assert!(!policy.is_locked(PluginComponent::McpServers));
+        assert!(policy.locked.is_empty());
     }
 
     #[test]

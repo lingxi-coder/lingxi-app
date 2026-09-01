@@ -74,4 +74,10 @@
 /// (`runtime_profile`, `dependency_snapshot`) whose UniFFI layout changes the
 /// native bindings. The wire JSON is additive, but the mobile bindings are
 /// positional and must version-lock with the host.
-pub const CLIENT_PROTOCOL_VERSION: &str = "9.0.0";
+///
+/// Bumped to 10.0.0 for the Phase 9 Local App plugin cutover. This removes the
+/// obsolete runtime-profile selection command/event/capability path: runtime
+/// family confirmation now flows only through the Host-owned Local App create
+/// confirmation sheet and plugin commands, so keeping the old client command
+/// family would preserve a dead incompatible UniFFI surface.
+pub const CLIENT_PROTOCOL_VERSION: &str = "10.0.0";

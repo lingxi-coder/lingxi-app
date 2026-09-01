@@ -20,14 +20,7 @@
 mod builtins;
 mod size_guideline;
 mod ultracode;
-// `LocalAppSurface` is exported because it is the TYPE the Canvas-vs-DOM
-// selectors outside this crate must match on. Without it, P-1.10's typed
-// policy is unreachable from `engine-mobile`, and the ~15 name-keyed
-// selectors Phase 4 deletes would have nothing to migrate ONTO — they would
-// keep comparing name literals while a typed answer existed but was private.
-pub use builtins::{
-    BuiltinWorkflowDescriptor, BuiltinWorkflowRegistry, LocalAppSurface, BUILTIN_WORKFLOWS,
-};
+pub use builtins::{BuiltinWorkflowDescriptor, BuiltinWorkflowRegistry, BUILTIN_WORKFLOWS};
 pub use size_guideline::{prompt_appendix_for, WorkflowSizeGuideline};
 pub use ultracode::{
     workflows_enabled, UltracodeAttachment, UltracodeAttachmentKind, UltracodeConfig,
@@ -219,7 +212,14 @@ fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
 /// intentionally independent of the resolved script body: a named built-in
 /// with an explicit script override still reports `built-in`, while the
 /// `scriptMatchesDefinition` flag controls telemetry redaction separately.
-/// Resolution order is saved (project, then user) > plugin > built-in.
+///
+/// `plugin_workflows` is the same registry the resolver consults, checked in
+/// the SAME position (last), so `tengu_workflow_launched`'s `workflow_source`
+/// names the tier the launch actually resolved from. The oracle stamps
+/// `source:"plugin"` on every plugin record (`v()` @169045670) and emits it
+/// verbatim (`workflow_source:c(se)` @172565293), so `"plugin"` is a real
+/// emitted value — without this arm a plugin workflow is misreported as
+/// `custom`.
 #[must_use]
 pub fn workflow_source_for_name(
     cwd: &Path,
@@ -316,90 +316,6 @@ where
     R: Fn(&str) -> std::io::Result<String>,
 {
     resolve_script_at(Path::new(""), spec, read, None)
-}
-
-/// Apply the configured local-app workflow model as a DEFAULT for the two
-/// Local App build workflows. An explicit `args.model` wins and is never
-/// overwritten.
-///
-/// Two callers (`engine-desktop` and `engine-mobile`'s `workflow_support`)
-/// each launch workflows through their own composition root, so this stays a
-/// shared utility rather than being duplicated into both.
-///
-/// The check is deliberately about `script` BYTES, not a name. P-1.9 deleted
-/// this function's earlier form, which took `workflow_name: Option<&str>` and
-/// checked it against a hand-maintained name array -- a name derived from
-/// `workflow::meta_string_value(&script, "name")`, i.e. parsed from the very
-/// script about to be defaulted. That trusted a value a caller fully
-/// controls: an inline `script` (no `name`) whose own `meta.name` merely
-/// CLAIMS to be a real build workflow is a completely custom workflow, and
-/// the old check could not tell the difference.
-/// `BUILTIN_WORKFLOWS::is_local_app_build_script` compares the resolved
-/// script's bytes against the compiled-in descriptor instead, so a custom
-/// workflow that only reuses the name -- however it spells `meta.name` or
-/// the launch-time `name` selector -- gets no default, and only the literal,
-/// unmodified bundled script does.
-pub fn apply_local_app_build_default_model(
-    cwd: &Path,
-    script: &str,
-    args: &mut Option<Value>,
-) -> Result<(), WorkflowLaunchError> {
-    if !BUILTIN_WORKFLOWS.is_local_app_build_script(script) {
-        return Ok(());
-    }
-    // `args.model` is the call-site authority. Do not even read app metadata
-    // when it is present: a stale or malformed `.lingxi/app.json` must not
-    // make an otherwise self-contained explicit launch fail.
-    if args
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|object| object.contains_key("model"))
-    {
-        return Ok(());
-    }
-    let path = cwd.join(".lingxi").join("app.json");
-    let metadata = match std::fs::read_to_string(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(WorkflowLaunchError(format!(
-                "cannot read app workflow model from '{}': {error}",
-                path.display()
-            )));
-        }
-    };
-    let metadata: Value = serde_json::from_str(&metadata).map_err(|error| {
-        WorkflowLaunchError(format!(
-            "cannot parse app workflow model from '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let Some(model) = metadata
-        .pointer("/app/workflowModel")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    else {
-        return Ok(());
-    };
-    let object = match args {
-        Some(Value::Object(object)) => object,
-        None => {
-            *args = Some(Value::Object(serde_json::Map::new()));
-            args.as_mut()
-                .and_then(Value::as_object_mut)
-                .expect("new object")
-        }
-        Some(_) => {
-            return Err(WorkflowLaunchError(
-                "a Local App build workflow's args must be an object so the configured \
-                 model can be applied"
-                    .to_string(),
-            ));
-        }
-    };
-    object.insert("model".to_string(), Value::String(model.to_string()));
-    Ok(())
 }
 
 // ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
@@ -663,8 +579,14 @@ pub struct WorkflowTool {
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
-    /// Shared live plugin workflow registry. It is optional so lightweight
-    /// hosts and unit tests retain the built-in/project/user behavior.
+    /// Optional live plugin-workflow registry (§14 — `plugin::PluginManager`
+    /// materializes a plugin's declared/auto-scanned `workflows` into this
+    /// SAME shared table). When wired, a plugin's saved workflow becomes
+    /// resolvable by its namespaced name (`{plugin}:{name}`) after the
+    /// built-in/project/user directories have already missed — see
+    /// [`saved_workflow_candidates`]'s call sites. `None` (the default until
+    /// a composition root calls [`Self::with_plugin_workflows`]) means only
+    /// built-in/project/user workflows resolve, exactly today's behavior.
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
@@ -710,8 +632,10 @@ impl WorkflowTool {
         self
     }
 
-    /// Share the live plugin-workflow registry with the host's plugin manager
-    /// and task resolver. All three readers must observe the same `Arc`.
+    /// Share the host's live plugin-workflow registry with the plugin manager
+    /// and task resolver. All three readers must observe the same `Arc`, so a
+    /// plugin's saved workflow becomes resolvable by name alongside
+    /// built-in/project/user workflows.
     #[must_use]
     pub fn with_plugin_workflows(
         mut self,
@@ -1203,12 +1127,27 @@ impl Tool for WorkflowTool {
                 return Err(ValidationError(msg));
             }
         } else if let Some(name) = name {
-            // Named workflows are resolved and validated by the launcher after
-            // permission. Keep this branch intentionally I/O-free.
             if name.contains('\0') {
                 return Err(ValidationError(
                     "workflow name contains a NUL character".into(),
                 ));
+            }
+            if workflow_source_for_name(
+                &self.current_cwd(),
+                &name,
+                self.plugin_workflows.as_deref(),
+            )
+            .is_none()
+            {
+                let available = self.list_available_workflow_names().unwrap_or_default();
+                let list = if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available
+                };
+                return Err(ValidationError(format!(
+                    "Workflow \"{name}\" not found. Available: {list}"
+                )));
             }
         }
 
@@ -1494,6 +1433,31 @@ mod tests {
     }
 
     #[test]
+    fn named_workflow_source_reports_plugin_for_a_registry_hit() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(
+            "plugin-a",
+            vec![workflow::PluginWorkflowEntry {
+                name: "acme:deploy".into(),
+                script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+                script: "deploy();".into(),
+            }],
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:deploy", Some(&registry)),
+            Some("plugin")
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "deep-research", Some(&registry)),
+            Some("built-in")
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:missing", Some(&registry)),
+            None
+        );
+    }
+
+    #[test]
     fn plugin_workflow_registry_reaches_resolver_and_source_telemetry() {
         let cwd = unique_temp_path("plugin-resolver");
         std::fs::create_dir_all(&cwd).expect("create resolver cwd");
@@ -1619,97 +1583,6 @@ mod tests {
             .list_available_workflow_names()
             .expect("built-ins");
         assert!(names.split(", ").any(|name| name == "deep-research"));
-    }
-
-    fn real_build_script() -> &'static str {
-        BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("built-in")
-            .script
-    }
-
-    #[test]
-    fn explicit_local_app_model_bypasses_malformed_app_metadata() {
-        let cwd = unique_temp_path("explicit-model-malformed-metadata");
-        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
-        std::fs::write(cwd.join(".lingxi/app.json"), b"{not-json")
-            .expect("write malformed app metadata");
-        let mut args = Some(serde_json::json!({
-            "model": "deepseek::deepseek-chat",
-            "app_id": "demo"
-        }));
-
-        apply_local_app_build_default_model(&cwd, real_build_script(), &mut args)
-            .expect("an explicit model must not parse app metadata");
-
-        assert_eq!(
-            args,
-            Some(serde_json::json!({
-                "model": "deepseek::deepseek-chat",
-                "app_id": "demo"
-            }))
-        );
-        let _ = std::fs::remove_dir_all(cwd);
-    }
-
-    #[test]
-    fn local_app_metadata_model_remains_the_default_without_an_explicit_model() {
-        let cwd = unique_temp_path("metadata-default-model");
-        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
-        std::fs::write(
-            cwd.join(".lingxi/app.json"),
-            br#"{"app":{"workflowModel":"deepseek::deepseek-chat"}}"#,
-        )
-        .expect("write app metadata");
-        let mut args = Some(serde_json::json!({"app_id": "demo"}));
-
-        apply_local_app_build_default_model(&cwd, real_build_script(), &mut args)
-            .expect("metadata default applies");
-
-        assert_eq!(
-            args,
-            Some(serde_json::json!({
-                "app_id": "demo",
-                "model": "deepseek::deepseek-chat"
-            }))
-        );
-        let _ = std::fs::remove_dir_all(cwd);
-    }
-
-    /// §19.3's gate: a custom workflow with the SAME NAME gets no model
-    /// default. This constructs a script that DECLARES
-    /// `meta.name = "local-app-build"` but is not the compiled bundled
-    /// script -- the exact shape the deleted, name-keyed check could not
-    /// distinguish from the real workflow.
-    #[test]
-    fn a_same_named_custom_workflow_gets_no_model_default() {
-        let cwd = unique_temp_path("same-name-spoof");
-        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
-        std::fs::write(
-            cwd.join(".lingxi/app.json"),
-            br#"{"app":{"workflowModel":"deepseek::deepseek-chat"}}"#,
-        )
-        .expect("write app metadata");
-        let custom_script =
-            "export const meta = { name: 'local-app-build', description: 'not a build' };\nreturn 1\n";
-        assert_ne!(
-            custom_script,
-            real_build_script(),
-            "the fixture must actually differ from the real bundled bytes, or this test \
-             proves nothing"
-        );
-        let mut args = Some(serde_json::json!({"app_id": "demo"}));
-
-        apply_local_app_build_default_model(&cwd, custom_script, &mut args)
-            .expect("a non-local-app script must not error");
-
-        assert_eq!(
-            args,
-            Some(serde_json::json!({"app_id": "demo"})),
-            "a custom workflow that merely reuses the real build workflow's `meta.name` must \
-             not collect its workflowModel default"
-        );
-        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[test]
@@ -2492,6 +2365,145 @@ mod tests {
         let _ = std::fs::remove_file(&wf_path);
         let _ = std::fs::remove_dir_all(&config_dir);
         result.expect("name-resolved workflow must fall back to user workflow dir");
+    }
+
+    /// §14 — a plugin's declared workflow, namespaced `{plugin}:{name}` by
+    /// `plugin::PluginManager::load_plugin`, resolves through the SAME
+    /// `name` input as a built-in/project/user workflow once the shared
+    /// registry is wired via `with_plugin_workflows`.
+    #[tokio::test]
+    async fn validate_name_resolves_via_plugin_workflow_registry() {
+        let dir = unique_temp_path("plugin-registry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("deploy.js");
+        std::fs::write(&script_path, VALID_SCRIPT).unwrap();
+
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        registry.register(
+            "plugin-a",
+            vec![workflow::PluginWorkflowEntry {
+                name: "acme:deploy".to_string(),
+                script_path: script_path.clone(),
+                script: VALID_SCRIPT.to_string(),
+            }],
+        );
+
+        let t = tool(None).with_plugin_workflows(registry);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let result = t
+            .validate_input(&json!({ "name": "acme:deploy" }), &ctx)
+            .await;
+
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        result.expect("a plugin-registered workflow should resolve by its namespaced name");
+    }
+
+    /// A wired-but-empty registry does not change the ordinary "not found"
+    /// behaviour — the plugin check is a pure addition to the search path.
+    #[tokio::test]
+    async fn validate_name_absent_from_plugin_registry_reports_not_found() {
+        let t = tool(None).with_plugin_workflows(Arc::new(workflow::PluginWorkflowRegistry::new()));
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let err = t
+            .validate_input(&json!({ "name": "no-such-workflow" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.0
+                .starts_with("Workflow \"no-such-workflow\" not found."),
+            "unexpected error: {}",
+            err.0
+        );
+    }
+
+    /// §14 — the LAUNCH path. `Tool::validate_input` and `resolve_script_at`
+    /// are two separate implementations of the same search order, and only
+    /// the former is exercised by
+    /// `validate_name_resolves_via_plugin_workflow_registry`; reverting the
+    /// `resolve_script_at` branch alone leaves that test green. This one
+    /// pins the launcher's half directly, so a partially-wired composition
+    /// root (tool wired, launcher not) cannot ship as "validate accepts,
+    /// launch says not found".
+    ///
+    /// It also pins the ORDER at this seam: project/user files above the
+    /// registry, and built-ins as the final fallback.
+    #[test]
+    fn resolve_script_at_falls_back_to_the_plugin_workflow_registry() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(
+            "plugin-a",
+            vec![workflow::PluginWorkflowEntry {
+                name: "acme:deploy".to_string(),
+                script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+                script: VALID_SCRIPT.to_string(),
+            }],
+        );
+        let read = |p: &str| -> std::io::Result<String> {
+            if p == "/plugins/acme/scripts/deploy.js" {
+                Ok(VALID_SCRIPT.to_string())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file",
+                ))
+            }
+        };
+        let named = |name: &str| WorkflowLaunchSpec {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+
+        // Wired registry, registered name → the plugin's script.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            Some(&registry),
+        )
+        .expect("a registered plugin workflow must resolve on the launch path");
+        assert_eq!(resolved, VALID_SCRIPT);
+
+        // The SAME name with NO registry is the pre-§14 behaviour: not found.
+        // (This is exactly the drift a half-wired composition root produces.)
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            None,
+        )
+        .expect_err("without the registry the launch path must not resolve it");
+        assert_eq!(
+            err.0, "Workflow \"acme:deploy\" not found. Available: (none)",
+            "byte-exact launch-path miss message"
+        );
+
+        // A name absent from a wired registry still misses.
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:absent"),
+            read,
+            Some(&registry),
+        )
+        .expect_err("an unregistered name must still miss");
+        assert!(err.0.starts_with("Workflow \"acme:absent\" not found."));
+
+        // Built-ins are still resolved without touching the registry.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("deep-research"),
+            read,
+            Some(&registry),
+        )
+        .expect("built-ins resolve regardless of the registry");
+        assert_eq!(
+            resolved,
+            BUILTIN_WORKFLOWS.get("deep-research").unwrap().script
+        );
     }
 
     #[tokio::test]

@@ -35,8 +35,8 @@ use crate::computer_access::ComputerAccessResponseDto;
 use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppRuntimeProfileDto,
-    AppSurfaceDto, PluginCommandDto,
+    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppSurfaceDto,
+    PluginCommandDto,
 };
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -475,16 +475,6 @@ pub enum ClientCommand {
         request_id: String,
         /// User's scoped authorization decision.
         decision: AppAuthorizationDecisionDto,
-    },
-
-    /// Resolve one native runtime profile selection request with the chosen
-    /// family or an explicit cancel.
-    ResolveAppRuntimeProfileSelection {
-        /// Pending selection request correlator.
-        request_id: String,
-        /// Selected runtime family, or `None` when the user cancelled.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        selected_family: Option<AppRuntimeProfileDto>,
     },
 
     /// Approve or reject a host-issued App Agent Profile proposal. The token

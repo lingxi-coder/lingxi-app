@@ -128,17 +128,33 @@ fn marketplace_entry_source_path(
     };
     let entry = serde_json::from_value::<plugin::marketplace::MarketplacePluginEntry>(raw_entry)
         .map_err(|error| format!("Invalid marketplace entry for \"{name}\": {error}"))?;
+    // §8: the catalog's own declared entry name is third-party-controlled the
+    // moment the marketplace is; install is one of the paths the finding
+    // calls out as never calling the name gate at all.
+    plugin::validate_plugin_name(&entry.name)
+        .map_err(|reason| format!("Invalid marketplace entry for \"{name}\": {reason}"))?;
     if let Some(MarketplacePluginSource::Structured(source)) = entry.source.as_ref() {
         match source {
             MarketplaceExternalSource::Github { .. }
             | MarketplaceExternalSource::Git { .. }
             | MarketplaceExternalSource::Url { .. }
+            | MarketplaceExternalSource::GitSubdir { .. }
+            | MarketplaceExternalSource::Archive { .. }
             | MarketplaceExternalSource::Npm { .. } => {
                 return materialize_external_plugin_source(plugins_dir, marketplace, name, source)
                     .map(Some);
             }
             MarketplaceExternalSource::File { .. }
             | MarketplaceExternalSource::Directory { .. } => {}
+            MarketplaceExternalSource::Unsupported { error } => {
+                return Err(format!(
+                    "This plugin's marketplace entry is invalid: '{name}'{}",
+                    error
+                        .as_deref()
+                        .map(|e| format!(": {e}"))
+                        .unwrap_or_default()
+                ));
+            }
         }
     }
     let candidate = match plugin::MarketplaceManager::plugin_dir_in_clone(market_root, &entry) {
@@ -197,24 +213,48 @@ fn confined_source_subdir(root: &Path, relative: Option<&str>) -> Result<PathBuf
     Ok(candidate)
 }
 
-fn download_external_plugin_url(url: &str, root: &Path) -> Result<PathBuf, String> {
+/// Materialize the oracle `archive` plugin-entry source: an HTTPS zip,
+/// optionally pinned by `sha256` (verified against every download; the
+/// install is refused on mismatch).
+fn download_external_plugin_archive(
+    url: &str,
+    sha256: Option<&str>,
+    root: &Path,
+) -> Result<PathBuf, String> {
     let url = url.to_string();
-    let root = root.to_path_buf();
+    let sha256 = sha256.map(ToOwned::to_owned);
+    let dest = root.join("archive");
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("failed to initialize plugin download: {error}"))?;
-        let mut roots = runtime.block_on(crate::startup_resources::download_plugin_urls(
-            std::slice::from_ref(&url),
-            &root,
-        ))?;
-        roots
-            .pop()
-            .ok_or_else(|| "plugin URL produced no materialized source".to_string())
+        runtime.block_on(crate::startup_resources::download_plugin_archive(
+            &url,
+            sha256.as_deref(),
+            &dest,
+        ))
     })
     .join()
     .map_err(|_| "plugin download worker panicked".to_string())?
+}
+
+/// Verify a `sha`-pinned checkout's resolved HEAD commit against the entry's
+/// declared pin (oracle: *"SHA pin verification failed: expected HEAD to be
+/// … Refusing to install."*). `None` (no pin declared) always succeeds.
+fn verify_sha_pin(expected: Option<&str>, actual_head: &str) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if expected.eq_ignore_ascii_case(actual_head) {
+        Ok(())
+    } else {
+        Err(format!(
+            "SHA pin verification failed: expected HEAD to be {expected}, got {actual_head}. \
+             The pinned commit may have been removed upstream, or a ref with the same name \
+             exists. Refusing to install."
+        ))
+    }
 }
 
 fn npm_package_path(package: &str) -> Result<PathBuf, String> {
@@ -265,18 +305,35 @@ fn npm_package_path(package: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(package_name))
 }
 
-fn materialize_npm_source(package: &str, root: &Path) -> Result<PathBuf, String> {
-    let package_path = npm_package_path(package)?;
-    let status = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+fn materialize_npm_source(
+    package: &str,
+    version: Option<&str>,
+    registry: Option<&str>,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    // A separate `version` field (oracle: "Specific version or version range")
+    // combines with `package` the same way an inline `name@version` already
+    // does, reusing every existing validation / lookup path unchanged.
+    let spec = match version {
+        Some(version) if !version.is_empty() => format!("{package}@{version}"),
+        _ => package.to_string(),
+    };
+    let package_path = npm_package_path(&spec)?;
+    let mut command = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
+    command
         .arg("install")
         .arg("--ignore-scripts")
         .arg("--no-audit")
         .arg("--no-fund")
         .arg("--package-lock=false")
         .arg("--prefix")
-        .arg(root)
+        .arg(root);
+    if let Some(registry) = registry {
+        command.arg("--registry").arg(registry);
+    }
+    let status = command
         .arg("--")
-        .arg(package)
+        .arg(&spec)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -292,14 +349,109 @@ fn materialize_npm_source(package: &str, root: &Path) -> Result<PathBuf, String>
     confined_source_subdir(&root.join("node_modules"), package_path.to_str())
 }
 
+/// Fetch/clone one external plugin-entry `source` into a scratch subdirectory
+/// of `work` and return the resolved plugin-root directory to copy from.
+fn resolve_external_plugin_source(
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    work: &Path,
+) -> Result<PathBuf, String> {
+    use plugin::marketplace::MarketplaceExternalSource;
+
+    match source {
+        MarketplaceExternalSource::Github {
+            repo,
+            git_ref,
+            path,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head = plugin::clone_plugin_git_pinned(
+                &format!("https://github.com/{repo}.git"),
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, path.as_deref())
+        }
+        MarketplaceExternalSource::Git {
+            url,
+            git_ref,
+            path,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, path.as_deref())
+        }
+        // Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY
+        // ("Full git repository URL (https:// or git@)"), not an archive —
+        // that is the separate `archive` arm below. The whole checkout is
+        // the plugin root (this arm has no `path`).
+        MarketplaceExternalSource::Url { url, git_ref, sha } => {
+            let checkout = work.join("checkout");
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            Ok(checkout)
+        }
+        // A subdirectory of a larger repository (monorepo). The oracle
+        // partial-clones (`--filter=tree:0`); this port does a full clone
+        // and confines to `path` (same result, more bandwidth — see the
+        // `GitSubdir` doc comment).
+        MarketplaceExternalSource::GitSubdir {
+            url,
+            path,
+            git_ref,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, Some(path.as_str()))
+        }
+        MarketplaceExternalSource::Archive { url, sha256 } => {
+            download_external_plugin_archive(url, sha256.as_deref(), work)
+        }
+        MarketplaceExternalSource::Npm {
+            package,
+            version,
+            registry,
+        } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
+        MarketplaceExternalSource::File { .. } | MarketplaceExternalSource::Directory { .. } => {
+            Err("local marketplace source must stay inside its catalog root".to_string())
+        }
+        MarketplaceExternalSource::Unsupported { error } => Err(format!(
+            "plugin source type unsupported{}",
+            error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        )),
+    }
+}
+
 fn materialize_external_plugin_source(
     plugins_dir: &Path,
     marketplace: &str,
     name: &str,
     source: &plugin::marketplace::MarketplaceExternalSource,
 ) -> Result<PathBuf, String> {
-    use plugin::marketplace::MarketplaceExternalSource;
-
     let cache_key = external_source_cache_key(source);
     let destination = plugins_dir
         .join("source-cache")
@@ -325,32 +477,7 @@ fn materialize_external_plugin_source(
         .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
 
     let result = (|| -> Result<(), String> {
-        let resolved = match source {
-            MarketplaceExternalSource::Github {
-                repo,
-                git_ref,
-                path,
-            } => {
-                let checkout = work.join("checkout");
-                plugin::clone_plugin_git(
-                    &format!("https://github.com/{repo}.git"),
-                    git_ref.as_deref().unwrap_or_default(),
-                    &checkout,
-                )?;
-                confined_source_subdir(&checkout, path.as_deref())?
-            }
-            MarketplaceExternalSource::Git { url, git_ref, path } => {
-                let checkout = work.join("checkout");
-                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
-                confined_source_subdir(&checkout, path.as_deref())?
-            }
-            MarketplaceExternalSource::Url { url } => download_external_plugin_url(url, &work)?,
-            MarketplaceExternalSource::Npm { package } => materialize_npm_source(package, &work)?,
-            MarketplaceExternalSource::File { .. }
-            | MarketplaceExternalSource::Directory { .. } => {
-                return Err("local marketplace source must stay inside its catalog root".to_string())
-            }
-        };
+        let resolved = resolve_external_plugin_source(source, &work)?;
         copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
         plugin::ensure_plugin_manifest(&payload)?;
         if let Err(error) = std::fs::rename(&payload, &destination) {
@@ -1630,8 +1757,24 @@ pub async fn run_uninstall_secure(
         )?;
         message.push('\n');
         message.push_str(&prune_message);
+    } else {
+        // §22 (oracle `QWn`): without `--prune`, proactively point out any
+        // auto-installed dependency this removal just orphaned, instead of
+        // leaving it silently stranded until the user happens to run
+        // `plugin prune` on their own.
+        message.push_str(&uninstall_orphan_suffix(plugins_dir, scope_value, &project));
     }
     Ok(message)
+}
+
+/// The trailing text a non-`--prune` `plugin uninstall` appends (oracle
+/// `QWn`): any auto-installed dependency the removal just left unreachable,
+/// or `""` when there is nothing to report. Reads the just-updated installed
+/// DB, so it reflects the POST-removal dependency graph.
+fn uninstall_orphan_suffix(plugins_dir: &Path, scope: Scope, project: &Option<String>) -> String {
+    let db = load_installed(plugins_dir);
+    let orphans = crate::commands::plugin_prune::scan_orphans(&db, scope, project);
+    crate::commands::plugin_prune::orphan_notice(&orphans, scope.label())
 }
 
 /// Validate a `plugin update` `--scope`. Unlike the install family, update's
@@ -1970,6 +2113,27 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
     }
 
+    /// Tiny recursive file walk (test-only) yielding every file path under
+    /// `root` as a String.
+    fn walkdir(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn install_materializes_records_and_enables() {
         let e = env();
@@ -2013,6 +2177,91 @@ mod tests {
             .plugins
             .join("cache/mymkt/hello/1.2.3/.lingxi-plugin/plugin.json")
             .exists());
+    }
+
+    /// Migrated from `plugin/tests/materialize.rs`'s
+    /// `install_marketplace_arm_rejects_symlink_escape` (spec §25d): that
+    /// test drove a lexically-safe-but-symlinked marketplace catalog entry
+    /// through `PluginManager::install`'s now-deleted marketplace arm.
+    /// Production's own `marketplace_entry_source_path` carries an
+    /// equivalent canonicalize + `starts_with` containment check (see its
+    /// doc comment) — this pins THAT check down directly, since nothing
+    /// exercised it before.
+    ///
+    /// A symlinked entry canonicalizes outside the marketplace root, so
+    /// `marketplace_entry_source_path` returns `Ok(None)` (fails closed,
+    /// same as a plugin that was never listed) rather than the deleted
+    /// arm's "resolves to a path outside the cache directory" message —
+    /// the shape of the failure differs, but the security property (never
+    /// copy the escaped directory) is the same.
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_a_marketplace_entry_whose_path_symlinks_outside_the_root() {
+        let e = env();
+        // The exfiltration target OUTSIDE the marketplace repo (stands in
+        // for `~/.ssh`).
+        let outside = e._tmp.path().join("outside");
+        std::fs::create_dir_all(outside.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            outside
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"evil","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(outside.join("id_rsa"), "PRIVATE KEY").unwrap();
+
+        // A malicious catalog entry: "link" is a single Normal path component
+        // (passes the lexical `..`/absolute guard in `plugin_dir_in_clone`)
+        // but is a symlink pointing OUT of the marketplace root.
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"evil","source":"link"}]}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, e.market.join("link")).unwrap();
+
+        let err = run_install("evil@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("a symlinked catalog entry must be rejected, not followed");
+        assert!(err.contains("not found in marketplace"), "got: {err}");
+        // Nothing was exfiltrated into the cache or source-cache.
+        for root in [e.plugins.join("cache"), e.plugins.join("source-cache")] {
+            if !root.exists() {
+                continue;
+            }
+            let leaked = walkdir(&root).iter().any(|p| p.ends_with("id_rsa"));
+            assert!(
+                !leaked,
+                "the symlink target's files must NOT be copied into {root:?}"
+            );
+        }
+    }
+
+    /// Migrated from `plugin/tests/materialize.rs`'s
+    /// `install_git_arm_malicious_version_cannot_escape_cache` (spec §25d):
+    /// that test drove a malicious `plugin.json` `"version":".."` through
+    /// `PluginManager::install`'s now-deleted git arm's `copy_into_cache`
+    /// (whose `sanitize_segment` is byte-identical to this crate's own
+    /// `sanitize`, still live at every versioned-cache-path call site in
+    /// this file). Pin the guard down directly at its real, still-used
+    /// entry point instead of through the deleted duplicate.
+    #[test]
+    fn sanitize_neutralizes_dot_and_dotdot_segments() {
+        for segment in ["..", ".", ""] {
+            assert_eq!(
+                sanitize(segment, true),
+                "-",
+                "segment {segment:?} must collapse to a safe token, not resolve to a parent/current dir"
+            );
+        }
+        // A real version string is untouched (dots preserved only when allowed).
+        assert_eq!(sanitize("1.2.3", true), "1.2.3");
+        // A non-empty segment that merely CONTAINS ".." is not collapsed (only
+        // an ENTIRE segment equal to ".." is); its slash becomes "-" and its
+        // dots are preserved (allow_dot=true), same as any other character map.
+        assert_eq!(sanitize("../1.2.3", true), "..-1.2.3");
     }
 
     #[test]
@@ -2076,6 +2325,7 @@ mod tests {
             url: format!("file://{}", repository.display()),
             git_ref: None,
             path: Some("nested/plugin".to_string()),
+            sha: None,
         };
 
         let materialized =
@@ -2087,6 +2337,219 @@ mod tests {
             .is_file());
         assert!(materialized
             .starts_with(std::fs::canonicalize(e.plugins.join("source-cache")).unwrap()));
+    }
+
+    /// A bare `git init`+commit fixture whose root IS the plugin (no subdir),
+    /// for the `url`-as-git-repo tests below. Returns `(repo path, HEAD sha)`.
+    #[cfg(unix)]
+    fn init_git_plugin_fixture(root: &Path) -> (PathBuf, String) {
+        std::fs::create_dir_all(root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            r#"{"name":"url-repo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for args in [
+            vec!["init", root.to_str().unwrap()],
+            vec!["-C", root.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                root.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("git is required by marketplace installation");
+            assert!(
+                output.status.success(),
+                "git fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let head = std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        assert!(head.status.success());
+        (
+            root.to_path_buf(),
+            String::from_utf8_lossy(&head.stdout).trim().to_string(),
+        )
+    }
+
+    /// Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY, not an
+    /// archive — a prior port version conflated the two under the same `url`
+    /// tag and tried to download-and-unpack an archive here, which would fail
+    /// (or silently mis-handle) a real oracle `source:"url"` entry.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_materializes_via_git_clone_not_archive_download() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source");
+        let (repository, _head) = init_git_plugin_fixture(&repository);
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: None,
+        };
+
+        let materialized =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo", &source).unwrap();
+
+        assert!(materialized
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .is_file());
+    }
+
+    /// Oracle `ohr`: a `sha` that is not in the repository at all reaches
+    /// `git checkout <sha>` (the `--unshallow` fallback fetch succeeds) and
+    /// fails there — *"Failed to checkout commit …"*. Either way the install
+    /// is refused; what must NOT happen is the pin being silently ignored.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_rejects_a_sha_pin_that_is_not_in_the_repository() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source-pinned");
+        let (repository, head) = init_git_plugin_fixture(&repository);
+        let wrong_sha = if head.starts_with('f') {
+            "0".repeat(40)
+        } else {
+            "f".repeat(40)
+        };
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: Some(wrong_sha),
+        };
+
+        let error =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-pinned", &source)
+                .expect_err("a mismatched sha pin must refuse the install");
+        assert!(
+            error.contains("Failed to checkout commit"),
+            "expected the pinned checkout to fail, got: {error}"
+        );
+    }
+
+    /// The tamper check itself (oracle `KHt`): once the pinned commit IS
+    /// checked out, a resolved HEAD that still disagrees with the pin refuses
+    /// the install with this byte-exact copy.
+    #[test]
+    fn verify_sha_pin_refuses_a_head_that_does_not_match_the_pin() {
+        let error = verify_sha_pin(Some("a".repeat(40).as_str()), &"b".repeat(40)).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "SHA pin verification failed: expected HEAD to be {} , got {}. \
+                 The pinned commit may have been removed upstream, or a ref with the same name \
+                 exists. Refusing to install.",
+                "a".repeat(40),
+                "b".repeat(40)
+            )
+            .replace(" ,", ",")
+        );
+        assert!(verify_sha_pin(None, &"b".repeat(40)).is_ok());
+    }
+
+    /// Oracle `ohr`: a `sha` names the commit to CHECK OUT (`--no-checkout`,
+    /// `fetch origin <sha>`, `checkout <sha>`), and the `rev-parse HEAD`
+    /// verification is the tamper check that runs AFTER it. A pin to anything
+    /// but the current tip — the only reason anyone pins — must therefore
+    /// install, not refuse. A port that only compares the pin against the tip
+    /// of the cloned ref inverts the feature: every genuine pin fails.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_installs_a_pin_to_a_non_tip_commit() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source-nontip");
+        let (repository, first) = init_git_plugin_fixture(&repository);
+
+        // A second commit moves the tip away from the pinned commit and
+        // changes the manifest, so the checked-out content is identifiable.
+        std::fs::write(
+            repository
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"url-repo","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        for args in [
+            vec!["-C", repository.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                repository.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "second",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("git is required by marketplace installation");
+            assert!(output.status.success());
+        }
+        let tip = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["-C", repository.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_ne!(first, tip, "the fixture must have moved the tip");
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: Some(first.clone()),
+        };
+
+        let materialized =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-nontip", &source)
+                .expect("a pin to a non-tip commit must install");
+        let manifest = std::fs::read_to_string(
+            materialized
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+        )
+        .unwrap();
+        assert!(
+            manifest.contains("1.0.0"),
+            "the PINNED commit's tree must be checked out, got: {manifest}"
+        );
+    }
+
+    /// Oracle `ohr`'s first line: `Invalid sha "…": cannot start with "-"`.
+    #[test]
+    fn a_sha_pin_that_looks_like_a_git_option_is_refused() {
+        let error = plugin::clone_plugin_git_pinned(
+            "https://example.invalid/x.git",
+            "",
+            Some("--upload-pack=touch /tmp/pwn"),
+            Path::new("/tmp/never-created-by-this-test"),
+        )
+        .expect_err("a sha starting with `-` must be refused before any git call");
+        assert!(
+            error.contains(r#"Invalid sha "--upload-pack=touch /tmp/pwn": cannot start with "-""#),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2534,6 +2997,36 @@ mod tests {
         );
     }
 
+    /// §8: install previously never called the name gate at all — a
+    /// marketplace catalog entry declaring a space/control/bidi-laden `name`
+    /// materialized without complaint. Reproduces via a bare-relative source
+    /// entry, the simplest catalog shape.
+    #[test]
+    fn install_rejects_a_catalog_entry_with_an_invalid_name() {
+        let e = env();
+        let manifest = e
+            .market
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        std::fs::write(
+            &manifest,
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[
+                {"name":"hello","source":"./plugins/hello"},
+                {"name":"bad name","source":"./plugins/hello"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let err =
+            run_install("bad name@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Installing plugin \"bad name@mymkt\"...✘ Failed to install plugin \"bad name@mymkt\": \
+             Invalid marketplace entry for \"bad name\": Plugin name cannot contain spaces. \
+             Use kebab-case (e.g., \"my-plugin\")"
+        );
+    }
+
     #[test]
     fn install_no_marketplace() {
         let e = env();
@@ -2658,6 +3151,54 @@ mod tests {
             .exists());
     }
 
+    /// §22 (oracle `QWn`): a non-`--prune` uninstall's message gains a
+    /// trailing notice naming any auto-installed dependency the DB shows as
+    /// newly unreachable — here modeled directly against an installed DB
+    /// carrying only the orphan (nothing manual reaches it).
+    #[test]
+    fn uninstall_orphan_suffix_reports_a_newly_orphaned_dependency() {
+        let e = env();
+        let dep_path = e.plugins.join("cache/mymkt/dep/1.0.0");
+        std::fs::create_dir_all(dep_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            dep_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"dep","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        write_installed(
+            &e.plugins,
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "dep@mymkt": [{
+                        "scope": "user",
+                        "installPath": dep_path.display().to_string(),
+                        "version": "1.0.0",
+                        "installedAt": "2026-01-01T00:00:00.000Z",
+                        "lastUpdated": "2026-01-01T00:00:00.000Z",
+                        "auto": true,
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        let suffix = uninstall_orphan_suffix(&e.plugins, Scope::User, &None);
+        assert_eq!(
+            suffix,
+            "\n1 auto-installed dependency no longer needed: dep. Run `lingxi-cli plugin prune` \
+             to remove."
+        );
+    }
+
+    #[test]
+    fn uninstall_orphan_suffix_is_empty_with_no_orphans() {
+        let e = env();
+        assert_eq!(uninstall_orphan_suffix(&e.plugins, Scope::User, &None), "");
+    }
+
     #[test]
     fn uninstall_not_installed() {
         let e = env();
@@ -2730,6 +3271,142 @@ mod tests {
         assert_eq!(
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
+        );
+    }
+
+    /// §21.9 — a versionless plugin's cache dir (`cache/<market>/<plugin>/unknown`)
+    /// is FIXED and shared by every scope. Install the same versionless plugin
+    /// at two scopes (both records land on the identical shared cache dir), then
+    /// update one scope: the update must defer instead of blowing the shared
+    /// Oracle `ice`: the "in use by another session" branch is keyed on a LIVE
+    /// session lease (`gK` = `aS(…,{excludeSelf:!0},…)`), and even when it
+    /// fires it only writes a DEBUG line and RETURNS the cache path — the
+    /// install/update continues and the record is still written. A port that
+    /// substitutes "some other installed-plugin RECORD points at this path"
+    /// for a live lease deadlocks the ordinary case of one plugin installed at
+    /// two scopes: both records share the versionless cache path
+    /// `cache/<mkt>/<plugin>/unknown`, so neither scope can ever be updated
+    /// again and nothing ever clears the condition.
+    #[test]
+    fn update_converges_when_a_versionless_cache_is_shared_by_another_scope() {
+        let e = env();
+        // Strip `version` so the marketplace resolves to "unknown" and both
+        // scopes' records land on the identical cache path.
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"hello"}"#,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+
+        let shared_cache = e.plugins.join("cache/mymkt/hello/unknown");
+        let records = installed_db(&e)["plugins"]["hello@mymkt"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(records.len(), 2, "both scopes share one record set");
+        assert!(records
+            .iter()
+            .all(|r| r["installPath"] == shared_cache.display().to_string()));
+
+        // A new file upstream: the update must actually re-copy.
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join("commands")
+                .join("new.md"),
+            "# new",
+        )
+        .unwrap();
+
+        let msg = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(
+            !msg.contains("in use by another session"),
+            "a second scope's persisted record is not a live session: {msg}"
+        );
+        assert!(
+            shared_cache.join("commands/new.md").exists(),
+            "the update must have re-materialized the cache, got: {msg}"
+        );
+        assert!(shared_cache.join("commands/hi.md").exists());
+    }
+
+    /// The same deadlock in its versioned form (the reviewer's repro): update
+    /// the user scope to 2.0.0 first, then the project scope must be able to
+    /// reach the very same 2.0.0 cache dir instead of being pinned at 1.2.3.
+    #[test]
+    fn update_converges_for_a_second_scope_pointing_at_an_existing_version_cache() {
+        let e = env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"hello","version":"2.0.0"}"#,
+        )
+        .unwrap();
+
+        run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        let msg = run_update("hello@mymkt", "project", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(
+            msg.contains("updated from 1.2.3 to 2.0.0"),
+            "the project scope must converge too, got: {msg}"
+        );
+        let expected = e
+            .plugins
+            .join("cache/mymkt/hello/2.0.0")
+            .display()
+            .to_string();
+        let records = installed_db(&e)["plugins"]["hello@mymkt"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            records
+                .iter()
+                .all(|r| r["installPath"] == expected && r["version"] == "2.0.0"),
+            "both records must land on the 2.0.0 cache: {records:?}"
         );
     }
 

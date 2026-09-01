@@ -331,13 +331,6 @@ G1	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/.lingxi/source-
 G1	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/app/main.jsx	LingXi
 G1	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/lib/lingxi-bridge.js	LingXi
 G1	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/lib/lingxi-provider.jsx	LingXi
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/settings.local.json	LINGXI
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/settings.local.json	\.lingxi
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/source-policy.json	LINGXI
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/source-policy.json	\.lingxi
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/app/main.jsx	LingXi
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js	LingXi
-G1	lingxi-code/local-apps/templates/vite-react-static-v1/lib/lingxi-provider.jsx	LingXi
 G1	lingxi-code/local-apps/tests/serde_compat.rs	\.lingxi
 G1	lingxi-code/mcp/src/config_diagnostics.rs	LINGXI
 G1	lingxi-code/mcp/src/enterprise_policy.rs	LINGXI
@@ -1064,13 +1057,6 @@ G3	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/.lingxi/source-
 G3	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/.lingxi/source-policy.json	LINGXI.md
 G3	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/lib/lingxi-bridge.js	.lingxi
 G3	lingxi-code/local-apps/templates/runtime-profiles/three-3d/r1/styles/foundation.css	.lingxi-*
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/.gitignore	.lingxi-*
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/settings.local.json	.lingxi
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/settings.local.json	LINGXI.md
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/source-policy.json	.lingxi
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/.lingxi/source-policy.json	LINGXI.md
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js	.lingxi
-G3	lingxi-code/local-apps/templates/vite-react-static-v1/styles/foundation.css	.lingxi-*
 G3	lingxi-code/local-apps/tests/fixtures/.gitignore	.lingxi
 G3	lingxi-code/local-apps/tests/serde_compat.rs	.lingxi
 G3	lingxi-code/mcp/src/json_config.rs	.lingxi.json

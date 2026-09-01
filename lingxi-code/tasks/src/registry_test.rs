@@ -2334,7 +2334,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
                 creator_agent_id: None,
             },
             session_uuid: None,
-            workflow_id: "local-app-build".into(),
+            workflow_id: "lingxi-local-app:local-app-build".into(),
             script: String::new(),
             resume_from_run_id: None,
             args: None,
@@ -2370,10 +2370,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
 }
 
 /// The delete guard now reads a task's typed `scope`, not its `workflow_id`
-/// -- so `workflow_id` is irrelevant to it, in EITHER direction. Before this
-/// migration, the guard had to special-case `local-canvas-build` as a sibling
-/// of the routed `local-app-build` name (keying on the routed name alone let
-/// a canvas app be DELETED WHILE ITS BUILD WAS RUNNING). Now two workflows
+/// -- so `workflow_id` is irrelevant to it, in EITHER direction. Now two workflows
 /// with completely different, made-up `workflow_id`s block the SAME app
 /// equally, as long as they both carry a matching scope; and a scope-less
 /// workflow does not block, regardless of how convincing its `workflow_id`
@@ -2415,13 +2412,13 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
         })
     };
 
-    // Two DIFFERENT, made-up workflow_ids, neither of which is either real
-    // build workflow name, both scoped to "canvas-app": both must block.
+    // Two DIFFERENT workflow_ids, one retired-looking and one made up, both
+    // scoped to "canvas-app": both must block.
     let (_d, registry_two) = make_registry();
     registry_two
         .insert_state_for_test(mk(
             "w-canvas",
-            "local-canvas-build",
+            "retired-local-app-alias",
             Some(
                 crate::scope::LocalAppWorkflowTaskScope::for_build("canvas-app")
                     .expect("valid app id"),
@@ -2445,17 +2442,17 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
     assert!(blockers.contains(&"w-canvas".to_string()));
     assert!(blockers.contains(&"w-canvas-2".to_string()));
 
-    // The REAL build name with NO scope must not block -- the name carries
+    // The REAL namespaced build id with NO scope must not block -- the id carries
     // no authority any more.
     registry
-        .insert_state_for_test(mk("w-other", "local-app-build", None))
+        .insert_state_for_test(mk("w-other", "lingxi-local-app:local-app-build", None))
         .await;
     assert!(
         registry
             .find_nonterminal_local_app_workflows("canvas-app")
             .await
             .is_empty(),
-        "workflow_id alone -- even the real build name -- must not block delete"
+        "workflow_id alone -- even the real namespaced build id -- must not block delete"
     );
 }
 
@@ -2499,8 +2496,8 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
             creator_agent_id: None,
         },
         session_uuid: None,
-        // Reuses the REAL build workflow's exact name...
-        workflow_id: "local-app-build".into(),
+        // Reuses the REAL namespaced build workflow id...
+        workflow_id: "lingxi-local-app:local-app-build".into(),
         script: String::new(),
         resume_from_run_id: None,
         // ...and forges the victim's app id into args, exactly as §8.1 and
@@ -2734,7 +2731,7 @@ async fn adopted_workflow_is_registered_as_paused_and_keeps_resume_metadata() {
         .register_adopted_workflow(crate::registry::AdoptedWorkflow {
             task_id: "wabc12345".into(),
             session_uuid: Some("session-1".into()),
-            workflow_id: "local-app-build".into(),
+            workflow_id: "lingxi-local-app:local-app-build".into(),
             run_id: "wf_abcdef".into(),
             script_path: "/workspace/.lingxi/workflows/build.js".into(),
             args: Some(r#"{"app_id":"demo"}"#.into()),

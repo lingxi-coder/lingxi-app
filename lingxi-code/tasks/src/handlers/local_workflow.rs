@@ -886,9 +886,13 @@ pub struct LocalWorkflowHandler {
     /// instead of reusing the engine session cwd (which may belong to another
     /// app or to the host project).
     workspace_root: Option<std::path::PathBuf>,
-    /// Optional live plugin-workflow registry shared with the Workflow tool
-    /// and PluginManager. Nested `workflow({name})` resolves through this
-    /// table only after project/user saved-workflow directories miss.
+    /// Optional live plugin-workflow registry (§14 — the SAME `Arc` shared
+    /// with `plugin::PluginManager::with_plugin_workflows` and
+    /// `tool_workflow::WorkflowTool::with_plugin_workflows`). When wired, a
+    /// nested `workflow({name})` call inside a running script can resolve a
+    /// plugin's saved workflow by its namespaced name, after the project/user
+    /// saved-workflow directories have already missed (see
+    /// [`resolve_nested_script`]).
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
@@ -924,7 +928,9 @@ impl LocalWorkflowHandler {
         }
     }
 
-    /// Share the live plugin-workflow registry with nested workflow calls.
+    /// Share the host's live plugin-workflow registry (the SAME `Arc` handed
+    /// to `plugin::PluginManager::with_plugin_workflows` and
+    /// `tool_workflow::WorkflowTool::with_plugin_workflows`).
     #[must_use]
     pub fn with_plugin_workflows(
         mut self,
@@ -946,7 +952,6 @@ impl LocalWorkflowHandler {
             .as_ref()
             .is_some_and(|wired| Arc::ptr_eq(wired, registry))
     }
-
     /// Attach a [`TaskStatusSink`] so terminal transitions are reported.
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
@@ -1789,7 +1794,10 @@ pub struct NestedConfig {
     pub args: Option<String>,
     /// Filesystem for resolving `workflow({scriptPath})` / `workflow(name)`.
     pub fs: Option<Arc<dyn FileSystem>>,
-    /// Live plugin-workflow registry used after project/user workflow lookup.
+    /// Live plugin-workflow registry (§14) consulted by `workflow(name)`
+    /// after the project/user saved-workflow directories have missed.
+    /// `None` ⇒ only built-in/project/user workflows resolve, exactly
+    /// today's behavior.
     pub plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 

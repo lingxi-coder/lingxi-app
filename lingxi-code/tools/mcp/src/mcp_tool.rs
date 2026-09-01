@@ -434,6 +434,7 @@ pub(crate) fn auth_kind_from_spec(spec: &McpTransportSpec) -> (&'static str, &'s
         McpTransportSpec::WebSocket { .. } => ("websocket", "none"),
         McpTransportSpec::InProcess { .. } => ("inProcess", "none"),
         McpTransportSpec::SseIde { .. } => ("sseIde", "none"),
+        McpTransportSpec::WsIde { .. } => ("wsIde", "none"),
         McpTransportSpec::SdkControl { .. } => ("sdkControl", "none"),
     }
 }
@@ -554,6 +555,8 @@ fn persist_id_seed() -> (u128, String) {
 
 // -- Permission shape (shared by all four MCP tools) -------------------------
 
+/// Oracle-byte-locked ask/passthrough message on the MCP factory's
+/// `checkPermissions` (@182520945).
 fn allow_mcp(reason: &str) -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
@@ -601,10 +604,27 @@ pub struct MCPTool {
     search_hint: Option<String>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
     always_load: bool,
-    /// `_meta.anthropic/requiresUserInteraction` hint from the MCP tool definition.
+    /// `_meta.anthropic/requiresUserInteraction` (§27b). `true` means this
+    /// tool needs a fresh interaction on every call, so a persisted "always
+    /// allow" grant must never be offered — see
+    /// `Tool::requires_user_interaction` below.
     requires_user_interaction: bool,
     /// Tighten-only ceiling resolved by `McpClient::list_tools` from config.
     effective_max_permission: Option<McpPermissionCeiling>,
+    /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
+    /// entry. `None` (every existing construction site) preserves today's
+    /// behaviour exactly: the server is derived from `full_name`'s parsed
+    /// segment, which is also the `McpRegistry` table key. `Some(key)` means
+    /// this instance was built over an agent-scoped connection registered
+    /// under `key` ([`mcp::registry::McpRegistry::connect_agent_scoped`]) —
+    /// dispatch (registry lookups) uses `key`, while `full_name` STAYS
+    /// `mcp__<server>__<tool>` with the PLAIN server name, so the model sees
+    /// the same tool name the oracle emits, `mcp__<server>__*` permission
+    /// rules still match, and `oauth::server_key` (which hashes
+    /// `config.name`) is untouched. Set only via
+    /// [`Self::with_bound_server_key`] so every OTHER construction site's
+    /// argument list is unaffected by this addition.
+    bound_server_key: Option<String>,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -639,6 +659,7 @@ impl MCPTool {
             always_load: true,
             requires_user_interaction: false,
             effective_max_permission: None,
+            bound_server_key: None,
         }
     }
 
@@ -657,11 +678,9 @@ impl MCPTool {
         full_name: String,
         description: String,
         input_schema: Value,
-        output_schema: Option<Value>,
-        requires_user_interaction: bool,
-        effective_max_permission: Option<McpPermissionCeiling>,
         search_hint: Option<String>,
         always_load: bool,
+        requires_user_interaction: bool,
     ) -> Self {
         Self {
             ctx,
@@ -672,12 +691,41 @@ impl MCPTool {
             // defensive no-op for in-band descriptions but keeps the per-tool
             // wire entry within the documented bound for any out-of-band source.
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
-            bound_output_schema: output_schema,
+            bound_output_schema: None,
             search_hint,
             always_load,
             requires_user_interaction,
-            effective_max_permission,
+            effective_max_permission: None,
+            bound_server_key: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_output_schema(mut self, output_schema: Option<Value>) -> Self {
+        self.bound_output_schema = output_schema;
+        self
+    }
+
+    #[must_use]
+    pub fn with_effective_max_permission(
+        mut self,
+        effective_max_permission: Option<McpPermissionCeiling>,
+    ) -> Self {
+        self.effective_max_permission = effective_max_permission;
+        self
+    }
+
+    /// §24b: bind this per-tool wire entry's DISPATCH target to `key` — the
+    /// [`mcp::registry::McpRegistry`] table key an agent-scoped connect
+    /// registered the underlying connection under. `full_name` (the wire
+    /// `name()`, already stamped by [`Self::new_for_tool`]) is left
+    /// untouched, so the model-facing FQN and permission-rule matching stay
+    /// on the plain server name; only registry lookups inside [`Self::call`]
+    /// use `key`.
+    #[must_use]
+    pub fn with_bound_server_key(mut self, key: String) -> Self {
+        self.bound_server_key = Some(key);
+        self
     }
 
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
@@ -1049,6 +1097,13 @@ impl Tool for MCPTool {
     fn search_hint(&self) -> Option<&str> {
         self.search_hint.as_deref()
     }
+    /// §27b — `_meta.anthropic/requiresUserInteraction`. Oracle:
+    /// `requiresUserInteraction(){return Ee}` (@182520425), where `Ee` is the
+    /// same bit read from `_meta` at tool-list time. The dispatcher's
+    /// consumers use this to suppress a persistent "always allow" grant for
+    /// this tool (`suppressesAlwaysAllowRule:()=>Ee||Zt(x,v.name)` —
+    /// @182520462; the `Zt(x,v.name)` disjunct has no port equivalent and is
+    /// out of scope here).
     fn requires_user_interaction(&self) -> bool {
         self.requires_user_interaction
     }
@@ -1088,8 +1143,32 @@ impl Tool for MCPTool {
         InterruptBehavior::Cancel
     }
 
+    /// §27b — the MCP factory's own `checkPermissions` arm (@182520945):
+    ///
+    /// ```js
+    /// if(Ee)return{behavior:"ask",message:"MCPTool requires permission.",
+    ///              suggestions:[],suppressAlwaysAllowRule:!0};
+    /// return{behavior:"passthrough",message:"MCPTool requires permission.",…}
+    /// ```
+    ///
+    /// `Ee` is the same `_meta.anthropic/requiresUserInteraction` bit
+    /// [`Self::requires_user_interaction`] reads. Without this arm the dialog
+    /// change landed with §27b never engages at all: the tool is allowed
+    /// outright and no prompt is ever built for the suppressed always-allow
+    /// row to be missing from.
+    ///
+    /// `suppressAlwaysAllowRule` is not a field here — the port carries it as
+    /// [`traits::permission_gate::PermissionCheckContext::requires_user_interaction`],
+    /// which `turn_loop` fills from [`Self::requires_user_interaction`] and
+    /// `TuiPermissionGate` reads to hide the persistent-grant row.
+    ///
+    /// KNOWN NARROWING (reported, not fixed here): the oracle raises this ask
+    /// inside `Aon`, whose tool-wide ALLOW-rule arm (`W=NLe(he(r),e)`) runs
+    /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
+    /// `turn_loop` only consults a tool's `check_permissions` when no rule
+    /// matched, so an allow rule still bypasses this arm in the port.
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        // MCP client-side ceilings are a local, tighten-only overlay.  Feed
+        // MCP client-side ceilings are a local, tighten-only overlay. Feed
         // them as the local ceiling and leave the server ceiling empty: the
         // client already folded config-side organization declarations into
         // `effective_max_permission`, so a second server/local merge here
@@ -1100,7 +1179,7 @@ impl Tool for MCPTool {
             self.effective_max_permission,
             None,
             self.requires_user_interaction,
-            // No MCP app-capability signal exists in this path.  Keep the
+            // No MCP app-capability signal exists in this path. Keep the
             // capability dimension permissive until a real authorization
             // signal is available; inventing `false` would deny every tool.
             true,
@@ -1161,6 +1240,16 @@ impl Tool for MCPTool {
         let (server, tool) = parse_full_name(&full_name)?;
         let server = server.to_string();
         let tool = tool.to_string();
+        // §24b: the registry table key to dispatch against. `full_name`
+        // above stays the PLAIN `mcp__<server>__<tool>` the model addressed
+        // (permission rules / telemetry / progress events below all keep
+        // using `server`); only registry LOOKUPS use `dispatch_key`, which
+        // is `server` itself unless this instance is bound to an
+        // agent-scoped connection (`with_bound_server_key`).
+        let dispatch_key: String = self
+            .bound_server_key
+            .clone()
+            .unwrap_or_else(|| server.clone());
 
         // STARTED.
         emit(
@@ -1191,7 +1280,7 @@ impl Tool for MCPTool {
             }
         };
 
-        if !registry.has_callable_server(&server).await {
+        if !registry.has_callable_server(&dispatch_key).await {
             emit(
                 self.bus(),
                 MCP_FAILED,
@@ -1225,7 +1314,7 @@ impl Tool for MCPTool {
         // raw and normalized forms are identical, so this is a no-op except for
         // tool names containing characters outside `[a-zA-Z0-9_-]`.
         let tool = registry
-            .resolve_wire_tool_name(&server, &full_name)
+            .resolve_wire_tool_name(&server, &full_name, self.bound_server_key.as_deref())
             .await
             .unwrap_or(tool);
         // Reconstruct the raw-tool FQN so the client's `mcp__<server>__` prefix
@@ -1276,7 +1365,7 @@ impl Tool for MCPTool {
         // lingxi has no `"sse-ide"`/`"ws-ide"` IDE variants, so that IDE
         // exclusion is inert here but PRESERVED inside the helper. A missing
         // config falls back to an empty kind (never IDE) — the default gate.
-        let transport_kind = match registry.get_config(&server).await {
+        let transport_kind = match registry.get_config(&dispatch_key).await {
             Some(cfg) => auth_kind_from_spec(&cfg.spec).0.to_string(),
             None => String::new(),
         };
@@ -1304,7 +1393,7 @@ impl Tool for MCPTool {
         let Some(task_registry) = bg_registry else {
             let res = registry
                 .call_tool_with_auth_retry(
-                    &server,
+                    &dispatch_key,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
@@ -1355,7 +1444,7 @@ impl Tool for MCPTool {
             let token_counter = token_counter.clone();
             let default_model = default_model.clone();
             let server = server.clone();
-            let call_server = server.clone();
+            let call_server = dispatch_key.clone();
             let tool = tool.clone();
             let tool_use_id = tool_use_id.clone();
             let progress = progress.clone();
@@ -2112,9 +2201,12 @@ impl Tool for ReadMcpResourceTool {
 /// disconnect via the matching `conn_id`).
 ///
 /// For each `Connected` server we map each [`traits::McpToolDto`] →
-/// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description(),
-/// dto.input_schema().clone(), dto.output_schema().cloned(), dto.requires_user_interaction(),
-/// dto.effective_max_permission, dto.search_hint, dto.always_load))`. The resulting tool's wire `name()` is the real
+/// `Arc::new(MCPTool::new_for_tool(
+///     ctx, dto.full_name, dto.description, dto.input_schema, dto.search_hint,
+///     dto.always_load, dto.requires_user_interaction,
+/// ).with_output_schema(dto.output_schema)
+///  .with_effective_max_permission(dto.effective_max_permission))`.
+/// The resulting tool's wire `name()` is the real
 /// `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's own
 /// `inputSchema`, and its `description()`/`prompt()` is the server's
 /// (truncated) description — so the model addresses it by name with the
@@ -2159,7 +2251,20 @@ pub async fn build_registered_mcp_tools(
     // declares `capabilities.resources`.
     let mut resource_tools_pushed = false;
     for state in conns.values() {
+        // §11 Stage 2 (LingXi discovery cache): a `Cached` server was served
+        // from disk with NO transport dialed yet — its catalog fields mirror
+        // `Connected`'s exactly (see `McpConnectionState::Cached`'s doc), so
+        // it builds the SAME per-tool wire entries here. Dispatch (`MCPTool::
+        // call` → `call_tool_with_auth_retry`) lazily dials it on first
+        // invocation; a `Cached` server that never appeared here would be
+        // hidden from the model entirely, defeating the point of caching it.
         if let McpConnectionState::Connected {
+            connection_id,
+            capabilities,
+            tools,
+            ..
+        }
+        | McpConnectionState::Cached {
             connection_id,
             capabilities,
             tools,
@@ -2169,17 +2274,19 @@ pub async fn build_registered_mcp_tools(
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
-                    Arc::new(MCPTool::new_for_tool(
-                        ctx.clone(),
-                        dto.full_name.clone(),
-                        dto.description().to_string(),
-                        dto.input_schema().clone(),
-                        dto.output_schema().cloned(),
-                        dto.requires_user_interaction(),
-                        dto.effective_max_permission,
-                        dto.search_hint.clone(),
-                        dto.always_load.unwrap_or(false),
-                    )) as Arc<dyn Tool>
+                    Arc::new(
+                        MCPTool::new_for_tool(
+                            ctx.clone(),
+                            dto.full_name.clone(),
+                            dto.description().to_string(),
+                            dto.input_schema().clone(),
+                            dto.search_hint.clone(),
+                            dto.always_load.unwrap_or(false),
+                            dto.requires_user_interaction(),
+                        )
+                        .with_output_schema(dto.output_schema().cloned())
+                        .with_effective_max_permission(dto.effective_max_permission),
+                    ) as Arc<dyn Tool>
                 })
                 .collect();
             if capabilities.resources && !resource_tools_pushed {
@@ -2240,6 +2347,114 @@ mod tests {
             Some(tool.max_result_size_chars()),
             "persistence threshold must NOT be the truncation cap"
         );
+    }
+
+    /// §27b's LOAD-BEARING half: the oracle's MCP factory
+    /// `checkPermissions` raises an ASK for a tool carrying
+    /// `_meta.anthropic/requiresUserInteraction`
+    /// (`if(Ee)return{behavior:"ask",message:"MCPTool requires permission.",
+    /// suggestions:[],suppressAlwaysAllowRule:!0}`, @182520945).
+    ///
+    /// Without it the §27b dialog change is unreachable: `MCPTool` allowed
+    /// EVERY call outright, so no permission prompt was ever built and the
+    /// suppressed "Yes, allow always" row stays hidden because the tool bit is
+    /// carried separately on the permission-check context.
+    #[tokio::test]
+    async fn requires_user_interaction_raises_the_factory_ask() {
+        let ctx = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let use_ctx = tool_api::test_support::fresh_ctx();
+
+        let interactive = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__interactive".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            true,
+        );
+        let decision = interactive
+            .check_permissions(&serde_json::json!({}), &use_ctx)
+            .await;
+        let PermissionResult::Ask { reason, prompt, .. } = decision else {
+            panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
+        };
+        assert_eq!(prompt.title, "Permission required");
+        assert_eq!(
+            prompt.message,
+            "MCP tool mcp__srv__interactive requires approval"
+        );
+        assert!(
+            prompt.options == vec!["Allow once".to_string(), "Deny".to_string()],
+            "protected MCP asks keep the one-shot approval options"
+        );
+        assert!(
+            matches!(&reason, PermissionDecisionReason::PermissionPromptTool { tool_name } if tool_name == "mcp__srv__interactive"),
+            "unexpected reason: {reason:?}"
+        );
+
+        // A plain MCP tool is unaffected — the passthrough/allow arm stands.
+        let plain = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__plain".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            false,
+        );
+        assert!(matches!(
+            plain
+                .check_permissions(&serde_json::json!({}), &use_ctx)
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// §27b: `MCPTool::new_for_tool`'s `requires_user_interaction` param must
+    /// override the `Tool` trait's `false` default (`tool-api/src/tool_trait.rs`)
+    /// — oracle `requiresUserInteraction(){return Ee}` (@182520425), where
+    /// `Ee` is the same per-tool `_meta.anthropic/requiresUserInteraction` bit.
+    #[test]
+    fn requires_user_interaction_reflects_the_per_tool_bit() {
+        let ctx = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let plain = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__plain".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            false,
+        );
+        assert!(!plain.requires_user_interaction());
+
+        let interactive = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__interactive".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            true,
+        );
+        assert!(interactive.requires_user_interaction());
+
+        // The generic dispatcher (no bound per-tool DTO) is not marked
+        // interactive — it has no single tool's `_meta` to read.
+        assert!(!MCPTool::new(ctx()).requires_user_interaction());
     }
 
     #[test]
@@ -2748,10 +2963,9 @@ mod tests {
             json!({"type": "object"}),
             None,
             false,
-            Some(McpPermissionCeiling::Ask),
-            None,
             false,
-        );
+        )
+        .with_effective_max_permission(Some(McpPermissionCeiling::Ask));
         assert!(matches!(
             tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
                 .await,
@@ -2764,10 +2978,8 @@ mod tests {
             "interactive".into(),
             json!({"type": "object"}),
             None,
-            true,
-            None,
-            None,
             false,
+            true,
         );
         assert!(matches!(
             interaction_tool
@@ -2786,10 +2998,9 @@ mod tests {
             json!({"type": "object"}),
             None,
             false,
-            Some(McpPermissionCeiling::Deny),
-            None,
             false,
-        );
+        )
+        .with_effective_max_permission(Some(McpPermissionCeiling::Deny));
         assert!(matches!(
             tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
                 .await,
@@ -3016,7 +3227,18 @@ mod auto_background_race_tests {
 
     // Drive the peer: read the client's `tools/call` request frame and answer it
     // with a canned text result so the awaiting call resolves.
-    fn spawn_responder(mut peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+    fn spawn_responder(peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+        spawn_tagged_responder(peer_rx, peer_tx, "ok");
+    }
+
+    /// Like [`spawn_responder`], but the canned `tools/call` result text is
+    /// caller-supplied — lets a test with TWO live peers tell which one
+    /// actually answered a given dispatch.
+    fn spawn_tagged_responder(
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        peer_tx: mpsc::Sender<Bytes>,
+        text: &'static str,
+    ) {
         tokio::spawn(async move {
             let frame = peer_rx.recv().await.expect("client sent a request frame");
             let req: Value = serde_json::from_slice(&frame).expect("json request");
@@ -3024,7 +3246,7 @@ mod auto_background_race_tests {
             let resp = json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+                "result": { "content": [{ "type": "text", "text": text }], "isError": false },
             });
             let mut bytes = serde_json::to_vec(&resp).unwrap();
             bytes.push(b'\n');
@@ -3120,6 +3342,96 @@ mod auto_background_race_tests {
             recorder.registered.lock().unwrap().is_empty(),
             "auto_bg_ms == 0 never backgrounds"
         );
+    }
+
+    // §24b: `bound_server_key` must be the ONLY thing that decides which live
+    // connection a per-tool wire entry dispatches to — `full_name` (the
+    // model-facing FQN) stays the plain `mcp__docs__search` either way.
+    #[tokio::test]
+    async fn bound_server_key_dispatches_to_the_scoped_connection_not_the_plain_name() {
+        // Two DIFFERENT live clients both registered under names that would
+        // satisfy a naive "parse the server out of full_name" lookup for
+        // "docs" — one under the PLAIN key (simulating an unrelated
+        // shared/session "docs" server), one under an agent-scoped key
+        // (simulating `McpRegistry::connect_agent_scoped`'s table key).
+        let (plain_conn, plain_peer_tx, plain_peer_rx) = paired();
+        let plain_client = Arc::new(
+            mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), plain_conn).await,
+        );
+        let (scoped_conn, scoped_peer_tx, scoped_peer_rx) = paired();
+        let scoped_client = Arc::new(
+            mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), scoped_conn).await,
+        );
+
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("docs", plain_client).await;
+        let scoped_key = "__lingxi_agent_scope__deadbeef__docs";
+        registry.register_client(scoped_key, scoped_client).await;
+
+        // Each peer answers with a DISTINCT text, so the result proves WHICH
+        // client actually received the call.
+        spawn_tagged_responder(plain_peer_rx, plain_peer_tx, "plain-answered");
+        spawn_tagged_responder(scoped_peer_rx, scoped_peer_tx, "scoped-answered");
+
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__docs__search".to_string(),
+            "search docs".to_string(),
+            json!({"type": "object"}),
+            None,
+            false,
+            false,
+        )
+        .with_bound_server_key(scoped_key.to_string());
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-scoped"));
+
+        let result = tool
+            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("scoped dispatch succeeds");
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("scoped-answered"),
+            "bound_server_key must route dispatch to the SCOPED client, not a same-named plain one"
+        );
+    }
+
+    // A per-tool entry with NO `bound_server_key` (every construction site
+    // before §24b, and the shared/session per-tool entries built by
+    // `build_registered_mcp_tools`) must keep dispatching by the plain name
+    // parsed from `full_name` — byte-identical to legacy.
+    #[tokio::test]
+    async fn unbound_per_tool_entry_dispatches_by_the_plain_parsed_name() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client =
+            Arc::new(mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("docs", client).await;
+        spawn_tagged_responder(peer_rx, peer_tx, "plain-answered");
+
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__docs__search".to_string(),
+            "search docs".to_string(),
+            json!({"type": "object"}),
+            None,
+            false,
+            false,
+        );
+        // No `.with_bound_server_key(..)` — legacy path.
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-plain"));
+
+        let result = tool
+            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("unbound dispatch succeeds");
+        assert_eq!(result.model_content.as_deref(), Some("plain-answered"));
     }
 
     // Threshold enabled but NO task registry wired on the context → the seam is
@@ -3577,6 +3889,7 @@ mod resource_tool_gating_tests {
                 capabilities: caps(resources),
                 tools: vec![],
                 resources: vec![],
+                resource_templates: vec![],
                 prompts: vec![],
                 connected_at: std::time::SystemTime::now(),
             },
@@ -3634,6 +3947,7 @@ mod resource_tool_gating_tests {
                     capabilities: caps(true),
                     tools: vec![],
                     resources: vec![],
+                    resource_templates: vec![],
                     prompts: vec![],
                     connected_at: std::time::SystemTime::now(),
                 },

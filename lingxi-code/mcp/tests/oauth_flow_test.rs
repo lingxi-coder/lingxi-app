@@ -231,6 +231,10 @@ struct RecordingTransport {
     /// carrying the configured required scope (step-up path).
     fail_403_first: AtomicUsize,
     fail_403_scope: Mutex<String>,
+    /// §24c: when set, the 401 failure carries this exact `WWW-Authenticate`
+    /// value; otherwise it is the same structured `McpError::HttpResponse`
+    /// with no challenge header.
+    structured_401_challenge: Mutex<Option<String>>,
 }
 impl RecordingTransport {
     fn new(fail_401_first: usize) -> Arc<Self> {
@@ -239,6 +243,7 @@ impl RecordingTransport {
             fail_401_first: AtomicUsize::new(fail_401_first),
             fail_403_first: AtomicUsize::new(0),
             fail_403_scope: Mutex::new(String::new()),
+            structured_401_challenge: Mutex::new(None),
         })
     }
     /// Build a transport whose first connect returns a 403 `insufficient_scope`
@@ -249,7 +254,14 @@ impl RecordingTransport {
             fail_401_first: AtomicUsize::new(0),
             fail_403_first: AtomicUsize::new(1),
             fail_403_scope: Mutex::new(scope.into()),
+            structured_401_challenge: Mutex::new(None),
         })
+    }
+    /// Make the next `fail_401_first` 401(s) carry `challenge` as a structured
+    /// `WWW-Authenticate` value rather than the default flattened string.
+    fn with_401_challenge(self: Arc<Self>, challenge: &str) -> Arc<Self> {
+        *self.structured_401_challenge.lock().unwrap() = Some(challenge.to_string());
+        self
     }
     fn last_spec(&self) -> McpTransportSpec {
         self.seen_specs.lock().unwrap().last().cloned().unwrap()
@@ -283,7 +295,24 @@ impl McpTransport for RecordingTransport {
         }
         if self.fail_401_first.load(Ordering::SeqCst) > 0 {
             self.fail_401_first.fetch_sub(1, Ordering::SeqCst);
-            return Err(McpError::Connection("HTTP 401 Unauthorized".into()));
+            if let Some(challenge) = self.structured_401_challenge.lock().unwrap().clone() {
+                return Err(McpError::HttpResponse {
+                    status: 401,
+                    www_authenticate: Some(challenge),
+                });
+            }
+            // Every wired transport reports a real 401 STRUCTURALLY —
+            // `SseConnectError::HttpResponse` for SSE's pre-flight GET
+            // (platforms/common/src/mcp_sse.rs) and `handshake_error`'s
+            // `data:{httpStatus,wwwAuthenticate}` unwrap for Streamable HTTP
+            // (platforms/posix/src/mcp.rs) — so the mock must too. A
+            // flattened `Connection("HTTP 401 …")` string is not a shape any
+            // production path can still produce, and pretending otherwise
+            // hid that `classify_auth_failure`'s gate was substring-based.
+            return Err(McpError::HttpResponse {
+                status: 401,
+                www_authenticate: None,
+            });
         }
         Ok(McpRawConnection {
             connection_id: protocol::McpConnectionId::new(),
@@ -712,6 +741,454 @@ async fn connect_401_triggers_refresh_and_retry() {
 }
 
 // ---------------------------------------------------------------------------
+// §24c: a live 401's `WWW-Authenticate` `resource_metadata` challenge drives
+// discovery to the URL the server names, instead of the well-known guess.
+// ---------------------------------------------------------------------------
+
+/// HTTP mock for the §24c wiring test: the Protected Resource Metadata is
+/// reachable ONLY at the challenge-named URL (the well-known guess 404s), and
+/// the discovered issuer's AS metadata/token endpoint use a HOST distinct from
+/// any well-known-guess fallback host, so a passing test proves the CHALLENGE
+/// URL was actually used end to end (not merely that discovery succeeded via
+/// some other path).
+struct ChallengeAwareAs {
+    requests: Mutex<Vec<HttpRequest>>,
+    refresh_body: String,
+}
+impl ChallengeAwareAs {
+    fn new(refresh_body: &str) -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            refresh_body: refresh_body.into(),
+        })
+    }
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+#[async_trait]
+impl HttpTransport for ChallengeAwareAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.requests.lock().unwrap().push(req.clone());
+        let (status, body) = if req.url == "https://mcp.example.com/custom-prm-location" {
+            (
+                200,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-from-challenge.example.com"]}"#
+                    .to_string(),
+            )
+        } else if req.url.contains("oauth-protected-resource") {
+            // The well-known guess must never be reached once the challenge
+            // names a URL — 404 it so a wrongly-used guess fails loudly
+            // instead of silently degrading to some other working path.
+            (404, String::new())
+        } else if req.url
+            == "https://as-from-challenge.example.com/.well-known/oauth-authorization-server"
+        {
+            (
+                200,
+                r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#.to_string(),
+            )
+        } else if req.url == "https://as-from-challenge.example.com/token" {
+            (200, self.refresh_body.clone())
+        } else {
+            (404, String::new())
+        };
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body,
+            body_bytes: Vec::new(),
+        })
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+#[tokio::test]
+async fn connect_401_challenge_resource_metadata_url_drives_prm_fetch() {
+    let refresh = r#"{"access_token":"access-challenge","refresh_token":"refresh-challenge","expires_in":3600}"#;
+    let mock_as = ChallengeAwareAs::new(refresh);
+    let challenge =
+        r#"Bearer resource_metadata="https://mcp.example.com/custom-prm-location""#.to_string();
+    // First connect attempt 401s carrying the challenge; the retry succeeds.
+    let transport = RecordingTransport::new(1).with_401_challenge(&challenge);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = http_cfg("challenge-srv", Some(oauth_block(Some("preset-client"))));
+    let key = oauth::server_key("challenge-srv", &config.spec);
+
+    // Seed an UNEXPIRED token (so the first connect uses it and 401s) + a
+    // refresh token, so the retry goes through `reauth_oauth_spec`'s discovery
+    // call rather than a fresh interactive flow.
+    let stored = oauth::StoredTokens {
+        access_token: "access-old".into(),
+        refresh_token: Some("refresh-1".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("dcr-issued-7".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    let data = SecureStorageData::new(
+        bytes,
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, &key, data)
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("connect ok after challenge-driven reauth");
+
+    assert_eq!(transport.connect_count(), 2);
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-challenge")
+    );
+    let requested: Vec<String> = mock_as.requests().into_iter().map(|r| r.url).collect();
+    assert!(
+        requested.contains(&"https://mcp.example.com/custom-prm-location".to_string()),
+        "the challenge-named resource_metadata URL must be fetched; got {requested:?}"
+    );
+    assert!(
+        !requested
+            .iter()
+            .any(|u| u.contains("/.well-known/oauth-protected-resource/v1")),
+        "the well-known guess must NOT be tried once the challenge names a URL; got {requested:?}"
+    );
+    assert!(
+        requested.contains(&"https://as-from-challenge.example.com/token".to_string()),
+        "token exchange must hit the AS discovered via the challenge's issuer; got {requested:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §19: static/helper-minted Authorization is authoritative over OAuth.
+// ---------------------------------------------------------------------------
+
+/// Seed a valid (unexpired) OAuth token so that, if the §19 gate is broken,
+/// `resolve_oauth_spec` takes its synchronous "stored, unexpired" branch
+/// (no interactive flow, no network) — the bug is then observable purely as
+/// a WRONG header value, never as a hang.
+async fn seed_unexpired_oauth_token(storage: &Arc<MemStorage>, key: &str) {
+    let stored = oauth::StoredTokens {
+        access_token: "oauth-bearer-should-not-win".into(),
+        refresh_token: Some("refresh-x".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("client-x".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    let data = SecureStorageData::new(
+        bytes,
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, key, data)
+        .await
+        .unwrap();
+}
+
+/// Gap 1: a static `headers.Authorization` on a server that ALSO has an
+/// `oauth` block must never be overwritten by the OAuth Bearer, even when a
+/// valid stored token is available.
+#[tokio::test]
+async fn static_authorization_header_survives_oauth_bearer() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let mut headers = traits::McpHeaders::new();
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer configured-static".into(),
+    );
+    let config = McpServerConfig {
+        name: "static-with-oauth".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers,
+            headers_helper: None,
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        scope: ConfigScope::Project,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    let key = oauth::server_key("static-with-oauth", &config.spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer configured-static"),
+        "OAuth must never overwrite a static Authorization header"
+    );
+    assert!(
+        mock_as.requests().is_empty(),
+        "OAuth must never even be attempted once a static Authorization header is set"
+    );
+}
+
+/// Gap 1 (classification): a static `headers.Authorization` server (no
+/// `oauth` block) that is rejected with a 401 must surface the oracle's exact
+/// `AUTH_HEADER_REJECTED` copy, not the raw transport error — and must not be
+/// retried (no OAuth, no headersHelper to refresh).
+#[tokio::test]
+async fn static_authorization_header_rejection_is_classified() {
+    let transport = RecordingTransport::new(usize::MAX);
+    let mut headers = traits::McpHeaders::new();
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer configured-static".into(),
+    );
+    let config = McpServerConfig {
+        name: "static-rejected".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers,
+            headers_helper: None,
+            oauth: None,
+        },
+        scope: ConfigScope::Project,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
+    let err = registry
+        .connect(config)
+        .await
+        .expect_err("must be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "connection failed: Server rejected the configured Authorization header (HTTP 401). \
+Check that the token is valid for this MCP endpoint — OAuth fallback is disabled when \
+headers.Authorization is set."
+    );
+    assert_eq!(transport.connect_count(), 1, "no retry for a static header");
+}
+
+/// Gap 2/3: a `headersHelper` that mints `Authorization` on a server that
+/// ALSO has an `oauth` block must never be overwritten by the OAuth Bearer.
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minted_authorization_survives_oauth_bearer() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = McpServerConfig {
+        name: "helper-with-oauth".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        // User scope so the headersHelper trust-dialog check is skipped.
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    // `oauth::server_key` hashes `{type, url, headers}`, so a stored-token
+    // lookup keys on the spec's headers too. Seed under the key the
+    // POST-helper-merge spec would hash to (the raw config's `headers` is
+    // empty; the helper mints `Authorization` into it) — the same key
+    // `resolve_oauth_spec` would look up if it (wrongly) ran here at all.
+    // This is what keeps this test deterministic instead of hanging on a
+    // never-driven interactive OAuth flow when the §19 gate is missing.
+    let post_helper_spec = McpTransportSpec::Http {
+        url: "https://mcp.example.com/v1".into(),
+        headers: traits::McpHeaders::from_iter([(
+            "Authorization".to_string(),
+            "Bearer helper-minted".to_string(),
+        )]),
+        headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
+        oauth: Some(oauth_block(Some("client-x"))),
+    };
+    let key = oauth::server_key("helper-with-oauth", &post_helper_spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer helper-minted"),
+        "OAuth must never overwrite a headersHelper-minted Authorization header"
+    );
+    assert!(
+        mock_as.requests().is_empty(),
+        "OAuth must never even be attempted once the helper mints Authorization"
+    );
+}
+
+/// Gap 2 (classification): a `headersHelper` that mints `Authorization` (no
+/// `oauth` block) rejected with a 401 must surface the oracle's exact
+/// `HEADERS_HELPER_AUTH_REJECTED` copy — even after the existing
+/// rerun-helper-once-on-auth-failure retry (proving the retried failure is
+/// ALSO reclassified, not just the first one).
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minted_authorization_rejection_is_classified() {
+    let transport = RecordingTransport::new(usize::MAX);
+    let config = McpServerConfig {
+        name: "helper-rejected".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
+            oauth: None,
+        },
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
+    let err = registry
+        .connect(config)
+        .await
+        .expect_err("must be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "connection failed: Server rejected the Authorization header minted by the configured \
+headersHelper (HTTP 401). Check that the helper command returns a valid credential for this \
+MCP endpoint — OAuth fallback is disabled when the helper supplies Authorization."
+    );
+    // Initial attempt + the pre-existing "helper may emit short-lived
+    // credentials, retry once" rerun — both fail, and the SECOND failure is
+    // the one classified above.
+    assert_eq!(transport.connect_count(), 2);
+}
+
+/// Gap 2 (predicate): a configured `headersHelper` that mints some OTHER
+/// header (not `Authorization`) must NOT suppress OAuth — `helperMintsAuthHeader`
+/// is "did the helper's output carry this exact key", not "is a helper
+/// configured at all". OAuth's Bearer must still be injected and must
+/// coexist with the helper's own header.
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = McpServerConfig {
+        name: "helper-other-header".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    // The helper mints only `X-Api-Key`, so the post-helper spec's headers
+    // are `{X-Api-Key: "helper-key"}` when `resolve_oauth_spec` hashes it.
+    let post_helper_spec = McpTransportSpec::Http {
+        url: "https://mcp.example.com/v1".into(),
+        headers: traits::McpHeaders::from_iter([(
+            "X-Api-Key".to_string(),
+            "helper-key".to_string(),
+        )]),
+        headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
+        oauth: Some(oauth_block(Some("client-x"))),
+    };
+    let key = oauth::server_key("helper-other-header", &post_helper_spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    let seen = transport.last_spec();
+    assert_eq!(
+        spec_auth_header(&seen).as_deref(),
+        Some("Bearer oauth-bearer-should-not-win"),
+        "OAuth must still inject its Bearer when the helper mints a DIFFERENT header"
+    );
+    if let McpTransportSpec::Http { headers, .. } = seen {
+        assert_eq!(
+            headers.get("X-Api-Key").map(String::as_str),
+            Some("helper-key")
+        );
+    } else {
+        panic!("expected Http spec");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RESIDUAL 3 (A): token revocation (RFC 7009) on disconnect.
 // ---------------------------------------------------------------------------
 
@@ -1027,6 +1504,43 @@ fn step_up_scope_extraction() {
     );
 }
 
+/// Unit: the 403 detector's PRIMARY match is the structural
+/// `McpError::HttpResponse` carrier (SSE's pre-flight GET returns it
+/// directly; Streamable HTTP's `initialize` unwraps it from the synthetic
+/// JSON-RPC error's `data` field via `handshake_error`,
+/// `platforms/posix/src/mcp.rs`) — no string flattening or substring
+/// matching involved. The prior test covers the string-fallback arms; this
+/// covers the structured arms the fallback exists alongside.
+#[test]
+fn step_up_scope_extraction_from_structured_http_response() {
+    use mcp::registry::test_support::error_is_403_insufficient_scope as detect;
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 403,
+            www_authenticate: Some(
+                "Bearer error=\"insufficient_scope\", scope=\"mcp:elevated\"".into()
+            ),
+        }),
+        Some("mcp:elevated".to_string())
+    );
+    // 403 without insufficient_scope → not step-up, even structurally.
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 403,
+            www_authenticate: Some("Bearer realm=\"mcp\"".into()),
+        }),
+        None
+    );
+    // 401 structurally → not step-up (that's `error_is_401`'s job).
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 401,
+            www_authenticate: Some("Bearer error=\"insufficient_scope\", scope=\"x\"".into()),
+        }),
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // RESIDUAL 3 (C): XAA gate + registry-driven cross-app-access.
 // ---------------------------------------------------------------------------
@@ -1194,4 +1708,616 @@ async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
     assert_eq!(stored.access_token, "xaa-access");
     assert_eq!(stored.client_id.as_deref(), Some("as-client"));
     assert_eq!(stored.client_secret.as_deref(), Some("as-secret"));
+}
+
+// ---------------------------------------------------------------------------
+// §26b: XAA refresh — no proactive window absent a refresh token (delta 1),
+// a stored refresh token takes the ordinary refresh route (delta 4), and a
+// 401 re-auth stays on the XAA path instead of falling to interactive
+// consent (delta 3). Single-flight (delta 2) is crate-private and covered by
+// `resolve_xaa_token_inner`'s in-crate unit test in `mcp/src/registry.rs`.
+// ---------------------------------------------------------------------------
+
+/// Panics if ever asked to make a request — proves a code path took NO
+/// network action at all (the "reuse the cache, don't touch the wire" case).
+struct PanicOnRequest;
+#[async_trait]
+impl HttpTransport for PanicOnRequest {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        panic!(
+            "XAA must reuse the cached access token without any network call; \
+             got a request to {}",
+            req.url
+        );
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+/// §26b delta 1 (regression guard): a cached XAA access token far from expiry
+/// (well outside the 300s window) and with no refresh token is reused
+/// outright — no silent exchange, no network call at all.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_no_refresh_token_far_from_expiry_reuses_cache_without_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-farexp", Some(oauth));
+    let key = oauth::server_key("xaa-farexp", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "cached-far".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600, // 3600s away — well outside the 300s window
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(PanicOnRequest) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok, cache reused");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer cached-far")
+    );
+}
+
+/// §26b delta 1: a cached XAA access token with NO refresh token that expires
+/// within 300s drives the silent exchange even though it is not yet
+/// literally expired — the oracle's proactive window. Before the fix, the
+/// port only re-exchanged on ACTUAL expiry, so this asserts the FRESH
+/// exchanged token, not the stale-but-not-yet-expired cached one.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_no_refresh_token_near_expiry_triggers_silent_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-nearexp", Some(oauth));
+    let key = oauth::server_key("xaa-nearexp", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "cached-near".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 100, // 100s away — inside the 300s window
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok via silent exchange");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access"),
+        "must be the FRESH exchanged token, not the stale (soon-to-expire) cached one"
+    );
+}
+
+/// HTTP mock for §26b delta 4: answers PRM + AS-metadata discovery and an
+/// ordinary `refresh_token` grant authenticated via `client_secret_basic`;
+/// panics if the `IdP` token-exchange leg or a `jwt-bearer` grant is ever hit —
+/// proving a stored refresh token takes the ordinary refresh route instead of
+/// re-running the full IdP+AS exchange chain.
+struct XaaRefreshOnlyAs {
+    requests: Mutex<Vec<HttpRequest>>,
+}
+impl XaaRefreshOnlyAs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+#[async_trait]
+impl HttpTransport for XaaRefreshOnlyAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.requests.lock().unwrap().push(req.clone());
+        let url = &req.url;
+        let body = req.body.as_deref().unwrap_or("");
+        assert!(
+            !url.contains("idp.example.com"),
+            "delta 4: a stored refresh token must never drive the IdP token-exchange leg"
+        );
+        if url.contains("oauth-protected-resource") {
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        if url.contains("oauth-authorization-server") {
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        if url == "https://as.example.com/token" {
+            assert!(
+                body.contains("grant_type=refresh_token"),
+                "must be an ordinary refresh grant; body={body}"
+            );
+            assert!(
+                !body.contains("jwt-bearer") && !body.contains("assertion="),
+                "must NOT be the XAA jwt-bearer grant; body={body}"
+            );
+            let auth = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .map(|(_, v)| v.clone());
+            assert!(
+                auth.as_deref().is_some_and(|v| v.starts_with("Basic ")),
+                "confidential client must authenticate via client_secret_basic; got {auth:?}"
+            );
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"access_token":"xaa-refreshed","refresh_token":"xaa-refresh-2","token_type":"Bearer","expires_in":3600}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        Ok(HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: String::new(),
+            body_bytes: Vec::new(),
+        })
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+/// §26b delta 4: a stored, expired XAA token WITH a refresh token drives the
+/// ordinary refresh grant (confidential `client_secret_basic`) rather than
+/// re-running the full IdP+AS exchange chain.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_stored_refresh_token_uses_ordinary_refresh_not_full_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+    let http = XaaRefreshOnlyAs::new();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-refresh", Some(oauth));
+    let key = oauth::server_key("xaa-refresh", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-stale".into(),
+        refresh_token: Some("xaa-refresh-1".into()),
+        expires_at_unix: 500, // already expired (clock = 1000)
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok via ordinary refresh");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-refreshed")
+    );
+    assert!(
+        http.requests()
+            .iter()
+            .any(|r| r.url == "https://as.example.com/token"),
+        "the ordinary refresh leg was hit"
+    );
+    let restored = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("refreshed tokens persisted");
+    assert_eq!(restored.access_token, "xaa-refreshed");
+    assert_eq!(restored.refresh_token.as_deref(), Some("xaa-refresh-2"));
+    assert_eq!(
+        restored.client_secret.as_deref(),
+        Some("as-secret"),
+        "the confidential client_secret must survive the refresh round-trip"
+    );
+}
+
+/// §26b delta 3: a server 401 for an XAA-flagged server must stay on the XAA
+/// path — never fall through to `run_interactive_oauth` (a 300s wait for a
+/// browser callback that will never arrive in this test). The registry's own
+/// module comment already promises this ("XAA is the ONLY auth path"); this
+/// asserts it holds across a 401 specifically. A short `tokio::time::timeout`
+/// races the real 300s callback wait so a regression fails in ~2s instead of
+/// hanging for 5 minutes.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_401_reauth_never_falls_to_interactive_consent() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    // First connect attempt 401s (the cached XAA token was rejected by the
+    // server even though the registry still considers it locally unexpired
+    // and far from the 300s window); the retry (post re-auth) succeeds.
+    let transport = RecordingTransport::new(1);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-401", Some(oauth));
+    let key = oauth::server_key("xaa-401", &config.spec);
+
+    // No refresh token stored — the shape §26b delta 3 targets: the old
+    // `reauth_oauth_spec` had no xaa arm, so a refresh-token-less XAA server
+    // fell into `None => run_interactive_oauth(...)`.
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-access-old".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), registry.connect(config)).await;
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    let connect_result = outcome.expect(
+        "connect() must not hang waiting for interactive consent — an XAA 401 must stay \
+         on the silent exchange/refresh path (§26b delta 3), never run_interactive_oauth",
+    );
+    connect_result.expect("xaa connect ok after 401 reauth");
+
+    assert_eq!(
+        transport.connect_count(),
+        2,
+        "stale bearer 401s, freshly-exchanged bearer retries"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access")
+    );
+    assert!(
+        url_rx.try_recv().is_err(),
+        "no interactive authorization URL should ever be surfaced for an XAA server"
+    );
+}
+
+/// §26b delta 3, second arm: a 403 `insufficient_scope` must stay on the XAA
+/// path exactly as the 401 does. `connect_locked_inner` evaluates the 403
+/// branch BEFORE the 401 branch, so a `step_up_oauth_spec` without an xaa
+/// guard WINS the race and drives `run_interactive_oauth` — binding a
+/// loopback listener and opening a browser on a deployment that has no
+/// interactive consent surface, contradicting `resolve_oauth_spec`'s own
+/// "XAA is the ONLY auth path" comment. Oracle `pEr` (@182200767) opens with
+/// `if(t.oauth?.xaa){...await gt(...);return}`, so no step-up can ever reach
+/// `redirectToAuthorization`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_403_step_up_never_falls_to_interactive_consent() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    // First connect 403s with `insufficient_scope`; the retry succeeds.
+    let transport = RecordingTransport::with_403_first("mcp:elevated");
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-403", Some(oauth));
+    let key = oauth::server_key("xaa-403", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-access-old".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), registry.connect(config)).await;
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    let connect_result = outcome.expect(
+        "connect() must not hang waiting for interactive consent — an XAA 403          insufficient_scope must stay on the silent exchange path, never run_interactive_oauth",
+    );
+    connect_result.expect("xaa connect ok after 403 step-up");
+
+    assert_eq!(
+        transport.connect_count(),
+        2,
+        "403 once, freshly-exchanged bearer retries"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access")
+    );
+    assert!(
+        url_rx.try_recv().is_err(),
+        "no interactive authorization URL should ever be surfaced for an XAA server"
+    );
+}
+
+/// §26b delta 1, refresh-token arm: oracle `tokens()` (@182213696) applies its
+/// 300s proactive window to the case where a refresh token IS stored —
+/// `if(r!=null&&r<=300&&n.refreshToken&&!d){...refreshAuthorization(...)}`
+/// runs after the XAA block for every server. Gating reuse on hard expiry
+/// instead hands the transport a token 60 seconds from death.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_stored_refresh_token_inside_300s_window_refreshes_proactively() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+    let http = XaaRefreshOnlyAs::new();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-proactive", Some(oauth));
+    let key = oauth::server_key("xaa-proactive", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-nearly-dead".into(),
+        refresh_token: Some("xaa-refresh-1".into()),
+        // Still VALID (clock = 1000) but only 60s of life left — inside the
+        // 300s window, so the oracle refreshes rather than serving it.
+        expires_at_unix: 1_000 + 60,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry.connect(config).await.expect("xaa connect ok");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-refreshed"),
+        "a token inside the 300s window must be refreshed BEFORE it is used"
+    );
+    assert!(
+        http.requests()
+            .iter()
+            .any(|r| r.url == "https://as.example.com/token"),
+        "the proactive refresh leg must actually be hit; got {:?}",
+        http.requests()
+            .iter()
+            .map(|r| r.url.clone())
+            .collect::<Vec<_>>()
+    );
 }

@@ -84,7 +84,7 @@ pub const MESSAGE_TRUNCATED: &str = "tengu_agent_message_truncated";
 // These are deliberately NOT added to the count-locked [`NAMES`] / the byte-for-
 // byte `ALL_EVENT_NAMES` registry fixture (`tengu_events.json`), which is a
 // snapshot of an OLDER claude event set; adding them would break the fixture's
-// 347-entry byte-parity lock. They live in [`AGENT_TOOL_NAMES`] for string-lock
+// 363-entry byte-parity lock. They live in [`AGENT_TOOL_NAMES`] for string-lock
 // testing only — mirroring how `tool::FILE_READ_ANALYTICS_NAMES` is kept apart.
 
 /// `tengu_agent_tool_selected` — `AgentTool` resolved the agent + model and is

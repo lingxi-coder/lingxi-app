@@ -72,6 +72,53 @@ pub fn test_clear_flag(key: &str) {
     flag_test_override().write().unwrap().remove(key);
 }
 
+// ── Array-valued flag reader (binary `Ot(e,t)` / `I(e,[])`) ─────────────────
+//
+// A handful of oracle flags are ARRAY-valued rather than boolean — e.g. the
+// MCP era-negotiation server denylist (`tengu_mcp_negotiation_server_denylist`,
+// cc_all.txt @~182279107: `let o=I(e,[]); if(!Array.isArray(o)...)`). Same
+// idiom as `flag_bool`/`nt`: a synchronous, default-on-miss read backed by the
+// same process-global snapshot, plus its own test-override layer so tests can
+// flip a list flag without touching the boolean one.
+
+fn flag_list_test_override() -> &'static StdRwLock<HashMap<String, Vec<String>>> {
+    static OVR: OnceLock<StdRwLock<HashMap<String, Vec<String>>>> = OnceLock::new();
+    OVR.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+/// Look up a string-array flag, returning `default` on miss or type mismatch.
+/// Checks the test-override layer first, then the cached snapshot's
+/// `FeatureValue::Json` array (non-string elements are dropped), else
+/// returns `default`. With no fetcher wired (the prod default) every read
+/// returns `default` — an empty list for the denylist, matching the shipped
+/// binary's GrowthBook-absent behavior.
+#[must_use]
+pub fn flag_string_list(key: &str, default: &[&str]) -> Vec<String> {
+    if let Some(v) = flag_list_test_override().read().unwrap().get(key) {
+        return v.clone();
+    }
+    match flag_snapshot().read().unwrap().get(key) {
+        Some(FeatureValue::Json(serde_json::Value::Array(items))) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => default.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+/// Test-only: set a string-array flag in the override layer.
+pub fn test_set_flag_list(key: &str, value: Vec<String>) {
+    flag_list_test_override()
+        .write()
+        .unwrap()
+        .insert(key.to_string(), value);
+}
+
+/// Test-only: clear a string-array flag from the override layer.
+pub fn test_clear_flag_list(key: &str) {
+    flag_list_test_override().write().unwrap().remove(key);
+}
+
 /// Polymorphic feature-flag value.
 ///
 /// Encoded with `#[serde(untagged)]` to match raw JSON shapes from

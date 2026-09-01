@@ -94,7 +94,15 @@ import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.SettingsStore
+import com.lingxi.code.model.ManagedLocalAppMcpSource
+import com.lingxi.code.model.ManagedLocalAppToolSchema
+import com.lingxi.code.model.LocalAppPluginStatus
+import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.LocalAppPluginInventoryDto
+import com.lingxi.code.bindings.ManagedLocalAppMcpServerDto
+import com.lingxi.code.bindings.PluginActivationStateDto
+import com.lingxi.code.bindings.PluginCommandDto
 import com.lingxi.code.theme.LingXiTheme
 import android.Manifest
 import android.content.Context
@@ -104,6 +112,7 @@ import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.model.Role
 import com.lingxi.code.localapps.LocalAppsAction
+import com.lingxi.code.localapps.LocalAppApprovalSheetDialog
 import com.lingxi.code.localapps.LocalAppsDestination
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
@@ -349,27 +358,21 @@ fun RootScreen(
     // Modal channels whose ONLY presenter lives inside `LocalAppsScreen`: raise
     // the cover so the user can answer them.
     //
-    // `pendingProfileProposal` joins the other two here. Its dialog
-    // (`ProfileProposalDialog`) is private to `LocalAppsScreen` and composed only
-    // under `if (showingApps)`, and the per-app MCP tool
-    // `<app>_agent_profile_propose_update` returns `approval_required: true` with
-    // the engine holding the approval token until it is answered. That was
-    // survivable while the cover was the only way to reach a local app; with the
-    // drawer's 「创建应用」 the default path now ends in the app's CONVERSATION
-    // with the cover never mounted, so the agent would wait forever on an
-    // approval the user was never shown. iOS rehomed the same sheet to its root
-    // for the same reason (`RootView.localAppProfileProposalItem`); Android
-    // already answers this class of request by raising the cover, so it does
-    // that rather than growing a second presenter.
+    // Local-app modal channels whose page-local presenters would disappear on a
+    // page switch: raise the cover for the ones still owned by `LocalAppsScreen`.
+    //
+    // Tokenized approval receipts moved to a ROOT presenter in Phase 8, so they
+    // survive both route switches and the drawer-driven create path. Only the
+    // remaining screen-local prompts need this "show the apps surface" assist.
     LaunchedEffect(
         localAppsState.pendingAuthorization,
         localAppsState.pendingUiAction,
-        localAppsState.pendingProfileProposal,
+        localAppsState.pendingDependencyChangeConfirmation,
     ) {
         if (
             localAppsState.pendingAuthorization != null ||
             localAppsState.pendingUiAction != null ||
-            localAppsState.pendingProfileProposal != null
+            localAppsState.pendingDependencyChangeConfirmation != null
         ) {
             showingApps = true
         }
@@ -486,6 +489,7 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
     LaunchedEffect(chatViewModel, voiceSpeechPlayer) {
@@ -504,6 +508,29 @@ fun RootScreen(
             .collect { event ->
                 if (event is ClientEvent.PermissionModeChanged) {
                     resolvedSettingsStore.setEffectivePermissionMode(event.mode)
+                } else if (event is ClientEvent.AppEvent) {
+                    when (val appEvent = event.event) {
+                        is AppEventDto.PluginStatusChanged -> {
+                            resolvedSettingsStore.setLocalAppPluginEnabled(
+                                appEvent.status.state == PluginActivationStateDto.LOADED,
+                            )
+                        }
+                        is AppEventDto.PluginInventoryChanged -> {
+                            resolvedSettingsStore.setLocalAppPluginStatus(
+                                appEvent.inventory.toSettingsModel(
+                                    prior = resolvedSettingsStore.state.value.localAppPlugin,
+                                ),
+                            )
+                        }
+                        is AppEventDto.ManagedMcpInventoryChanged -> {
+                            resolvedSettingsStore.setManagedLocalAppInventory(
+                                appEvent.servers.map { server ->
+                                    server.toSettingsModel(context)
+                                },
+                            )
+                        }
+                        else -> Unit
+                    }
                 }
             }
     }
@@ -523,6 +550,26 @@ fun RootScreen(
     LaunchedEffect(chatViewModel, reconnectToken) { chatViewModel.refreshMcpServers() }
     LaunchedEffect(engineMcp) {
         resolvedSettingsStore.setMcpServers(engineMcp)
+    }
+    LaunchedEffect(currentEngineSource, reconnectToken, settingsState.localAppPlugin.pluginId) {
+        val pluginId = settingsState.localAppPlugin.pluginId
+        runCatching {
+            currentEngineSource.submitClientCommand(
+                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                    PluginCommandDto.GetStatus(pluginId = pluginId),
+                ),
+            )
+            currentEngineSource.submitClientCommand(
+                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                    PluginCommandDto.GetInventory(pluginId = pluginId),
+                ),
+            )
+            currentEngineSource.submitClientCommand(
+                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                    PluginCommandDto.GetManagedMcpInventory,
+                ),
+            )
+        }
     }
 
     // The composer draft is hoisted here so a voice transcription (the
@@ -1521,6 +1568,12 @@ fun RootScreen(
             message = if (showingApps) null else localAppsState.error,
             onDismiss = { localAppsViewModel.onAction(LocalAppsAction.DismissError) },
         )
+        localAppsState.pendingApprovalSheet?.let { sheet ->
+            LocalAppApprovalSheetDialog(
+                sheet = sheet,
+                onAction = localAppsViewModel::onAction,
+            )
+        }
     }
 }
 
@@ -1625,6 +1678,45 @@ internal fun appendVoiceTranscript(base: String, transcript: String): String = w
     base.isBlank() -> transcript
     else -> "$base $transcript"
 }
+
+private fun LocalAppPluginInventoryDto.toSettingsModel(
+    prior: LocalAppPluginStatus,
+): LocalAppPluginStatus = LocalAppPluginStatus(
+    pluginId = pluginId,
+    displayName = displayName,
+    version = version,
+    bundleDigest = bundleSha256.take(12),
+    enabled = state == PluginActivationStateDto.LOADED,
+    skillsCount = counts.skills.toInt(),
+    agentsCount = counts.agents.toInt(),
+    workflowsCount = counts.workflows.toInt(),
+    templatesCount = counts.templates.toInt(),
+    validationError = validationError ?: prior.validationError,
+)
+
+private fun ManagedLocalAppMcpServerDto.toSettingsModel(context: Context): ManagedLocalAppMcpSource =
+    ManagedLocalAppMcpSource(
+        stableServerName = serverName,
+        appName = appName,
+        appId = appId,
+        buildDigestSummary = buildId.take(12),
+        catalogDigestSummary = catalogSha256.take(12),
+        toolCount = toolCount.toInt(),
+        authoringRevision = "r${authoringRevision}",
+        uiVerification = uiVerification.summary,
+        mcpVerification = mcpVerification.summary,
+        schemaSummary = toolSurfaceSha256.take(12),
+        annotationSummary = tools.firstNotNullOfOrNull { it.annotationsJson }
+            ?: context.getString(R.string.common_none),
+        permissionCeiling = tools.firstOrNull()?.permissionCeiling
+            ?: context.getString(R.string.common_none),
+        toolSchemas = tools.map { tool ->
+            ManagedLocalAppToolSchema(
+                name = tool.name,
+                permissionSummary = tool.permissionCeiling,
+            )
+        },
+    )
 
 @Preview(showBackground = true)
 @Composable

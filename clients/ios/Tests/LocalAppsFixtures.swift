@@ -23,7 +23,7 @@ func dataField(id: String) -> LocalAppDataField {
         id: String,
         name: String,
         brief: String = "简介",
-        workflowState: AppWorkflowStateDto = .ready,
+        workflowState: AppWorkflowStateDto = .publishedUnverified,
         initSessionId: String? = nil,
         scaffolded: Bool = true
     ) -> AppRecordDto {

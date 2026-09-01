@@ -360,24 +360,20 @@ mod tests {
     /// only from which typed constructor the Host calls, never from a
     /// string that could collide with a real workflow's `meta.name`.
     ///
-    /// A hostile custom workflow could declare a `meta.name` equal to the
-    /// real build workflow's name (`"local-app-build"`, a literal fixed here
-    /// as a TEST value -- not read from any production list, since this
-    /// crate no longer keeps one) while doing something else entirely. Feed
-    /// that exact string into the only public string input this type
-    /// accepts (`app_id`) via a *non*-Build constructor, and purpose must
-    /// stay whatever the Host asked for -- the string never gets
-    /// reinterpreted as "this must be the real build workflow". Note the
-    /// name passes the app-id grammar: well-formedness is not the defence
-    /// here, the absence of a name-taking constructor is.
+    /// A hostile caller can still supply a string that *looks* like it could
+    /// be a workflow basename. Feed such a string into the only public string
+    /// input this type accepts (`app_id`) via a *non*-Build constructor, and
+    /// purpose must stay whatever the Host asked for -- the string never gets
+    /// reinterpreted as workflow authority. Well-formedness is not the
+    /// defence here; the absence of a name-taking constructor is.
     #[test]
     fn scope_is_constructed_by_the_host_not_derived_from_meta_name() {
-        let real_build_workflow_name = "local-app-build";
+        let workflow_looking_id = "plugin-build-name";
 
-        let scope = LocalAppWorkflowTaskScope::for_use_test(real_build_workflow_name)
-            .expect("a workflow name happens to be a well-formed app id");
+        let scope = LocalAppWorkflowTaskScope::for_use_test(workflow_looking_id)
+            .expect("workflow-looking strings that satisfy app-id grammar stay ordinary app ids");
 
-        assert_eq!(scope.app_id(), real_build_workflow_name);
+        assert_eq!(scope.app_id(), workflow_looking_id);
         assert_eq!(scope.purpose(), LocalAppWorkflowPurpose::UseTest);
         assert!(!scope.requires_workspace_lease());
     }

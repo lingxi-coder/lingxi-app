@@ -22,6 +22,7 @@ fn make_request(tool_name: &str, default: PromptDefault) -> PermissionRequest {
         tool_name: tool_name.to_string(),
         tool_input: json!({}),
         default_decision: default,
+        suppress_always_allow_rule: false,
     }
 }
 

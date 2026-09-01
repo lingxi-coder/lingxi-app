@@ -22,6 +22,7 @@ mod accumulator {
         accumulate_stream_salvaging, response_to_stream_events,
     };
 }
+pub mod agent_mcp_tools;
 pub mod api;
 pub mod builtins;
 pub mod catalog;

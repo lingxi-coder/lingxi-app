@@ -29,7 +29,9 @@ pub type McpHeaders = indexmap::IndexMap<String, String>;
 
 /// Concrete transport configuration for one MCP server.
 ///
-/// Mirrors the 7 transport variants described in spec §7.1. Platform
+/// Mirrors the 8 transport variants described in spec §7.1 (the two
+/// developer-IDE transports, `SseIde`/`WsIde`, added for oracle parity — see
+/// mcp §10 in the byte-alignment doc). Platform
 /// implementations decide which variants they support via
 /// [`McpTransport::supported_transports`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +97,24 @@ pub enum McpTransportSpec {
         /// True when the IDE is hosted on Windows (affects path normalization).
         ide_running_in_windows: bool,
     },
+    /// WebSocket endpoint exposed by a developer IDE.
+    ///
+    /// Oracle `d` (2.1.251 Mach-O @154584715): `f({type:N("ws-ide"),url:i(),
+    /// ideName:i(),authToken:i().optional(),ideRunningInWindows:q().optional(),
+    /// timeout:o().optional(),alwaysLoad:q().optional(),role:t()})` — the same
+    /// shape as [`Self::SseIde`] plus an optional `authToken` used at the
+    /// WebSocket handshake.
+    WsIde {
+        /// Endpoint URL (`ws://` or `wss://`).
+        url: String,
+        /// Human-readable IDE name (for logs and approval UI).
+        ide_name: String,
+        /// Optional bearer token presented at the WebSocket handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
+        /// True when the IDE is hosted on Windows (affects path normalization).
+        ide_running_in_windows: bool,
+    },
     /// Logical channel controlled by a host SDK / embedder.
     SdkControl {
         /// Identifier for the host-provided control channel.
@@ -115,13 +135,14 @@ pub enum McpTransportKind {
     WebSocket,
     InProcess,
     SseIde,
+    WsIde,
     SdkControl,
 }
 
 impl McpTransportSpec {
     /// Short transport-kind label for display (`"stdio"`, `"sse"`, `"http"`,
-    /// `"websocket"`, `"inprocess"`, `"sse-ide"`, `"sdk-control"`). Used by
-    /// `OrchestratorHandle::list_mcp_servers` (M6-07) to populate
+    /// `"websocket"`, `"inprocess"`, `"sse-ide"`, `"ws-ide"`, `"sdk-control"`).
+    /// Used by `OrchestratorHandle::list_mcp_servers` (M6-07) to populate
     /// `McpServerInfo::transport`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -132,6 +153,7 @@ impl McpTransportSpec {
             Self::WebSocket { .. } => "websocket",
             Self::InProcess { .. } => "inprocess",
             Self::SseIde { .. } => "sse-ide",
+            Self::WsIde { .. } => "ws-ide",
             Self::SdkControl { .. } => "sdk-control",
         }
     }
@@ -148,6 +170,7 @@ impl McpTransportSpec {
             Self::WebSocket { .. } => McpTransportKind::WebSocket,
             Self::InProcess { .. } => McpTransportKind::InProcess,
             Self::SseIde { .. } => McpTransportKind::SseIde,
+            Self::WsIde { .. } => McpTransportKind::WsIde,
             Self::SdkControl { .. } => McpTransportKind::SdkControl,
         }
     }
@@ -195,7 +218,7 @@ pub struct McpRawConnection {
 ///
 /// Mirrors the JSON-RPC capability object — booleans indicate whether the
 /// server exposes the corresponding feature category.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // mirrors the MCP wire spec exactly
 pub struct ServerCapabilitiesDto {
     /// Server exposes one or more tools.
@@ -413,7 +436,7 @@ impl McpToolDefinitionDto {
 }
 
 /// One tool advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDto {
     /// Server name (logical, e.g. registry key).
     pub server_name: String,
@@ -433,6 +456,18 @@ pub struct McpToolDto {
     /// the `searchHint` matches. Forwarded from `client.ts:1779-1780`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_load: Option<bool>,
+    /// `true` when `tool._meta['anthropic/requiresUserInteraction'] === true`
+    /// (client.ts factory, binary-confirmed @182519150). Marks a tool that
+    /// needs fresh, in-the-moment user interaction on every call (e.g. an
+    /// embedded OAuth/consent step) — a stored "always allow" rule cannot
+    /// satisfy that, so a persistent grant must never be offered/written for
+    /// it (oracle `suppressesAlwaysAllowRule` @182520462). Forwarded onto
+    /// `MCPTool`'s `Tool::requires_user_interaction` override; consumed by
+    /// the TUI permission dialog to hide "Yes, allow always"
+    /// (`tui/src/permission_gate.rs`, `tui/src/bottom_pane/permission_view.rs`).
+    /// Defaults to `false` for servers/paths that don't set it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_user_interaction: bool,
     /// Tighten-only permission ceiling derived outside the MCP wire definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_max_permission: Option<McpPermissionCeiling>,
@@ -452,6 +487,7 @@ impl McpToolDto {
             definition,
             search_hint: None,
             always_load: None,
+            requires_user_interaction: false,
             effective_max_permission: None,
         }
     }
@@ -483,18 +519,26 @@ impl McpToolDto {
     /// Whether the server marked the tool as requiring interaction.
     #[must_use]
     pub fn requires_user_interaction(&self) -> bool {
-        self.definition
-            .meta
-            .as_ref()
-            .and_then(Value::as_object)
-            .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        self.requires_user_interaction
+            || self
+                .definition
+                .meta
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
     }
 }
 
+/// `serde(skip_serializing_if)` helper for a plain `bool` field defaulting to
+/// `false` — keeps the common (unset) case terse in serialized form.
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 /// One resource advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceDto {
     /// Resource URI.
     pub uri: String,
@@ -504,8 +548,36 @@ pub struct McpResourceDto {
     pub mime_type: Option<String>,
 }
 
+/// One parameterized resource template advertised by an MCP server
+/// (`resources/templates/list`).
+///
+/// Distinct from [`McpResourceDto`], which carries a concrete `uri`: a
+/// template's `uri_template` is an RFC 6570 URI Template with `{variable}`
+/// placeholders a client fills in before issuing `resources/read` against the
+/// resolved URI (MCP spec `ListResourceTemplatesResult` /
+/// `ResourceTemplate`). Oracle `GGt = f({...DYe.shape,...dEt.shape,
+/// uriTemplate:i(),description:qT(i()),mimeType:qT(i()),
+/// annotations:LYe.optional(),_meta:qT(un({}))})` (2.1.251 Mach-O
+/// @167622755); the response envelope is `{resourceTemplates:[...]}` (oracle
+/// `MYe = yEt.extend({resourceTemplates:H(GGt)})`, same offset). `annotations`
+/// / `_meta` are not yet surfaced here — no consumer needs them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpResourceTemplateDto {
+    /// RFC 6570 URI template, e.g. `"file:///{path}"`.
+    #[serde(rename = "uriTemplate")]
+    pub uri_template: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional content type.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
 /// One prompt advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptDto {
     /// Prompt name as exposed by the server.
     pub name: String,
@@ -517,7 +589,7 @@ pub struct McpPromptDto {
 }
 
 /// One named argument declared by an MCP prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptArgumentDto {
     /// Wire argument name sent to `prompts/get`.
     pub name: String,
@@ -649,6 +721,21 @@ pub trait McpTransport: Send + Sync {
         &self,
         conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError>;
+
+    /// Enumerate parameterized resource templates exposed by the server
+    /// (`resources/templates/list` — see [`McpResourceTemplateDto`]).
+    ///
+    /// Additive method: the DEFAULT body returns an empty list so every
+    /// existing implementation compiles unchanged, exactly like
+    /// [`Self::read_resource_rich`]'s default below. Production transports
+    /// (POSIX) override it to issue the real wire call; a server (or a stub
+    /// transport) that never declares templates is unaffected.
+    async fn list_resource_templates(
+        &self,
+        _conn: &McpRawConnection,
+    ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+        Ok(Vec::new())
+    }
 
     /// Enumerate all prompts exposed by the server.
     async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError>;

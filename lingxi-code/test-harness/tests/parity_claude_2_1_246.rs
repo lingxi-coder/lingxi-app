@@ -1,12 +1,14 @@
 //! Historical version-facing identifiers captured from the Claude Code 2.1.246 oracle.
 //!
 //! The LIVE pins moved to `parity_claude_2_1_251.rs` when the parity target
-//! advanced to 2.1.251. This file no longer asserts against the live version
-//! constant; pinning it to a superseded version would make a correct target
-//! bump fail.
+//! advanced to 2.1.251 (the mcp/plugin byte-alignment backlog). This file no
+//! longer asserts against `traits::CLAUDE_CODE_VERSION` — pinning a live
+//! constant to a superseded version is how a suite starts failing for being
+//! CORRECT, the same demotion 2.1.217 and 2.1.220 already took.
 //!
-//! The derivation shape remains version-agnostic: the advertised version, the
-//! child-process identity and the WebFetch user agent must share one source.
+//! Kept because the DERIVATION shape is what matters and it is version-agnostic:
+//! the advertised version, the child-process identity and the WebFetch user
+//! agent must all come from one constant.
 
 #[test]
 fn version_facing_identifiers_share_one_source() {

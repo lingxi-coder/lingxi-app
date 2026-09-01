@@ -219,6 +219,8 @@ fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManife
         version: builtin_bundle::COMPILED_PLUGIN_VERSION.to_string(),
         description: builtin_bundle::COMPILED_PLUGIN_DESCRIPTION.to_string(),
         author: Some(builtin_bundle::COMPILED_PLUGIN_AUTHOR.to_string()),
+        author_email: None,
+        author_url: None,
         homepage: None,
         source: plugin::PluginSource::BuiltIn,
         components: plugin::PluginComponents::default(),
@@ -228,6 +230,10 @@ fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManife
         user_config: None,
         channels: Vec::new(),
         settings: std::collections::HashMap::new(),
+        keywords: Vec::new(),
+        license: None,
+        repository: None,
+        metadata: None,
     };
     (id, manifest)
 }
@@ -414,7 +420,6 @@ mod mobile_plugin_composition_tests {
             Arc::new(platform_posix_minimal::PosixHttp::new()),
             Arc::new(platform_posix_minimal::PosixRuntime::new()),
             credentials,
-            Arc::new(plugin::PluginBlocklist::new(String::new())),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             Arc::new(RwLock::new(CommandRegistry::new())),
             Arc::new(RwLock::new(SkillRegistry::new())),

@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
@@ -148,41 +151,289 @@ fun LocalAppsScreen(
         state.pendingAuthorization?.let { request ->
             AuthorizationDialog(request = request, onAction = onAction)
         }
-        state.pendingRuntimeProfileSelection?.let { request ->
-            RuntimeProfileSelectionDialog(request = request, onAction = onAction)
-        }
         state.pendingDependencyChangeConfirmation?.let { request ->
             DependencyChangeConfirmationDialog(request = request, onAction = onAction)
-        }
-        state.pendingProfileProposal?.let { proposal ->
-            ProfileProposalDialog(proposal = proposal, onAction = onAction)
         }
     }
 }
 
 @Composable
-private fun ProfileProposalDialog(
-    proposal: LocalAppProfileProposal,
+fun LocalAppApprovalSheetDialog(
+    sheet: LocalAppApprovalSheet,
     onAction: (LocalAppsAction) -> Unit,
 ) {
+    val context = LocalContext.current
+    val canApprove = sheet.state == LocalAppApprovalReceiptState.Pending
     AlertDialog(
-        onDismissRequest = { onAction(LocalAppsAction.ResolveProfileProposal(false)) },
-        title = { Text("应用 Agent 请求更新指令") },
+        onDismissRequest = { onAction(LocalAppsAction.ResolveApprovalSheet(false)) },
+        title = {
+            Text(
+                when (sheet) {
+                    is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_title)
+                    is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_title)
+                    is LocalAppProfileApprovalSheet -> stringResource(R.string.local_apps_profile_proposal_title)
+                },
+            )
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(proposal.reason)
-                Text(proposal.instructions)
-                Text("版本 ${proposal.currentRevision} → ${proposal.currentRevision + 1uL}")
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .widthIn(max = 640.dp)
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                when (sheet) {
+                    is LocalAppCreateApprovalSheet -> {
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_create_confirm_app_name),
+                            value = sheet.appName,
+                        )
+                        if (sheet.brief.isNotBlank()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_app_brief),
+                                value = sheet.brief,
+                            )
+                        }
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_create_confirm_selected_template),
+                            value = sheet.templateName,
+                        )
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_create_confirm_runtime_profile),
+                            value = buildString {
+                                append(sheet.runtimeProfile.family.label(context))
+                                append('\n')
+                                append("r${sheet.runtimeProfile.revision} · ${sheet.runtimeProfile.surface.label(context)}")
+                                if (sheet.dependencies.isNotEmpty()) {
+                                    append('\n')
+                                    append(
+                                        sheet.dependencies.joinToString("\n") { dependency ->
+                                            listOfNotNull(
+                                                dependency.packageName,
+                                                dependency.version?.let { "@$it" },
+                                                dependency.downloadStatus?.localizedDependencyStatus(context),
+                                            ).joinToString(" ")
+                                        },
+                                    )
+                                }
+                            },
+                        )
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_create_confirm_agent_reason),
+                            value = sheet.reason,
+                        )
+                        if (sheet.rejectedCandidates.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_rejected_candidates),
+                                value = sheet.rejectedCandidates.joinToString("\n"),
+                            )
+                        }
+                        if (sheet.initialTools.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_initial_tools),
+                                value = sheet.initialTools.joinToString("\n") { tool ->
+                                    listOfNotNull(tool.name, tool.summary.takeUnless { it == tool.name }).joinToString(" · ")
+                                },
+                            )
+                        }
+                        if (sheet.permissionCeilings.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_permission_ceiling),
+                                value = sheet.permissionCeilings.joinToString("\n"),
+                            )
+                        }
+                        if (sheet.gates.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_required_gates),
+                                value = sheet.gates.joinToString("\n") { gate ->
+                                    buildString {
+                                        append(gate.name)
+                                        append(" · ")
+                                        append(gate.status.label(context))
+                                        gate.detail?.takeIf { it.isNotBlank() }?.let {
+                                            append(" · ")
+                                            append(it)
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    is LocalAppMcpProposalApprovalSheet -> {
+                        if (sheet.summary.isNotBlank()) {
+                            Text(sheet.summary, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        val added = sheet.toolDiffs.filter { it.before == null && it.after != null }
+                        val removed = sheet.toolDiffs.filter { it.before != null && it.after == null }
+                        val changed = sheet.toolDiffs.filter { it.before != null && it.after != null && it.changedFields.isNotEmpty() }
+                        if (added.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_mcp_proposal_added),
+                                value = added.joinToString("\n") { diff ->
+                                    listOfNotNull(
+                                        diff.after?.name ?: diff.name,
+                                        diff.after?.title,
+                                        diff.after?.description,
+                                    ).joinToString(" · ")
+                                },
+                            )
+                        }
+                        if (removed.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_mcp_proposal_removed),
+                                value = removed.joinToString("\n") { it.before?.name ?: it.name },
+                            )
+                        }
+                        changed.forEach { tool ->
+                            LocalAppMcpToolDiffCard(tool, context)
+                        }
+                        if (sheet.requiredChanges.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_mcp_proposal_required_flow_changes),
+                                value = sheet.requiredChanges.joinToString("\n"),
+                            )
+                        }
+                        if (sheet.excludedCapabilities.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_mcp_proposal_excluded_capabilities),
+                                value = sheet.excludedCapabilities.joinToString("\n"),
+                            )
+                        }
+                        if (sheet.pendingGates.isNotEmpty()) {
+                            LocalAppApprovalFact(
+                                label = stringResource(R.string.local_apps_create_confirm_required_gates),
+                                value = sheet.pendingGates.joinToString("\n") { gate ->
+                                    buildString {
+                                        append(gate.name)
+                                        append(" · ")
+                                        append(gate.status.label(context))
+                                        gate.detail?.takeIf { it.isNotBlank() }?.let {
+                                            append(" · ")
+                                            append(it)
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                        if (sheet.state == LocalAppApprovalReceiptState.Superseded) {
+                            Text(
+                                text = stringResource(R.string.local_apps_mcp_proposal_receipt_superseded),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    is LocalAppProfileApprovalSheet -> {
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_create_confirm_agent_reason),
+                            value = sheet.reason,
+                        )
+                        LocalAppApprovalFact(
+                            label = stringResource(R.string.local_apps_profile_proposal_navigation_title),
+                            value = sheet.instructions,
+                        )
+                    }
+                }
+                sheet.expiresAtMs?.let { expiresAtMs ->
+                    Text(
+                        text = when (sheet) {
+                            is LocalAppCreateApprovalSheet -> stringResource(
+                                R.string.local_apps_create_confirm_receipt_expires_fmt,
+                                DateFormat.getDateTimeInstance().format(Date(expiresAtMs)),
+                            )
+                            is LocalAppMcpProposalApprovalSheet -> stringResource(
+                                R.string.local_apps_mcp_proposal_receipt_expires_fmt,
+                                DateFormat.getDateTimeInstance().format(Date(expiresAtMs)),
+                            )
+                            is LocalAppProfileApprovalSheet -> DateFormat.getDateTimeInstance().format(Date(expiresAtMs))
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { onAction(LocalAppsAction.ResolveProfileProposal(true)) }) {
-                Text("应用")
+            Button(
+                onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(true)) },
+                enabled = canApprove,
+            ) {
+                Text(
+                    when (sheet) {
+                        is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_approve)
+                        is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_approve)
+                        is LocalAppProfileApprovalSheet -> stringResource(R.string.local_apps_profile_proposal_apply)
+                    },
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = { onAction(LocalAppsAction.ResolveProfileProposal(false)) }) {
-                Text(stringResource(R.string.local_apps_deny))
+            TextButton(onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(false)) }) {
+                Text(
+                    when (sheet) {
+                        is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_reject)
+                        is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_reject)
+                        is LocalAppProfileApprovalSheet -> stringResource(R.string.common_cancel)
+                    },
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun LocalAppApprovalFact(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+private fun LocalAppMcpToolDiffCard(
+    diff: LocalAppApprovalToolDiff,
+    context: android.content.Context,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.semantics { heading() },
+    ) {
+        Text(
+            text = "${stringResource(R.string.local_apps_mcp_proposal_changed)} · ${diff.name}",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        LocalAppMcpToolSurfaceFact(
+            title = stringResource(R.string.local_apps_mcp_proposal_before),
+            surface = diff.before,
+            changedFields = diff.changedFields,
+            context = context,
+        )
+        LocalAppMcpToolSurfaceFact(
+            title = stringResource(R.string.local_apps_mcp_proposal_after),
+            surface = diff.after,
+            changedFields = diff.changedFields,
+            context = context,
+        )
+    }
+}
+
+@Composable
+private fun LocalAppMcpToolSurfaceFact(
+    title: String,
+    surface: LocalAppApprovalToolSurface?,
+    changedFields: List<LocalAppApprovalToolField>,
+    context: android.content.Context,
+) {
+    if (surface == null) return
+    LocalAppApprovalFact(
+        label = title,
+        value = changedFields.joinToString("\n\n") { field ->
+            buildString {
+                append(field.label(context))
+                append('\n')
+                append(surface.valueFor(field))
             }
         },
     )
@@ -348,7 +599,15 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                AssistChip(onClick = {}, label = { Text(app.workflow.label()) })
+                FlowRowBadges(
+                    badges = localAppStatusBadges(
+                        workflow = app.workflow,
+                        runtimeError = app.runtime.detail,
+                        runtimeProfileStatus = app.runtimeProfileStatus,
+                        mcpVerification = app.mcpVerification,
+                        uiVerification = app.uiVerification,
+                    ),
+                )
                 Box {
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Rounded.MoreVert, contentDescription = stringResource(R.string.local_apps_card_menu_a11y))
@@ -395,7 +654,7 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
                         Spacer(Modifier.width(6.dp))
                         Text(stringResource(R.string.composer_stop))
                     }
-                } else if (app.workflow == LocalAppWorkflow.Ready) {
+                } else if (app.workflow.isPublished) {
                     Button(onClick = { onAction(LocalAppsAction.StartRuntime(app.id)) }) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
@@ -694,7 +953,7 @@ private fun LocalAppDetailsScreen(
                 // nothing but the not-running placeholder, and the Preview TAB
                 // below already covers inspecting a half-built app.
                 actions = {
-                    if (app?.workflow == LocalAppWorkflow.Ready) {
+                    if (app?.workflow?.isPublished == true) {
                         IconButton(onClick = { onAction(LocalAppsAction.OpenRunSurface(appId)) }) {
                             Icon(
                                 Icons.Rounded.OpenInFull,
@@ -707,6 +966,35 @@ private fun LocalAppDetailsScreen(
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            app?.let {
+                FlowRowBadges(
+                    badges = localAppStatusBadges(
+                        workflow = it.workflow,
+                        runtimeError = it.runtime.detail ?: state.details[appId]?.runtime?.detail,
+                        runtimeProfileStatus = state.details[appId]?.runtimeProfileStatus ?: it.runtimeProfileStatus,
+                        mcpVerification = state.details[appId]?.mcpVerification ?: it.mcpVerification,
+                        uiVerification = state.details[appId]?.uiVerification ?: it.uiVerification,
+                    ),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) {
+                    (state.details[appId]?.mcpVerification ?: it.mcpVerification)?.let { summary ->
+                        VerificationSummaryRow(
+                            label = stringResource(R.string.local_apps_verification_mcp),
+                            summary = summary,
+                        )
+                    }
+                    (state.details[appId]?.uiVerification ?: it.uiVerification)?.let { summary ->
+                        VerificationSummaryRow(
+                            label = stringResource(R.string.local_apps_verification_ui),
+                            summary = summary,
+                        )
+                    }
+                }
+            }
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -1227,113 +1515,6 @@ private fun AuthorizationDialog(
 }
 
 @Composable
-private fun RuntimeProfileSelectionDialog(
-    request: LocalAppRuntimeProfileSelectionRequest,
-    onAction: (LocalAppsAction) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(null)) },
-        title = { Text(stringResource(R.string.local_apps_runtime_profile_prompt_title)) },
-        text = {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item {
-                    Text(request.reason)
-                }
-                items(request.options) { option ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    option.family.label(),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                if (request.recommendedFamily == option.family) {
-                                    AssistChip(
-                                        onClick = {},
-                                        enabled = false,
-                                        label = { Text(stringResource(R.string.local_apps_runtime_profile_recommended)) },
-                                    )
-                                }
-                                AssistChip(
-                                    onClick = {},
-                                    enabled = false,
-                                    label = {
-                                        Text(
-                                            if (option.available) {
-                                                stringResource(R.string.local_apps_runtime_profile_available)
-                                            } else {
-                                                stringResource(R.string.local_apps_runtime_profile_unavailable)
-                                            },
-                                        )
-                                    },
-                                )
-                            }
-                            Text(
-                                stringResource(
-                                    R.string.local_apps_runtime_profile_revision_surface,
-                                    option.revision.toInt(),
-                                    option.surface.label(),
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                option.corePackages.joinToString("\n") { "${it.name}@${it.version}" },
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                stringResource(R.string.local_apps_runtime_profile_contract, option.contractSha256),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                stringResource(
-                                    R.string.local_apps_runtime_profile_cache_download,
-                                    option.cacheStatus.localizedRuntimeProfileStatus(),
-                                    option.downloadStatus.localizedRuntimeProfileStatus(),
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            option.reason?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall)
-                            }
-                            Button(
-                                onClick = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(option.family)) },
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = option.available,
-                            ) {
-                                Text(
-                                    if (option.available) {
-                                        stringResource(R.string.local_apps_runtime_profile_select)
-                                    } else {
-                                        stringResource(R.string.local_apps_runtime_profile_unavailable_action)
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = {
-            TextButton(onClick = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(null)) }) {
-                Text(stringResource(R.string.common_cancel))
-            }
-        },
-    )
-}
-
-@Composable
 private fun DependencyChangeConfirmationDialog(
     request: LocalAppDependencyChangeConfirmationRequest,
     onAction: (LocalAppsAction) -> Unit,
@@ -1510,7 +1691,51 @@ private fun LocalAppsTopBar(
 @Composable
 private fun LocalAppWorkflow.label(): String = when (this) {
     LocalAppWorkflow.Draft -> stringResource(R.string.local_apps_workflow_draft)
-    LocalAppWorkflow.Ready -> stringResource(R.string.settings_linux_state_ready)
+    LocalAppWorkflow.PublishedUnverified -> stringResource(R.string.local_apps_verification_status_unverified)
+    LocalAppWorkflow.PublishedVerified -> stringResource(R.string.local_apps_verification_status_passed)
+}
+
+@Composable
+private fun FlowRowBadges(
+    badges: List<LocalAppStatusBadgeKind>,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        badges.forEach { badge ->
+            AssistChip(
+                onClick = {},
+                enabled = false,
+                label = {
+                    Text(
+                        when (badge) {
+                            LocalAppStatusBadgeKind.Draft -> stringResource(R.string.local_apps_workflow_draft)
+                            LocalAppStatusBadgeKind.PublishedUnverified -> stringResource(R.string.local_apps_verification_status_unverified)
+                            LocalAppStatusBadgeKind.PublishedVerified -> stringResource(R.string.local_apps_verification_status_passed)
+                            LocalAppStatusBadgeKind.VerificationPending -> stringResource(R.string.local_apps_verification_status_pending)
+                            LocalAppStatusBadgeKind.VerificationFailed -> stringResource(R.string.local_apps_verification_status_failed)
+                            LocalAppStatusBadgeKind.Error -> stringResource(R.string.local_apps_error_title)
+                        },
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun VerificationSummaryRow(
+    label: String,
+    summary: LocalAppVerificationSummary,
+) {
+    Text(
+        text = "$label · ${summary.status.label()} · ${summary.summary}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -1549,6 +1774,76 @@ private fun LocalAppRuntimeProfileSurface.label(): String = when (this) {
     LocalAppRuntimeProfileSurface.Canvas -> stringResource(R.string.local_apps_runtime_profile_surface_canvas)
 }
 
+private fun LocalAppRuntimeProfileFamily.label(context: android.content.Context): String = when (this) {
+    LocalAppRuntimeProfileFamily.ReactDom -> context.getString(R.string.local_apps_runtime_profile_family_react_dom)
+    LocalAppRuntimeProfileFamily.Canvas2d -> context.getString(R.string.local_apps_runtime_profile_family_canvas_2d)
+    LocalAppRuntimeProfileFamily.Three3d -> context.getString(R.string.local_apps_runtime_profile_family_three_3d)
+    LocalAppRuntimeProfileFamily.Phaser2d -> context.getString(R.string.local_apps_runtime_profile_family_phaser_2d)
+    LocalAppRuntimeProfileFamily.Babylon3d -> context.getString(R.string.local_apps_runtime_profile_family_babylon_3d)
+}
+
+private fun LocalAppRuntimeProfileSurface.label(context: android.content.Context): String = when (this) {
+    LocalAppRuntimeProfileSurface.Dom -> context.getString(R.string.local_apps_runtime_profile_surface_dom)
+    LocalAppRuntimeProfileSurface.Canvas -> context.getString(R.string.local_apps_runtime_profile_surface_canvas)
+}
+
+@Composable
+private fun LocalAppVerificationStatus.label(): String = when (this) {
+    LocalAppVerificationStatus.Pending -> stringResource(R.string.local_apps_verification_status_pending)
+    LocalAppVerificationStatus.Passed -> stringResource(R.string.local_apps_verification_status_passed)
+    LocalAppVerificationStatus.Failed -> stringResource(R.string.local_apps_verification_status_failed)
+    LocalAppVerificationStatus.Unverified -> stringResource(R.string.local_apps_verification_status_unverified)
+    LocalAppVerificationStatus.Unavailable -> stringResource(R.string.local_apps_verification_status_unavailable)
+}
+
+private fun LocalAppVerificationStatus.label(context: android.content.Context): String = when (this) {
+    LocalAppVerificationStatus.Pending -> context.getString(R.string.local_apps_verification_status_pending)
+    LocalAppVerificationStatus.Passed -> context.getString(R.string.local_apps_verification_status_passed)
+    LocalAppVerificationStatus.Failed -> context.getString(R.string.local_apps_verification_status_failed)
+    LocalAppVerificationStatus.Unverified -> context.getString(R.string.local_apps_verification_status_unverified)
+    LocalAppVerificationStatus.Unavailable -> context.getString(R.string.local_apps_verification_status_unavailable)
+}
+
+@Composable
+private fun LocalAppApprovalToolField.label(): String = when (this) {
+    LocalAppApprovalToolField.Name -> stringResource(R.string.local_apps_field_name)
+    LocalAppApprovalToolField.Title -> stringResource(R.string.settings_display_name)
+    LocalAppApprovalToolField.Description -> stringResource(R.string.local_apps_brief)
+    LocalAppApprovalToolField.InputSchema -> stringResource(R.string.local_apps_mcp_proposal_field_input_schema)
+    LocalAppApprovalToolField.OutputSchema -> stringResource(R.string.local_apps_mcp_proposal_field_output_schema)
+    LocalAppApprovalToolField.Annotations -> stringResource(R.string.local_apps_mcp_proposal_field_annotations)
+    LocalAppApprovalToolField.Execution -> stringResource(R.string.local_apps_mcp_proposal_field_execution)
+    LocalAppApprovalToolField.VisibleMeta -> stringResource(R.string.local_apps_mcp_proposal_field_visible_meta)
+    LocalAppApprovalToolField.SemanticFlow -> stringResource(R.string.local_apps_mcp_proposal_field_semantic_flow)
+    LocalAppApprovalToolField.PermissionCeiling -> stringResource(R.string.local_apps_mcp_proposal_field_permission_ceiling)
+}
+
+private fun LocalAppApprovalToolField.label(context: android.content.Context): String = when (this) {
+    LocalAppApprovalToolField.Name -> context.getString(R.string.local_apps_field_name)
+    LocalAppApprovalToolField.Title -> context.getString(R.string.settings_display_name)
+    LocalAppApprovalToolField.Description -> context.getString(R.string.local_apps_brief)
+    LocalAppApprovalToolField.InputSchema -> context.getString(R.string.local_apps_mcp_proposal_field_input_schema)
+    LocalAppApprovalToolField.OutputSchema -> context.getString(R.string.local_apps_mcp_proposal_field_output_schema)
+    LocalAppApprovalToolField.Annotations -> context.getString(R.string.local_apps_mcp_proposal_field_annotations)
+    LocalAppApprovalToolField.Execution -> context.getString(R.string.local_apps_mcp_proposal_field_execution)
+    LocalAppApprovalToolField.VisibleMeta -> context.getString(R.string.local_apps_mcp_proposal_field_visible_meta)
+    LocalAppApprovalToolField.SemanticFlow -> context.getString(R.string.local_apps_mcp_proposal_field_semantic_flow)
+    LocalAppApprovalToolField.PermissionCeiling -> context.getString(R.string.local_apps_mcp_proposal_field_permission_ceiling)
+}
+
+private fun LocalAppApprovalToolSurface.valueFor(field: LocalAppApprovalToolField): String = when (field) {
+    LocalAppApprovalToolField.Name -> name
+    LocalAppApprovalToolField.Title -> title.orEmpty()
+    LocalAppApprovalToolField.Description -> description.orEmpty()
+    LocalAppApprovalToolField.InputSchema -> inputSchemaJson
+    LocalAppApprovalToolField.OutputSchema -> outputSchemaJson.orEmpty()
+    LocalAppApprovalToolField.Annotations -> annotationsJson.orEmpty()
+    LocalAppApprovalToolField.Execution -> executionJson.orEmpty()
+    LocalAppApprovalToolField.VisibleMeta -> visibleMetaJson.orEmpty()
+    LocalAppApprovalToolField.SemanticFlow -> semanticFlowJson
+    LocalAppApprovalToolField.PermissionCeiling -> permissionCeiling
+}
+
 @Composable
 private fun String.localizedRuntimeProfileStatus(): String = when (this) {
     "bundled" -> stringResource(R.string.local_apps_runtime_profile_status_bundled)
@@ -1556,6 +1851,13 @@ private fun String.localizedRuntimeProfileStatus(): String = when (this) {
     "download_required" -> stringResource(R.string.local_apps_runtime_profile_status_download_required)
     "unavailable" -> stringResource(R.string.local_apps_runtime_profile_status_unavailable)
     "gated" -> stringResource(R.string.local_apps_runtime_profile_status_gated)
+    else -> this
+}
+
+private fun String.localizedDependencyStatus(context: android.content.Context): String = when (this) {
+    "may_be_required" -> context.getString(R.string.local_apps_dependency_change_download_may_be_required)
+    "not_required" -> context.getString(R.string.local_apps_dependency_change_download_not_required)
+    "not_needed" -> context.getString(R.string.local_apps_dependency_change_cache_not_needed)
     else -> this
 }
 

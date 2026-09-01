@@ -17,6 +17,7 @@
 use crate::connection::ConfigScope;
 use crate::normalization::is_reserved_mcp_server_name;
 use serde_json::Value;
+use std::path::Path;
 
 /// claude `mcpErrorMetadata.severity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,209 @@ impl McpConfigWarning {
             None => self.message.clone(),
         }
     }
+
+    /// True for the "file not found" variant produced by
+    /// [`read_mcp_config_file`]. Claude-code's own `"project"`-scope loader
+    /// filters exactly this variant out before logging/surfacing it
+    /// (`Iqe`'s callers: `F.filter(B=>!B.message.startsWith("MCP config file
+    /// not found"))`) — a missing ancestor `.mcp.json` is routine, not an
+    /// anomaly. Callers that surface [`McpConfigWarning`]s to a user (rather
+    /// than just loading servers) should apply the same filter.
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        self.message.starts_with("MCP config file not found")
+    }
+}
+
+/// Byte cap claude-code 2.1.251 applies to every NON-dynamic-scope MCP config
+/// file read (`Iqe`'s `var mcn=2097152`, binary offset 160911363).
+pub const MCP_CONFIG_MAX_BYTES: u64 = 2_097_152;
+
+/// The lowercase scope tag claude-code's `Iqe`/`F7t` embed in log lines and
+/// `mcpErrorMetadata.scope` (`"local"|"user"|"project"|"dynamic"|...` — the
+/// `ConfigScope` variant names are NOT used verbatim, oracle's are lowercase
+/// single words).
+fn oracle_scope_label(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Local => "local",
+        ConfigScope::User => "user",
+        ConfigScope::Project => "project",
+        ConfigScope::Dynamic => "dynamic",
+        ConfigScope::Enterprise => "enterprise",
+        ConfigScope::ClaudeAi => "claudeai",
+        ConfigScope::Managed => "managed",
+        ConfigScope::Agent => "agent",
+    }
+}
+
+/// Byte-faithful port of claude-code 2.1.251's `Iqe`: the shape/size-guarded
+/// read that precedes MCP config parsing.
+///
+/// Binary evidence (`Iqe` @160911493, offset range 160911363-160912816):
+/// ```text
+/// var mcn=2097152;
+/// function Iqe(e){
+///   let{filePath:t,expandVars:r,scope:o,bridgeSessionId:u}=e,d=le(),_;
+///   try{
+///     let A=o==="dynamic" ? d.readFileSync(t,{encoding:"utf8"}) : Atr(d,t,mcn);
+///     if(A===null) return /* shape/size rejection */ ...
+///     _=A
+///   }catch(A){
+///     if(E(A)==="ENOENT") return /* not-found */ ...
+///     return /* other read error */ ...
+///   }
+///   ...
+/// }
+/// ```
+///
+/// - `scope == Dynamic` (the `--mcp-config <path>` CLI flag, confirmed at
+///   binary offset 166778831 with `scope:"dynamic"`): reads the file with NO
+///   shape/size check at all, matching the oracle's own `readFileSync`
+///   branch. That flag is already gated on [`Path::is_file`] at its own call
+///   site (`apps/cli/src/init.rs`) — the ONLY guard the oracle itself applies
+///   to a dynamic-scope path.
+/// - every other scope: the path must be a regular file (`Path::is_file`,
+///   which follows symlinks — a symlink to a device/FIFO fails this exactly
+///   as the suggestion text implies, a symlink to a regular file passes) of
+///   at most [`MCP_CONFIG_MAX_BYTES`] bytes, or the read is rejected with a
+///   typed, byte-exact [`McpConfigWarning`] instead of being attempted.
+///
+/// Binary-confirmed evidence for WHICH scopes actually reach `Iqe`: the
+/// caller switch at offset 160900580 shows `case"project"` (walking the
+/// ancestor directories for `.mcp.json`) and `case"enterprise"`
+/// (`Iqe({filePath:J$t(),expandVars:t,scope:"enterprise"})`) calling
+/// `Iqe(...)`, and the `--mcp-config` dynamic path at 166778794 doing the
+/// same; but `case"user"` and `case"local"` call `xqe({configObject:...})`
+/// directly on an ALREADY-PARSED settings object (`oe().mcpServers` /
+/// `li().mcpServers`) and never invoke `Iqe` at all — so this guard is wired
+/// into this port's project-scope `.mcp.json` reads AND both enterprise
+/// `managed-mcp.json` reads ([`crate::enterprise_policy::load_enterprise_servers_at`]
+/// and [`crate::enterprise_policy::enterprise_mcp_active_at`], the port's
+/// `$7t`), never the global config file read (see the §23b report: applying
+/// it there would be a fabrication, not a port).
+///
+/// # Errors
+/// Returns a fatal [`McpConfigWarning`] for: shape/size rejection, "file not
+/// found" (see [`McpConfigWarning::is_not_found`]), and any other I/O error.
+pub fn read_mcp_config_file(path: &Path, scope: ConfigScope) -> Result<String, McpConfigWarning> {
+    let file = path.to_string_lossy().into_owned();
+    let label = oracle_scope_label(scope);
+    if scope != ConfigScope::Dynamic {
+        match std::fs::metadata(path) {
+            Ok(meta) => {
+                if !meta.is_file() || meta.len() > MCP_CONFIG_MAX_BYTES {
+                    tracing::warn!(
+                        path = %file,
+                        scope = label,
+                        "MCP config skipped for {file} (scope={label}): not a regular file or exceeds {MCP_CONFIG_MAX_BYTES} byte limit"
+                    );
+                    telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_SHAPE_GATE));
+                    return Err(McpConfigWarning {
+                        file: Some(file.clone()),
+                        path: String::new(),
+                        message: format!(
+                            "MCP config is not a regular file or exceeds {MCP_CONFIG_MAX_BYTES} bytes: {file}"
+                        ),
+                        suggestion: Some(
+                            "Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)"
+                                .to_string(),
+                        ),
+                        scope,
+                        server_name: None,
+                        severity: McpConfigSeverity::Fatal,
+                    });
+                }
+            }
+            Err(e) => return Err(io_error_warning(e, &file, scope, label)),
+        }
+    }
+    std::fs::read_to_string(path).map_err(|e| io_error_warning(e, &file, scope, label))
+}
+
+/// Shared tail of `Iqe`'s `catch` block: ENOENT vs every other I/O error.
+fn io_error_warning(
+    e: std::io::Error,
+    file: &str,
+    scope: ConfigScope,
+    label: &str,
+) -> McpConfigWarning {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        // Oracle's `E(A)==="ENOENT"` branch returns immediately with NO
+        // `n(...)` log call and NO `p(...)` telemetry — a missing config is
+        // routine, not logged at all at this layer.
+        return McpConfigWarning {
+            file: Some(file.to_string()),
+            path: String::new(),
+            message: format!("MCP config file not found: {file}"),
+            suggestion: Some("Check that the file path is correct".to_string()),
+            scope,
+            server_name: None,
+            severity: McpConfigSeverity::Fatal,
+        };
+    }
+    tracing::error!(
+        path = %file,
+        scope = label,
+        error = %e,
+        "MCP config read error for {file} (scope={label}): {e}"
+    );
+    telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_READ_FAILED));
+    McpConfigWarning {
+        file: Some(file.to_string()),
+        path: String::new(),
+        message: format!("Failed to read file: {e}"),
+        suggestion: Some("Check file permissions and ensure the file exists".to_string()),
+        scope,
+        server_name: None,
+        severity: McpConfigSeverity::Fatal,
+    }
+}
+
+/// Byte-faithful port of `Iqe`'s post-read JSON-parse guard
+/// (`let C=Ut(_,!1);if(!C)return ...`).
+///
+/// The oracle emits TWO different strings here, not one: an internal log
+/// line with full detail (`` `MCP config is not valid JSON: ${t} (scope=${o},
+/// length=${_.length}, first100=${b(_.slice(0,100))})` ``) and a SHORT, FIXED
+/// (non-interpolated) user-facing message — `"MCP config is not a valid
+/// JSON"` — with no path/scope/length in it at all. This port reproduces
+/// both, but the `length`/`first100` reproduction in the log line is
+/// best-effort (Rust `char` count vs JS UTF-16 `.length`; `first100` quoted
+/// via [`serde_json::to_string`], matching this port's existing convention
+/// for the oracle's `b()` stringify helper — see
+/// `json_config::McpTransportSpec` construction's `url_invalid` diagnostic).
+///
+/// # Errors
+/// Returns a fatal [`McpConfigWarning`] when `raw` is not valid JSON.
+pub fn parse_mcp_config_json(
+    raw: &str,
+    path: &Path,
+    scope: ConfigScope,
+) -> Result<Value, McpConfigWarning> {
+    serde_json::from_str::<Value>(raw).map_err(|_| {
+        let file = path.to_string_lossy().into_owned();
+        let label = oracle_scope_label(scope);
+        let length = raw.chars().count();
+        let first100: String = raw.chars().take(100).collect();
+        let quoted =
+            serde_json::to_string(&first100).unwrap_or_else(|_| format!("{first100:?}"));
+        tracing::error!(
+            path = %file,
+            scope = label,
+            length,
+            "MCP config is not valid JSON: {file} (scope={label}, length={length}, first100={quoted})"
+        );
+        telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_INVALID_JSON));
+        McpConfigWarning {
+            file: Some(file),
+            path: String::new(),
+            message: "MCP config is not a valid JSON".to_string(),
+            suggestion: Some("Fix the JSON syntax errors in the file".to_string()),
+            scope,
+            server_name: None,
+            severity: McpConfigSeverity::Fatal,
+        }
+    })
 }
 
 /// The MCP server `type` values claude recognizes (`Alu`'s keys). An entry with
@@ -202,11 +406,13 @@ pub fn collect_mcp_config_warnings(
 }
 
 /// Loader validity per type (aligned with [`crate::json_config`]): stdio needs
-/// a `command`, every remote type needs a `url`. The remote schemas (`cLi`
-/// @226761199, `J5n` @226762069) declare `url: E.string()` with NO `.min(1)`
-/// — unlike stdio's `command: E.string().min(1)` — so a present-but-blank
-/// `url` is schema-VALID and the entry loads (it then reports as
-/// `- Not configured`, claude `zar`).
+/// a `command`, every remote type needs a `url` — EXCEPT `sdk`, whose oracle
+/// schema (`MAn`) carries neither `command` nor `url` and instead REQUIRES its
+/// own `name: i()`. The remote schemas
+/// (`cLi` @226761199, `J5n` @226762069) declare `url: E.string()` with NO
+/// `.min(1)` — unlike stdio's `command: E.string().min(1)` — so a
+/// present-but-blank `url` is schema-VALID and the entry loads (it then
+/// reports as `- Not configured`, claude `zar`).
 /// Complete, stable issue list for one MCP entry. Unlike the old single
 /// best-effort reason, this retains every failing field path so users can fix a
 /// malformed record in one pass.
@@ -269,6 +475,44 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
+        // Oracle `MAn` @154585319:
+        // `f({type:N("sdk"),name:i(),timeout:o().optional(),alwaysLoad:q().optional()})`
+        // — no `url` and no `command` field at all, so an sdk entry must NOT
+        // be flagged for lacking a `url`. But `name` is a REQUIRED `i()`
+        // (every sibling carries `.optional()`), so `{"type":"sdk"}` fails
+        // `safeParse` and the oracle reports it. `i()` has no `.min(1)`, so
+        // an EMPTY string is schema-valid — hence a plain required-string
+        // check, not `require_nonempty_string`. See
+        // [`crate::json_config::build_server_from_json_entry`].
+        "sdk" => match object.get("name") {
+            Some(Value::String(_)) => {}
+            None => issues.push("name: expected string, received undefined".to_string()),
+            Some(value) => issues.push(format!(
+                "name: expected string, received {}",
+                json_type_name(value)
+            )),
+        },
+        // Oracle `NAn` @154585377:
+        // `f({type:N("claudeai-proxy"),url:i(),id:i(),displayName:i().optional(),
+        // iconUrl:i().optional(), ...})` — `url` AND `id` are both REQUIRED
+        // `i()` (no `.min(1)`, so an EMPTY string satisfies either), in
+        // pointed contrast to `displayName`/`iconUrl` and the rest of the
+        // schema's tail. `id` has no analogue in any other union member, so
+        // this is the one arm that needs both checks. See
+        // [`crate::json_config::build_server_from_json_entry`].
+        "claudeai-proxy" => {
+            let require_present_string = |key: &str, issues: &mut Vec<String>| match object.get(key)
+            {
+                Some(Value::String(_)) => {}
+                None => issues.push(format!("{key}: expected string, received undefined")),
+                Some(value) => issues.push(format!(
+                    "{key}: expected string, received {}",
+                    json_type_name(value)
+                )),
+            };
+            require_present_string("url", &mut issues);
+            require_present_string("id", &mut issues);
+        }
         _ => match object.get("url") {
             Some(Value::String(_)) => {}
             None => issues.push("url: expected string, received undefined".to_string()),
@@ -278,7 +522,17 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
             )),
         },
     }
-    if ty != "stdio" {
+    // `headers: De(i(),i()).optional()` is declared by `OAn`/`sGt`/`LAn`
+    // only. `fYe` (stdio) does not declare it — nor does `NAn`
+    // (claudeai-proxy, @154585377), whose keys are exactly
+    // `type,url,id,displayName,iconUrl,timeout,alwaysLoad,toolPermissions,
+    // stateless,cachedInitResponse,discoverSupport,cachedDiscoverResponse,
+    // eligible,ineligibleReason,enterpriseManaged`. `f` (@154568943) is a
+    // catchall-free `z.object`, so a malformed `headers` on either of those
+    // two is STRIPPED, not reported. Keeping the check for `claudeai-proxy`
+    // made this warn about an entry
+    // `json_config::strip_to_claudeai_proxy_schema` now loads.
+    if !matches!(ty, "stdio" | "claudeai-proxy") {
         if let Some(headers) = object.get("headers") {
             match headers {
                 Value::Object(values) => {
@@ -306,6 +560,23 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
     if let Some(always_load) = object.get("alwaysLoad") {
         if !always_load.is_boolean() {
             issues.push("alwaysLoad: expected boolean".to_string());
+        }
+    }
+    // §11 — `discoveryCache: q().optional()` is declared by `OAn`/`sGt`
+    // (`sse` / `http` / `streamable-http`) ONLY, and with NO `.catch`, so a
+    // present-but-non-boolean value fails `safeParse` there and is an
+    // unknown-and-stripped key everywhere else. Without this the loader
+    // rejected the entry (`json_config::discovery_cache_flag`) while
+    // diagnostics stayed silent, so the server vanished from `mcp list` with
+    // no `Skipped —` line naming the field.
+    if crate::json_config::discovery_cache_is_schema_key_for(Some(ty)) {
+        if let Some(discovery_cache) = object.get("discoveryCache") {
+            if !discovery_cache.is_boolean() {
+                issues.push(format!(
+                    "discoveryCache: expected boolean, received {}",
+                    json_type_name(discovery_cache)
+                ));
+            }
         }
     }
     issues
@@ -388,6 +659,14 @@ fn collect_whitespace_fields(entry: &Value, ty: &str) -> Vec<String> {
 /// claude `Osg` — the env-var references left unresolved after expanding the
 /// fields Osg expands (stdio: command/args/env values; sse/http/ws: url/headers
 /// values; other types expand nothing). Deduped, first-seen order (`Fo`).
+///
+/// `streamable-http` belongs to the url/headers family even though `Osg`
+/// (`fAn` @160896200) has no `case "streamable-http"`: it runs on the PARSED
+/// entry (`xqe` @160909118: `let fe=me.data; … ge=r?fAn(fe):void 0`) and
+/// `sGt` (@154584848) declares `type: ie(["http","streamable-http"])
+/// .transform(()=>"http")`, so a `streamable-http` entry reaches `fAn` already
+/// retyped as `"http"` and DOES expand. `ty` here is the RAW config string
+/// (pre-transform), so the alias must be listed explicitly.
 fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
     let mut all: Vec<String> = Vec::new();
     let push = |s: &str, all: &mut Vec<String>| {
@@ -413,7 +692,7 @@ fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
-        "sse" | "http" | "ws" => {
+        "sse" | "http" | "streamable-http" | "ws" => {
             if let Some(u) = entry.get("url").and_then(Value::as_str) {
                 push(u, &mut all);
             }
@@ -425,7 +704,8 @@ fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
-        // sdk / claudeai-proxy / streamable-http / ide → Osg expands nothing.
+        // sdk / claudeai-proxy / ide → `fAn` passes the entry through
+        // untouched (`case"claudeai-proxy":u=e;break`), so Osg expands nothing.
         _ => {}
     }
     // `Fo` — dedup preserving first-seen order.
@@ -457,24 +737,48 @@ pub fn collect_all_mcp_config_warnings_at(
     global_config_path: Option<&std::path::Path>,
 ) -> Vec<McpConfigWarning> {
     let mut out = Vec::new();
-    let read_json = |p: &std::path::Path| -> Option<Value> {
-        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
-    };
 
-    // Project scope: the discovered `.mcp.json`.
+    // Project scope: the discovered `.mcp.json`. Byte-faithful `Iqe` guard
+    // (shape/size check, then JSON-parse) — see [`read_mcp_config_file`] and
+    // [`parse_mcp_config_json`]. A missing file is routine (claude-code's own
+    // `"project"`-scope loader filters this variant out before surfacing it,
+    // see [`McpConfigWarning::is_not_found`]) so it is silently skipped here
+    // too, matching the oracle; every OTHER rejection (shape/size, other I/O
+    // error, invalid JSON) is surfaced as a typed warning.
     let project = project_mcp_path;
-    if let Some(v) = read_json(project) {
-        out.extend(collect_mcp_config_warnings(
-            &v,
-            ConfigScope::Project,
-            Some(&project.to_string_lossy()),
-        ));
+    match read_mcp_config_file(project, ConfigScope::Project) {
+        Ok(raw) => match parse_mcp_config_json(&raw, project, ConfigScope::Project) {
+            Ok(v) => {
+                // oracle: `return y("mcp_config_parse"), xqe({...})` — the
+                // success half of the gate, fired right where `Iqe` hands the
+                // parsed object off to its caller.
+                telemetry::emit_mcp_config_parse_gate(None);
+                out.extend(collect_mcp_config_warnings(
+                    &v,
+                    ConfigScope::Project,
+                    Some(&project.to_string_lossy()),
+                ))
+            }
+            Err(warning) => out.push(warning),
+        },
+        Err(warning) if warning.is_not_found() => {}
+        Err(warning) => out.push(warning),
     }
 
     // User + Local scope: the global config file's top-level `mcpServers`
-    // (user) and `projects.<cwd-key>.mcpServers` (local).
+    // (user) and `projects.<cwd-key>.mcpServers` (local). NOT behind `Iqe` in
+    // the oracle: claude-code's `"user"`/`"local"` loaders consume an
+    // ALREADY-PARSED settings object (`oe().mcpServers` / `li().mcpServers`)
+    // and never call `Iqe` themselves (see [`read_mcp_config_file`]'s doc for
+    // the binary evidence), so this read intentionally keeps its pre-existing
+    // lenient handling rather than the shape/size guard above — applying that
+    // guard's byte-exact strings here would misrepresent oracle behaviour,
+    // not port it.
+    let read_json_lenient = |p: &std::path::Path| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
     if let Some(gp) = global_config_path {
-        if let Some(v) = read_json(gp) {
+        if let Some(v) = read_json_lenient(gp) {
             let file = gp.to_string_lossy();
             out.extend(collect_mcp_config_warnings(
                 &v,
@@ -579,6 +883,139 @@ mod tests {
         );
     }
 
+    /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` carries NO `url`.
+    /// An `sdk` entry with neither `url` NOR `command` must NOT be reported as
+    /// an invalid config — unlike every other KNOWN_MCP_TYPES member, `sdk`
+    /// has no transport field to require. (Before this fix `validation_issues`
+    /// fell through to the `_` arm's url-required check for every non-stdio
+    /// type, so a bare sdk entry was flagged "invalid ... url: expected
+    /// string, received undefined" even though the loader accepts it.)
+    #[test]
+    fn sdk_entry_with_no_url_is_not_flagged_invalid() {
+        let w =
+            only(&json!({"mcpServers":{"claude-vscode":{"type":"sdk","name":"claude-vscode"}}}));
+        assert!(w.is_empty(), "sdk entry without url must not warn: {w:?}");
+    }
+
+    /// Oracle `MAn` @154585319 declares `name: i()` with NO `.optional()` —
+    /// the ONLY required field the sdk arm has. `xqe` runs
+    /// `ZGn["sdk"]().safeParse(entry)`, which fails, and reports
+    /// `Skipped — invalid MCP server config for "x": name: expected string,
+    /// received undefined`. The port previously suppressed EVERY diagnostic
+    /// for the type (`"sdk" => {}`), so a phantom sdk server loaded in total
+    /// silence.
+    #[test]
+    fn sdk_entry_without_name_is_flagged_invalid() {
+        let w = only(&json!({"mcpServers":{"x":{"type":"sdk"}}}));
+        assert_eq!(w.len(), 1, "a nameless sdk entry must warn: {w:?}");
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": name: expected string, received undefined"
+        );
+        // A non-string `name` is the same schema failure, different received.
+        let w = only(&json!({"mcpServers":{"x":{"type":"sdk","name":7}}}));
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": name: expected string, received number"
+        );
+        // `i()` carries no `.min(1)`, so an EMPTY name is schema-valid.
+        assert!(only(&json!({"mcpServers":{"x":{"type":"sdk","name":""}}})).is_empty());
+    }
+
+    /// Oracle `NAn` @154585377 declares `url:i(),id:i()` both required, with
+    /// NO `.min(1)` on either — the mirror of the sdk `name` case above, but
+    /// for the ONE union member that needs two required checks. Before this
+    /// fix `validation_issues` fell through to the `_` arm, which checks
+    /// `url` only, so an idless claudeai-proxy entry loaded (per the sibling
+    /// loader fix) in total diagnostic silence.
+    #[test]
+    fn claudeai_proxy_entry_without_id_is_flagged_invalid() {
+        let w = only(&json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}));
+        assert_eq!(
+            w.len(),
+            1,
+            "an idless claudeai-proxy entry must warn: {w:?}"
+        );
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": id: expected string, received undefined"
+        );
+        // A non-string `id` is the same schema failure, different received.
+        let w = only(
+            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":7}}}),
+        );
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": id: expected string, received number"
+        );
+        // `i()` carries no `.min(1)`, so an EMPTY id is schema-valid.
+        assert!(only(
+            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}})
+        )
+        .is_empty());
+        // Both required fields missing report both, in `url`-then-`id` order.
+        let w = only(&json!({"mcpServers":{"x":{"type":"claudeai-proxy"}}}));
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": \
+             url: expected string, received undefined; \
+             id: expected string, received undefined"
+        );
+    }
+
+    /// `NAn` (@154585377) declares no `headers` key and `f` (@154568943) is a
+    /// catchall-free `z.object`, so a malformed `headers` on a
+    /// `claudeai-proxy` entry is STRIPPED — the oracle loads the server and
+    /// says nothing. The shared post-match `headers` check ran for every
+    /// non-`stdio` type, so the port warned about (and, in the loader,
+    /// dropped) an entry claude-code keeps. `sse`/`http`/`ws`, whose
+    /// `OAn`/`sGt`/`LAn` DO declare `headers: De(i(),i()).optional()`, are the
+    /// positive control.
+    #[test]
+    fn claudeai_proxy_headers_are_stripped_not_validated() {
+        let c = json!({"mcpServers":{"p":{
+            "type":"claudeai-proxy","url":"https://x.test","id":"c1","headers":"nope"
+        }}});
+        assert!(
+            only(&c).is_empty(),
+            "`NAn` has no `headers`: {:?}",
+            only(&c)
+        );
+        // Positive control: the same malformed value under `http` IS reported.
+        let c = json!({"mcpServers":{"h":{
+            "type":"http","url":"https://x.test","headers":"nope"
+        }}});
+        let w = only(&c);
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"h\": headers: expected record, received string"
+        );
+    }
+
+    /// `Osg`/`fAn` (@160896200) has no `case "streamable-http"`, but it runs
+    /// on the PARSED entry (`xqe` @160909118: `let fe=me.data; …
+    /// ge=r?fAn(fe):void 0`) and `sGt` (@154584848) declares
+    /// `type: ie(["http","streamable-http"]).transform(()=>"http")` — so a
+    /// `streamable-http` entry arrives already retyped as `"http"`, expands,
+    /// and `M(U,Pe)` (@160910700) reports its missing vars. `ty` here is the
+    /// RAW string, so the alias was falling into the expands-nothing arm and
+    /// the warning vanished.
+    #[test]
+    fn streamable_http_reports_missing_env_vars_like_http() {
+        let expected = "Missing environment variables: LINGXI_DIAG_UNSET_SHTTP";
+        for ty in ["streamable-http", "http"] {
+            let c = json!({"mcpServers":{"m":{
+                "type": ty, "url":"https://${LINGXI_DIAG_UNSET_SHTTP}.example/mcp"
+            }}});
+            let w = only(&c);
+            assert_eq!(
+                w.iter().map(|x| x.message.as_str()).collect::<Vec<_>>(),
+                vec![expected],
+                "type {ty:?} must report the same missing var as its `sGt` twin"
+            );
+        }
+    }
+
     #[test]
     fn reserved_name_warning_is_byte_exact() {
         let c = json!({"mcpServers":{"workspace":{"type":"stdio","command":"c"}}});
@@ -592,7 +1029,8 @@ mod tests {
             Some("Rename this server in your MCP config \u{2014} \"workspace\" is reserved for internal use")
         );
         // An SDK server with a reserved name is NOT flagged (claude `m.type!=="sdk"`).
-        let c2 = json!({"mcpServers":{"workspace":{"type":"sdk","url":"chan"}}});
+        // `name` is `MAn`'s one required field; the stray `url` is stripped.
+        let c2 = json!({"mcpServers":{"workspace":{"type":"sdk","name":"chan","url":"chan"}}});
         assert!(only(&c2).is_empty());
     }
 
@@ -733,5 +1171,290 @@ mod tests {
             line,
             "Skipped \u{2014} unknown MCP server type \"grpc\" for server \"srv\" (Valid types are: stdio, sse, http (or streamable-http), ws, sdk)"
         );
+    }
+
+    // ── §23b: `read_mcp_config_file` / `parse_mcp_config_json` (`Iqe` port) ──
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn shape_gate_rejects_oversized_regular_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("huge.mcp.json");
+        // One byte over the oracle's `mcn = 2097152` cap.
+        let big = vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize];
+        std::fs::write(&path, &big).unwrap();
+
+        let err = read_mcp_config_file(&path, ConfigScope::Project).unwrap_err();
+        assert!(!err.is_not_found());
+        assert_eq!(err.severity, McpConfigSeverity::Fatal);
+        assert_eq!(err.scope, ConfigScope::Project);
+        assert_eq!(
+            err.message,
+            format!(
+                "MCP config is not a regular file or exceeds {MCP_CONFIG_MAX_BYTES} bytes: {}",
+                path.display()
+            )
+        );
+        assert_eq!(
+            err.suggestion.as_deref(),
+            Some(
+                "Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)"
+            )
+        );
+    }
+
+    #[test]
+    fn shape_gate_accepts_regular_file_at_exactly_the_cap() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("exact.mcp.json");
+        let mut body = vec![b' '; MCP_CONFIG_MAX_BYTES as usize - 2];
+        body.extend_from_slice(b"{}");
+        std::fs::write(&path, &body).unwrap();
+        let raw = read_mcp_config_file(&path, ConfigScope::Project).unwrap();
+        assert_eq!(raw.len() as u64, MCP_CONFIG_MAX_BYTES);
+    }
+
+    #[test]
+    fn shape_gate_rejects_non_regular_file() {
+        // A directory is not a regular file — same "shape" branch the oracle's
+        // suggestion text describes for devices/FIFOs/symlinks-to-those.
+        let dir = TempDir::new().unwrap();
+        let err = read_mcp_config_file(dir.path(), ConfigScope::Project).unwrap_err();
+        assert!(err
+            .message
+            .starts_with("MCP config is not a regular file or exceeds"));
+        assert!(!err.is_not_found());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shape_gate_rejects_fifo() {
+        let dir = TempDir::new().unwrap();
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+        let err = read_mcp_config_file(&fifo, ConfigScope::Project).unwrap_err();
+        assert!(err
+            .message
+            .starts_with("MCP config is not a regular file or exceeds"));
+        assert_eq!(
+            err.suggestion.as_deref(),
+            Some(
+                "Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)"
+            )
+        );
+    }
+
+    #[test]
+    fn missing_file_is_the_not_found_variant() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("absent.mcp.json");
+        let err = read_mcp_config_file(&path, ConfigScope::Project).unwrap_err();
+        assert!(err.is_not_found());
+        assert_eq!(
+            err.message,
+            format!("MCP config file not found: {}", path.display())
+        );
+        assert_eq!(
+            err.suggestion.as_deref(),
+            Some("Check that the file path is correct")
+        );
+    }
+
+    #[test]
+    fn other_read_error_is_distinct_from_not_found() {
+        // ENAMETOOLONG (not ENOENT): a path component past NAME_MAX. Confirmed
+        // at the oracle: `E(A)==="ENOENT"` is the ONLY branch that yields the
+        // "file not found" shape — everything else falls to the generic
+        // "Failed to read file: …" message.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a".repeat(300));
+        let err = read_mcp_config_file(&path, ConfigScope::Project).unwrap_err();
+        assert!(!err.is_not_found());
+        assert!(
+            err.message.starts_with("Failed to read file: "),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(
+            err.suggestion.as_deref(),
+            Some("Check file permissions and ensure the file exists")
+        );
+    }
+
+    #[test]
+    fn dynamic_scope_bypasses_the_shape_gate() {
+        // Oracle: `o==="dynamic" ? readFileSync(...) : Atr(...,mcn)` — the
+        // size/regular-file check is skipped entirely for Dynamic scope.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("huge.json");
+        let big = vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize];
+        std::fs::write(&path, &big).unwrap();
+        let raw = read_mcp_config_file(&path, ConfigScope::Dynamic).unwrap();
+        assert_eq!(raw.len() as u64, MCP_CONFIG_MAX_BYTES + 1);
+    }
+
+    #[test]
+    fn well_formed_small_file_reads_through() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(&path, r#"{"mcpServers":{}}"#).unwrap();
+        let raw = read_mcp_config_file(&path, ConfigScope::Project).unwrap();
+        assert_eq!(raw, r#"{"mcpServers":{}}"#);
+    }
+
+    #[test]
+    fn invalid_json_returns_the_short_fixed_message() {
+        // Oracle returns a SHORT literal here — NOT the detailed
+        // path/scope/length/first100 string, which is log-only.
+        let path = Path::new("/p/.mcp.json");
+        let err = parse_mcp_config_json("{ not json", path, ConfigScope::Project).unwrap_err();
+        assert_eq!(err.message, "MCP config is not a valid JSON");
+        assert_eq!(
+            err.suggestion.as_deref(),
+            Some("Fix the JSON syntax errors in the file")
+        );
+        assert_eq!(err.file.as_deref(), Some("/p/.mcp.json"));
+        assert_eq!(err.severity, McpConfigSeverity::Fatal);
+    }
+
+    #[test]
+    fn valid_json_parses_through() {
+        let path = Path::new("/p/.mcp.json");
+        let v = parse_mcp_config_json(r#"{"mcpServers":{}}"#, path, ConfigScope::Project).unwrap();
+        assert_eq!(v, json!({"mcpServers":{}}));
+    }
+
+    // ── §23b telemetry: each fatal branch fires `mcp_config_parse` with its
+    //    OWN reason; the success branch fires it with none ──────────────────
+
+    use crate::tracing_capture::GateCapture;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn shape_gate_rejection_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("huge.mcp.json");
+        std::fs::write(&path, vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize]).unwrap();
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_SHAPE_GATE.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn read_failure_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a".repeat(300));
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_READ_FAILED.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn missing_file_fires_no_telemetry_at_all() {
+        // Oracle: `E(A)==="ENOENT"` returns immediately with no `n(...)` log
+        // and no `p(...)` call — a missing ancestor config is routine.
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("absent.mcp.json");
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(cap.rows(), Vec::<(String, Option<String>)>::new());
+    }
+
+    #[test]
+    fn invalid_json_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let path = Path::new("/p/.mcp.json");
+        let _ = parse_mcp_config_json("{ not json", path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_INVALID_JSON.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn successful_project_config_parse_reports_no_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        std::fs::write(&project, r#"{"mcpServers":{}}"#).unwrap();
+        let _ = collect_all_mcp_config_warnings_at(&project, dir.path(), None);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(telemetry::MCP_CONFIG_PARSE_GATE.to_string(), None)]
+        );
+    }
+
+    // ── `collect_all_mcp_config_warnings_at` wiring ────────────────────────
+
+    #[test]
+    fn missing_project_mcp_json_yields_no_warnings() {
+        let dir = TempDir::new().unwrap();
+        let warnings =
+            collect_all_mcp_config_warnings_at(&dir.path().join(".mcp.json"), dir.path(), None);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn oversized_project_mcp_json_surfaces_the_shape_gate_warning() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        let big = vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize];
+        std::fs::write(&project, &big).unwrap();
+        let warnings = collect_all_mcp_config_warnings_at(&project, dir.path(), None);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0]
+                .message
+                .starts_with("MCP config is not a regular file or exceeds"),
+            "got: {}",
+            warnings[0].message
+        );
+        assert_eq!(warnings[0].scope, ConfigScope::Project);
+    }
+
+    #[test]
+    fn malformed_project_mcp_json_surfaces_the_invalid_json_warning() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        std::fs::write(&project, "{ not json").unwrap();
+        let warnings = collect_all_mcp_config_warnings_at(&project, dir.path(), None);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].message, "MCP config is not a valid JSON");
     }
 }

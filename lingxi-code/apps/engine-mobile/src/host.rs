@@ -55,8 +55,8 @@ use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{ModelDetailsDto, SessionAgentSummaryDto, SlashCommandDto};
 use client_protocol::local_apps::{
-    AppCreateOriginDto, AppEventDto, AppSurfaceDto, PluginActivationStateDto, PluginCommandDto,
-    PluginStatusDto,
+    AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
+    LocalAppPluginInventoryDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
 };
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
@@ -2549,6 +2549,14 @@ async fn build_mobile_inner_with_ask(
     let mcp_registry = Arc::new(McpRegistry::new(
         local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
     ));
+    local_apps_mcp
+        .attach_registry(Arc::downgrade(&mcp_registry))
+        .map_err(|_| {
+            MobileBuildError::Orchestrator(
+                "local apps MCP registry was already attached during bootstrap".into(),
+            )
+        })?;
+    let _ = local_apps_mcp.attach_registry(Arc::downgrade(&mcp_registry));
     // Subscribe before connecting so initialization-time catalog notifications
     // are retained until the shared ToolRegistry is ready below.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
@@ -3971,7 +3979,6 @@ async fn build_mobile_inner_with_ask(
             Arc::new(platform_posix_minimal::PosixRuntime::new())
                 as Arc<dyn traits::RuntimeSpawner>,
             credentials.clone(),
-            Arc::new(plugin::PluginBlocklist::new(String::new())),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             shared_command_registry.clone(),
             Arc::new(RwLock::new(skill_api::SkillRegistry::new())),
@@ -6206,6 +6213,78 @@ impl MobileEngineHandle {
         Ok(())
     }
 
+    async fn emit_builtin_plugin_inventory(&self, plugin_id: &str) -> Result<(), ClientError> {
+        if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
+            return Err(ClientError::NotFound {
+                message: format!("mobile plugin {plugin_id:?}"),
+            });
+        }
+        let state = self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile builtin plugin bundle is unavailable".to_string(),
+            })?;
+        let state = match state {
+            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
+            plugin::PluginState::Disabled { .. } => PluginActivationStateDto::Disabled,
+            _ => {
+                return Err(ClientError::Internal {
+                    message: "mobile builtin plugin is not in a stable activation state".into(),
+                })
+            }
+        };
+        let inventory = crate::builtin_bundle::COMPILED_PLUGIN_INVENTORY;
+        let count = |prefix: &str, suffix: &str| {
+            u32::try_from(
+                inventory
+                    .iter()
+                    .filter(|(path, _, _)| path.starts_with(prefix) && path.ends_with(suffix))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX)
+        };
+        let templates = serde_json::from_slice::<serde_json::Value>(
+            crate::builtin_bundle::compiled_plugin_catalog_bytes(),
+        )
+        .ok()
+        .and_then(|value| {
+            value
+                .get("templates")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| u32::try_from(items.len()).ok())
+        })
+        .ok_or_else(|| ClientError::Internal {
+            message: "mobile builtin plugin catalog is invalid".into(),
+        })?;
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::PluginInventoryChanged {
+                    inventory: LocalAppPluginInventoryDto {
+                        plugin_id: plugin_id.to_string(),
+                        display_name: crate::builtin_bundle::COMPILED_PLUGIN_DISPLAY_NAME.into(),
+                        source: "builtin".into(),
+                        version: crate::builtin_bundle::COMPILED_PLUGIN_VERSION.into(),
+                        bundle_sha256: crate::builtin_bundle::compiled_plugin_bundle_digest()
+                            .into(),
+                        state,
+                        manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+                        counts: LocalAppPluginComponentCountsDto {
+                            skills: count("skills/", "/SKILL.md"),
+                            agents: count("agents/", ".md"),
+                            workflows: count("workflows/", ".js"),
+                            templates,
+                        },
+                        validation_error: None,
+                    },
+                },
+            })
+            .await;
+        Ok(())
+    }
+
     /// Apply a builtin plugin toggle and persist the same bare
     /// `enabledPlugins[plugin_id]` key that the desktop settings surface uses.
     /// The registry mutation happens before the settings write; a failed write
@@ -6774,6 +6853,20 @@ impl MobileEngineHandle {
         // record set via its own `AppsChanged` domain event.
         if let Err(error) = service.delete_app(&app_id).await {
             self.emit_app_failure(Some(app_id), &error).await;
+            return;
+        }
+        if let Err(message) = self
+            .local_apps_host
+            .unregister_managed_local_app(&app_id)
+            .await
+        {
+            self.emit_app_failure(
+                Some(app_id),
+                &AppError::Io(format!(
+                    "delete local app registry cleanup failed: {message}"
+                )),
+            )
+            .await;
         }
     }
 }
@@ -7568,6 +7661,46 @@ impl MobileEngineHandle {
                 PluginCommandDto::SetEnabled { plugin_id, enabled } => {
                     self.set_builtin_plugin_enabled(plugin_id, enabled).await
                 }
+                PluginCommandDto::GetInventory { plugin_id } => {
+                    self.emit_builtin_plugin_inventory(&plugin_id).await
+                }
+                PluginCommandDto::ResolveCreateConfirmation {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_create_confirmation(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App create confirmation".into(),
+                        })
+                    }
+                }
+                PluginCommandDto::ResolveMcpProposalApproval {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_mcp_proposal_approval(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App MCP proposal approval".into(),
+                        })
+                    }
+                }
+                PluginCommandDto::GetManagedMcpInventory => self
+                    .local_apps_host
+                    .emit_managed_mcp_inventory()
+                    .await
+                    .map_err(|message| ClientError::Rejected { message }),
                 _ => Err(ClientError::Rejected {
                     message: "unsupported mobile plugin command".to_string(),
                 }),
@@ -7656,22 +7789,6 @@ impl MobileEngineHandle {
                     tracing::debug!(
                         request_id,
                         "unknown or completed local-app capability request"
-                    );
-                }
-                Ok(())
-            }
-            ClientCommand::ResolveAppRuntimeProfileSelection {
-                request_id,
-                selected_family,
-            } => {
-                if !self
-                    .local_apps_host
-                    .resolve_runtime_profile_selection(&request_id, selected_family)
-                    .await
-                {
-                    tracing::debug!(
-                        request_id,
-                        "unknown or completed local-app runtime profile selection"
                     );
                 }
                 Ok(())
@@ -10421,6 +10538,12 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps MCP host was already attached");
     }
     if local_apps_host
+        .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
+        .is_err()
+    {
+        tracing::warn!("local-apps MCP registry was already attached");
+    }
+    if local_apps_host
         .attach_agent_executor(inner.app_agent_executor.clone())
         .is_err()
     {
@@ -10460,6 +10583,20 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
+            runtime.block_on(async {
+                for record in service.list_apps().await {
+                    if let Err(error) = local_apps_host
+                        .sync_managed_local_app_publication(&record.id)
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %record.id,
+                            %error,
+                            "local-apps managed MCP publication sync deferred"
+                        );
+                    }
+                }
+            });
             // v3 Phase 4: repair init-session pins, drifted catalogs and
             // placeholder titles for every app. Runs as a background sweep on
             // the shared worker runtime (this builder is sync); see

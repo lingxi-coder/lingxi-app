@@ -2531,7 +2531,10 @@ mod tests {
         let def = parse_agent_from_json("a", &json, AgentSource::Flag)
             .expect("invalid MCP entry must not drop the agent");
         assert_eq!(def.mcp_servers.len(), 1);
-        assert!(crate::mcp_servers::agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
+        assert!(
+            crate::mcp_servers::agent_mcp_specs_to_scoped_configs(&def, false, false, &[])
+                .is_empty()
+        );
     }
 
     #[test]

@@ -334,6 +334,11 @@ pub async fn resolve_subagent_tools(
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
     depth: u32,
+    // §24b — this spawn's already-connected per-agent MCP tools (claude
+    // `Agr`'s `Fe`), passed straight through to
+    // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
+    // every caller that has none (byte-identical legacy).
+    agent_mcp_tools: &[Arc<dyn Tool>],
 ) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
@@ -357,7 +362,8 @@ pub async fn resolve_subagent_tools(
             ));
         }
     }
-    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], depth, false);
+    let mut resolved =
+        AgentToolResolver::resolve(agent_def, &parent_tools, agent_mcp_tools, depth, false);
     if !tool_wide_deny.is_empty() {
         resolved.retain(|t| {
             !tool_wide_deny

@@ -252,6 +252,18 @@ enum Source {
     Url { url: String },
 }
 
+/// The `source` tag string for one classified source (`m.source` in the
+/// oracle) — used both for the `--sparse` guard's error message and for
+/// `source_object`'s `"source"` field.
+fn source_kind(source: &Source) -> &'static str {
+    match source {
+        Source::Directory(_) => "directory",
+        Source::Github { .. } => "github",
+        Source::Git { .. } => "git",
+        Source::Url { .. } => "url",
+    }
+}
+
 fn source_identity(source: &Source) -> MarketplaceSourceIdentity {
     match source {
         Source::Directory(path) => MarketplaceSourceIdentity::Directory {
@@ -493,7 +505,12 @@ fn classify_source(source: &str) -> Result<Source, String> {
 }
 
 /// The settings / registry `source` sub-object for a classified source.
-fn source_object(src: &Source) -> Value {
+///
+/// `sparse` (oracle `sparsePaths`, `--sparse <paths...>`) is recorded only for
+/// `github`/`git` — the caller has already rejected it for every other kind
+/// with the oracle's exact guard error, so a non-empty `sparse` here is only
+/// ever reached for those two.
+fn source_object(src: &Source, sparse: &[String]) -> Value {
     let mut o = Map::new();
     match src {
         Source::Directory(p) => {
@@ -519,6 +536,12 @@ fn source_object(src: &Source) -> Value {
             o.insert("url".to_string(), Value::String(url.clone()));
         }
     }
+    if !sparse.is_empty() && matches!(src, Source::Github { .. } | Source::Git { .. }) {
+        o.insert(
+            "sparsePaths".to_string(),
+            Value::Array(sparse.iter().cloned().map(Value::String).collect()),
+        );
+    }
     Value::Object(o)
 }
 
@@ -541,7 +564,7 @@ fn source_object(src: &Source) -> Value {
 pub fn run_add(
     source: &str,
     scope: Option<&str>,
-    _sparse: &[String],
+    sparse: &[String],
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -552,14 +575,24 @@ pub fn run_add(
     // Classification (incl. local existence) is checked FIRST — before scope,
     // and before any "Adding marketplace…" progress line — matching the binary.
     let classified = classify_source(source)?;
+    // Oracle `qn`: the scope is validated FIRST
+    // (`if(w=i.scope??"user",w!=="user"&&w!=="project"&&w!=="local")return …`),
+    // and only then does the `--sparse` kind guard run. With both wrong, the
+    // caller must see the scope error.
     let target = match scope {
         Some(s) => Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?,
         None => Scope::User,
     };
+    if !sparse.is_empty() && !matches!(classified, Source::Github { .. } | Source::Git { .. }) {
+        return Err(format!(
+            "✘ --sparse is only supported for github and git marketplace sources (got: {})",
+            source_kind(&classified)
+        ));
+    }
 
     match classified {
         Source::Directory(abs) => add_directory(&abs, target, plugins_dir, home, cwd),
-        remote => add_remote(&remote, target, plugins_dir, home, cwd),
+        remote => add_remote(&remote, sparse, target, plugins_dir, home, cwd),
     }
 }
 
@@ -606,13 +639,19 @@ fn add_directory(
             manifest_path.display()
         ));
     }
+    // §8: the name gate previously existed only on the authoring path
+    // (`plugin tag`/`plugin init`) — marketplace ingestion never called it, so
+    // a local `marketplace.json` naming itself e.g. `claude-official` (or
+    // carrying a bidi-spoofed name) registered without complaint.
+    plugin::validate_marketplace_name(&name)
+        .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
     let identity = MarketplaceSourceIdentity::Directory {
         path: abs.display().to_string(),
     };
     plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
         .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
 
-    let source_value = source_object(&Source::Directory(abs.to_path_buf()));
+    let source_value = source_object(&Source::Directory(abs.to_path_buf()), &[]);
     write_marketplace(
         &name,
         &source_value,
@@ -629,6 +668,7 @@ fn add_directory(
 /// clone dir.
 fn add_remote(
     remote: &Source,
+    sparse: &[String],
     target: Scope,
     plugins_dir: &Path,
     home: &Path,
@@ -646,6 +686,15 @@ fn add_remote(
         Source::Url { url } => {
             let (name, staged_catalog) = fetch_hosted_marketplace(plugins_dir, url)
                 .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+            // §8: the hosted catalog's declared `name` is fully attacker-
+            // controlled (this fetch has no relationship to `<source>`'s own
+            // host); validate it before it can be registered.
+            if let Err(reason) = plugin::validate_marketplace_name(&name) {
+                let _ = std::fs::remove_dir_all(&staged_catalog);
+                return Err(format!(
+                    "Adding marketplace…✘ Failed to add marketplace: {reason}"
+                ));
+            }
             let identity = source_identity(remote);
             if let Err(reason) =
                 plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
@@ -655,7 +704,7 @@ fn add_remote(
                     "Adding marketplace…✘ Failed to add marketplace: {reason}"
                 ));
             }
-            let source_value = source_object(remote);
+            let source_value = source_object(remote, &[]);
             return publish_and_write_marketplace(
                 &name,
                 &source_value,
@@ -675,8 +724,18 @@ fn add_remote(
     }
 
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let (name, staged_clone) = clone_marketplace(plugins_dir, &clone_url, &hint, git_ref)
-        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    let (name, staged_clone) =
+        clone_marketplace(plugins_dir, &clone_url, &hint, git_ref, sparse)
+            .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    // §8: the cloned catalog's declared `name` is attacker-controlled the
+    // moment `<source>` names a repo the caller doesn't own; validate it
+    // before it can be registered.
+    if let Err(reason) = plugin::validate_marketplace_name(&name) {
+        let _ = std::fs::remove_dir_all(&staged_clone);
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: {reason}"
+        ));
+    }
     let identity = source_identity(remote);
     if let Err(reason) =
         plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
@@ -687,7 +746,7 @@ fn add_remote(
         ));
     }
 
-    let source_value = source_object(remote);
+    let source_value = source_object(remote, sparse);
     publish_and_write_marketplace(
         &name,
         &source_value,
@@ -825,16 +884,56 @@ fn sanitize_segment(s: &str) -> String {
 /// dispatcher without nesting runtimes. Returns `(marketplace_name, clone_dir)`,
 /// where the clone remains in a unique staging directory until the caller has
 /// applied the catalog's name-aware managed policy.
+/// Confine a freshly-cloned marketplace working tree to `sparse_paths` (the
+/// oracle's cone-mode `sparsePaths`, e.g. `[".claude-plugin", "plugins"]`):
+/// every top-level directory NOT named by one of `sparse_paths`' first path
+/// segments is removed; top-level files and `.git` are always kept (cone mode
+/// keeps root-listed files). This narrows the WORKING TREE to the same
+/// result cone-mode sparse-checkout produces; unlike the oracle it does not
+/// reduce clone bandwidth (no safe sparse-checkout binding is available over
+/// this crate's vendored-libgit2 transport — see the `MarketplaceManager` doc).
+///
+/// A `sparsePaths` list that omits the directory actually holding
+/// `marketplace.json` prunes the manifest away too, exactly as a real
+/// cone-mode sparse-checkout would — this is a user configuration error, not
+/// a bug here.
+fn prune_to_sparse_paths(clone_dir: &Path, sparse_paths: &[String]) -> Result<(), String> {
+    if sparse_paths.is_empty() {
+        return Ok(());
+    }
+    let keep: std::collections::HashSet<&str> = sparse_paths
+        .iter()
+        .map(|p| p.split('/').next().unwrap_or(p.as_str()))
+        .collect();
+    let entries = std::fs::read_dir(clone_dir)
+        .map_err(|e| format!("Failed to apply --sparse to the clone: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to apply --sparse to the clone: {e}"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == ".git" || keep.contains(name) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            std::fs::remove_dir_all(entry.path())
+                .map_err(|e| format!("Failed to apply --sparse to the clone: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn clone_marketplace(
     plugins_dir: &Path,
     clone_url: &str,
     hint: &str,
     git_ref: Option<&str>,
+    sparse: &[String],
 ) -> Result<(String, PathBuf), String> {
     let plugins_dir = plugins_dir.to_path_buf();
     let url = clone_url.to_string();
     let hint = hint.to_string();
     let git_ref = git_ref.map(ToOwned::to_owned);
+    let sparse = sparse.to_vec();
     std::thread::spawn(move || -> Result<(String, PathBuf), String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -851,7 +950,13 @@ fn clone_marketplace(
         );
         let mgr = plugin::MarketplaceManager::new(plugins_dir.clone());
         match rt.block_on(mgr.resolve_index_via_git_ref(&url, &staging_hint, git_ref.as_deref())) {
-            Ok((index, clone_dir)) => Ok((index.name, clone_dir)),
+            Ok((index, clone_dir)) => {
+                if let Err(error) = prune_to_sparse_paths(&clone_dir, &sparse) {
+                    let _ = std::fs::remove_dir_all(&clone_dir);
+                    return Err(error);
+                }
+                Ok((index.name, clone_dir))
+            }
             Err(error) => {
                 let staged = plugins_dir
                     .join("marketplaces")
@@ -1415,6 +1520,33 @@ mod tests {
         );
     }
 
+    /// §8: marketplace ingestion previously never called the name gate at
+    /// all — a local `marketplace.json` naming itself after an official
+    /// Anthropic catalog registered without complaint.
+    #[test]
+    fn add_directory_rejects_a_marketplace_json_impersonating_an_official_catalog() {
+        let e = full_env();
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"anthropic-official","owner":{"name":"me"},"plugins":[]}"#,
+        )
+        .unwrap();
+        let src = e.market.to_string_lossy().to_string();
+
+        let err = run_add(&src, None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Adding marketplace…✘ Failed to add marketplace: Marketplace name impersonates an \
+             official Anthropic/Claude marketplace"
+        );
+        assert!(
+            !e.plugins.join("known_marketplaces.json").exists(),
+            "a rejected name must never reach the registry"
+        );
+    }
+
     #[test]
     fn add_rolls_back_scope_settings_when_registry_write_fails() {
         let e = full_env();
@@ -1817,42 +1949,232 @@ mod tests {
     #[test]
     fn source_object_shapes() {
         assert_eq!(
-            source_object(&Source::Github {
-                repo: "a/b".to_string(),
-                git_ref: None
-            }),
+            source_object(
+                &Source::Github {
+                    repo: "a/b".to_string(),
+                    git_ref: None
+                },
+                &[]
+            ),
             json!({"source": "github", "repo": "a/b"})
         );
         assert_eq!(
-            source_object(&Source::Github {
-                repo: "a/b".to_string(),
-                git_ref: Some("v1".to_string())
-            }),
+            source_object(
+                &Source::Github {
+                    repo: "a/b".to_string(),
+                    git_ref: Some("v1".to_string())
+                },
+                &[]
+            ),
             json!({"source": "github", "repo": "a/b", "ref": "v1"})
         );
         assert_eq!(
-            source_object(&Source::Git {
-                url: "https://x/y.git".to_string(),
-                git_ref: None
-            }),
+            source_object(
+                &Source::Git {
+                    url: "https://x/y.git".to_string(),
+                    git_ref: None
+                },
+                &[]
+            ),
             json!({"source": "git", "url": "https://x/y.git"})
         );
         assert_eq!(
-            source_object(&Source::Git {
-                url: "https://x/y.git".to_string(),
-                git_ref: Some("dev".to_string())
-            }),
+            source_object(
+                &Source::Git {
+                    url: "https://x/y.git".to_string(),
+                    git_ref: Some("dev".to_string())
+                },
+                &[]
+            ),
             json!({"source": "git", "url": "https://x/y.git", "ref": "dev"})
         );
         assert_eq!(
-            source_object(&Source::Url {
-                url: "https://x/cat.json".to_string()
-            }),
+            source_object(
+                &Source::Url {
+                    url: "https://x/cat.json".to_string()
+                },
+                &[]
+            ),
             json!({"source": "url", "url": "https://x/cat.json"})
         );
         assert_eq!(
-            source_object(&Source::Directory(PathBuf::from("/abs/mkt"))),
+            source_object(&Source::Directory(PathBuf::from("/abs/mkt")), &[]),
             json!({"source": "directory", "path": "/abs/mkt"})
+        );
+    }
+
+    /// `--sparse` (oracle `sparsePaths`) is recorded on github/git — the two
+    /// kinds the guard in `run_add` allows it for — and is a no-op everywhere
+    /// else (never reached with a non-empty `sparse` in practice, since the
+    /// guard rejects it earlier, but `source_object` itself stays honest).
+    #[test]
+    fn source_object_records_sparse_paths_for_github_and_git_only() {
+        let paths = vec![".claude-plugin".to_string(), "plugins".to_string()];
+        assert_eq!(
+            source_object(
+                &Source::Github {
+                    repo: "a/b".to_string(),
+                    git_ref: None
+                },
+                &paths
+            ),
+            json!({"source": "github", "repo": "a/b", "sparsePaths": [".claude-plugin", "plugins"]})
+        );
+        assert_eq!(
+            source_object(
+                &Source::Git {
+                    url: "https://x/y.git".to_string(),
+                    git_ref: None
+                },
+                &paths
+            ),
+            json!({"source": "git", "url": "https://x/y.git", "sparsePaths": [".claude-plugin", "plugins"]})
+        );
+        // Directory/Url never carry sparsePaths even if (hypothetically) asked.
+        assert_eq!(
+            source_object(&Source::Directory(PathBuf::from("/abs/mkt")), &paths),
+            json!({"source": "directory", "path": "/abs/mkt"})
+        );
+    }
+
+    /// The oracle: *"--sparse is only supported for github and git
+    /// marketplace sources"*. `run_add` must reject it (byte-exact message)
+    /// for every other classified source kind, and the registry/settings
+    /// declaration must never silently drop it for github/git (the prior
+    /// port behavior: `_sparse` was accepted and discarded).
+    #[test]
+    fn sparse_is_rejected_for_non_github_git_sources_with_the_oracle_message() {
+        let e = full_env();
+        let err = run_add(
+            "https://example.test/marketplace.json",
+            None,
+            &["plugins".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "✘ --sparse is only supported for github and git marketplace sources (got: url)"
+        );
+    }
+
+    /// Oracle `qn` validates `--scope` BEFORE the `--sparse` kind guard, so
+    /// with both wrong the caller sees the scope error. (Both message bodies
+    /// are byte-exact already; only the precedence diverged.)
+    #[test]
+    fn an_invalid_scope_beats_the_sparse_kind_guard() {
+        let e = full_env();
+        let err = run_add(
+            "https://example.test/marketplace.json",
+            Some("bogus"),
+            &["plugins".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "✘ Invalid scope \'bogus\'. Use: user, project, or local"
+        );
+    }
+
+    /// `prune_to_sparse_paths` — the working-tree narrowing that stands in for
+    /// real cone-mode sparse-checkout (see its doc comment: no safe
+    /// sparse-checkout binding is available over this crate's vendored-libgit2
+    /// transport). Top-level files and `.git` always survive; a top-level
+    /// directory not named by any `sparse_paths` entry does not.
+    #[test]
+    fn prune_to_sparse_paths_keeps_only_named_top_level_dirs_and_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        std::fs::write(root.join(".claude-plugin/marketplace.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("plugins/foo")).unwrap();
+        std::fs::create_dir_all(root.join("unrelated-monorepo-package")).unwrap();
+        std::fs::write(root.join("README.md"), "hi").unwrap();
+
+        prune_to_sparse_paths(root, &[".claude-plugin".to_string(), "plugins".to_string()])
+            .unwrap();
+
+        assert!(root.join(".git").is_dir(), ".git must survive pruning");
+        assert!(root.join(".claude-plugin/marketplace.json").is_file());
+        assert!(root.join("plugins/foo").is_dir());
+        assert!(
+            root.join("README.md").is_file(),
+            "top-level files always survive"
+        );
+        assert!(
+            !root.join("unrelated-monorepo-package").exists(),
+            "an un-listed top-level directory must be pruned"
+        );
+    }
+
+    /// `--sparse` end to end: `clone_marketplace` (the actual clone helper
+    /// `run_add` calls) must narrow the working tree it hands back, not just
+    /// record `sparsePaths` in the registry — the audited gap was that a prior
+    /// port version discarded `--sparse` entirely, so neither happened.
+    #[cfg(unix)]
+    #[test]
+    fn clone_marketplace_prunes_the_working_tree_to_sparse_paths() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let repo = repo_root.path().join("repo");
+        std::fs::create_dir_all(repo.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            repo.join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"sparse-mkt","owner":{"name":"me"},"plugins":[]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("unrelated-package")).unwrap();
+        std::fs::write(repo.join("unrelated-package/file.txt"), "x").unwrap();
+        for args in [
+            vec!["init", repo.to_str().unwrap()],
+            vec!["-C", repo.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                repo.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let e = env();
+        let (name, clone_dir) = clone_marketplace(
+            &e.plugins,
+            &format!("file://{}", repo.display()),
+            "sparse-hint",
+            None,
+            &[branding::PLUGIN_MANIFEST_DIR.to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(name, "sparse-mkt");
+        assert!(clone_dir
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json")
+            .is_file());
+        assert!(
+            !clone_dir.join("unrelated-package").exists(),
+            "a directory outside --sparse must not survive in the clone"
         );
     }
 

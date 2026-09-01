@@ -1127,6 +1127,7 @@ dependencies = [
  "tui-core",
  "unicode-width 0.1.14",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -3510,6 +3511,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "boon",
  "branding",
  "bytes",
  "futures-util",
@@ -3522,10 +3524,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "telemetry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "traits",
  "unicode-normalization",
  "url",
@@ -4954,6 +4958,7 @@ dependencies = [
  "outputstyles",
  "platform-posix",
  "protocol",
+ "regex",
  "secret",
  "semver",
  "serde",
@@ -6686,6 +6691,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "traits",
 ]
 
@@ -7378,6 +7384,7 @@ dependencies = [
  "async-trait",
  "branding",
  "engine",
+ "mcp",
  "once_cell",
  "permission",
  "protocol",

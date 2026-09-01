@@ -652,11 +652,11 @@ impl Tool for ToolSearchTool {
         } else {
             Vec::new()
         };
-        // Failed servers surface only behind the `tengu_surface_failed_mcp_servers`
-        // flag (claude's `jzr()`, default off): the failed/managed-policy notes
-        // are absent otherwise.
+        // Failed servers surface behind the `tengu_surface_failed_mcp_servers`
+        // flag (claude's `VKe()` @156292999: `I("tengu_surface_failed_mcp_servers",!0)`
+        // — default ON). A test/managed override can still turn the note off.
         let failed_mcp_servers: Vec<(String, Option<String>)> = if matches.is_empty()
-            && telemetry::flag_bool("tengu_surface_failed_mcp_servers", false)
+            && telemetry::flag_bool("tengu_surface_failed_mcp_servers", true)
         {
             match &self.ctx.mcp_registry {
                 Some(registry) => registry.failed_action_servers().await,
@@ -1266,6 +1266,138 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(out.data["matches"], json!([]));
+    }
+
+    /// Minimal transport — the registry needs one to construct, but this test
+    /// never dials: the failed connection state is inserted directly.
+    struct NeverDialledTransport;
+
+    #[async_trait::async_trait]
+    impl traits::McpTransport for NeverDialledTransport {
+        async fn connect(
+            &self,
+            _spec: &traits::McpTransportSpec,
+        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _conn: &traits::McpRawConnection,
+        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
+            unreachable!()
+        }
+        async fn list_tools(
+            &self,
+            _conn: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _conn: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(
+            &self,
+            _conn: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _conn: &traits::McpRawConnection,
+            _tool: &str,
+            _input: serde_json::Value,
+        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _conn: &traits::McpRawConnection,
+            _uri: &str,
+        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _conn_id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _conn: &traits::McpRawConnection,
+        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _conn: &traits::McpRawConnection,
+            _req: traits::ElicitRequestDto,
+        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            unreachable!()
+        }
+        async fn disconnect(
+            &self,
+            _conn_id: protocol::McpConnectionId,
+        ) -> Result<(), traits::McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
+            vec![traits::McpTransportKind::Stdio]
+        }
+    }
+
+    /// §21.4 — oracle `VKe()` (`function VKe(){return I("tengu_surface_failed_mcp_servers",!0)}`,
+    /// cc 2.1.251 @156292999) defaults `tengu_surface_failed_mcp_servers` to
+    /// TRUE. This test sets NO override — that is the entire point of
+    /// "default" — and drives a REAL `mcp::McpRegistry` with one server parked
+    /// in `Failed` state, confirming ToolSearch's empty-result note names it.
+    /// Revert the `true` back to `false` at the `flag_bool` call site in
+    /// `call()` above and this goes red: the note disappears because
+    /// `failed_mcp_servers` collection is gated off by default.
+    #[tokio::test]
+    async fn call_surfaces_failed_mcp_server_note_by_default() {
+        let registry = std::sync::Arc::new(mcp::registry::McpRegistry::new(std::sync::Arc::new(
+            NeverDialledTransport,
+        )
+            as std::sync::Arc<dyn traits::McpTransport>));
+        registry.connections.write().await.insert(
+            "flaky".into(),
+            mcp::McpConnectionState::Failed {
+                config: mcp::McpServerConfig {
+                    name: "flaky".into(),
+                    spec: traits::McpTransportSpec::Stdio {
+                        command: "x".into(),
+                        args: vec![],
+                        env: Default::default(),
+                    },
+                    scope: mcp::ConfigScope::User,
+                    disabled: false,
+                    timeout_ms: None,
+                    always_load: false,
+                    config_error: None,
+                },
+                error: "connection refused".into(),
+                attempts: 3,
+            },
+        );
+
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.mcp_registry = Some(registry);
+        let tool = ToolSearchTool::with_view(ctx, mk_view(vec![entry("Read", "read a file")]));
+        let out = tool
+            .call(json!({"query": "select:Nope"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"], json!([]));
+        let content = out.model_content.expect("empty-result note present");
+        assert!(
+            content.contains("flaky: \"connection refused\""),
+            "expected the failed-server note by DEFAULT (no flag override set); got: {content}"
+        );
+        assert_eq!(
+            out.data["failed_mcp_servers"],
+            json!([{ "name": "flaky", "error": "connection refused" }])
+        );
     }
 
     #[tokio::test]

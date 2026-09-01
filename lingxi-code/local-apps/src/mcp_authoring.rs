@@ -199,6 +199,8 @@ pub struct McpConfirmationReceipt {
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     #[serde(default)]
+    pub claimed: bool,
+    #[serde(default)]
     pub consumed: bool,
     #[serde(default)]
     pub superseded: bool,
@@ -215,6 +217,15 @@ pub struct McpReceiptBook {
 impl McpReceiptBook {
     /// Issue one receipt, superseding any outstanding receipt for this app.
     pub fn issue(&mut self, receipt: McpConfirmationReceipt) -> Result<(), GeneratedMcpIssue> {
+        if self.slots.values().any(|existing| {
+            existing.app_id == receipt.app_id && existing.claimed && !existing.consumed
+        }) {
+            return Err(binding_issue(
+                "receipt_in_use",
+                "an MCP receipt for this app is already in use",
+            )[0]
+            .clone());
+        }
         if self.slots.values().any(|existing| {
             existing.app_id == receipt.app_id && existing.receipt_id == receipt.receipt_id
         }) {
@@ -611,17 +622,11 @@ pub fn validate_app_mcp_flow_binding(
                 binding_issue("step_schema_missing", "result output schema is unavailable")
             })?;
             validate_pointer(schema, json_pointer, "result")?;
-            if schema_at(
-                &context.output_schema,
-                &pointer_segments(json_pointer).map_err(|issue| vec![issue])?,
-            )
-            .is_none()
-            {
-                return Err(binding_issue(
-                    "output_schema_mismatch",
-                    "result pointer is not accepted by the tool output schema",
-                ));
-            }
+            // `result` is the selected value, not the step's enclosing
+            // object. The selected value is checked against the tool's
+            // outputSchema after materialization; requiring the same JSON
+            // pointer path in outputSchema would incorrectly reject the
+            // common `{step: {result: ...}} -> {result: ...}` projection.
         }
     }
     if input_bytes > MAX_MCP_CALL_BYTES {
@@ -678,6 +683,45 @@ pub fn validate_app_mcp_flow_binding_for_consumer(
         check(value)?;
     }
     check(&binding.result)
+}
+
+/// Resolve one Host-validated binding against the current tool input and the
+/// outputs of already completed flow steps. The binding tree is deliberately
+/// data-only: no interpolation, expression, or executable value can enter a
+/// step through this adapter.
+pub fn materialize_flow_value_binding(
+    binding: &FlowValueBinding,
+    tool_input: &Value,
+    step_outputs: &BTreeMap<String, Value>,
+) -> Result<Value, GeneratedMcpIssue> {
+    let resolve = |value: &Value, pointer: &str, label: &str| {
+        pointer_segments(pointer)?;
+        value
+            .pointer(pointer)
+            .cloned()
+            .ok_or_else(|| GeneratedMcpIssue {
+                tool_name: None,
+                code: "binding_value_missing",
+                message: format!("{label} pointer {pointer:?} did not resolve to a value"),
+            })
+    };
+    match binding {
+        FlowValueBinding::Literal(value) => Ok(value.clone()),
+        FlowValueBinding::ToolInput { json_pointer } => {
+            resolve(tool_input, json_pointer, "tool input")
+        }
+        FlowValueBinding::StepOutput {
+            step_id,
+            json_pointer,
+        } => {
+            let output = step_outputs.get(step_id).ok_or_else(|| GeneratedMcpIssue {
+                tool_name: None,
+                code: "step_output_missing",
+                message: format!("StepOutput references incomplete step {step_id:?}"),
+            })?;
+            resolve(output, json_pointer, "step output")
+        }
+    }
 }
 
 impl AppMcpProposal {
@@ -810,6 +854,7 @@ pub fn catalog_sha256(
 ) -> Result<String, GeneratedMcpIssue> {
     digest_value(
         serde_json::json!({
+            "appId": validated.proposal.app_id,
             "buildId": build_id,
             "proposal": validated.proposal,
             "tools": validated.tools.iter().map(|tool| serde_json::json!({
@@ -981,9 +1026,112 @@ impl McpConfirmationReceipt {
             candidate_digest,
             issued_at_ms,
             expires_at_ms: issued_at_ms.saturating_add(Self::TTL_MS),
+            claimed: false,
             consumed: false,
             superseded: false,
         }
+    }
+
+    pub fn claim_candidate(
+        &mut self,
+        app_id: &str,
+        workflow_run_id: &str,
+        approval_digest: &str,
+        candidate_digest: &str,
+        now_ms: u64,
+    ) -> Result<(), GeneratedMcpIssue> {
+        if self.candidate_digest != candidate_digest {
+            return Err(binding_issue(
+                "receipt_candidate_mismatch",
+                "MCP receipt is bound to another candidate",
+            )[0]
+            .clone());
+        }
+        if self.app_id != app_id || self.workflow_run_id != workflow_run_id {
+            return Err(binding_issue(
+                "receipt_scope",
+                "MCP receipt is bound to another app or workflow run",
+            )[0]
+            .clone());
+        }
+        if self.consumed {
+            return Err(
+                binding_issue("receipt_replay", "MCP receipt has already been consumed")[0].clone(),
+            );
+        }
+        if self.claimed {
+            return Err(
+                binding_issue("receipt_in_use", "MCP receipt is already in use")[0].clone(),
+            );
+        }
+        if self.superseded {
+            return Err(
+                binding_issue("receipt_superseded", "MCP receipt has been superseded")[0].clone(),
+            );
+        }
+        if now_ms >= self.expires_at_ms {
+            return Err(binding_issue("receipt_expired", "MCP receipt has expired")[0].clone());
+        }
+        if self.approval_contract_sha256 != approval_digest {
+            return Err(binding_issue(
+                "receipt_contract_mismatch",
+                "MCP receipt approval contract changed",
+            )[0]
+            .clone());
+        }
+        self.claimed = true;
+        Ok(())
+    }
+
+    pub fn release_claim(&mut self) {
+        if !self.consumed {
+            self.claimed = false;
+        }
+    }
+
+    pub fn commit_claimed_candidate(
+        &mut self,
+        app_id: &str,
+        workflow_run_id: &str,
+        approval_digest: &str,
+        candidate_digest: &str,
+    ) -> Result<(), GeneratedMcpIssue> {
+        if self.app_id != app_id || self.workflow_run_id != workflow_run_id {
+            return Err(binding_issue(
+                "receipt_scope",
+                "MCP receipt is bound to another app or workflow run",
+            )[0]
+            .clone());
+        }
+        if self.consumed {
+            return Err(
+                binding_issue("receipt_replay", "MCP receipt has already been consumed")[0].clone(),
+            );
+        }
+        if !self.claimed {
+            return Err(binding_issue(
+                "receipt_not_claimed",
+                "MCP receipt must be claimed before commit",
+            )[0]
+            .clone());
+        }
+        if self.approval_contract_sha256 != approval_digest {
+            return Err(binding_issue(
+                "receipt_contract_mismatch",
+                "MCP receipt approval contract changed",
+            )[0]
+            .clone());
+        }
+        if self.candidate_digest != candidate_digest {
+            return Err(binding_issue(
+                "receipt_candidate_mismatch",
+                "MCP receipt is bound to another candidate",
+            )[0]
+            .clone());
+        }
+        self.claimed = false;
+        self.consumed = true;
+        Ok(())
     }
 
     pub fn consume(
@@ -1020,6 +1168,7 @@ impl McpConfirmationReceipt {
             )[0]
             .clone());
         }
+        self.claimed = false;
         self.consumed = true;
         Ok(())
     }
@@ -1044,6 +1193,57 @@ impl McpConfirmationReceipt {
             .clone());
         }
         self.consume(app_id, workflow_run_id, approval_digest, now_ms)
+    }
+}
+
+impl McpReceiptBook {
+    pub fn claim_candidate(
+        &mut self,
+        receipt_id: &str,
+        app_id: &str,
+        workflow_run_id: &str,
+        approval_digest: &str,
+        candidate_digest: &str,
+        now_ms: u64,
+    ) -> Result<(), GeneratedMcpIssue> {
+        let receipt = self.slots.get_mut(receipt_id).ok_or_else(|| {
+            binding_issue(
+                "receipt_missing",
+                "MCP receipt is unknown or was not issued",
+            )[0]
+            .clone()
+        })?;
+        receipt.claim_candidate(
+            app_id,
+            workflow_run_id,
+            approval_digest,
+            candidate_digest,
+            now_ms,
+        )
+    }
+
+    pub fn release_claim(&mut self, receipt_id: &str) {
+        if let Some(receipt) = self.slots.get_mut(receipt_id) {
+            receipt.release_claim();
+        }
+    }
+
+    pub fn commit_claimed_candidate(
+        &mut self,
+        receipt_id: &str,
+        app_id: &str,
+        workflow_run_id: &str,
+        approval_digest: &str,
+        candidate_digest: &str,
+    ) -> Result<(), GeneratedMcpIssue> {
+        let receipt = self.slots.get_mut(receipt_id).ok_or_else(|| {
+            binding_issue(
+                "receipt_missing",
+                "MCP receipt is unknown or was not issued",
+            )[0]
+            .clone()
+        })?;
+        receipt.commit_claimed_candidate(app_id, workflow_run_id, approval_digest, candidate_digest)
     }
 }
 
@@ -1127,10 +1327,7 @@ fn validate_schema_node(
         return;
     };
     if at_root {
-        let closed = object
-            .get("additionalProperties")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let closed = matches!(object.get("additionalProperties"), Some(Value::Bool(false)));
         let object_root = object.get("type").map_or(false, |value| {
             value == "object"
                 || value
@@ -1394,7 +1591,7 @@ pub fn derive_local_app_mcp_ceiling(
 mod tests {
     use super::{
         approval_contract_sha256, derive_local_app_mcp_ceiling, load_candidate_journal,
-        save_candidate_journal, validate_app_mcp_flow_binding,
+        materialize_flow_value_binding, save_candidate_journal, validate_app_mcp_flow_binding,
         validate_app_mcp_flow_binding_for_consumer, validate_app_mcp_proposal,
         validate_generated_mcp_catalog, validate_generated_structured_result, AppMcpFlowBinding,
         AppMcpFlowContext, AppMcpProposal, FlowSource, FlowValueBinding, McpAuthoringStage,
@@ -1445,6 +1642,41 @@ mod tests {
         assert!(issues
             .iter()
             .any(|issue| issue.code == "remote_ref_forbidden"));
+    }
+
+    #[test]
+    fn closed_root_requires_additional_properties_false() {
+        let valid = McpToolDefinitionDto::new(
+            "good_name",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"string"}},
+                "additionalProperties":false
+            }),
+        );
+        validate_generated_mcp_catalog(&[valid]).expect("closed root schema should pass");
+
+        let open_true = McpToolDefinitionDto::new(
+            "good_name",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"string"}},
+                "additionalProperties":true
+            }),
+        );
+        let issues = validate_generated_mcp_catalog(&[open_true]).expect_err("true must fail");
+        assert!(issues.iter().any(|issue| issue.code == "root_schema_open"));
+
+        let missing_flag = McpToolDefinitionDto::new(
+            "good_name",
+            json!({
+                "type":"object",
+                "properties":{"x":{"type":"string"}}
+            }),
+        );
+        let issues =
+            validate_generated_mcp_catalog(&[missing_flag]).expect_err("missing flag must fail");
+        assert!(issues.iter().any(|issue| issue.code == "root_schema_open"));
     }
 
     #[test]
@@ -1656,6 +1888,64 @@ mod tests {
         let issue = validate_app_mcp_flow_binding(&bad_literal, "app", &context, &registry)
             .expect_err("result must satisfy output schema");
         assert_eq!(issue[0].code, "output_schema_mismatch");
+    }
+
+    #[test]
+    fn materialize_typed_binding_resolves_input_literal_and_prior_output() {
+        let input = json!({"query": "hello"});
+        let outputs = BTreeMap::from([("step1".into(), json!({"value": "world"}))]);
+        assert_eq!(
+            materialize_flow_value_binding(
+                &FlowValueBinding::ToolInput {
+                    json_pointer: "/query".into(),
+                },
+                &input,
+                &outputs,
+            )
+            .unwrap(),
+            json!("hello")
+        );
+        assert_eq!(
+            materialize_flow_value_binding(&FlowValueBinding::Literal(json!(42)), &input, &outputs)
+                .unwrap(),
+            json!(42)
+        );
+        assert_eq!(
+            materialize_flow_value_binding(
+                &FlowValueBinding::StepOutput {
+                    step_id: "step1".into(),
+                    json_pointer: "/value".into(),
+                },
+                &input,
+                &outputs,
+            )
+            .unwrap(),
+            json!("world")
+        );
+    }
+
+    #[test]
+    fn materialize_typed_binding_rejects_missing_or_dynamic_values() {
+        let input = json!({"query": "hello"});
+        let outputs = BTreeMap::new();
+        let missing = materialize_flow_value_binding(
+            &FlowValueBinding::ToolInput {
+                json_pointer: "/missing".into(),
+            },
+            &input,
+            &outputs,
+        )
+        .expect_err("missing tool input must fail closed");
+        assert_eq!(missing.code, "binding_value_missing");
+        let dynamic = materialize_flow_value_binding(
+            &FlowValueBinding::ToolInput {
+                json_pointer: "/{dynamic}".into(),
+            },
+            &input,
+            &outputs,
+        )
+        .expect_err("dynamic pointers must fail closed");
+        assert_eq!(dynamic.code, "pointer_dynamic");
     }
 
     #[test]

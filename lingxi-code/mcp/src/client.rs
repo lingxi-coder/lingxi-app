@@ -267,6 +267,15 @@ pub struct McpClient {
     /// [`McpTransportKind::Stdio`] (claude-code's `e?.type ?? "stdio"`) until the
     /// registry sets the real kind via [`Self::with_transport_kind`].
     transport_kind: McpTransportKind,
+    /// The server's connection URL, when it has one (`None` for `stdio`).
+    /// Feeds the §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way
+    /// `protocol_negotiation.rs`'s denylist gate consults a server's URL.
+    /// Defaults to `None` (byte-identical to omitting [`Self::with_server_url`]
+    /// entirely) until a caller threads the resolved
+    /// [`crate::McpTransportSpec`]'s URL through — no production call site
+    /// does yet; see the §20a batch report.
+    server_url: Option<String>,
 }
 
 impl McpClient {
@@ -373,6 +382,7 @@ impl McpClient {
             config_tools: Vec::new(),
             config_tool_permissions: BTreeMap::new(),
             transport_kind: McpTransportKind::Stdio,
+            server_url: None,
         }
     }
 
@@ -407,6 +417,19 @@ impl McpClient {
     #[must_use]
     pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
         self.transport_kind = kind;
+        self
+    }
+
+    /// Builder that records the server's connection URL (`None` for
+    /// `stdio`/url-less transports) so [`Self::list_tools`] can consult the
+    /// §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way a remote
+    /// server's URL feeds `protocol_negotiation.rs`'s denylist gate. Not
+    /// calling this is byte-identical to a url-less server for that gate
+    /// (only a bare `"*"` allowlist entry can still match).
+    #[must_use]
+    pub fn with_server_url(mut self, url: Option<String>) -> Self {
+        self.server_url = url;
         self
     }
 
@@ -539,7 +562,31 @@ impl McpClient {
         let mut tools: Vec<McpToolDto> = resp
             .tools
             .into_iter()
-            .map(|t| {
+            .filter_map(|t| {
+                // §20a — normalize or drop the tool's `inputSchema` before it
+                // reaches the model (oracle `Wrt`/`qrt`, see
+                // `crate::tool_schema`). Must run before the DTO is built so
+                // a dropped tool never gets constructed.
+                let decision =
+                    crate::tool_schema::decide_tool_schema(self.server_url.as_deref(), &t.input_schema);
+                if let Some(reason) = decision.drop_reason {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
+                        t.name
+                    );
+                    return None;
+                }
+                if let Some(warning) = &decision.warning {
+                    tracing::debug!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Tool \"{}\" {warning}",
+                        t.name
+                    );
+                }
+
                 // Normalize BOTH segments (server + tool) — 1:1 with TS
                 // `buildMcpToolName` = `getMcpPrefix(server) +
                 // normalizeNameForMCP(toolName)` (`mcpStringUtils.ts:51`).
@@ -550,18 +597,23 @@ impl McpClient {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
                 let projected_meta = ToolMeta::from_meta_value(t.meta.as_ref());
-                McpToolDto {
+                let description = match decision.description_note {
+                    // oracle: `E.description ? \`${note}\n\n${description}\` : note`.
+                    Some(note) if t.description.as_deref().is_some_and(|d| !d.is_empty()) => {
+                        format!("{note}\n\n{}", t.description.as_deref().unwrap_or_default())
+                    }
+                    Some(note) => note,
+                    None => t.description.unwrap_or_default(),
+                };
+                Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
                     definition: McpToolDefinitionDto {
                         name: t.name,
                         title: t.title,
-                        description: t
-                            .description
-                            .as_deref()
-                            .map(truncate_description)
-                            .map(Cow::into_owned),
-                        input_schema: t.input_schema,
+                        description: (!description.is_empty())
+                            .then(|| truncate_description(&description).into_owned()),
+                        input_schema: decision.schema,
                         output_schema: t.output_schema,
                         annotations: t.annotations,
                         execution: t.execution,
@@ -580,8 +632,9 @@ impl McpClient {
                     } else {
                         projected_meta.always_load
                     },
+                    requires_user_interaction: projected_meta.requires_user_interaction,
                     effective_max_permission: None,
-                }
+                })
             })
             .collect();
         self.apply_config_permission_ceilings(&mut tools);
@@ -1508,10 +1561,19 @@ fn resolve_idle_timeout_gld(
 /// claude-code's `xMy = new Set(["sse-ide","ws-ide","sdk"])` (`GLd`). These are
 /// same-process bridges (IDE / SDK control), for which a silence watchdog is
 /// meaningless.
+///
+/// All THREE `xMy` members are covered: `SseIde` = `"sse-ide"`, `WsIde` =
+/// `"ws-ide"` (§10's variant — omitting it gave a `ws-ide` transport the
+/// 5-minute `AMy` remote default the oracle disables), `SdkControl` = `"sdk"`.
+/// `InProcess` has no oracle counterpart and is this port's own same-process
+/// bridge, which belongs to the set for the same reason.
 fn transport_kind_is_in_process(kind: McpTransportKind) -> bool {
     matches!(
         kind,
-        McpTransportKind::SseIde | McpTransportKind::SdkControl | McpTransportKind::InProcess
+        McpTransportKind::SseIde
+            | McpTransportKind::WsIde
+            | McpTransportKind::SdkControl
+            | McpTransportKind::InProcess
     )
 }
 
@@ -1604,7 +1666,8 @@ struct ToolsListResponse {
 /// `_meta` block carries claude-code-specific hints
 /// (`anthropic/searchHint` for retrieval prefiltering, `anthropic/alwaysLoad`
 /// to force-include the tool in the agent prompt even when the search hint
-/// doesn't match).
+/// doesn't match, `anthropic/requiresUserInteraction` to mark a tool that
+/// needs fresh interaction on every call).
 #[derive(Debug, Deserialize)]
 struct RawTool {
     name: String,
@@ -1630,8 +1693,9 @@ struct RawTool {
 /// `None`/`false` when absent so non-claude-code servers decode cleanly.
 ///
 /// Public because the round-trip serde contract for the slashed key names
-/// (`anthropic/searchHint`, `anthropic/alwaysLoad`) is part of the
-/// load-bearing wire surface tests assert against.
+/// (`anthropic/searchHint`, `anthropic/alwaysLoad`,
+/// `anthropic/requiresUserInteraction`) is part of the load-bearing wire
+/// surface tests assert against.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ToolMeta {
     /// Claude-code retrieval prefilter hint (e.g. `"shell"`, `"editor"`).
@@ -1641,9 +1705,19 @@ pub struct ToolMeta {
     /// search hint doesn't match the current task.
     #[serde(default, rename = "anthropic/alwaysLoad")]
     pub always_load: Option<bool>,
-    /// `true` when the tool must still prompt even if an allow rule exists.
+    /// `true` when the tool needs a fresh, in-the-moment user interaction on
+    /// every invocation (e.g. an embedded OAuth/consent step) that a stored
+    /// "always allow" rule cannot satisfy. Oracle: `v._meta?.
+    /// ["anthropic/requiresUserInteraction"]===!0` (client.ts factory,
+    /// binary-confirmed @182519150); read back as `requiresUserInteraction()`
+    /// (@182520425) and folded into `suppressesAlwaysAllowRule` (@182520462).
+    /// Forwarded onto `traits::McpToolDto::requires_user_interaction` and from
+    /// there onto `tool-mcp`'s `MCPTool::requires_user_interaction` override,
+    /// so a persistent "always allow" grant is never offered/written for such
+    /// a tool (see `tui/src/permission_gate.rs` and
+    /// `tui/src/bottom_pane/permission_view.rs`).
     #[serde(default, rename = "anthropic/requiresUserInteraction")]
-    pub requires_user_interaction: Option<bool>,
+    pub requires_user_interaction: bool,
 }
 
 impl ToolMeta {
@@ -2417,6 +2491,28 @@ mod constructor_tests {
             Some(1)
         );
     }
+
+    // ── `requiresUserInteraction` (§27b) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn requires_user_interaction_meta_is_forwarded_onto_the_dto() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn).await;
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([
+                { "name": "a", "description": "A", "inputSchema": {} },
+                { "name": "b", "description": "B", "inputSchema": {},
+                  "_meta": { "anthropic/requiresUserInteraction": true } },
+            ]),
+        )
+        .await;
+        assert_eq!(tools.len(), 2);
+        assert!(!tools[0].requires_user_interaction);
+        assert!(tools[1].requires_user_interaction);
+    }
 }
 
 #[cfg(test)]
@@ -2544,9 +2640,15 @@ mod timeout_tests {
     #[test]
     fn idle_is_zero_for_in_process_transports() {
         // xMy = {"sse-ide","ws-ide","sdk"} → no idle timeout. lingxi's in-process
-        // kinds (SseIde / SdkControl / InProcess) mirror that set.
+        // kinds (SseIde / WsIde / SdkControl / InProcess) mirror that set —
+        // `WsIde` is §10's new variant and is the literal `"ws-ide"` member of
+        // `xMy` (oracle @182263592 / @182470659:
+        // `var er=new Set(["sse-ide","ws-ide","sdk"]); function tr(e){let
+        // t=e?.type??"stdio"; if(er.has(t))return 0; …}`), so it must NOT fall
+        // through to the 5-minute remote default.
         for kind in [
             McpTransportKind::SseIde,
+            McpTransportKind::WsIde,
             McpTransportKind::SdkControl,
             McpTransportKind::InProcess,
         ] {

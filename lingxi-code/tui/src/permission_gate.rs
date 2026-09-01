@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use permission::gate::{
-    PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptWorker,
+    PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
+    PermissionRequest, PermissionResponse, PromptWorker,
 };
 use permission::{
     persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
@@ -103,28 +104,34 @@ impl PermissionGate for TuiPermissionGate {
         }
     }
 
+    /// §27b — carries [`PermissionCheckContext::requires_user_interaction`]
+    /// through to the dialog so it can suppress "Yes, allow always"
+    /// (oracle `suppressesAlwaysAllowRule`, @182520462) for a tool that needs
+    /// fresh interaction on every call. The default trait impl would drop
+    /// `ctx` entirely (forwarding only `ctx.worker` into
+    /// `check_with_worker`), so this override is required to reach the bit.
     async fn check_with_context(
         &self,
         name: &str,
         input: &serde_json::Value,
-        ctx: &permission::gate::PermissionCheckContext,
-    ) -> permission::gate::PermissionOutcome {
-        match self
-            .check_with_context_impl(
-                name,
-                input,
-                ctx.worker.clone(),
-                ctx.suppress_always_allow_rule,
-                ctx.auto_mode_prompt,
-            )
-            .await
-        {
-            outcome => outcome,
-        }
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        self.check_with_context_impl(
+            name,
+            input,
+            ctx.worker.clone(),
+            ctx.suppress_always_allow_rule
+                || (name != "ExitPlanMode" && ctx.requires_user_interaction),
+            ctx.auto_mode_prompt,
+        )
+        .await
     }
 }
 
 impl TuiPermissionGate {
+    /// Shared body behind [`PermissionGate::check_with_worker`] and
+    /// [`PermissionGate::check_with_context`]. `check_with_context` is the only
+    /// path that may suppress AllowAlways or surface an engine-selected Auto row.
     async fn check_with_context_impl(
         &self,
         name: &str,
@@ -180,6 +187,7 @@ impl TuiPermissionGate {
                 tool_name: name.to_string(),
                 tool_input: input.clone(),
                 default_decision,
+                suppress_always_allow_rule,
             }
         };
 
@@ -215,9 +223,14 @@ impl TuiPermissionGate {
         // Step 4: persist if AllowAlways. The rule is NARROWED to the specific
         // command / path / domain the call used (claude-code `ruleSuggestions`),
         // not a bare tool-wide allow — so "always allow" scopes the grant.
-        let allow_always =
-            matches!(response, PermissionResponse::AllowAlways) && !suppress_always_allow_rule;
-        if allow_always {
+        //
+        // §27b: `suppress_always_allow_rule` means the dialog was built with
+        // the "Yes, allow always" row OMITTED, so a well-behaved view can
+        // never answer `AllowAlways` here. The `&& !suppress_always_allow_rule`
+        // guard is defense in depth — a persistent grant must never be
+        // recorded for a tool that needs fresh interaction on every call,
+        // even if some future view got the omission wrong.
+        if matches!(response, PermissionResponse::AllowAlways) && !suppress_always_allow_rule {
             let rule = permission::allow_suggestion(name, input);
             self.session_allow_rules.lock().await.push(rule.clone());
             // (3c) Durably record the choice when a persist target is wired.
@@ -360,6 +373,96 @@ mod tests {
         let stored = rules.lock().await;
         assert_eq!(stored.len(), 1);
         assert!(stored[0].matches_tool("Bash"));
+    }
+
+    // ===== §27b: `check_with_context` / `suppress_always_allow_rule` =====
+
+    #[tokio::test]
+    async fn check_with_context_ignores_ctx_by_default_on_check_with_worker() {
+        // `check`/`check_with_worker` never see a `PermissionCheckContext`, so
+        // the dialog they build must ALWAYS offer "allow always"
+        // (`suppress_always_allow_rule: false`) — unchanged from before §27b.
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+        let tui_task = tokio::spawn(async move {
+            let ex = event_rx.recv().await.unwrap();
+            match &ex.request {
+                PermissionRequest::ToolUseConfirm {
+                    suppress_always_allow_rule,
+                    ..
+                } => assert!(!suppress_always_allow_rule),
+                _ => panic!("unexpected variant"),
+            }
+            let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
+        });
+        let _ = gate.check_with_worker("Bash", &json!({}), None).await;
+        tui_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_with_context_forwards_requires_user_interaction_as_suppress_bit() {
+        // `PermissionCheckContext::requires_user_interaction: true` (e.g. an
+        // MCP tool whose `_meta.anthropic/requiresUserInteraction === true`)
+        // must reach the dialog as `suppress_always_allow_rule: true` — the
+        // oracle's `suppressesAlwaysAllowRule` (@182520462).
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+        let tui_task = tokio::spawn(async move {
+            let ex = event_rx.recv().await.unwrap();
+            match &ex.request {
+                PermissionRequest::ToolUseConfirm {
+                    suppress_always_allow_rule,
+                    ..
+                } => assert!(suppress_always_allow_rule),
+                _ => panic!("unexpected variant"),
+            }
+            let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
+        });
+        let ctx = permission::gate::PermissionCheckContext {
+            requires_user_interaction: true,
+            ..Default::default()
+        };
+        let outcome = gate
+            .check_with_context("mcp__server__tool", &json!({}), &ctx)
+            .await;
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            }
+        );
+        tui_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_with_context_never_persists_allow_always_when_suppressed() {
+        // Defense in depth: even if a view somehow answered `AllowAlways` for
+        // a suppressed request, `TuiPermissionGate` must not record a
+        // persistent rule for it.
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let tui_task = tokio::spawn(async move {
+            let ex = event_rx.recv().await.unwrap();
+            let _ = ex.resp_tx.send(PermissionResponse::AllowAlways);
+        });
+        let ctx = permission::gate::PermissionCheckContext {
+            requires_user_interaction: true,
+            ..Default::default()
+        };
+        let outcome = gate
+            .check_with_context("mcp__server__tool", &json!({}), &ctx)
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+        tui_task.await.unwrap();
+        assert!(
+            rules.lock().await.is_empty(),
+            "a suppressed AllowAlways must never be persisted"
+        );
     }
 
     #[tokio::test]

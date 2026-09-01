@@ -6,6 +6,7 @@
 export * from './protocol.js';
 export * from './toolview.js';
 export * from './lockfile.js';
+export * from './validation.js';
 export { versionCompatible } from './version.js';
 export {
   BridgeClient,

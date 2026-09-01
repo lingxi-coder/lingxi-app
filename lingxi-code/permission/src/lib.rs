@@ -122,7 +122,11 @@ pub use loader::{
     default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
-pub use mcp_policy::{clamp_mcp_permission_result, permission_rules_from_mcp_tool_policies};
+pub use mcp_policy::{
+    clamp_mcp_permission_result, mcp_server_policy_rules, permission_rules_from_mcp_tool_policies,
+    upstream_name_drift_warning, McpServerPolicyView, McpServerToolDecl, McpToolMaxPermission,
+    McpToolPermissionPolicy,
+};
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};

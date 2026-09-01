@@ -368,10 +368,6 @@ def check_build_inventory_and_permissions() -> None:
         fail("permission settings asset must retain the production permissions object")
     if (PLUGIN / "assets" / "templates" / "vite-react-static-v1").exists():
         fail("permission settings must not be copied into Plugin template assets")
-    source_template = CODE / "local-apps" / "templates" / "vite-react-static-v1" / ".lingxi" / "settings.local.json"
-    require_file(source_template, "permission migration comparison fixture")
-    if source.read_bytes() != source_template.read_bytes():
-        fail("migrated permission settings bytes differ from the production payload")
     profile_text = PROFILE_RS.read_text(encoding="utf-8")
     if len(re.findall(r'profile_file!\(\s*"', profile_text)) != 112:
         fail("local_app_runtime_profiles.rs must retain exactly 112 profile_file! call sites")

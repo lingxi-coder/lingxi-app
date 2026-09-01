@@ -442,6 +442,7 @@ pub async fn run(cli: &Cli) -> i32 {
             args.force,
             &args.with,
             &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
         )),
 
         // Prune orphaned auto-installed dependencies from the v2 installed record.

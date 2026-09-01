@@ -107,11 +107,6 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("Local App MCP promotion is unavailable in this host build".into())
     }
-    /// Confirm one runtime profile for one unscaffolded app and mint a short-lived receipt.
-    async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
-        let _ = input;
-        Err("runtime profile confirmation is unavailable in this host build".into())
-    }
     /// Confirm a dependency change proposal before the host mutates package state.
     async fn confirm_dependency_change(&self, input: Value) -> Result<Value, String> {
         let _ = input;
@@ -295,7 +290,6 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "get",
     "create",
     "runtime_profiles",
-    "confirm_runtime_profile",
     "template_catalog",
     "validate_template_selection",
     "resolve_template_selection",
@@ -360,18 +354,24 @@ pub struct LocalAppAuditEntry {
     pub cancelled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportConnectionScope {
+    conversation_id: String,
+    scope: mcp::registry::ConversationExport,
+}
+
 struct LocalAppCallState {
-    inflight_by_app: HashMap<String, usize>,
-    inflight_total: usize,
-    read_calls: HashMap<String, VecDeque<Instant>>,
-    mutation_calls: HashMap<(String, String), VecDeque<Instant>>,
+    inflight_by_scope: HashMap<(String, String), usize>,
+    inflight_total_by_conversation: HashMap<String, usize>,
+    read_calls: HashMap<(String, String), VecDeque<Instant>>,
+    mutation_calls: HashMap<(String, String, String), VecDeque<Instant>>,
 }
 
 impl Default for LocalAppCallState {
     fn default() -> Self {
         Self {
-            inflight_by_app: HashMap::new(),
-            inflight_total: 0,
+            inflight_by_scope: HashMap::new(),
+            inflight_total_by_conversation: HashMap::new(),
             read_calls: HashMap::new(),
             mutation_calls: HashMap::new(),
         }
@@ -380,19 +380,31 @@ impl Default for LocalAppCallState {
 
 struct LocalAppCallGuard {
     state: Arc<StdMutex<LocalAppCallState>>,
+    conversation_id: String,
     app_id: String,
 }
 
 impl Drop for LocalAppCallGuard {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
-            if let Some(count) = state.inflight_by_app.get_mut(&self.app_id) {
+            let key = (self.conversation_id.clone(), self.app_id.clone());
+            if let Some(count) = state.inflight_by_scope.get_mut(&key) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    state.inflight_by_app.remove(&self.app_id);
+                    state.inflight_by_scope.remove(&key);
                 }
             }
-            state.inflight_total = state.inflight_total.saturating_sub(1);
+            if let Some(count) = state
+                .inflight_total_by_conversation
+                .get_mut(&self.conversation_id)
+            {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state
+                        .inflight_total_by_conversation
+                        .remove(&self.conversation_id);
+                }
+            }
         }
     }
 }
@@ -414,12 +426,14 @@ pub struct LocalAppsMcpTransport {
     lingxi_home: OnceLock<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
+    registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
     init_session_minter: OnceLock<Arc<InitSessionMinter>>,
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
     cancellations: Arc<StdMutex<HashMap<McpConnectionId, Arc<AtomicBool>>>>,
+    export_scopes: Arc<StdMutex<HashMap<McpConnectionId, ExportConnectionScope>>>,
     local_app_calls: Arc<StdMutex<LocalAppCallState>>,
     audit: Arc<StdMutex<Vec<LocalAppAuditEntry>>>,
 }
@@ -530,6 +544,9 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.host.get() {
             let _ = scoped.host.set(value.clone());
         }
+        if let Some(value) = self.registry.get() {
+            let _ = scoped.registry.set(value.clone());
+        }
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
@@ -539,6 +556,7 @@ impl LocalAppsMcpTransport {
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
         scoped.cancellations = Arc::clone(&self.cancellations);
         scoped.audit = Arc::clone(&self.audit);
+        scoped.export_scopes = Arc::clone(&self.export_scopes);
         Ok(scoped)
     }
 
@@ -549,12 +567,14 @@ impl LocalAppsMcpTransport {
             lingxi_home: OnceLock::new(),
             service: OnceLock::new(),
             host: OnceLock::new(),
+            registry: OnceLock::new(),
             session_id: OnceLock::new(),
             init_session_minter: OnceLock::new(),
             agent_session_id: None,
             call_budget: None,
             connections: StdMutex::new(HashSet::new()),
             cancellations: Arc::new(StdMutex::new(HashMap::new())),
+            export_scopes: Arc::new(StdMutex::new(HashMap::new())),
             local_app_calls: Arc::new(StdMutex::new(LocalAppCallState::default())),
             audit: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -641,6 +661,9 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.host.get() {
             let _ = scoped.host.set(value.clone());
         }
+        if let Some(value) = self.registry.get() {
+            let _ = scoped.registry.set(value.clone());
+        }
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
@@ -650,6 +673,7 @@ impl LocalAppsMcpTransport {
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
         scoped.cancellations = Arc::clone(&self.cancellations);
         scoped.audit = Arc::clone(&self.audit);
+        scoped.export_scopes = Arc::clone(&self.export_scopes);
         // A budget is deliberately never inherited from the global
         // Conversation Agent transport. It belongs to exactly one app Agent
         // session and is installed only by `scoped_for_app_with_budget`.
@@ -703,6 +727,13 @@ impl LocalAppsMcpTransport {
         self.host.set(host)
     }
 
+    pub fn attach_registry(
+        &self,
+        registry: std::sync::Weak<mcp::McpRegistry>,
+    ) -> Result<(), std::sync::Weak<mcp::McpRegistry>> {
+        self.registry.set(registry)
+    }
+
     fn service(&self) -> Result<&Arc<AppService>, McpError> {
         self.service.get().ok_or_else(|| {
             McpError::Internal("local apps service is still starting; retry shortly".into())
@@ -744,6 +775,29 @@ impl LocalAppsMcpTransport {
             .ok_or_else(|| {
                 McpError::Connection("local apps MCP connection is no longer active".into())
             })
+    }
+
+    fn export_scope_for_connection(
+        &self,
+        connection_id: McpConnectionId,
+    ) -> Result<Option<ExportConnectionScope>, McpError> {
+        let from_connection = self
+            .export_scopes
+            .lock()
+            .map_err(|_| McpError::Internal("local apps export scope registry poisoned".into()))?
+            .get(&connection_id)
+            .cloned();
+        if from_connection.is_some() {
+            return Ok(from_connection);
+        }
+        Ok(self
+            .scope
+            .export()
+            .cloned()
+            .map(|scope| ExportConnectionScope {
+                conversation_id: "legacy_export".into(),
+                scope,
+            }))
     }
 
     async fn wait_cancelled(cancelled: Arc<AtomicBool>) {
@@ -1109,12 +1163,13 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "stage_create",
-                "Prepare isolated create staging from a Host-validated selection and return the install-before-build dependency_input_sha256. This operation never publishes a receipt or commits a Manifest.",
+                "Prepare isolated create staging from a Host-validated selection, persist optional structured design evidence, and return the install-before-build dependency_input_sha256. This operation never publishes a receipt or commits a Manifest.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
                     "validated_selection_handle":{"type":"string","pattern":"^vsel_[A-Za-z0-9]{32}$"},
-                    "quality_level":{"enum":["fast","balanced","thorough"]}
+                    "quality_level":{"enum":["fast","balanced","thorough"]},
+                    "design_spec":{"type":"object","description":"Optional structured design evidence to bind into the staged create candidate and later native approval contract."}
                 },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -1153,16 +1208,8 @@ impl LocalAppsMcpTransport {
                 },"required":["app_id","workflow_run_id"],"additionalProperties":false}),
             ),
             Self::tool(
-                "confirm_runtime_profile",
-                "Open the native runtime-profile selector for an unscaffolded app. The caller may provide a recommendation, but only the family the user selects in the native UI can mint the short-lived receipt consumed by LocalAppScaffold.",
-                json!({"type":"object","properties":{
-                    "app_id":app_id.clone(),
-                    "recommended_profile":{"type":"string","enum":["react_dom","canvas_2d","three_3d","phaser_2d","babylon_3d"],"description":"Optional model recommendation highlighted by the native selector; it is not authoritative."}
-                },"required":["app_id"],"additionalProperties":false}),
-            ),
-            Self::tool(
                 "create",
-                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through native runtime-profile confirmation plus `scaffold`.",
+                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through one unified native create confirmation plus `scaffold`.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -1170,14 +1217,15 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the confirmed display name, one-line brief, and runtime identity onto an app the user created as an empty workspace, then lay down its source tree. Call this ONLY after native runtime-profile confirmation has produced a short-lived `runtime_profile_receipt`; the host derives the immutable surface from that receipt and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the confirmed display name, one-line brief, and Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged template snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed."},
                     "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
-                    "runtime_profile_receipt":{"type":"string","minLength":1,"description":"Short-lived receipt from native runtime-profile confirmation. It is authoritative; the host derives the immutable runtime binding and surface from it and rejects model-supplied overrides."},
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Required with receipt_id so the Host can re-bind the scaffold to the exact prepared create candidate."},
+                    "receipt_id":{"type":"string","minLength":1,"description":"One-shot receipt from the unified native create confirmation. The Host binds it to the exact app, workflow run and approved create candidate before scaffolding."},
                     "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
-                },"required":["app_id","name","brief","runtime_profile_receipt"],"additionalProperties":false}),
+                },"required":["app_id","name","brief","workflow_run_id","receipt_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "manage_runtime",
@@ -1284,7 +1332,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "inspect_ui",
-                "Inspect the structured accessibility/DOM snapshot of a running local app. Never executes JavaScript.",
+                "Inspect the structured a11y-tree/DOM snapshot of a running local app. Never executes JavaScript.",
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"selector":{"type":"string","maxLength":500}},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -1466,6 +1514,7 @@ impl LocalAppsMcpTransport {
 
     fn reserve_export_call(
         &self,
+        conversation_id: &str,
         app_id: &str,
         tool_name: &str,
         read_only: bool,
@@ -1475,13 +1524,28 @@ impl LocalAppsMcpTransport {
             .local_app_calls
             .lock()
             .map_err(|_| Self::tool_error("local app call limiter unavailable"))?;
-        if state.inflight_total >= 8 || state.inflight_by_app.get(app_id).copied().unwrap_or(0) >= 4
+        let scope_key = (conversation_id.to_string(), app_id.to_string());
+        if state
+            .inflight_total_by_conversation
+            .get(conversation_id)
+            .copied()
+            .unwrap_or(0)
+            >= 8
+            || state
+                .inflight_by_scope
+                .get(&scope_key)
+                .copied()
+                .unwrap_or(0)
+                >= 4
         {
             return Err(rate_limited(1_000));
         }
         let cutoff = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
         if read_only {
-            let calls = state.read_calls.entry(app_id.to_string()).or_default();
+            let calls = state
+                .read_calls
+                .entry((conversation_id.to_string(), app_id.to_string()))
+                .or_default();
             while calls.front().is_some_and(|started| *started < cutoff) {
                 calls.pop_front();
             }
@@ -1497,7 +1561,11 @@ impl LocalAppsMcpTransport {
         } else {
             let calls = state
                 .mutation_calls
-                .entry((app_id.to_string(), tool_name.to_string()))
+                .entry((
+                    conversation_id.to_string(),
+                    app_id.to_string(),
+                    tool_name.to_string(),
+                ))
                 .or_default();
             while calls.front().is_some_and(|started| *started < cutoff) {
                 calls.pop_front();
@@ -1512,11 +1580,15 @@ impl LocalAppsMcpTransport {
             }
             calls.push_back(now);
         }
-        *state.inflight_by_app.entry(app_id.to_string()).or_default() += 1;
-        state.inflight_total += 1;
+        *state.inflight_by_scope.entry(scope_key).or_default() += 1;
+        *state
+            .inflight_total_by_conversation
+            .entry(conversation_id.to_string())
+            .or_default() += 1;
         drop(state);
         Ok(LocalAppCallGuard {
             state: Arc::clone(&self.local_app_calls),
+            conversation_id: conversation_id.to_string(),
             app_id: app_id.to_string(),
         })
     }
@@ -1580,9 +1652,11 @@ impl LocalAppsMcpTransport {
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         self.ensure_connection(conn)?;
-        let Some(scope) = self.scope.export() else {
+        let Some(export_scope) = self.export_scope_for_connection(conn.connection_id)? else {
             return Err(McpError::ToolNotFound(tool.into()));
         };
+        let conversation_id = export_scope.conversation_id;
+        let scope = export_scope.scope;
         if input.get("app_id").is_some() {
             return Ok(Self::tool_error(
                 "app_id is connection-scoped and must not be supplied",
@@ -1609,7 +1683,7 @@ impl LocalAppsMcpTransport {
             .strip_prefix("mcp__")
             .and_then(|value| value.strip_prefix(&format!("{}__", scope.server_name())))
             .unwrap_or(tool);
-        let Some(entry) = self.active_catalog_entry(scope, &manifest, &layout, raw_name)? else {
+        let Some(entry) = self.active_catalog_entry(&scope, &manifest, &layout, raw_name)? else {
             return Err(McpError::ToolNotFound(tool.into()));
         };
         let definition_value = entry.get("definition").unwrap_or(&entry);
@@ -1627,11 +1701,24 @@ impl LocalAppsMcpTransport {
             .as_ref()
             .and_then(|annotations| annotations.read_only_hint)
             .unwrap_or(false);
-        let _call_guard = match self.reserve_export_call(&scope.app_id, &definition.name, read_only)
-        {
+        let _call_guard = match self.reserve_export_call(
+            &conversation_id,
+            &scope.app_id,
+            &definition.name,
+            read_only,
+        ) {
             Ok(guard) => guard,
             Err(result) => return Ok(result),
         };
+        let registry = self.registry.get().and_then(std::sync::Weak::upgrade);
+        if let Some(registry) = registry.as_ref() {
+            registry
+                .begin_local_app_call(&conversation_id, &scope.app_id)
+                .await
+                .map_err(|error| {
+                    McpError::Internal(format!("local app exposure invalid: {error}"))
+                })?;
+        }
         let started = Instant::now();
         let request = json!({
             "app_id": scope.app_id,
@@ -1639,6 +1726,7 @@ impl LocalAppsMcpTransport {
             "flow": entry.get("flow").cloned().unwrap_or(Value::Null),
             "input": input,
             "catalog_sha256": active.catalog_sha256,
+            "conversation_id": conversation_id,
         });
         let input_digest = format!(
             "{:x}",
@@ -1685,6 +1773,11 @@ impl LocalAppsMcpTransport {
                 true,
             ),
         };
+        if let Some(registry) = registry.as_ref() {
+            registry
+                .end_local_app_call(&conversation_id, &scope.app_id)
+                .await;
+        }
         self.append_export_audit(LocalAppAuditEntry {
             app_id: scope.app_id.clone(),
             catalog_sha256: active.catalog_sha256.clone(),
@@ -2239,10 +2332,6 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
-            "confirm_runtime_profile" => match self.host()?.confirm_runtime_profile(input).await {
-                Ok(value) => Self::result(value),
-                Err(message) => Self::tool_error(message),
-            },
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -2336,8 +2425,8 @@ impl LocalAppsMcpTransport {
                                 // and for a CROP it is the denominator of
                                 // `capture_rect.x + ix * capture_rect.width /
                                 // image_width` (the formula
-                                // `skills/frontend-qa/SKILL.md` hands the
-                                // agent). Re-inserted as flat siblings rather
+                                // Local App QA guidance hands the agent).
+                                // Re-inserted as flat siblings rather
                                 // than a trimmed `image` object so no reader
                                 // has to guess whether `image` still carries
                                 // the data.
@@ -2459,16 +2548,38 @@ impl LocalAppsMcpTransport {
 #[async_trait]
 impl McpTransport for LocalAppsMcpTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        let valid_in_process_key = match (self.scope.export(), spec) {
-            (Some(scope), McpTransportSpec::InProcess { registry_key }) => {
-                registry_key == &scope.registry_key()
+        let export_scope = match spec {
+            McpTransportSpec::InProcess { registry_key } => {
+                if let Some(scope) = self.scope.export() {
+                    if registry_key != &scope.registry_key() {
+                        return Err(McpError::UnsupportedTransport(spec.transport_kind()));
+                    }
+                    None
+                } else if registry_key == LOCAL_APPS_REGISTRY_KEY {
+                    None
+                } else {
+                    mcp::registry::ConversationExport::parse_scoped_registry_key(registry_key)?.map(
+                        |(conversation_id, scope)| ExportConnectionScope {
+                            conversation_id,
+                            scope,
+                        },
+                    )
+                }
             }
-            (None, McpTransportSpec::InProcess { registry_key }) => {
-                registry_key == LOCAL_APPS_REGISTRY_KEY
-            }
-            _ => false,
+            _ => None,
         };
-        if !valid_in_process_key {
+        if !matches!(spec, McpTransportSpec::InProcess { .. })
+            || (self.scope.export().is_none()
+                && !matches!(
+                    spec,
+                    McpTransportSpec::InProcess { registry_key }
+                        if registry_key == LOCAL_APPS_REGISTRY_KEY
+                            || mcp::registry::ConversationExport::parse_scoped_registry_key(registry_key)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                ))
+        {
             return Err(McpError::UnsupportedTransport(spec.transport_kind()));
         }
         let connection_id = McpConnectionId::new();
@@ -2480,6 +2591,14 @@ impl McpTransport for LocalAppsMcpTransport {
             .lock()
             .map_err(|_| McpError::Internal("local apps cancellation registry poisoned".into()))?
             .insert(connection_id, Arc::new(AtomicBool::new(false)));
+        if let Some(scope) = export_scope {
+            self.export_scopes
+                .lock()
+                .map_err(|_| {
+                    McpError::Internal("local apps export scope registry poisoned".into())
+                })?
+                .insert(connection_id, scope);
+        }
         Ok(McpRawConnection { connection_id })
     }
 
@@ -2503,17 +2622,25 @@ impl McpTransport for LocalAppsMcpTransport {
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         self.ensure_connection(conn)?;
-        if let Some(scope) = self.scope.export() {
+        if let Some(export_scope) = self.export_scope_for_connection(conn.connection_id)? {
             let service = self.service()?;
             service
-                .record(&scope.app_id)
+                .record(&export_scope.scope.app_id)
                 .await
                 .map_err(|error| McpError::Internal(error.to_string()))?;
-            let layout = local_apps::AppLayout::new(self.root.clone(), scope.app_id.clone())
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+            let layout =
+                local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
+                    .map_err(|error| McpError::Internal(error.to_string()))?;
             let manifest = local_apps::load_manifest(&layout)
                 .map_err(|error| McpError::Internal(error.to_string()))?;
-            return self.active_catalog_tools(scope, &manifest, &layout);
+            if let Some(active) = manifest.active_mcp_catalog.as_ref() {
+                if let Ok(mut scopes) = self.export_scopes.lock() {
+                    if let Some(scope) = scopes.get_mut(&conn.connection_id) {
+                        scope.scope.listed_tool_surface_sha256 = active.tool_surface_sha256.clone();
+                    }
+                }
+            }
+            return self.active_catalog_tools(&export_scope.scope, &manifest, &layout);
         }
         // The static host operations are BUILTIN tools (`LocalApp*`) now, so the
         // MCP surface advertises only the DYNAMIC per-app namespaces. Serving
@@ -2628,6 +2755,11 @@ impl McpTransport for LocalAppsMcpTransport {
         {
             cancelled.store(true, Ordering::Release);
         }
+        let _ = self
+            .export_scopes
+            .lock()
+            .map_err(|_| McpError::Internal("local apps export scope registry poisoned".into()))?
+            .remove(&connection_id);
         Ok(())
     }
 
@@ -2820,6 +2952,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_registry_key_connects_on_global_transport() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
+        let scope =
+            mcp::registry::ConversationExport::new("abc12345", "0".repeat(64)).expect("scope");
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: scope.scoped_registry_key("conversation-1").unwrap(),
+            })
+            .await
+            .expect("scoped connection");
+        let caps = transport.initialize(&connection).await.expect("initialize");
+        assert!(caps.tools);
+    }
+
+    #[tokio::test]
     async fn disconnect_cancels_inflight_local_app_calls() {
         let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
         let connection = transport
@@ -2848,14 +2995,15 @@ mod tests {
         for _ in 0..60 {
             drop(
                 transport
-                    .reserve_export_call("abc12345", "read_value", true)
+                    .reserve_export_call("conversation", "abc12345", "read_value", true)
                     .expect("first 60 read calls are allowed"),
             );
         }
-        let read_limited = match transport.reserve_export_call("abc12345", "read_value", true) {
-            Ok(_) => panic!("61st read call must be rejected"),
-            Err(error) => error,
-        };
+        let read_limited =
+            match transport.reserve_export_call("conversation", "abc12345", "read_value", true) {
+                Ok(_) => panic!("61st read call must be rejected"),
+                Err(error) => error,
+            };
         assert_eq!(
             read_limited.structured_content.unwrap()["code"],
             "rate_limited"
@@ -2864,15 +3012,15 @@ mod tests {
         for _ in 0..10 {
             drop(
                 transport
-                    .reserve_export_call("abc12345", "write_value", false)
+                    .reserve_export_call("conversation", "abc12345", "write_value", false)
                     .expect("first 10 mutation calls are allowed"),
             );
         }
-        let mutation_limited = match transport.reserve_export_call("abc12345", "write_value", false)
-        {
-            Ok(_) => panic!("11th mutation call must be rejected"),
-            Err(error) => error,
-        };
+        let mutation_limited =
+            match transport.reserve_export_call("conversation", "abc12345", "write_value", false) {
+                Ok(_) => panic!("11th mutation call must be rejected"),
+                Err(error) => error,
+            };
         assert_eq!(
             mutation_limited.structured_content.unwrap()["code"],
             "rate_limited"
@@ -3124,7 +3272,6 @@ mod tests {
                 "validate_template_selection",
                 "resolve_template_selection",
                 "stage_create",
-                "confirm_runtime_profile",
                 "create",
                 "scaffold",
                 "manage_runtime",
@@ -3927,8 +4074,8 @@ mod tests {
     /// `image.width`/`image.height` are the only numbers that convert a
     /// coordinate the model reads off the picture back into the CSS pixels
     /// `act_on_ui`'s `pointer` takes. Dropping the whole `image` object took
-    /// them with it, so `skills/frontend-qa/SKILL.md`'s inversion formula
-    /// named a key the caller never receives: the agent then guesses a scale,
+    /// them with it, so the Local App QA inversion formula named a key the
+    /// caller never receives: the agent then guesses a scale,
     /// the derived tap lands somewhere else, and the call still answers
     /// `ok: true`. They ride as `image_width`/`image_height` siblings rather
     /// than a re-inserted `image` object precisely so the base64 is not sent
@@ -4643,7 +4790,7 @@ mod tests {
              {outcome:?}"
         );
         assert!(
-            format!("{outcome:?}").contains("runtime_profile_receipt"),
+            format!("{outcome:?}").contains("receipt_id"),
             "the handler must reject missing native confirmation rather than being blocked by the shell gate: {outcome:?}"
         );
     }

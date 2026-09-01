@@ -33,6 +33,7 @@ impl McpTransport for PosixMcp {
             McpTransportSpec::WebSocket { .. } => McpTransportKind::WebSocket,
             McpTransportSpec::InProcess { .. } => McpTransportKind::InProcess,
             McpTransportSpec::SseIde { .. } => McpTransportKind::SseIde,
+            McpTransportSpec::WsIde { .. } => McpTransportKind::WsIde,
             McpTransportSpec::SdkControl { .. } => McpTransportKind::SdkControl,
         };
         Err(McpError::UnsupportedTransport(kind))

@@ -1,4 +1,4 @@
-//! Plugin subsystem — manifest model, 7-state lifecycle, blocklist, strict
+//! Plugin subsystem — manifest model, 7-state lifecycle, strict
 //! policy, agent-frontmatter privilege validation, and component materializers.
 //!
 //! Plugins are the most cross-cutting subsystem in the engine: every
@@ -12,7 +12,6 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_validation;
-pub mod blocklist;
 pub mod brand_normalize;
 pub mod dependency;
 pub mod discovery;
@@ -26,6 +25,7 @@ pub mod marketplace;
 mod mcpb;
 pub mod source;
 pub mod strict_policy;
+pub mod theme_registry;
 pub mod trust;
 pub mod workflow;
 /// `${user_config.KEY}` substitution + plugin-option env helpers.
@@ -37,7 +37,6 @@ pub mod workflow;
 pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
-pub use blocklist::PluginBlocklist;
 /// §19.1 / P0a.7 — brand-token normalization layer for comparing Claude-oracle
 /// plugin fixtures against LingXi's plugin contract; see the module doc for
 /// the frozen-identity vs. known-pair distinction.
@@ -49,9 +48,12 @@ pub use dependency::{
 };
 pub use discovery::{
     discover_cli_plugin_dirs, discover_effective_plugins, discover_enabled_plugins,
-    discover_installed_plugins, discover_recorded_plugins,
+    discover_installed_plugins, discover_recorded_plugins, has_control_or_bidi_formatting,
+    validate_marketplace_name, validate_plugin_name,
 };
-pub use git::clone_plugin_git;
+pub use git::{
+    clone_plugin_git, clone_plugin_git_pinned, is_confusable_authority_url, is_suspicious_url,
+};
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};
@@ -69,6 +71,7 @@ pub use mcpb::sha256_hex as plugin_source_sha256;
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
+pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};
 pub use trust::{default_trust_for_source, PluginTrustLevel};
 /// Legacy discovery assertion helper. Production workflow registration uses
 /// the shared `workflow::PluginWorkflowRegistry` instead.

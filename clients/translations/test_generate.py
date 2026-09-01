@@ -1,4 +1,5 @@
 import json, subprocess, tempfile, os, sys
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from generate import load_locales, validate_consistency, write_android, write_ios, stale_problems
 
@@ -32,8 +33,19 @@ def test_consistency_info_plist_inner_parity():
 def test_generate_check_exit_0(tmp_path):
     out = tmp_path / "out"
     result = subprocess.run([sys.executable, "generate.py", "--ios-out", str(out), "--android-out", str(out), "--check"], cwd=os.path.dirname(__file__), capture_output=True, text=True)
-    assert result.returncode == 0
-    assert "OK:" in result.stdout
+    assert result.returncode == 1
+    assert "--check cannot be combined" in result.stderr
+
+def test_generate_check_rejects_custom_output_dirs(tmp_path):
+    out = tmp_path / "out"
+    result = subprocess.run(
+        [sys.executable, "generate.py", "--check", "--ios-out", str(out)],
+        cwd=os.path.dirname(__file__),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "--check cannot be combined" in result.stderr
 
 def test_ios_catalog_shape(tmp_path):
     rc = subprocess.run([sys.executable, "generate.py", "--ios-out", str(tmp_path)], cwd=os.path.dirname(__file__)).returncode
@@ -145,6 +157,44 @@ def test_generate_check_clean_repo_gate():
     result = subprocess.run([sys.executable, "generate.py", "--check"], cwd=os.path.dirname(__file__), capture_output=True, text=True)
     assert result.returncode == 0
     assert "OK:" in result.stdout
+
+def test_generate_check_rejects_selector_only_orphans(tmp_path):
+    selector_only_keys = {
+        "local_apps_permission_runtime_profile_selection",
+        "local_apps_runtime_profile_prompt_title",
+        "local_apps_runtime_profile_recommended",
+        "local_apps_runtime_profile_available",
+        "local_apps_runtime_profile_unavailable",
+        "local_apps_runtime_profile_select",
+        "local_apps_runtime_profile_unavailable_action",
+        "local_apps_runtime_profile_revision_surface",
+        "local_apps_runtime_profile_contract",
+        "local_apps_runtime_profile_cache_download",
+    }
+    translation_root = Path(__file__).resolve().parent
+    locales = load_locales(translation_root)
+    for locale, values in locales.items():
+        assert selector_only_keys.isdisjoint(values), f"{locale} keeps removed selector-only keys"
+
+    repo_root = translation_root.parents[1]
+    generated = [
+        repo_root / "clients/ios/Resources/Localizable.xcstrings",
+        *sorted((repo_root / "clients/android/app/src/main/res").glob("values*/strings.xml")),
+    ]
+    for path in generated:
+        text = path.read_text(encoding="utf-8")
+        for key in selector_only_keys:
+            assert key not in text, f"removed selector-only key {key} remains in {path}"
+
+    sandbox_locales, ios_out, android_out = _gate_sandbox(tmp_path)
+    write_ios(sandbox_locales, ios_out)
+    write_android(sandbox_locales, android_out)
+    catalog_path = ios_out / "Localizable.xcstrings"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["strings"]["local_apps_runtime_profile_select"] = {}
+    catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+    problems = stale_problems(sandbox_locales, ios_out, android_out)
+    assert any("Localizable.xcstrings" in problem and "out of date" in problem for problem in problems)
 
 if __name__ == "__main__":
     import pytest

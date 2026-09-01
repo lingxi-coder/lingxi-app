@@ -61,14 +61,15 @@ pub use events::{
     RecordingAppEventObserver,
 };
 pub use manifest::{
-    derive_publication_state, load_manifest, load_mcp_catalog, save_manifest, save_mcp_catalog,
-    AppDependencySnapshot, AppLayout, AppManifest, AppMcpCatalogRef, AppPublicationState,
-    AppRuntimeProfileBinding, AppSurface, AppTemplateOrigin, DataCollectionSchema, DataFieldKind,
-    DataFieldSchema, DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
+    derive_publication_state, hash_mcp_catalog, load_manifest, load_mcp_catalog, save_manifest,
+    save_mcp_catalog, AppDependencySnapshot, AppLayout, AppManifest, AppMcpCatalogRef,
+    AppPublicationState, AppRuntimeProfileBinding, AppSurface, AppTemplateOrigin,
+    DataCollectionSchema, DataFieldKind, DataFieldSchema, DeviceContext,
+    WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use mcp_authoring::{
     approval_contract_sha256, catalog_sha256, derive_local_app_mcp_ceiling, load_candidate_journal,
-    save_candidate_journal, validate_app_mcp_flow_binding,
+    materialize_flow_value_binding, save_candidate_journal, validate_app_mcp_flow_binding,
     validate_app_mcp_flow_binding_for_consumer, validate_app_mcp_proposal,
     validate_generated_mcp_catalog, validate_generated_structured_result, value_matches_schema,
     AppMcpFlowBinding, AppMcpFlowContext, AppMcpProposal, AppMcpToolProposal, FlowSource,

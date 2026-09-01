@@ -27,9 +27,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationDto, McpNotificationStream,
-    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDefinitionDto,
-    McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
-    ServerCapabilitiesDto,
+    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+    McpToolDefinitionDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+    McpTransportSpec, ServerCapabilitiesDto,
 };
 
 /// MCP protocol version this transport advertises in `initialize`.
@@ -223,6 +223,43 @@ struct RawTool {
     description: String,
     #[serde(rename = "inputSchema", default)]
     input_schema: Value,
+    #[serde(default, rename = "_meta")]
+    meta: RawToolMeta,
+}
+
+/// The subset of a tool's `_meta` this transport forwards.
+///
+/// §27b — `anthropic/requiresUserInteraction` decides whether the permission
+/// dialog may offer a PERSISTENT "always allow" grant (oracle
+/// `requiresUserInteraction(){return Ee}` @182520425 →
+/// `suppressesAlwaysAllowRule` @182520462). This transport, not
+/// `mcp::client::McpClient`, is what fills
+/// `McpConnectionState::Connected { tools }` on the desktop connect path, so
+/// dropping the bit here made the whole §27b chain inert end to end.
+///
+/// `anthropic/searchHint` and `anthropic/alwaysLoad` are still dropped by this
+/// transport (pre-existing, out of this batch's scope — reported, not fixed).
+#[derive(Deserialize, Default)]
+struct RawToolMeta {
+    #[serde(default, rename = "anthropic/requiresUserInteraction")]
+    requires_user_interaction: bool,
+}
+
+impl RawTool {
+    /// Wire entry -> DTO. `server_name`/`full_name` carry the empty `<server>`
+    /// token; `McpRegistry::connect` rewrites both once it knows the registry
+    /// key.
+    fn into_dto(self) -> McpToolDto {
+        let mut definition = McpToolDefinitionDto::new(self.name, self.input_schema);
+        definition.description = Some(self.description);
+        let mut dto = McpToolDto::new(
+            String::new(),
+            format!("mcp____{}", definition.name),
+            definition,
+        );
+        dto.requires_user_interaction = self.meta.requires_user_interaction;
+        dto
+    }
 }
 
 #[derive(Deserialize)]
@@ -251,6 +288,27 @@ struct RawResource {
     uri: String,
     #[serde(default)]
     name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+/// Wire response for `resources/templates/list` (§26a). Oracle
+/// `MYe = yEt.extend({resourceTemplates:H(GGt)})` (2.1.251 Mach-O
+/// @167622755) — same envelope shape as `ResourcesListResult` but keyed
+/// `resourceTemplates` and carrying `uriTemplate` instead of a concrete `uri`.
+#[derive(Deserialize)]
+struct ResourceTemplatesListResult {
+    #[serde(default, rename = "resourceTemplates")]
+    resource_templates: Vec<RawResourceTemplate>,
+}
+
+#[derive(Deserialize)]
+struct RawResourceTemplate {
+    #[serde(rename = "uriTemplate")]
+    uri_template: String,
+    #[serde(default)]
+    name: String,
+    description: Option<String>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
 }
@@ -297,6 +355,46 @@ struct RawPromptArgument {
 /// a more specific mapping, e.g. `call_tool`'s timeout / not-found paths).
 fn map_call_err(e: &ConnectionError) -> McpError {
     McpError::Internal(e.to_string())
+}
+
+/// Recover structured HTTP status / `WWW-Authenticate` metadata from a failed
+/// `initialize` call, instead of flattening it to a `Handshake(String)`.
+///
+/// The Streamable HTTP writer task has no synchronous way to fail the
+/// `initialize` POST directly (it runs the request/response cycle inside a
+/// detached `tokio::spawn`, decoupled from the caller's `.call()` future), so
+/// a non-2xx response is turned into a *synthetic* JSON-RPC error response
+/// (`mcp_http.rs::http_error_message`) carrying `data: {httpStatus,
+/// wwwAuthenticate}` — the same structured pair `McpError::HttpResponse`
+/// already carries for a genuine transport-level failure (SSE's pre-flight
+/// GET). Unwrap that `data` shape here so callers (401/403 auth
+/// classification in `mcp::registry`) can match on `McpError::HttpResponse`
+/// uniformly regardless of which transport produced it.
+///
+/// A real MCP protocol failure (bad params, method not found, a plain
+/// `RouterError` with no `data`) has no `httpStatus` in `data` and falls
+/// back to the prior `Handshake(e.to_string())` behavior unchanged.
+fn handshake_error(e: &ConnectionError) -> McpError {
+    if let ConnectionError::Router(RouterError::Remote(re)) = e {
+        if let Some(status) = re
+            .data
+            .as_ref()
+            .and_then(|data| data.get("httpStatus"))
+            .and_then(Value::as_u64)
+        {
+            let www_authenticate = re
+                .data
+                .as_ref()
+                .and_then(|data| data.get("wwwAuthenticate"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return McpError::HttpResponse {
+                status: status as u16,
+                www_authenticate,
+            };
+        }
+    }
+    McpError::Handshake(e.to_string())
 }
 
 /// True when `e` is a remote JSON-RPC error carrying the
@@ -415,8 +513,16 @@ impl McpTransport for PosixMcpTransport {
         let result: Value = connection
             .call("initialize", initialize_params())
             .await
-            // A failed initialize is a handshake failure, not a generic error.
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
+            // A failed initialize is a handshake failure — UNLESS the
+            // Streamable HTTP writer task (`mcp_http.rs::http_error_message`)
+            // turned a non-2xx POST response into a synthetic JSON-RPC error
+            // carrying `data: {httpStatus, wwwAuthenticate}`; surface that
+            // structurally as `McpError::HttpResponse` (see `handshake_error`)
+            // so 401/403 classification never has to substring-match a
+            // stringified error. SSE's connect() arm already returns this
+            // structurally via `SseConnectError::HttpResponse` for the
+            // pre-flight GET; this closes the matching gap for `Http`.
+            .map_err(|e| handshake_error(&e))?;
 
         // The server's declared capabilities live under `result.capabilities`
         // as a presence map (e.g. `{ "tools": {} }`). Map by presence.
@@ -460,20 +566,7 @@ impl McpTransport for PosixMcpTransport {
         // only an `McpConnectionId`. We leave `server_name` empty (and the
         // `full_name` FQN unprefixed by a server) and let the `lingxi-mcp`
         // layer rewrite the FQN once it knows the registry key.
-        let server_name = String::new();
-        Ok(parsed
-            .tools
-            .into_iter()
-            .map(|t| {
-                let mut definition = McpToolDefinitionDto::new(t.name, t.input_schema);
-                definition.description = Some(t.description);
-                McpToolDto::new(
-                    server_name.clone(),
-                    format!("mcp__{server_name}__{}", definition.name),
-                    definition,
-                )
-            })
-            .collect())
+        Ok(parsed.tools.into_iter().map(RawTool::into_dto).collect())
     }
 
     async fn list_resources(
@@ -494,6 +587,29 @@ impl McpTransport for PosixMcpTransport {
                 uri: r.uri,
                 name: r.name,
                 mime_type: r.mime_type,
+            })
+            .collect())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        conn: &McpRawConnection,
+    ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+        let connection = self.connection_for_result(conn.connection_id)?;
+        let raw: Value = connection
+            .call("resources/templates/list", json!({}))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ResourceTemplatesListResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        Ok(parsed
+            .resource_templates
+            .into_iter()
+            .map(|t| McpResourceTemplateDto {
+                uri_template: t.uri_template,
+                name: t.name,
+                description: t.description,
+                mime_type: t.mime_type,
             })
             .collect())
     }
@@ -754,6 +870,7 @@ fn map_kind(spec: &McpTransportSpec) -> McpTransportKind {
         McpTransportSpec::WebSocket { .. } => McpTransportKind::WebSocket,
         McpTransportSpec::InProcess { .. } => McpTransportKind::InProcess,
         McpTransportSpec::SseIde { .. } => McpTransportKind::SseIde,
+        McpTransportSpec::WsIde { .. } => McpTransportKind::WsIde,
         McpTransportSpec::SdkControl { .. } => McpTransportKind::SdkControl,
     }
 }
@@ -1030,8 +1147,9 @@ mod initialize_params_tests {
 
 #[cfg(test)]
 mod error_mapping_tests {
-    use super::{is_method_not_found, map_call_err};
+    use super::{handshake_error, is_method_not_found, map_call_err};
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
+    use serde_json::json;
     use std::time::Duration;
     use traits::McpError;
 
@@ -1075,6 +1193,81 @@ mod error_mapping_tests {
         }
     }
 
+    /// `handshake_error` unwraps the synthetic `{httpStatus, wwwAuthenticate}`
+    /// `data` shape the Streamable HTTP writer task attaches to a non-2xx
+    /// `initialize` POST (`mcp_http.rs::http_error_message`) into a
+    /// structural `McpError::HttpResponse`, carrying BOTH the exact status
+    /// and the full `WWW-Authenticate` value through — the pair §19's
+    /// AUTH_HEADER_REJECTED/HEADERS_HELPER_AUTH_REJECTED classification and
+    /// §24c's `resource_metadata` extraction both need.
+    #[test]
+    fn handshake_error_unwraps_structured_http_data() {
+        let e = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32001,
+            message: "MCP_HTTP_STATUS=403;WWW_AUTHENTICATE=Bearer error=\"insufficient_scope\", \
+                      scope=\"mcp:elevated\", resource_metadata=\"https://mock/.well-known/x\""
+                .into(),
+            data: Some(json!({
+                "httpStatus": 403,
+                "wwwAuthenticate": "Bearer error=\"insufficient_scope\", scope=\"mcp:elevated\", \
+                                     resource_metadata=\"https://mock/.well-known/x\""
+            })),
+        }));
+        match handshake_error(&e) {
+            McpError::HttpResponse {
+                status,
+                www_authenticate,
+            } => {
+                assert_eq!(status, 403);
+                let waa = www_authenticate.expect("wwwAuthenticate must survive unwrapping");
+                assert!(waa.contains("insufficient_scope"));
+                assert!(waa.contains("resource_metadata="));
+            }
+            other => panic!("expected McpError::HttpResponse, got {other:?}"),
+        }
+    }
+
+    /// A 401 with no `WWW-Authenticate` header still structures as
+    /// `HttpResponse { status: 401, www_authenticate: None }` — the header is
+    /// optional, the status is not.
+    #[test]
+    fn handshake_error_unwraps_structured_http_data_without_www_authenticate() {
+        let e = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32001,
+            message: "MCP_HTTP_STATUS=401;WWW_AUTHENTICATE=".into(),
+            data: Some(json!({ "httpStatus": 401, "wwwAuthenticate": null })),
+        }));
+        assert!(matches!(
+            handshake_error(&e),
+            McpError::HttpResponse {
+                status: 401,
+                www_authenticate: None,
+            }
+        ));
+    }
+
+    /// A genuine MCP protocol failure (unrelated remote error, no `data`)
+    /// must NOT be misclassified as an `HttpResponse` — it falls back to the
+    /// prior stringified `Handshake` behavior unchanged.
+    #[test]
+    fn handshake_error_falls_back_to_handshake_for_non_http_errors() {
+        let remote = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32602,
+            message: "invalid params".into(),
+            data: None,
+        }));
+        match handshake_error(&remote) {
+            McpError::Handshake(s) => assert_eq!(s, remote.to_string()),
+            other => panic!("expected McpError::Handshake, got {other:?}"),
+        }
+
+        let writer_closed = ConnectionError::Router(RouterError::WriterClosed);
+        match handshake_error(&writer_closed) {
+            McpError::Handshake(s) => assert_eq!(s, writer_closed.to_string()),
+            other => panic!("expected McpError::Handshake, got {other:?}"),
+        }
+    }
+
     /// The load-bearing `McpError::Timeout` Display string (matched by REPL /
     /// integration surfaces) must carry the server, tool, and seconds in the
     /// documented `traits` format.
@@ -1088,6 +1281,52 @@ mod error_mapping_tests {
         assert_eq!(
             err.to_string(),
             format!("MCP server \"\" tool \"echo\" timed out after {EXAMPLE_TIMEOUT_SECS}s")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_meta_tests {
+    use super::{RawTool, ToolsListResult};
+
+    /// §27b — the `_meta.anthropic/requiresUserInteraction` bit must survive
+    /// THIS transport, because `McpRegistry::connect` fills
+    /// `McpConnectionState::Connected { tools }` from
+    /// `PosixMcpTransport::list_tools`, and `build_registered_mcp_tools` reads
+    /// that state to construct every desktop `MCPTool`. The parallel decode in
+    /// `mcp::client::McpClient::list_tools` is reached only by
+    /// `refresh_catalog`, so a test there does NOT cover the connect path:
+    /// with the bit hardcoded `false` here a server declaring
+    /// `requiresUserInteraction` still got "Yes, allow always" offered.
+    #[test]
+    fn requires_user_interaction_meta_survives_the_posix_transport_decode() {
+        let raw = serde_json::json!({
+            "tools": [
+                {
+                    "name": "plain",
+                    "description": "no meta",
+                    "inputSchema": { "type": "object" }
+                },
+                {
+                    "name": "interactive",
+                    "description": "needs a live consent step",
+                    "inputSchema": { "type": "object" },
+                    "_meta": { "anthropic/requiresUserInteraction": true }
+                }
+            ]
+        });
+        let parsed: ToolsListResult = serde_json::from_value(raw).expect("decode");
+        let dtos: Vec<_> = parsed.tools.into_iter().map(RawTool::into_dto).collect();
+        assert_eq!(dtos.len(), 2);
+        assert_eq!(dtos[0].tool_name, "plain");
+        assert!(
+            !dtos[0].requires_user_interaction,
+            "a tool with no _meta must default to false"
+        );
+        assert_eq!(dtos[1].tool_name, "interactive");
+        assert!(
+            dtos[1].requires_user_interaction,
+            "_meta.anthropic/requiresUserInteraction must reach the DTO the registry stores"
         );
     }
 }

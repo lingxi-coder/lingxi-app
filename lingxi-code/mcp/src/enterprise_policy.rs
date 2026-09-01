@@ -66,9 +66,16 @@ pub const ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE: &str =
 /// testable without touching the process-global managed dir / env.
 #[must_use]
 pub fn enterprise_mcp_active_at(path: &Path) -> bool {
-    // claude's `$7t` gates on "regular file within size limit"; here a failed
-    // read (ENOENT / not-a-file / unreadable) is the same not-active signal.
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    // claude's `$7t` IS `Iqe` at `scope:"enterprise"` (`zit`'s
+    // `case"enterprise"` calls `Iqe({filePath:J$t(),expandVars:t,
+    // scope:"enterprise"})`, 2.1.251 @160901500), so the read goes through
+    // `Atr(d,t,mcn)` — `if(!o.isFile()||o.size>r)return null`, @156004982 —
+    // and is REFUSED for a non-regular file (a FIFO would otherwise block
+    // boot forever waiting for a writer) or one over 2 MiB. A refused or
+    // failed read (ENOENT / not-a-file / oversized / unreadable) is the same
+    // not-active signal.
+    let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(path, ConfigScope::Enterprise)
+    else {
         return false;
     };
     if raw.trim().is_empty() {
@@ -86,11 +93,17 @@ pub fn enterprise_mcp_active_at(path: &Path) -> bool {
 // Stage 2 — the `bPe`/`edt` (deny) / `gPe`/`ZFe` (allow) policy matchers.
 //
 // claude reads the allow/deny lists from the *effective merged* settings
-// (`$n()`); the CLI `mcp add` has no effective-settings reader, so we read them
-// from the managed policy tiers (`managed-settings.json` + `managed-settings.d`)
-// — the canonical, enterprise home for `deniedMcpServers`/`allowedMcpServers`.
-// (A deny/allow list placed in a *personal* user-tier settings file is not yet
-// consulted here; that awaits a shared effective-settings reader.)
+// (`Je()`) via [`McpPolicy::from_effective_settings`] — see
+// [`allow_managed_mcp_servers_only`] just below for the `allowManagedMcpServersOnly`
+// gate that decides whether `allowedMcpServers` reads from every tier (like
+// `deniedMcpServers` always does) or from managed policy alone.
+//
+// [`read_managed_mcp_policy`]/[`read_managed_mcp_policy_in`] read ONLY the
+// managed policy tiers (`managed-settings.json` + `managed-settings.d`) —
+// a narrower, managed-tiers-only view kept for the one remaining call site
+// that has no ordinary-tier sources to hand it (the agent-frontmatter MCP
+// merge). A deny/allow list placed in a *personal* user-tier settings file is
+// not consulted by that narrow reader.
 //
 // Since 2.1.219 the POLICY side of every predicate expands against a dedicated
 // policy expansion env (frozen startup snapshot + managed-source env — see the
@@ -127,52 +140,138 @@ pub struct McpPolicy {
     pub allowed: Option<Vec<McpServerMatcher>>,
 }
 
-impl McpPolicy {
-    /// Compose the effective policy from ordinary settings sources and managed
-    /// sources. Deny entries accumulate across every source and always win;
-    /// allow entries are accepted only from managed policy.
-    #[must_use]
-    pub fn from_effective_settings(ordinary: &[Value], managed: &[Value]) -> Self {
-        let mut denied = Vec::new();
-        let mut denied_present = false;
-        for source in ordinary.iter().chain(managed) {
-            let Some(raw) = source.get("deniedMcpServers") else {
-                continue;
-            };
-            denied_present = true;
-            let Some(entries) = raw.as_array() else {
-                continue;
-            };
-            for entry in entries {
-                if let Ok(matcher) = parse_matcher_entry(entry, MatcherListKind::Denied) {
-                    if !denied.contains(&matcher) {
-                        denied.push(matcher);
-                    }
+/// Fold `key`'s matcher-list entries across every source that DEFINES it,
+/// accumulating de-duplicated matchers into one list — claude's "merges from
+/// all sources" arrays. This is `deniedMcpServers`'s permanent shape (`pAn()`
+/// always reads the full merged effective settings) and is also
+/// `allowedMcpServers`'s shape whenever [`allow_managed_mcp_servers_only`] is
+/// false (`uAn()` then also returns the full merged effective settings,
+/// `Je()`, not the managed-only slice).
+///
+/// Returns `(field present in any source, matchers)`; an entry failing the
+/// zod-mirrored per-element validation ([`parse_matcher_entry`]) is dropped,
+/// same as [`read_managed_mcp_policy_in`].
+fn accumulate_matcher_list<'a>(
+    sources: impl Iterator<Item = &'a Value>,
+    key: &str,
+    kind: MatcherListKind,
+) -> (bool, Vec<McpServerMatcher>) {
+    let mut out = Vec::new();
+    let mut present = false;
+    for source in sources {
+        let Some(raw) = source.get(key) else {
+            continue;
+        };
+        present = true;
+        let Some(entries) = raw.as_array() else {
+            continue;
+        };
+        for entry in entries {
+            if let Ok(matcher) = parse_matcher_entry(entry, kind) {
+                if !out.contains(&matcher) {
+                    out.push(matcher);
                 }
             }
         }
+    }
+    (present, out)
+}
 
-        // Managed tiers are ordered low → high. A later managed tier that
-        // supplies the field replaces the previous allowlist; an invalid value
-        // fails closed as an empty allowlist.
-        let mut allowed = None;
-        for source in managed {
-            let Some(raw) = source.get("allowedMcpServers") else {
-                continue;
-            };
-            allowed = Some(
-                raw.as_array()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter_map(|entry| {
-                                parse_matcher_entry(entry, MatcherListKind::Allowed).ok()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            );
+/// claude's byte-exact warning when `allowManagedMcpServersOnly` is present
+/// but is not a boolean (@154802763). Unlike the two list warnings below, an
+/// invalid value here fails closed to the MORE restrictive managed-only
+/// reading — `.catch(() => true)` — never to unrestricted.
+const ALLOW_MANAGED_MCP_SERVERS_ONLY_INVALID: &str = "\"allowManagedMcpServersOnly\" was present but invalid; treating it as true until it is fixed.";
+
+/// claude's `ghr()` (@160901593): `ye("policySettings")?.allowManagedMcpServersOnly===!0`.
+/// Only the managed/policy settings tiers participate — a user- or
+/// project-scope `allowManagedMcpServersOnly` cannot opt itself into (or out
+/// of) the managed-only reading. Managed tiers are ordered low → high, same
+/// as every other managed-settings field (a later tier's value replaces an
+/// earlier one wholesale, it does not merge); a present non-boolean value
+/// fails closed to `true`.
+fn allow_managed_mcp_servers_only(managed: &[Value]) -> bool {
+    let mut raw = None;
+    for source in managed {
+        if let Some(v) = source.get("allowManagedMcpServersOnly") {
+            raw = Some(v);
         }
+    }
+    match raw {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            tracing::warn!("allowManagedMcpServersOnly: {ALLOW_MANAGED_MCP_SERVERS_ONLY_INVALID}");
+            true
+        }
+    }
+}
+
+impl McpPolicy {
+    /// Compose the effective policy from ordinary settings sources and managed
+    /// sources — claude's `uAn()`/`pAn()` pair, gated on `ghr()`
+    /// (`allowManagedMcpServersOnly`).
+    ///
+    /// `deniedMcpServers` ALWAYS accumulates across every source (ordinary
+    /// then managed) and always wins — deny is never policy-locked, so users
+    /// can deny servers for themselves even under managed-only mode (the
+    /// setting's own description: *"deniedMcpServers still merges from all
+    /// sources, so users can deny servers for themselves"*).
+    ///
+    /// `allowedMcpServers` depends on [`allow_managed_mcp_servers_only`]:
+    /// - **true** (or an invalid value, failing closed) — allow entries are
+    ///   accepted ONLY from managed policy (`ye("policySettings")??{}`); a
+    ///   later managed tier that supplies the field replaces the previous
+    ///   allowlist wholesale, and an invalid list value fails closed as an
+    ///   empty allowlist (nothing admitted).
+    /// - **false or absent** (the default) — `allowedMcpServers` merges from
+    ///   EVERY settings tier like `deniedMcpServers` does (`Je()`, the full
+    ///   merged effective settings) — a user- or project-scope allowlist is
+    ///   honoured exactly like the oracle's default (unlocked) behaviour.
+    #[must_use]
+    pub fn from_effective_settings(ordinary: &[Value], managed: &[Value]) -> Self {
+        let (denied_present, denied) = accumulate_matcher_list(
+            ordinary.iter().chain(managed),
+            "deniedMcpServers",
+            MatcherListKind::Denied,
+        );
+
+        let allowed = if allow_managed_mcp_servers_only(managed) {
+            // ye("policySettings")??{} — the single merged managed/policy
+            // settings object; a later managed tier that supplies the field
+            // replaces the previous allowlist wholesale (Object.assign-style
+            // per key, not accumulated), and an invalid value fails closed as
+            // an empty allowlist.
+            let mut allowed = None;
+            for source in managed {
+                let Some(raw) = source.get("allowedMcpServers") else {
+                    continue;
+                };
+                allowed = Some(
+                    raw.as_array()
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    parse_matcher_entry(entry, MatcherListKind::Allowed).ok()
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                );
+            }
+            allowed
+        } else {
+            // Je() — not policy-locked, so allow merges from every tier
+            // exactly like deny does.
+            let (present, list) = accumulate_matcher_list(
+                ordinary.iter().chain(managed),
+                "allowedMcpServers",
+                MatcherListKind::Allowed,
+            );
+            present.then_some(list)
+        };
+
         Self {
             denied: denied_present.then_some(denied),
             allowed,
@@ -1355,7 +1454,9 @@ fn spec_matcher_view(spec: &McpTransportSpec) -> Value {
             "command": command,
             "args": args,
         }),
-        McpTransportSpec::Sse { url, .. } | McpTransportSpec::SseIde { url, .. } => {
+        McpTransportSpec::Sse { url, .. }
+        | McpTransportSpec::SseIde { url, .. }
+        | McpTransportSpec::WsIde { url, .. } => {
             serde_json::json!({ "type": "sse", "url": url })
         }
         McpTransportSpec::Http { url, .. } => serde_json::json!({ "type": "http", "url": url }),
@@ -1382,7 +1483,25 @@ pub fn is_server_allowed(config: &McpServerConfig, policy: &McpPolicy) -> bool {
 /// missing/malformed file.
 #[must_use]
 pub fn load_enterprise_servers() -> Vec<McpServerConfig> {
-    let Ok(raw) = std::fs::read_to_string(managed_mcp_config_path()) else {
+    load_enterprise_servers_at(&managed_mcp_config_path())
+}
+
+/// The [`load_enterprise_servers`] core, parameterized on the config path so it
+/// is testable without touching the process-global managed dir / env.
+///
+/// The read goes through the same `Iqe` shape/size guard the project-scope
+/// `.mcp.json` walk uses: `zit`'s `case"enterprise"` calls
+/// `Iqe({filePath:J$t(),expandVars:t,scope:"enterprise"})` (2.1.251
+/// @160901500), and every non-`dynamic` scope inside `Iqe` reads via
+/// `Atr(d,t,mcn)` (`if(!o.isFile()||o.size>r)return null`, @156004982). A
+/// managed `managed-mcp.json` that is a FIFO or larger than
+/// [`crate::config_diagnostics::MCP_CONFIG_MAX_BYTES`] is refused rather than
+/// read — an unguarded `read_to_string` on a writer-less FIFO blocks boot
+/// forever.
+#[must_use]
+pub fn load_enterprise_servers_at(path: &Path) -> Vec<McpServerConfig> {
+    let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(path, ConfigScope::Enterprise)
+    else {
         return Vec::new();
     };
     crate::json_config::parse_mcp_json_string(&raw, ConfigScope::Enterprise).unwrap_or_default()
@@ -1417,6 +1536,55 @@ pub fn apply_enterprise_mcp_policy_with(configs: &mut Vec<McpServerConfig>, poli
 
 #[cfg(test)]
 mod tests {
+
+    /// The enterprise `managed-mcp.json` read goes through the same `Iqe`
+    /// shape/size guard the project `.mcp.json` walk uses: `zit`'s
+    /// `case"enterprise"` calls `Iqe({filePath:J$t(),expandVars:t,
+    /// scope:"enterprise"})` (2.1.251 @160901500) and every non-`dynamic`
+    /// scope inside `Iqe` reads via `Atr(d,t,mcn)` —
+    /// `if(!o.isFile()||o.size>r)return null` with `mcn=2097152` (@156004982,
+    /// @160911363). Both enterprise readers were doing a bare
+    /// `std::fs::read_to_string`, so an oversized managed config was read in
+    /// full and a FIFO would have blocked boot forever waiting for a writer.
+    #[test]
+    fn enterprise_managed_config_is_refused_when_it_exceeds_the_byte_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("managed-mcp.json");
+
+        // Comfortably UNDER the cap: loads normally, so the test cannot pass
+        // by simply failing to read anything.
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"srv":{"type":"stdio","command":"c"}}}"#,
+        )
+        .unwrap();
+        assert!(super::enterprise_mcp_active_at(&path));
+        let servers = super::load_enterprise_servers_at(&path);
+        assert_eq!(servers.len(), 1, "a small managed config must still load");
+        assert_eq!(servers[0].name, "srv");
+
+        // Same content, padded past `mcn` with whitespace inside the object so
+        // it stays valid JSON: the guard must refuse the read outright.
+        let cap = crate::config_diagnostics::MCP_CONFIG_MAX_BYTES as usize;
+        let padded = format!(
+            "{{\"mcpServers\":{{\"srv\":{{\"type\":\"stdio\",\"command\":\"c\"}}}}{}}}",
+            " ".repeat(cap + 1)
+        );
+        std::fs::write(&path, &padded).unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len()
+                > crate::config_diagnostics::MCP_CONFIG_MAX_BYTES,
+            "fixture must actually cross the {cap}-byte threshold it names"
+        );
+        assert!(
+            !super::enterprise_mcp_active_at(&path),
+            "an over-cap managed-mcp.json must not activate enterprise MCP control"
+        );
+        assert!(
+            super::load_enterprise_servers_at(&path).is_empty(),
+            "an over-cap managed-mcp.json must be refused, not read in full"
+        );
+    }
 
     /// Within the FILE tier, a `managed-settings.d` drop-in OVERRIDES the base
     /// `managed-settings.json`, and the drop-ins are applied in sorted order.
@@ -2109,6 +2277,16 @@ mod tests {
         // `RLi`'s array-level catches are asymmetric: `allowedMcpServers` falls
         // back to `[]` (and `ZFe`'s `length===0` ⇒ deny all) while
         // `deniedMcpServers` falls back to `undefined` (nothing enforced).
+        //
+        // §23a note: this exercises [`read_managed_mcp_policy_in`], the
+        // narrow managed-tiers-only reader — NOT
+        // [`McpPolicy::from_effective_settings`], whose `allowedMcpServers`
+        // handling now depends on `allowManagedMcpServersOnly` (see
+        // `effective_policy_merges_all_denies_and_only_managed_allows_when_locked`
+        // / `effective_policy_merges_allow_from_every_tier_when_unlocked`
+        // below). This narrow reader has no ordinary-tier sources to
+        // consult in the first place, so it stays the managed-only
+        // projection unconditionally; unaffected by that fix.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("managed-settings.json"),
@@ -2209,13 +2387,24 @@ mod tests {
         );
     }
 
+    // §23a (round 7 inverted this, corrected round 9): the port was
+    // unconditionally managed-only for `allowedMcpServers` regardless of
+    // `allowManagedMcpServersOnly`. That is over-strict, not a hole — a
+    // user/project allowlist the oracle would honour (flag absent or false)
+    // was silently dropped. `from_effective_settings` now models the flag
+    // (claude's `ghr()`/`uAn()`); this test renamed from
+    // `effective_policy_merges_all_denies_but_only_managed_allows` (which
+    // asserted the over-strict behaviour unconditionally) to make the
+    // managed-only branch explicit by SETTING the flag, and a new sibling
+    // test below covers the corrected default (flag absent) branch.
     #[test]
-    fn effective_policy_merges_all_denies_but_only_managed_allows() {
+    fn effective_policy_merges_all_denies_and_only_managed_allows_when_locked() {
         let ordinary = vec![serde_json::json!({
             "deniedMcpServers": [{"serverName": "user-deny"}],
             "allowedMcpServers": [{"serverName": "user-allow-must-be-ignored"}]
         })];
         let managed = vec![serde_json::json!({
+            "allowManagedMcpServersOnly": true,
             "deniedMcpServers": [{"serverName": "managed-deny"}],
             "allowedMcpServers": [{"serverName": "managed-allow"}]
         })];
@@ -2240,5 +2429,84 @@ mod tests {
             &serde_json::json!({"command": "x"}),
             &policy
         ));
+    }
+
+    /// The §23a fix's core behaviour: with `allowManagedMcpServersOnly`
+    /// absent (the default), a user/project-scope `allowedMcpServers` is
+    /// honoured exactly like `deniedMcpServers` always is — merged in from
+    /// every tier, not silently dropped.
+    #[test]
+    fn effective_policy_merges_allow_from_every_tier_when_unlocked() {
+        let ordinary = vec![serde_json::json!({
+            "allowedMcpServers": [{"serverName": "user-allow"}]
+        })];
+        let managed = vec![serde_json::json!({
+            "allowedMcpServers": [{"serverName": "managed-allow"}]
+        })];
+        let policy = McpPolicy::from_effective_settings(&ordinary, &managed);
+        assert!(is_allowed(
+            "user-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(is_allowed(
+            "managed-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(!is_allowed(
+            "not-listed",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+    }
+
+    /// `allowManagedMcpServersOnly:false` is byte-identical to absent —
+    /// merges allow from every tier.
+    #[test]
+    fn effective_policy_treats_explicit_false_flag_same_as_absent() {
+        let ordinary = vec![serde_json::json!({
+            "allowedMcpServers": [{"serverName": "user-allow"}]
+        })];
+        let managed = vec![serde_json::json!({"allowManagedMcpServersOnly": false})];
+        let policy = McpPolicy::from_effective_settings(&ordinary, &managed);
+        assert!(is_allowed(
+            "user-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+    }
+
+    /// claude's `.catch(() => true)`: a non-boolean
+    /// `allowManagedMcpServersOnly` fails closed to the MORE restrictive
+    /// managed-only reading, not to unrestricted.
+    #[test]
+    fn effective_policy_invalid_flag_value_fails_closed_to_managed_only() {
+        let ordinary = vec![serde_json::json!({
+            "allowedMcpServers": [{"serverName": "user-allow"}]
+        })];
+        let managed = vec![serde_json::json!({
+            "allowManagedMcpServersOnly": "yes",
+            "allowedMcpServers": [{"serverName": "managed-allow"}]
+        })];
+        let policy = McpPolicy::from_effective_settings(&ordinary, &managed);
+        assert!(is_allowed(
+            "managed-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+        assert!(!is_allowed(
+            "user-allow",
+            &serde_json::json!({"command": "x"}),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn allow_managed_mcp_servers_only_warning_is_byte_exact() {
+        assert_eq!(
+            ALLOW_MANAGED_MCP_SERVERS_ONLY_INVALID,
+            "\"allowManagedMcpServersOnly\" was present but invalid; treating it as true until it is fixed."
+        );
     }
 }

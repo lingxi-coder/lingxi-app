@@ -867,9 +867,6 @@ pub enum AppCapabilityKindDto {
     UiControl,
     NetworkDomain,
     RestoreCheckpoint,
-    /// One-shot host approval for selecting or confirming a runtime profile.
-    /// This is an operational prompt, not a manifest-declared app capability.
-    RuntimeProfileSelection,
     /// One-shot host approval for dependency add/update operations. This is an
     /// operational prompt, not a manifest-declared app capability.
     DependencyChange,
@@ -933,19 +930,6 @@ pub struct AppRuntimeProfileOptionDto {
     pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-/// Native one-shot runtime profile selection request for one unscaffolded app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(rename_all = "camelCase")]
-pub struct AppRuntimeProfileSelectionRequestDto {
-    pub request_id: String,
-    pub app_id: String,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_family: Option<AppRuntimeProfileDto>,
-    pub options: Vec<AppRuntimeProfileOptionDto>,
 }
 
 /// The kind of one requested dependency change.  Removal is represented on
@@ -1123,6 +1107,285 @@ pub enum PluginCommandDto {
         /// Bare `enabledPlugins` key.
         plugin_id: String,
     },
+    /// Read the host-verified builtin-plugin inventory row for native settings.
+    GetInventory {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+    },
+    /// Resolve one unified create-confirmation sheet.
+    ResolveCreateConfirmation {
+        /// Pending native confirmation correlator.
+        request_id: String,
+        /// Whether the user approved the exact reviewed surface.
+        approved: bool,
+    },
+    /// Resolve one MCP proposal diff/approval sheet.
+    ResolveMcpProposalApproval {
+        /// Pending native confirmation correlator.
+        request_id: String,
+        /// Whether the user approved the exact reviewed surface.
+        approved: bool,
+    },
+    /// Read the managed Local App MCP inventory projection for native UI.
+    GetManagedMcpInventory,
+}
+
+/// Client-protocol-level Local App failure code surfaced directly to native UI.
+///
+/// This is intentionally SEPARATE from [`AppErrorCodeDto`]: these failures come
+/// from the Local App Plugin/native-control plane rather than the core app
+/// runtime operations already covered by `AppOperationFailed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppPluginErrorCodeDto {
+    PluginDisabled,
+    BuiltinBundleUnavailable,
+    TemplateUnavailable,
+    ProposalInvalid,
+    CatalogStale,
+    ActiveStateCorrupt,
+    McpAuthoringRequired,
+    RepairBudgetExhausted,
+    ExposureCapacityReached,
+}
+
+/// Verification badge state shown in native Local App surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppVerificationStatusDto {
+    Pending,
+    Passed,
+    Failed,
+    Unverified,
+    Unavailable,
+}
+
+/// One verification badge or status line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppVerificationSummaryDto {
+    pub status: LocalAppVerificationStatusDto,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// One named gate shown in a native approval or verification surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppGateStatusDto {
+    pub gate_id: String,
+    pub label: String,
+    pub status: LocalAppVerificationStatusDto,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Count summary for the builtin Local App Plugin inventory row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppPluginComponentCountsDto {
+    pub skills: u32,
+    pub agents: u32,
+    pub workflows: u32,
+    pub templates: u32,
+}
+
+/// Native settings/inventory projection for the builtin Local App Plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppPluginInventoryDto {
+    pub plugin_id: String,
+    pub display_name: String,
+    pub source: String,
+    pub version: String,
+    pub bundle_sha256: String,
+    pub state: PluginActivationStateDto,
+    pub manifest_default_enabled: bool,
+    pub counts: LocalAppPluginComponentCountsDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_error: Option<String>,
+}
+
+/// One rejected selector candidate shown only in trusted native UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppRejectedCandidateDto {
+    pub template_id: String,
+    pub reason: String,
+}
+
+/// Display-only summary of the selected template on the create sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppTemplateSummaryDto {
+    pub template_id: String,
+    pub surface: AppSurfaceDto,
+    pub summary: String,
+}
+
+/// One reviewable MCP tool surface carried through Local App native UI.
+///
+/// Complex JSON-valued MCP fields stay as STRINGS here, matching the broader
+/// client-protocol rule that structured payloads crossing the wire remain
+/// UniFFI-flat strings instead of `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpToolSurfaceDto {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema_json: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_meta_json: Option<String>,
+    pub semantic_flow_json: String,
+    pub permission_ceiling: String,
+}
+
+/// One shared receipt status used by create confirmation and MCP proposal approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppReceiptStatusDto {
+    pub receipt_id: String,
+    pub app_id: String,
+    pub workflow_run_id: String,
+    pub approval_contract_sha256: String,
+    pub candidate_digest: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub consumed: bool,
+    pub superseded: bool,
+}
+
+/// Native request for one unified create confirmation sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppCreateConfirmationRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub name: String,
+    pub brief: String,
+    pub selected_template: LocalAppTemplateSummaryDto,
+    pub runtime_profile: AppRuntimeProfileOptionDto,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<LocalAppRejectedCandidateDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_tools: Vec<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_gates: Vec<LocalAppGateStatusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<LocalAppReceiptStatusDto>,
+}
+
+/// One review-surface dimension whose before/after changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppMcpToolFieldDto {
+    Name,
+    Title,
+    Description,
+    InputSchema,
+    OutputSchema,
+    Annotations,
+    Execution,
+    VisibleMeta,
+    SemanticFlow,
+    PermissionCeiling,
+}
+
+/// Coarse kind of one MCP proposal diff row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppMcpToolChangeKindDto {
+    Added,
+    Removed,
+    Changed,
+}
+
+/// One tool row in the native MCP proposal diff sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpToolDiffDto {
+    pub kind: LocalAppMcpToolChangeKindDto,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<LocalAppMcpToolFieldDto>,
+}
+
+/// Native request for one Local App MCP proposal diff/approval sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpProposalApprovalRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub workflow_run_id: String,
+    pub summary: String,
+    pub proposal_sha256: String,
+    pub approval_contract_sha256: String,
+    pub tool_surface_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_diffs: Vec<LocalAppMcpToolDiffDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_flow_changes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_gates: Vec<LocalAppGateStatusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<LocalAppReceiptStatusDto>,
+}
+
+/// One managed Local App MCP logical-server row for native inventory UIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedLocalAppMcpServerDto {
+    pub server_name: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub build_id: String,
+    pub catalog_sha256: String,
+    pub tool_surface_sha256: String,
+    pub tool_count: u32,
+    pub authoring_revision: u64,
+    pub publication_state: AppWorkflowStateDto,
+    pub mcp_verification: LocalAppVerificationSummaryDto,
+    pub ui_verification: LocalAppVerificationSummaryDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LocalAppMcpToolSurfaceDto>,
 }
 
 /// Extensible local-app event payload carried by the single top-level
@@ -1219,13 +1482,6 @@ pub enum AppEventDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// A native one-shot runtime profile selector must resolve this request
-    /// with one chosen family or an explicit cancel.
-    ///
-    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
-    AppRuntimeProfileSelectionRequested {
-        request: AppRuntimeProfileSelectionRequestDto,
-    },
     /// A native one-shot dependency review must resolve with approval or
     /// cancellation before the host may resolve/install any package.
     ///
@@ -1239,6 +1495,38 @@ pub enum AppEventDto {
     /// Appended at the END to preserve UniFFI enum ordinals for older clients.
     PluginStatusChanged {
         status: PluginStatusDto,
+    },
+    /// Host-verified inventory row for the builtin Local App Plugin.
+    PluginInventoryChanged {
+        inventory: LocalAppPluginInventoryDto,
+    },
+    /// One trusted native create-confirmation sheet is waiting for a decision.
+    CreateConfirmationRequested {
+        request: LocalAppCreateConfirmationRequestDto,
+    },
+    /// One trusted native MCP proposal diff/approval sheet is waiting for a decision.
+    McpProposalApprovalRequested {
+        request: LocalAppMcpProposalApprovalRequestDto,
+    },
+    /// Managed Local App MCP inventory changed.
+    ManagedMcpInventoryChanged {
+        servers: Vec<ManagedLocalAppMcpServerDto>,
+    },
+    /// Derived publication plus UI/MCP verification summary for one app.
+    VerificationSummaryChanged {
+        app_id: String,
+        publication_state: AppWorkflowStateDto,
+        mcp_verification: LocalAppVerificationSummaryDto,
+        ui_verification: LocalAppVerificationSummaryDto,
+    },
+    /// Local App Plugin/native-control-plane failure surfaced directly to clients.
+    LocalAppOperationFailed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        code: LocalAppPluginErrorCodeDto,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 }
 
@@ -1296,7 +1584,83 @@ mod tests {
     // crate's job are pinned below under their own honest names, and
     // `native_toggle_writes_back_the_same_bare_key` (fully reachable here)
     // keeps its required name.
-    use super::{AppEventDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto};
+    use super::{
+        AppEventDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto,
+        AppSurfaceDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
+        LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
+        LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
+        LocalAppPluginComponentCountsDto, LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
+        LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+        LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+        PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
+    };
+
+    fn canonical_profile_option() -> AppRuntimeProfileOptionDto {
+        AppRuntimeProfileOptionDto {
+            family: AppRuntimeProfileDto::ReactDom,
+            revision: 1,
+            contract_sha256: "8".repeat(64),
+            surface: AppSurfaceDto::Dom,
+            core_packages: vec![
+                AppRuntimeProfilePackageDto {
+                    name: "react".into(),
+                    version: "19.0.0".into(),
+                },
+                AppRuntimeProfilePackageDto {
+                    name: "@ionic/react".into(),
+                    version: "9.0.0".into(),
+                },
+            ],
+            cache_status: "bundled".into(),
+            download_status: "bundled".into(),
+            available: true,
+            reason: None,
+        }
+    }
+
+    fn canonical_tool_surface(name: &str) -> LocalAppMcpToolSurfaceDto {
+        LocalAppMcpToolSurfaceDto {
+            name: name.into(),
+            title: Some("Track habits".into()),
+            description: Some("Create one completed-habits entry.".into()),
+            input_schema_json:
+                r#"{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]}"#
+                    .into(),
+            output_schema_json: Some(
+                r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#
+                    .into(),
+            ),
+            annotations_json: Some(r#"{"readOnlyHint":false}"#.into()),
+            execution_json: Some(r#"{"taskSupport":"optional"}"#.into()),
+            visible_meta_json: Some(r#"{"anthropic/requiresUserInteraction":true}"#.into()),
+            semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.into(),
+            permission_ceiling: "ask".into(),
+        }
+    }
+
+    fn canonical_receipt() -> LocalAppReceiptStatusDto {
+        LocalAppReceiptStatusDto {
+            receipt_id: "receipt-0001".into(),
+            app_id: "habits-1a2b".into(),
+            workflow_run_id: "wf-0001".into(),
+            approval_contract_sha256: "1".repeat(64),
+            candidate_digest: "2".repeat(64),
+            issued_at_ms: 1_750_000_000_000,
+            expires_at_ms: 1_750_000_030_000,
+            consumed: false,
+            superseded: false,
+        }
+    }
+
+    fn canonical_gate() -> LocalAppGateStatusDto {
+        LocalAppGateStatusDto {
+            gate_id: "ui_runner".into(),
+            label: "UI runner available".into(),
+            status: LocalAppVerificationStatusDto::Pending,
+            available: true,
+            detail: Some("Will run after approval.".into()),
+        }
+    }
 
     /// The wire-shape half of "explicit `false` is Disabled, not absent"
     /// (§19.2): a Disabled status serializes to a concrete, present JSON
@@ -1478,6 +1842,269 @@ mod tests {
         assert_eq!(
             status["plugin_id"], set["plugin_id"],
             "GetStatus and SetEnabled must name the plugin with the SAME bare key"
+        );
+    }
+
+    #[test]
+    fn plugin_inventory_and_new_plugin_commands_round_trip_under_exact_keys() {
+        let inventory = LocalAppPluginInventoryDto {
+            plugin_id: "lingxi-local-app".into(),
+            display_name: "Local App Plugin".into(),
+            source: "builtin".into(),
+            version: "2.0.0-dev".into(),
+            bundle_sha256: "a".repeat(64),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: true,
+            counts: LocalAppPluginComponentCountsDto {
+                skills: 27,
+                agents: 1,
+                workflows: 6,
+                templates: 4,
+            },
+            validation_error: Some("missing verified root".into()),
+        };
+        let event = AppEventDto::PluginInventoryChanged {
+            inventory: inventory.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize plugin inventory event");
+        assert_eq!(json["type"], "plugin_inventory_changed");
+        assert_eq!(json["inventory"]["pluginId"], "lingxi-local-app");
+        assert_eq!(json["inventory"]["counts"]["templates"], 4_u64);
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json)
+                .expect("deserialize plugin inventory event"),
+            event
+        );
+
+        for command in [
+            PluginCommandDto::GetInventory {
+                plugin_id: "lingxi-local-app".into(),
+            },
+            PluginCommandDto::ResolveCreateConfirmation {
+                request_id: "create-0001".into(),
+                approved: true,
+            },
+            PluginCommandDto::ResolveMcpProposalApproval {
+                request_id: "proposal-0001".into(),
+                approved: false,
+            },
+            PluginCommandDto::GetManagedMcpInventory,
+        ] {
+            let json = serde_json::to_value(&command).expect("serialize plugin command");
+            assert_eq!(
+                serde_json::from_value::<PluginCommandDto>(json.clone())
+                    .expect("deserialize plugin command"),
+                command
+            );
+            match command {
+                PluginCommandDto::GetInventory { .. } => assert_eq!(json["type"], "get_inventory"),
+                PluginCommandDto::ResolveCreateConfirmation { .. } => {
+                    assert_eq!(json["type"], "resolve_create_confirmation")
+                }
+                PluginCommandDto::ResolveMcpProposalApproval { .. } => {
+                    assert_eq!(json["type"], "resolve_mcp_proposal_approval")
+                }
+                PluginCommandDto::GetManagedMcpInventory => {
+                    assert_eq!(json["type"], "get_managed_mcp_inventory")
+                }
+                _ => unreachable!("covered above"),
+            }
+        }
+    }
+
+    #[test]
+    fn create_confirmation_and_receipt_status_preserve_exact_wire_keys() {
+        let request = LocalAppCreateConfirmationRequestDto {
+            request_id: "create-0001".into(),
+            app_id: "habits-1a2b".into(),
+            name: "Habits".into(),
+            brief: "Track streaks and notes".into(),
+            selected_template: LocalAppTemplateSummaryDto {
+                template_id: "react-dom-r1".into(),
+                surface: AppSurfaceDto::Dom,
+                summary: "Best for forms and lists".into(),
+            },
+            runtime_profile: canonical_profile_option(),
+            reason: "The user asked for a compact list app.".into(),
+            rejected: vec![LocalAppRejectedCandidateDto {
+                template_id: "three-3d-r1".into(),
+                reason: "3D would add unnecessary runtime weight.".into(),
+            }],
+            initial_tools: vec![canonical_tool_surface("save_habit")],
+            required_gates: vec![canonical_gate()],
+            receipt: Some(canonical_receipt()),
+        };
+        let event = AppEventDto::CreateConfirmationRequested {
+            request: request.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize create confirmation");
+        assert_eq!(json["type"], "create_confirmation_requested");
+        assert_eq!(
+            json["request"]["selectedTemplate"]["templateId"],
+            "react-dom-r1"
+        );
+        assert_eq!(
+            json["request"]["runtimeProfile"]["contractSha256"],
+            "8".repeat(64)
+        );
+        assert_eq!(
+            json["request"]["receipt"]["expiresAtMs"],
+            1_750_000_030_000_u64
+        );
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json.clone())
+                .expect("deserialize create confirmation"),
+            event
+        );
+
+        let missing_receipt_state = {
+            let mut value = json;
+            value["request"]["receipt"]
+                .as_object_mut()
+                .expect("receipt object")
+                .remove("superseded");
+            value
+        };
+        let error = serde_json::from_value::<AppEventDto>(missing_receipt_state)
+            .expect_err("receipt state is required when a receipt object is present");
+        assert!(
+            error.to_string().contains("superseded"),
+            "decode error must name the missing field, got: {error}"
+        );
+    }
+
+    #[test]
+    fn mcp_proposal_diff_and_managed_inventory_round_trip_with_receipt_states() {
+        let request = LocalAppMcpProposalApprovalRequestDto {
+            request_id: "proposal-0001".into(),
+            app_id: "habits-1a2b".into(),
+            workflow_run_id: "wf-0002".into(),
+            summary: "Expose one habit-save tool and retire the summary tool.".into(),
+            proposal_sha256: "3".repeat(64),
+            approval_contract_sha256: "4".repeat(64),
+            tool_surface_sha256: "5".repeat(64),
+            tool_diffs: vec![
+                LocalAppMcpToolDiffDto {
+                    kind: LocalAppMcpToolChangeKindDto::Removed,
+                    name: "summarize_habits".into(),
+                    before: Some(canonical_tool_surface("summarize_habits")),
+                    after: None,
+                    changed_fields: Vec::new(),
+                },
+                LocalAppMcpToolDiffDto {
+                    kind: LocalAppMcpToolChangeKindDto::Changed,
+                    name: "save_habit".into(),
+                    before: Some(canonical_tool_surface("save_habit")),
+                    after: Some(LocalAppMcpToolSurfaceDto {
+                        description: Some("Create or update one completed-habits entry.".into()),
+                        ..canonical_tool_surface("save_habit")
+                    }),
+                    changed_fields: vec![
+                        LocalAppMcpToolFieldDto::Description,
+                        LocalAppMcpToolFieldDto::InputSchema,
+                        LocalAppMcpToolFieldDto::PermissionCeiling,
+                    ],
+                },
+            ],
+            required_flow_changes: vec!["Add a save step for notes.".into()],
+            excluded_capabilities: vec!["calendar".into()],
+            pending_gates: vec![canonical_gate()],
+            receipt: Some(LocalAppReceiptStatusDto {
+                expires_at_ms: 1_750_000_000_010,
+                superseded: true,
+                ..canonical_receipt()
+            }),
+        };
+        let event = AppEventDto::McpProposalApprovalRequested {
+            request: request.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize proposal approval");
+        assert_eq!(json["type"], "mcp_proposal_approval_requested");
+        assert_eq!(json["request"]["toolDiffs"][0]["kind"], "removed");
+        assert_eq!(json["request"]["toolDiffs"][0]["name"], "summarize_habits");
+        assert_eq!(json["request"]["receipt"]["superseded"], true);
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize proposal approval"),
+            event
+        );
+
+        let inventory_event = AppEventDto::ManagedMcpInventoryChanged {
+            servers: vec![ManagedLocalAppMcpServerDto {
+                server_name: "local_app_habits-1a2b".into(),
+                app_id: "habits-1a2b".into(),
+                app_name: "Habits".into(),
+                build_id: "build-0001".into(),
+                catalog_sha256: "6".repeat(64),
+                tool_surface_sha256: "7".repeat(64),
+                tool_count: 2,
+                authoring_revision: 3,
+                publication_state: AppWorkflowStateDto::PublishedUnverified,
+                mcp_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Passed,
+                    summary: "MCP schema, binding and isolation checks passed.".into(),
+                    code: None,
+                },
+                ui_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Unavailable,
+                    summary: "No UI runner is available on this device.".into(),
+                    code: Some("verification_unavailable".into()),
+                },
+                tools: vec![canonical_tool_surface("save_habit")],
+            }],
+        };
+        let inventory_json =
+            serde_json::to_value(&inventory_event).expect("serialize managed inventory");
+        assert_eq!(inventory_json["type"], "managed_mcp_inventory_changed");
+        assert_eq!(inventory_json["servers"][0]["toolCount"], 2_u64);
+        assert_eq!(
+            inventory_json["servers"][0]["uiVerification"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(inventory_json)
+                .expect("deserialize managed inventory"),
+            inventory_event
+        );
+    }
+
+    #[test]
+    fn verification_and_error_events_keep_status_and_error_layers_separate() {
+        let summary = AppEventDto::VerificationSummaryChanged {
+            app_id: "habits-1a2b".into(),
+            publication_state: AppWorkflowStateDto::PublishedVerified,
+            mcp_verification: LocalAppVerificationSummaryDto {
+                status: LocalAppVerificationStatusDto::Passed,
+                summary: "Catalog and MCP verification are current.".into(),
+                code: None,
+            },
+            ui_verification: LocalAppVerificationSummaryDto {
+                status: LocalAppVerificationStatusDto::Unverified,
+                summary: "UI verification has not run on this build.".into(),
+                code: None,
+            },
+        };
+        let json = serde_json::to_value(&summary).expect("serialize summary");
+        assert_eq!(json["type"], "verification_summary_changed");
+        assert_eq!(json["mcp_verification"]["status"], "passed");
+        assert_eq!(json["ui_verification"]["status"], "unverified");
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize summary"),
+            summary
+        );
+
+        let failure = AppEventDto::LocalAppOperationFailed {
+            app_id: None,
+            code: LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable,
+            message: "The verified builtin bundle root is missing.".into(),
+            request_id: Some("plugin-read-1".into()),
+        };
+        let json = serde_json::to_value(&failure).expect("serialize local app failure");
+        assert_eq!(json["type"], "local_app_operation_failed");
+        assert_eq!(json["code"], "builtin_bundle_unavailable");
+        assert_eq!(json["request_id"], "plugin-read-1");
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize local app failure"),
+            failure
         );
     }
 }

@@ -2505,7 +2505,7 @@ mod adopted_workflow_scope_test {
             // A real build workflow's name -- exactly what a forged
             // checkpoint would also carry (see `AdoptedWorkflow`'s doc
             // comment). Both tests below prove the guard no longer cares.
-            workflow_id: "local-app-build".to_string(),
+            workflow_id: "lingxi-local-app:local-app-build".to_string(),
             run_id: run_id.to_string(),
             script_path: "/workspace/.lingxi/workflows/build.js".to_string(),
             args: Some(format!(r#"{{"app_id":"{args_app_id}"}}"#)),

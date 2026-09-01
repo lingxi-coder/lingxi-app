@@ -95,6 +95,11 @@ fn canonical_hash(value: Value, context: &str) -> Result<String, AppError> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// Canonical SHA-256 of an immutable MCP catalog JSON body.
+pub fn hash_mcp_catalog(value: Value) -> Result<String, AppError> {
+    canonical_hash(value, "MCP catalog")
+}
+
 /// Supported native collection field types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

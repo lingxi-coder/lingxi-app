@@ -23,8 +23,8 @@ pub mod tengu;
 pub use bus::{AnalyticsBus, OverflowPolicy};
 pub use error::TelemetryError;
 pub use feature_flags::{
-    flag_bool, test_clear_flag, test_set_flag, FeatureFlagsClient, FeatureFlagsFetcher,
-    FeatureValue,
+    flag_bool, flag_string_list, test_clear_flag, test_clear_flag_list, test_set_flag,
+    test_set_flag_list, FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue,
 };
 pub use killswitch::Killswitch;
 pub use pii::{strip_proto_fields, PiiTagged, Verified};
@@ -439,6 +439,397 @@ pub fn emit_uncompilable_ignore_pattern(site: &'static str) {
         event = crate::tengu::ignore_pattern::UNCOMPILABLE_IGNORE_PATTERN,
         site = site,
     );
+}
+
+// -- 2.1.251 §23b: MCP config-parse outcome gate -----------------------------
+//
+// Oracle `Iqe` (mcp/src/config_diagnostics.rs's byte-faithful port) reports
+// its outcome through a NAMED COUNT-GATE, not a `tengu_*` analytics event:
+// `p("mcp_config_parse", reason)` on one of three fatal outcomes, or
+// `y("mcp_config_parse")` on success — the SAME gate name every time, with an
+// optional `reason` sub-label. This is a distinct wire family from the
+// `tengu_*` event tree in [`crate::tengu`] (no `tengu_` prefix, and the
+// oracle routes it through its OTel log-gate helpers `p`/`y` rather than the
+// `s(...)` analytics-bus call every `tengu_*` event uses) — see
+// `mcp/src/tool_schema.rs`'s module doc for the sibling `mcp_list_tools_*` /
+// `mcp_connect_*` family in the same OTel log-gate style.
+
+/// The oracle's `mcp_config_parse` gate name (both `p(...)` and `y(...)` use
+/// this literal as their first argument).
+pub const MCP_CONFIG_PARSE_GATE: &str = "mcp_config_parse";
+/// `p("mcp_config_parse","mcp_config_shape_gate")` — the config path is not a
+/// regular file, or exceeds the byte cap (`Iqe`'s `Atr(...)===null` branch).
+pub const MCP_CONFIG_SHAPE_GATE: &str = "mcp_config_shape_gate";
+/// `p("mcp_config_parse","mcp_config_read_failed")` — the file exists and
+/// passed the shape gate but a non-ENOENT I/O error stopped the read.
+pub const MCP_CONFIG_READ_FAILED: &str = "mcp_config_read_failed";
+/// `p("mcp_config_parse","mcp_config_invalid_json")` — the file read cleanly
+/// but did not parse as JSON.
+pub const MCP_CONFIG_INVALID_JSON: &str = "mcp_config_invalid_json";
+
+/// Emit the `mcp_config_parse` outcome gate. `reason` is `None` for the
+/// success case (oracle `y(...)`) or one of [`MCP_CONFIG_SHAPE_GATE`] /
+/// [`MCP_CONFIG_READ_FAILED`] / [`MCP_CONFIG_INVALID_JSON`] for a fatal
+/// outcome (oracle `p(...)`). Deliberately NOT gated on ENOENT — the oracle's
+/// `catch` block returns immediately with no `n(...)` log and no `p(...)`
+/// call for a missing file, so callers must not call this at all for that
+/// branch (see `mcp/src/config_diagnostics.rs::io_error_warning`).
+pub fn emit_mcp_config_parse_gate(reason: Option<&'static str>) {
+    match reason {
+        Some(reason) => tracing::warn!(event = MCP_CONFIG_PARSE_GATE, reason = reason),
+        None => tracing::debug!(event = MCP_CONFIG_PARSE_GATE),
+    }
+}
+
+// -- 2.1.251 §20a/§20b: tengu_mcp_degraded -----------------------------------
+
+/// Emit [`crate::tengu::mcp::DEGRADED`]. Unlike the config-parse gate above
+/// this IS a real `tengu_*` analytics event (see `tengu::mcp`'s module doc
+/// for the `yn`/`qr` oracle trace) — one call per nonzero per-server counter
+/// bucket, or once (process-global) for
+/// [`crate::tengu::mcp::DegradedReason::SchemaValidatorUnavailable`].
+pub fn emit_mcp_degraded(payload: &crate::tengu::mcp::DegradedPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::DEGRADED,
+        reason = payload.reason.wire_str(),
+        transport_type = payload.transport_type.as_ref().map(Verified::as_str),
+        normalized_count = payload.normalized_count,
+        skipped_count = payload.skipped_count,
+        kept_count = payload.kept_count,
+        mcp_server_name = payload.mcp_server_name.as_ref().map(Verified::as_str),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::SERVER_CONFIG_INVALID`] — a server's config
+/// failed the loader-time or connect-time URL/shape re-validation.
+pub fn emit_mcp_server_config_invalid(payload: &crate::tengu::mcp::ServerConfigInvalidPayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::SERVER_CONFIG_INVALID,
+        transport_type = payload.transport_type.as_str(),
+        field = payload.field.as_str(),
+        source = payload.source.wire_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::TOOLS_LISTED`] — a `tools/list` round-trip
+/// completed and the tool set was bound.
+pub fn emit_mcp_tools_listed(payload: &crate::tengu::mcp::ToolsListedPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::TOOLS_LISTED,
+        transport_type = payload.transport_type.as_str(),
+        list_duration_ms = payload.list_duration_ms,
+        tool_count = payload.tool_count,
+        always_load_count = payload.always_load_count,
+        discovery_source = payload.discovery_source.as_str(),
+        mcp_server_name = payload.mcp_server_name.as_ref().map(Verified::as_str),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::DISCOVERY_SOURCE`] — §11 discovery-cache
+/// observability. See [`crate::tengu::mcp::DiscoverySourcePayload`] for the
+/// two oracle call sites this covers.
+pub fn emit_mcp_discovery_source(payload: &crate::tengu::mcp::DiscoverySourcePayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::DISCOVERY_SOURCE,
+        transport_type = payload.transport_type.as_str(),
+        source = payload.source.as_str(),
+        entry_age_ms = payload.entry_age_ms,
+    );
+}
+
+#[cfg(test)]
+mod mcp_discovery_source_tests {
+    use super::*;
+    use crate::tengu::mcp::DiscoverySourcePayload;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type DiscoverySourceRow = (String, String, Option<u64>);
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        rows: Arc<StdMutex<Vec<DiscoverySourceRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                source: Option<String>,
+                entry_age_ms: Option<u64>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_u64(&mut self, field: &Field, value: u64) {
+                    if field.name() == "entry_age_ms" {
+                        self.entry_age_ms = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "source" => self.source = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "source" => self.source = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                source: None,
+                entry_age_ms: None,
+            };
+            event.record(&mut v);
+            if let (Some(e), Some(s)) = (v.event, v.source) {
+                self.rows.lock().unwrap().push((e, s, v.entry_age_ms));
+            }
+        }
+    }
+
+    /// A HIT carries `entry_age_ms`; reverting the field mapping (e.g.
+    /// swapping `source`/`transport_type`) is caught by asserting the exact
+    /// row, not just that SOME event fired.
+    #[test]
+    fn hit_emits_source_and_entry_age() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_discovery_source(&DiscoverySourcePayload {
+            transport_type: Verified::assert_safe("http".to_string()),
+            source: Verified::assert_safe("cache_fresh".to_string()),
+            entry_age_ms: Some(1_234),
+        });
+
+        assert_eq!(
+            cap.rows.lock().unwrap().clone(),
+            vec![(
+                crate::tengu::mcp::DISCOVERY_SOURCE.to_string(),
+                "cache_fresh".to_string(),
+                Some(1_234)
+            )]
+        );
+    }
+
+    /// A MISS carries no `entry_age_ms` — must stay absent, not `Some(0)` or
+    /// any other default that would silently fabricate an age for an entry
+    /// that never existed.
+    #[test]
+    fn miss_emits_no_entry_age() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_discovery_source(&DiscoverySourcePayload {
+            transport_type: Verified::assert_safe("http".to_string()),
+            source: Verified::assert_safe("miss_expired".to_string()),
+            entry_age_ms: None,
+        });
+
+        assert_eq!(
+            cap.rows.lock().unwrap().clone(),
+            vec![(
+                crate::tengu::mcp::DISCOVERY_SOURCE.to_string(),
+                "miss_expired".to_string(),
+                None
+            )]
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcp_degraded_tests {
+    use super::*;
+    use crate::tengu::mcp::{DegradedPayload, DegradedReason};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type DegradedRow = (String, String, Option<i64>);
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        rows: Arc<StdMutex<Vec<DegradedRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                reason: Option<String>,
+                skipped_count: Option<i64>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_i64(&mut self, field: &Field, value: i64) {
+                    if field.name() == "skipped_count" {
+                        self.skipped_count = Some(value);
+                    }
+                }
+                fn record_u64(&mut self, field: &Field, value: u64) {
+                    if field.name() == "skipped_count" {
+                        self.skipped_count = Some(value as i64);
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "reason" => self.reason = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "reason" => self.reason = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                reason: None,
+                skipped_count: None,
+            };
+            event.record(&mut v);
+            if let (Some(e), Some(r)) = (v.event, v.reason) {
+                self.rows.lock().unwrap().push((e, r, v.skipped_count));
+            }
+        }
+    }
+
+    /// Reverting the classification-to-reason mapping (e.g. wiring
+    /// `ToolSchemaUnsupported` where `ToolSchemaInvalid` belongs) is caught
+    /// by this: the emitted `reason` field must match the payload's, not
+    /// some other constant.
+    #[test]
+    fn emits_the_configured_reason_and_count_field() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_degraded(&DegradedPayload {
+            reason: DegradedReason::ToolSchemaUnsupported,
+            transport_type: Some(Verified::assert_safe("stdio".to_string())),
+            normalized_count: None,
+            skipped_count: Some(2),
+            kept_count: None,
+            mcp_server_name: Some(Verified::assert_safe("srv".to_string())),
+        });
+
+        let rows = cap.rows.lock().unwrap().clone();
+        assert_eq!(
+            rows,
+            vec![(
+                crate::tengu::mcp::DEGRADED.to_string(),
+                "tool_schema_unsupported".to_string(),
+                Some(2)
+            )]
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_parse_gate_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type GateRow = (String, Option<String>);
+
+    /// Capture every event's `event`/`reason` fields as `(event, reason)`.
+    #[derive(Default, Clone)]
+    struct GateCapture {
+        rows: Arc<StdMutex<Vec<GateRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for GateCapture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                reason: Option<String>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "reason" => self.reason = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "reason" => self.reason = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                reason: None,
+            };
+            event.record(&mut v);
+            if let Some(name) = v.event {
+                self.rows.lock().unwrap().push((name, v.reason));
+            }
+        }
+    }
+
+    /// Every fatal outcome must fire the SAME gate name with its own reason —
+    /// reverting the `reason` argument at any one call site (or dropping the
+    /// call entirely) is caught here, not just at the `config_diagnostics.rs`
+    /// layer, since this is the shared primitive every one of those sites
+    /// funnels through.
+    #[test]
+    fn shape_gate_read_failed_and_invalid_json_each_report_their_own_reason() {
+        let cap = GateCapture::default();
+        let subscriber = Registry::default().with(cap.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_SHAPE_GATE));
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_READ_FAILED));
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_INVALID_JSON));
+        emit_mcp_config_parse_gate(None);
+
+        let rows = cap.rows.lock().unwrap().clone();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_SHAPE_GATE.to_string())
+                ),
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_READ_FAILED.to_string())
+                ),
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_INVALID_JSON.to_string())
+                ),
+                (MCP_CONFIG_PARSE_GATE.to_string(), None),
+            ]
+        );
+    }
 }
 
 // -- M5-14 Task 10: release-marker emit-once helpers -------------------------

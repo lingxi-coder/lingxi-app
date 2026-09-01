@@ -75,22 +75,13 @@
 # (local_app_plugin_binding.rs, below) instead of telling the model which one
 # to launch, so this file has no entries here any more.
 
-# local_apps_mcp.rs — incidental prose matches, not component-name leaks: the
-# `inspect_ui` MCP tool's own description ("the structured accessibility/DOM
-# snapshot"), and a code comment citing `skills/frontend-qa/SKILL.md`'s
-# inversion formula by path. Neither is a case/dispatch/lookup on the literal;
-# both are listed explicitly precisely because a generic English word and a doc
-# citation are exactly the kind of match a scanner must still name.
-apps/engine-mobile/src/local_apps_mcp.rs:accessibility:1
-apps/engine-mobile/src/local_apps_mcp.rs:frontend-qa:1
-
-# local_app_plugin_binding.rs — the one place a build target maps to its
-# required workflow id, as of P-1.3 (moved here from workflow_support.rs,
-# which now contains no Local App workflow name at all). The Host never reads
-# these literals itself: it asks LocalAppPluginBinding::resolve/enforce, which
-# is the composition binding this scanner's own allowlist header describes.
-apps/engine-mobile/src/local_app_plugin_binding.rs:local-app-build:1
-apps/engine-mobile/src/local_app_plugin_binding.rs:local-canvas-build:1
+# local_app_plugin_binding.rs — the one place a build target maps to the
+# plugin-owned build workflow id. The Host never reads these literals itself:
+# it asks LocalAppPluginBinding::resolve/enforce, which is the composition
+# binding this scanner's own allowlist header describes.
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
 
 # --- tasks/src -------------------------------------------------------------
 
@@ -105,44 +96,7 @@ apps/engine-mobile/src/local_app_plugin_binding.rs:local-canvas-build:1
 
 # --- tools/workflow/src ----------------------------------------------------
 
-# builtins.rs — the two Phase -1 workflow registrations themselves
-# (`BuiltinWorkflowDescriptor { name: "local-app-build" | "local-canvas-build" }`)
-# plus the doc comment naming the `create-local-app` skill that hands them the
-# confirmed spec.
-tools/workflow/src/builtins.rs:create-local-app:1
-tools/workflow/src/builtins.rs:local-app-build:1
-tools/workflow/src/builtins.rs:local-canvas-build:1
-
-# lib.rs — no entries here any more. P-1.9 deleted both
-# `LOCAL_APP_BUILD_WORKFLOWS` and `apply_local_app_build_default_model` (the
-# only place in this file that named either workflow, in its name-check and
-# its "args must be an object" error message). The `workflowModel` default is
-# now applied by `engine-desktop` (the crate's one caller), keyed on the
-# resolved script's byte identity against `tool_workflow::BUILTIN_WORKFLOWS`
-# rather than on either workflow's name, and `engine-desktop` is not a scan
-# root (design §19.3's completion condition is stated over `tasks/src` and
-# `tools/workflow/src` only).
-
-# The three `include_str!`ed workflow scripts. These are production source that
-# merely is not Rust: `builtins.rs` concatenates them into the compiled
-# descriptors. Their occurrences are prompt prose telling the model which
-# specialist skill to consult at each step (`frontend-design`, `frontend-qa`,
-# `accessibility`, the framework skills) plus each script's own `export const
-# meta` workflow name.
-tools/workflow/src/local_app_build_workflow.js:local-app-build:1
-tools/workflow/src/local_app_build_workflow.js:frontend-design:1
-tools/workflow/src/local_app_build_workflow.js:frontend-qa:2
-tools/workflow/src/local_app_build_workflow.js:accessibility:2
-tools/workflow/src/local_app_build_workflow.js:react-best-practices:2
-tools/workflow/src/local_app_build_workflow.js:ionic-react-local-app:2
-tools/workflow/src/local_app_canvas_workflow.js:local-canvas-build:1
-tools/workflow/src/local_app_canvas_workflow.js:frontend-design:1
-tools/workflow/src/local_app_canvas_workflow.js:frontend-qa:3
-tools/workflow/src/local_app_canvas_workflow.js:accessibility:2
-tools/workflow/src/local_app_canvas_workflow.js:react-best-practices:2
-tools/workflow/src/local_app_canvas_workflow.js:canvas-2d-local-app:1
-tools/workflow/src/local_app_canvas_workflow.js:threejs-local-app:1
-tools/workflow/src/local_app_canvas_workflow.js:phaser-2d-local-app:1
-tools/workflow/src/local_app_canvas_workflow.js:babylon-3d-local-app:1
-tools/workflow/src/local_app_workflow_core.js:frontend-qa:2
-tools/workflow/src/local_app_workflow_core.js:accessibility:1
+# No entries here any more. Phase 9 moved Local App workflows out of the
+# built-in workflow registry and into the verified plugin bundle; the remaining
+# built-in workflow surface is generic and must not carry Local App component
+# names.

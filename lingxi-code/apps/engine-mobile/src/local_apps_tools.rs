@@ -942,7 +942,13 @@ mod tests {
             .expect("LocalAppScaffold");
         let decision = scaffold
             .check_permissions(
-                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "runtime_profile_receipt": "receipt-a"}),
+                &serde_json::json!({
+                    "app_id": "app-a",
+                    "name": "N",
+                    "brief": "b",
+                    "workflow_run_id": "wf_scaffold_permission",
+                    "receipt_id": "mcp-create-receipt"
+                }),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -1032,7 +1038,7 @@ mod tests {
         assert!(scaffold.input_schema()["properties"]["runtime_profile"].is_null());
         assert_eq!(
             scaffold.input_schema()["required"],
-            serde_json::json!(["app_id", "name", "brief", "runtime_profile_receipt"])
+            serde_json::json!(["app_id", "name", "brief", "workflow_run_id", "receipt_id"])
         );
     }
 }

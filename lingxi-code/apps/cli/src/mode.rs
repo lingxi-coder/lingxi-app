@@ -1990,6 +1990,43 @@ async fn run_plugin_action(
     let _ = turn_tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
 }
 
+/// `N noun` / `N nouns` — naive `+s` plural, matching claude-code's
+/// `plural()` for these ASCII nouns.
+fn reload_plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// The `/reload-plugins` result line's body (mirrors claude-code's
+/// `refreshActivePlugins` formatter). §22: the error tally routes readers to
+/// `/plugin` (`N error(s) during load. Run /plugin for details.`) — a prior
+/// port revision misrouted this to `/doctor`, which has no plugin-load detail
+/// to show.
+fn reload_summary_body(c: &engine_desktop::PluginRefreshCounts) -> String {
+    // claude-code labels plugin COMMANDS "skills" in this line
+    // (`n(command_count, 'skill')`); `agent_count`/hooks/MCP/LSP mirror the
+    // same result struct.
+    let parts = [
+        reload_plural(c.enabled, "plugin"),
+        reload_plural(c.commands, "skill"),
+        reload_plural(c.agents, "agent"),
+        reload_plural(c.hooks, "hook"),
+        reload_plural(c.mcp, "plugin MCP server"),
+        reload_plural(c.lsp, "plugin LSP server"),
+    ];
+    let mut body = format!("Reloaded: {}", parts.join(" \u{00b7} "));
+    if c.errors > 0 {
+        body.push_str(&format!(
+            "\n{} during load. Run /plugin for details.",
+            reload_plural(c.errors, "error")
+        ));
+    }
+    body
+}
+
 /// (`/reload-plugins`) Apply pending plugin enable/disable changes to the LIVE
 /// session: [`engine_desktop::PluginRuntime::refresh`] re-reads the on-disk
 /// enabled set and reconciles it into the engine's retained registries
@@ -2004,16 +2041,6 @@ async fn run_reload_plugins(
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
     use tui_core::orchestrator_bridge::TurnEvent;
-
-    /// `N noun` / `N nouns` — naive `+s` plural, matching claude-code's
-    /// `plural()` for these ASCII nouns.
-    fn n(count: usize, noun: &str) -> String {
-        if count == 1 {
-            format!("{count} {noun}")
-        } else {
-            format!("{count} {noun}s")
-        }
-    }
 
     let Some(rt) = plugin_runtime else {
         let _ = turn_tx.send(TurnEvent::SystemNotice {
@@ -2059,23 +2086,7 @@ async fn run_reload_plugins(
     let _ = turn_tx.send(TurnEvent::CommandCatalogRefreshed {
         commands: registry_rows,
     });
-    // claude-code labels plugin COMMANDS "skills" in this line (`n(command_count,
-    // 'skill')`); `agent_count`/hooks/MCP/LSP mirror the same result struct.
-    let parts = [
-        n(c.enabled, "plugin"),
-        n(c.commands, "skill"),
-        n(c.agents, "agent"),
-        n(c.hooks, "hook"),
-        n(c.mcp, "plugin MCP server"),
-        n(c.lsp, "plugin LSP server"),
-    ];
-    let mut body = format!("Reloaded: {}", parts.join(" \u{00b7} "));
-    if c.errors > 0 {
-        body.push_str(&format!(
-            "\n{} during load. Run /doctor for details.",
-            n(c.errors, "error")
-        ));
-    }
+    let body = reload_summary_body(&c);
     let _ = turn_tx.send(TurnEvent::SystemNotice {
         body,
         is_error: c.errors > 0,
@@ -3596,6 +3607,45 @@ mod tests {
             no_tui,
             ..Argv::default()
         }
+    }
+
+    // --- §22: the `/reload-plugins` error-tally routing ---------------------
+
+    /// §22: a `/reload-plugins` result carrying load errors must route the
+    /// reader to `/plugin`, matching the oracle's `N error(s) during load.
+    /// Run /plugin for details.` — NOT `/doctor`, which shows no plugin-load
+    /// detail.
+    #[test]
+    fn reload_summary_routes_load_errors_to_plugin_not_doctor() {
+        let counts = engine_desktop::PluginRefreshCounts {
+            enabled: 2,
+            commands: 3,
+            agents: 1,
+            hooks: 0,
+            mcp: 1,
+            lsp: 0,
+            errors: 2,
+        };
+        let body = reload_summary_body(&counts);
+        assert_eq!(
+            body,
+            "Reloaded: 2 plugins \u{b7} 3 skills \u{b7} 1 agent \u{b7} 0 hooks \u{b7} 1 plugin \
+             MCP server \u{b7} 0 plugin LSP servers\n2 errors during load. Run /plugin for \
+             details.",
+            "got: {body}"
+        );
+        assert!(!body.contains("/doctor"));
+    }
+
+    #[test]
+    fn reload_summary_omits_the_error_line_when_nothing_failed() {
+        let counts = engine_desktop::PluginRefreshCounts {
+            enabled: 1,
+            ..Default::default()
+        };
+        let body = reload_summary_body(&counts);
+        assert!(!body.contains("during load"));
+        assert!(!body.contains("/plugin for details"));
     }
 
     #[test]

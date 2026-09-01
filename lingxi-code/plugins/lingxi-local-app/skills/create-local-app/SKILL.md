@@ -47,15 +47,16 @@ shape yet. Settling what the app IS is your work in that conversation:
    core engine, revision, and recommendation reason in the same final
    confirmation. Profile family is immutable once committed, so it is the
    user's call to confirm.
-4. After the conversational confirmation, call
-   `LocalAppConfirmRuntimeProfile` with the conversational choice only as
-   `recommended_profile`. Its native one-shot selector shows every catalog
-   option and returns a short-lived receipt for the family the user selects;
-   the recommendation is not authoritative. Then call `LocalAppScaffold` with
-   that receipt; never send a model-authored surface/profile override:
+4. After the conversational confirmation, call the unified
+   `lingxi-local-app:local-app-build` create branch for this shell app. That
+   Host-owned path re-reads the template catalog, stages the create candidate,
+   runs the initial MCP authoring pass, shows one trusted native create
+   confirmation, and only then calls `LocalAppScaffold`. Never call a
+   standalone runtime-profile selector or pass a model-authored
+   surface/profile override. Do not supply `args.runtime_profile` as an authority; the host reads the materialized manifest and overwrites it:
 
 ```json
-{"app_id":"<the id LINGXI.md names>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","runtime_profile_receipt":"<receipt id>"}
+{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}}
 ```
 
 5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
@@ -104,9 +105,10 @@ Two things hold for as long as the app is a shell:
   the editable surface. Source written beforehand is deleted, not merged, so
   the turn that wrote it is lost work rather than a head start.
 - **Most local-app tools refuse an app that has no shape.** The shell may list
-  and inspect records, read `LocalAppRuntimeProfiles`, request
-  `LocalAppConfirmRuntimeProfile`, and finally call `LocalAppScaffold`. Every
-  other one — build, dependency install, runtime, logs,
+  and inspect records, read `LocalAppRuntimeProfiles` and
+  `LocalAppTemplateCatalog`, and then hand the confirmed spec to
+  `lingxi-local-app:local-app-build`. Every other one — direct build,
+  dependency install, runtime, logs,
   manifest, UI inspection/capture/action, data, checkpoints, app events,
   background flows — returns a refusal that names `LocalAppScaffold` as the way
   out. `LocalAppManifest` included: collections and capabilities are declared
@@ -151,6 +153,9 @@ specification containing:
 - dynamic viewport, safe area, color scheme, reduced motion, and input mode
   are runtime inputs only; do not treat them as prompt facts. The generated app
   must read them from `window.lingxi.v2.deviceContext`;
+- the host draws no title or navigation chrome while the app is running, so
+  the app owns every visible title/back affordance; reserve the bottom-leading
+  80-by-80 CSS-pixel safe-area corner for the host's floating run control;
 - pages, navigation/back semantics, complete states, data/permissions;
 - for a `canvas` surface, the confirmed runtime profile (`canvas_2d`,
   `three_3d`, `phaser_2d`, or `babylon_3d`) and the mechanics, phase model,

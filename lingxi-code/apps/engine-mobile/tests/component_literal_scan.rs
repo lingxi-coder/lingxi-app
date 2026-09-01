@@ -158,13 +158,11 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// expected to drive this to zero; any change to this constant must be
 /// accompanied by an equal change in the allowlist file, in the same diff.
 ///
-/// 28 → 24 (P-1.9): deleting `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
-/// `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (plus
-/// `apply_local_app_build_default_model`, which named a build workflow in its
-/// "args must be an object" error message) removed the last Local App
-/// workflow-name literals from `tasks/src/lib.rs` (2 entries) and
-/// `tools/workflow/src/lib.rs` (2 entries) — 4 entries gone, none added.
-const ALLOWLIST_BASELINE_COUNT: usize = 24;
+/// 24 → 3 (Phase 9 Local App plugin-only cleanup): deleting the stale built-in
+/// workflow entries from `tools/workflow/src`, the retired canvas workflow
+/// alias, and their dead allowlist rows leaves only the real remaining
+/// production component-name literals.
+const ALLOWLIST_BASELINE_COUNT: usize = 3;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
@@ -283,26 +281,41 @@ fn allowlist_file_path() -> PathBuf {
 /// Extract every registered skill's basename from a live [`skill_api::SkillRegistry`]
 /// instance.
 fn skill_basenames(reg: &skill_api::SkillRegistry) -> BTreeSet<String> {
-    reg.names().into_iter().map(str::to_owned).collect()
-}
-
-/// The Local App workflow basenames, read from the one typed field that
-/// answers this question: `BuiltinWorkflowDescriptor::is_local_app_build`
-/// (`tools/workflow/src/builtins.rs`), via
-/// `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`.
-/// Deliberately NOT `tool_workflow::BUILTIN_WORKFLOWS.names()`: that also
-/// contains `deep-research`, a general-purpose workflow with no Local App
-/// component identity, and including it would inflate the needle set with a
-/// name this scanner has no mandate to track. `is_local_app_build` is what
-/// keeps `deep-research` out here without a second hardcoded name array: it
-/// answers `false` for that descriptor and `true` for exactly the two real
-/// build workflows.
-fn local_app_workflow_basenames() -> BTreeSet<String> {
-    tool_workflow::BUILTIN_WORKFLOWS
-        .local_app_build_workflow_names()
+    reg.names()
         .into_iter()
+        .filter(|name| is_local_app_component_skill(name))
         .map(str::to_owned)
         .collect()
+}
+
+fn is_local_app_component_skill(name: &str) -> bool {
+    name.contains("local-app")
+        || name.ends_with("-local-app")
+        || name.starts_with("mcp-")
+        || matches!(
+            name,
+            "accessibility"
+                | "frontend-design"
+                | "frontend-qa"
+                | "react-best-practices"
+                | "template-selection"
+                | "expose-as-mcp"
+        )
+}
+
+/// The Local App plugin workflow basenames. Phase 9 removed the standalone
+/// core workflows, so the scan seeds now come from the plugin-owned workflow
+/// identities rather than `tool_workflow::BUILTIN_WORKFLOWS`.
+fn local_app_workflow_basenames() -> BTreeSet<String> {
+    [
+        "lingxi-local-app:local-app-build",
+        "lingxi-local-app:local-app-use-test",
+        "lingxi-local-app:local-app-mcp-authoring",
+    ]
+    .into_iter()
+    .filter_map(|name| name.rsplit(':').next())
+    .map(str::to_owned)
+    .collect()
 }
 
 /// Double every basename into its namespaced FQN (`lingxi-local-app:<name>`)
@@ -329,11 +342,13 @@ fn needle_set_from(reg: &skill_api::SkillRegistry) -> BTreeSet<String> {
     expand_with_namespace(&basenames)
 }
 
-/// The full needle set the production scan runs with: every verified Plugin
-/// skill and Local App workflow basename, plus each one's namespaced FQN.
+/// The full needle set the production scan runs with: every Local App
+/// component skill basename and Local App workflow basename, plus each one's
+/// namespaced FQN.
 fn production_needle_set() -> BTreeSet<String> {
     let mut basenames = engine_mobile::mobile_plugin_skill_names()
         .into_iter()
+        .filter(|name| is_local_app_component_skill(name))
         .collect::<BTreeSet<_>>();
     basenames.extend(local_app_workflow_basenames());
     expand_with_namespace(&basenames)
@@ -749,6 +764,25 @@ impl std::fmt::Display for Violation {
     }
 }
 
+fn is_component_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+}
+
+/// Bare component basenames are common English-like substrings (`local-app-run`
+/// is a prefix of `local-app-runtime`), so accept them only as complete name
+/// tokens. Plugin-qualified FQNs are unambiguous identities and remain exact
+/// substring needles; [`keep_longest`] reports the FQN instead of its trailing
+/// basename when both are present.
+fn has_component_name_boundaries(hay: &str, start: usize, end: usize, needle: &str) -> bool {
+    if needle.contains(':') {
+        return true;
+    }
+    let before = hay[..start].chars().next_back();
+    let after = hay[end..].chars().next();
+    before.is_none_or(|ch| !is_component_name_char(ch))
+        && after.is_none_or(|ch| !is_component_name_char(ch))
+}
+
 /// Every `(start, end, needle)` span of a needle in `hay`.
 fn find_spans(hay: &str, needles: &BTreeSet<String>) -> Vec<(usize, usize, String)> {
     let mut spans = Vec::new();
@@ -756,7 +790,10 @@ fn find_spans(hay: &str, needles: &BTreeSet<String>) -> Vec<(usize, usize, Strin
         let mut from = 0;
         while let Some(pos) = hay[from..].find(needle.as_str()) {
             let start = from + pos;
-            spans.push((start, start + needle.len(), needle.clone()));
+            let end = start + needle.len();
+            if has_component_name_boundaries(hay, start, end, needle) {
+                spans.push((start, end, needle.clone()));
+            }
             from = start + 1;
         }
     }
@@ -1292,7 +1329,7 @@ fn a_literal_in_an_unknown_extension_is_reported() {
     .expect("write .txt fixture");
     fs::write(
         tmp.path().join("schema.json"),
-        "{\n  \"workflow\": \"local-canvas-build\"\n}\n",
+        "{\n  \"workflow\": \"local-app-use-test\"\n}\n",
     )
     .expect("write .json fixture");
     fs::write(
@@ -1314,7 +1351,7 @@ fn a_literal_in_an_unknown_extension_is_reported() {
 
     for (file, literal) in [
         ("tool_description.txt", "threejs-local-app"),
-        ("schema.json", "local-canvas-build"),
+        ("schema.json", "local-app-use-test"),
         ("prompt.mustache", "phaser-2d-local-app"),
         ("PROMPT", "local-app-build"),
     ] {
@@ -1408,7 +1445,7 @@ fn scanner_rejects_a_split_literal_assembled_from_fragments() {
     fs::write(
         tmp.path().join("split.rs"),
         "pub const A: &str = concat!(\"local-app\", \"-build\");\n\
-         pub const B: &str =\n    \"local-canvas\\\n     -build\";\n",
+         pub const B: &str =\n    \"local-app-use\\\n     -test\";\n",
     )
     .expect("write split fixture");
 
@@ -1429,9 +1466,9 @@ fn scanner_rejects_a_split_literal_assembled_from_fragments() {
 
     let wrapped_hit = violations
         .iter()
-        .find(|v| v.literal == "local-canvas-build")
+        .find(|v| v.literal == "local-app-use-test")
         .unwrap_or_else(|| {
-            panic!("line-wrapped `local-canvas-build` was not caught: {violations:?}")
+            panic!("line-wrapped `local-app-use-test` was not caught: {violations:?}")
         });
     assert_eq!(
         wrapped_hit.line, 3,
@@ -1474,6 +1511,7 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     // scan runs with.
     let fresh_skills: BTreeSet<String> = engine_mobile::mobile_plugin_skill_names()
         .into_iter()
+        .filter(|name| is_local_app_component_skill(name))
         .collect();
     let workflows = local_app_workflow_basenames();
     let fresh_only_skills: Vec<&String> = fresh_skills
@@ -1553,7 +1591,8 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
         "production_needle_set() must not already contain the planted name, \
          got {production_hits:?}"
     );
-    assert!(grown_needles.len() > production_needles.len());
+    let base_needles = needle_set_from(&skill_api::SkillRegistry::new());
+    assert!(grown_needles.len() > base_needles.len());
 }
 
 /// P-1.9: `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
@@ -1561,10 +1600,9 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
 /// arrays this module doc's "must not grow a hardcoded name array" rule was
 /// written against -- are BOTH gone now. This pins that this file's own
 /// needle derivation (`local_app_workflow_basenames`) survived that deletion
-/// by reading a typed field instead
-/// (`BuiltinWorkflowDescriptor::is_local_app_build`), rather than by growing
-/// its own copy of the two names to compensate -- which is exactly the
-/// forbidden resolution the module doc calls out.
+/// by reading the plugin-owned workflow identities instead of growing its own
+/// copied list elsewhere -- which is exactly the forbidden resolution the
+/// module doc calls out.
 #[test]
 fn scanner_workflow_needles_survive_the_name_list_deletion() {
     let workflows = local_app_workflow_basenames();
@@ -1572,14 +1610,15 @@ fn scanner_workflow_needles_survive_the_name_list_deletion() {
         workflows,
         BTreeSet::from([
             "local-app-build".to_string(),
-            "local-canvas-build".to_string()
+            "local-app-mcp-authoring".to_string(),
+            "local-app-use-test".to_string(),
         ]),
-        "the needle set must be exactly the two real build workflows -- no more, no fewer"
+        "the needle set must be exactly the current plugin workflow basenames -- no more, no fewer"
     );
     assert!(
         !workflows.contains("deep-research"),
         "deep-research has no Local App identity and must not be pulled in just because \
-         BUILTIN_WORKFLOWS also lists it"
+         the generic workflow registry also lists it"
     );
 
     // The needles this function derives must still drive the real scan: a
@@ -1598,7 +1637,7 @@ fn scanner_workflow_needles_survive_the_name_list_deletion() {
     assert_eq!(
         hits.len(),
         workflows.len(),
-        "every current build-workflow basename must still be caught by the derived \
+        "every current plugin workflow basename must still be caught by the derived \
          needle set: {hits:?}"
     );
 }
@@ -1709,6 +1748,17 @@ fn a_live_trigger_of(label: &str, reg: &skill_api::SkillRegistry) -> String {
     })
 }
 
+fn registry_has_any_trigger(reg: &skill_api::SkillRegistry) -> bool {
+    reg.names().into_iter().any(|name| {
+        reg.get(name)
+            .expect("just listed by SkillRegistry::names")
+            .frontmatter
+            .triggers
+            .iter()
+            .any(|trigger| !trigger.trim().is_empty())
+    })
+}
+
 /// Prove `triggers_colliding_with_workflow_names` can actually SEE this
 /// registry's triggers and report a collision, by handing it a needle taken
 /// from the registry itself — a needle it MUST flag.
@@ -1733,7 +1783,7 @@ fn assert_collision_detector_is_live(label: &str, reg: &skill_api::SkillRegistry
 }
 
 /// The direct catch: no bundled skill — mobile or desktop — may carry a
-/// trigger embedding one of today's real Local App build workflow basenames.
+/// trigger embedding one of today's real Local App plugin workflow basenames.
 /// Before P-1.11 this failed for real: `create-local-app` carried
 /// `"local-app-build"` (a WORKFLOW's name) as its third trigger, alongside
 /// its own two genuine discovery phrases.
@@ -1743,17 +1793,21 @@ fn a_workflow_name_is_not_a_skill_trigger() {
     assert!(
         !workflows.is_empty(),
         "local_app_workflow_basenames() is empty, so this test would pass \
-         without reading a single trigger. tool_workflow::BUILTIN_WORKFLOWS \
-         must still expose at least one Local App build workflow name for \
+         without reading a single trigger. The plugin workflow registry must \
+         still expose at least one Local App workflow name for \
          skill-api/src/builtin/bundled.rs to be gated against."
     );
 
+    let mut positive_controls = 0;
     for (label, reg) in bundled_skill_registries() {
-        assert_collision_detector_is_live(label, &reg);
+        if registry_has_any_trigger(&reg) {
+            assert_collision_detector_is_live(label, &reg);
+            positive_controls += 1;
+        }
         let offenders = triggers_colliding_with_workflow_names(&reg, &workflows);
         assert!(
             offenders.is_empty(),
-            "skill-api/src/builtin/bundled.rs binds a Local App build \
+            "skill-api/src/builtin/bundled.rs binds a Local App plugin \
              workflow's own name as a skill trigger, reached via {label} -- \
              exactly the cross-component name binding design doc §19.3 \
              forbids ({} offender(s)): {offenders:?}. A workflow's name is \
@@ -1762,18 +1816,20 @@ fn a_workflow_name_is_not_a_skill_trigger() {
             offenders.len()
         );
     }
+    assert!(
+        positive_controls > 0,
+        "no bundled registry exposed a trigger, so the collision detector's positive control ran zero times"
+    );
 }
 
 /// The generalization `a_workflow_name_is_not_a_skill_trigger` alone cannot
-/// prove: Phase 4 is expected to MERGE `local-app-build` and
-/// `local-canvas-build` into one workflow spelled some other, not-yet-decided
-/// way. A trigger written to coincide with WHATEVER that new spelling turns
-/// out to be is the same silent binding P-1.11 removed, just aimed at
-/// tomorrow's name — and a check keyed only on today's two basenames could
-/// never catch it. The simulated name is deliberately disjoint from today's
-/// basenames in BOTH directions (neither contains the other), so a pass here
-/// cannot be explained by the literals the test above already covers; the
-/// positive control is what keeps that from making this a tautology.
+/// prove: if the plugin later renames or adds a Local App workflow, a trigger
+/// written to coincide with that future spelling is the same silent binding
+/// P-1.11 removed, just aimed at tomorrow's name. The simulated name is
+/// deliberately disjoint from today's basenames in BOTH directions (neither
+/// contains the other), so a pass here cannot be explained by the literals the
+/// test above already covers; the positive control is what keeps that from
+/// making this a tautology.
 #[test]
 fn skill_triggers_survive_a_workflow_rename() {
     let today = local_app_workflow_basenames();
@@ -1789,8 +1845,12 @@ fn skill_triggers_survive_a_workflow_rename() {
         }
     }
 
+    let mut positive_controls = 0;
     for (label, reg) in bundled_skill_registries() {
-        assert_collision_detector_is_live(label, &reg);
+        if registry_has_any_trigger(&reg) {
+            assert_collision_detector_is_live(label, &reg);
+            positive_controls += 1;
+        }
         let offenders = triggers_colliding_with_workflow_names(&reg, &renamed);
         assert!(
             offenders.is_empty(),
@@ -1803,6 +1863,10 @@ fn skill_triggers_survive_a_workflow_rename() {
             offenders.len()
         );
     }
+    assert!(
+        positive_controls > 0,
+        "no bundled registry exposed a trigger, so the rename detector's positive control ran zero times"
+    );
 }
 
 /// The companion the two tests above need in order not to be gameable.
@@ -2349,24 +2413,13 @@ fn whole_word_occurrences(line: &str, symbol: &str) -> usize {
 /// every test here would stay green.
 ///
 /// So: assert the mentions are still there, in the shapes the section doc
-/// above claims, and that exactly one of the six whole-word occurrences the
+/// above claims, and that exactly one of the five whole-word occurrences the
 /// scan surface sees is the call.
 ///
-/// The count is FIVE mentions, not the four that live in genuinely
-/// production code, and the fifth one is worth stating plainly because it is
-/// a property of [`test_skip_ranges`] rather than of this gate:
-/// `test_skip_ranges` recognizes only the exact attribute `#[cfg(test)]`, so
-/// lib.rs's `#[cfg(all(test, feature = "uniffi"))] mod
-/// mobile_plugin_composition_tests` is NOT a skip region, and its line-523
-/// comment is scanned as production. For a "no unaudited second door" gate
-/// that direction of error is the safe one — a real call inside that module
-/// would be COUNTED, making the gate louder rather than blinder — but it is
-/// not what the phrase "`#[cfg(test)]` regions excluded" would lead a reader
-/// to expect, so it is pinned here rather than left to be rediscovered.
-/// Teaching `test_skip_ranges` the `cfg(all(test, ..))` form is deliberately
-/// NOT done from this task: that helper also feeds the component-literal
-/// scanner above, whose committed allowlist and `ALLOWLIST_BASELINE_COUNT`
-/// were measured against today's surface.
+/// The current production surface carries four prose mentions: two line
+/// comments and two doc comments. Pinning both the total and the shapes keeps
+/// the call detector's comment/string rejection exercised against the real
+/// tree instead of only against planted fixtures.
 #[test]
 fn verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes() {
     let rel = "apps/engine-mobile/src/lib.rs";
@@ -2400,12 +2453,9 @@ fn verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes() {
         .collect();
     assert_eq!(
         mentions.len(),
-        5,
+        4,
         "`register_verified_builtin` must still appear as PROSE on the scan \
-         surface of lib.rs — four times in genuinely production code plus \
-         once inside `#[cfg(all(test, feature = \"uniffi\"))] mod \
-         mobile_plugin_composition_tests`, which `test_skip_ranges` does not \
-         recognize as a test region (see this test's doc comment). This \
+         surface of lib.rs — two line comments plus two doc comments. This \
          gate's `1` only proves that mentions are EXCLUDED for as long as \
          there are mentions to exclude. Found {} instead: {mentions:?}. If \
          the documentation legitimately changed, update the section doc above \
@@ -2425,8 +2475,8 @@ fn verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes() {
         .count();
     assert_eq!(
         (line_comments, doc_comments),
-        (2, 3),
-        "expected two `//` line comments and three `///` doc comments, got \
+        (2, 2),
+        "expected two `//` line comments and two `///` doc comments, got \
          ({line_comments}, {doc_comments}) from {mentions:?} — every prose \
          mention must sit at the START of a comment line, because a mention \
          sharing a line with live code is a shape this gate has never been \
@@ -2903,7 +2953,7 @@ fn also_production() {}
         .unwrap();
         fs::write(
             root.join("only_test.rs"),
-            "const T: &str = \"local-canvas-build\";\n",
+            "const T: &str = \"local-app-use-test\";\n",
         )
         .unwrap();
 
@@ -2947,22 +2997,28 @@ fn also_production() {}
             .collect();
         let found = matches_on_line("workflow_id: \"local-app-build\".into(),", &needles);
         assert_eq!(found, vec!["local-app-build".to_string()]);
+
+        let ambiguous = BTreeSet::from(["local-app-run".to_string()]);
+        assert!(
+            matches_on_line("stage the local-app-runtime first", &ambiguous).is_empty(),
+            "a basename prefix inside a longer hyphenated token is not a component identity"
+        );
     }
 
     #[test]
     fn matches_on_line_reports_two_distinct_literals_on_one_line() {
-        let needles: BTreeSet<String> = ["local-app-build", "local-canvas-build"]
+        let needles: BTreeSet<String> = ["local-app-build", "local-app-use-test"]
             .into_iter()
             .map(str::to_owned)
             .collect();
         let found = matches_on_line(
-            "surface `canvas`, workflow is `local-canvas-build` — NOT `local-app-build`.",
+            "use-test is `local-app-use-test` — NOT `local-app-build`.",
             &needles,
         );
         assert_eq!(
             found,
             vec![
-                "local-canvas-build".to_string(),
+                "local-app-use-test".to_string(),
                 "local-app-build".to_string()
             ]
         );
@@ -3025,7 +3081,7 @@ fn also_production() {}
     /// `.to_string(` survives character stripping, so it is removed as a token.
     #[test]
     fn a_plus_concatenated_literal_is_caught_as_a_split_literal() {
-        let needles: BTreeSet<String> = ["local-app-build", "local-canvas-build"]
+        let needles: BTreeSet<String> = ["local-app-build", "local-app-use-test"]
             .into_iter()
             .map(str::to_owned)
             .collect();
@@ -3034,7 +3090,7 @@ pub fn a() -> String {
     \"local-app\".to_string() + \"-build\"
 }
 pub fn b() -> String {
-    String::from(\"local-canvas\") + \"-build\"
+    String::from(\"local-app-use\") + \"-test\"
 }
 ";
         let found = scan_text("plus.rs", src, &needles);
@@ -3053,8 +3109,8 @@ pub fn b() -> String {
 
         let b = found
             .iter()
-            .find(|v| v.literal == "local-canvas-build")
-            .unwrap_or_else(|| panic!("`String::from(..) + \"-build\"` was not caught: {found:?}"));
+            .find(|v| v.literal == "local-app-use-test")
+            .unwrap_or_else(|| panic!("`String::from(..) + \"-test\"` was not caught: {found:?}"));
         assert_eq!(b.line, 5);
         assert!(b.split);
     }

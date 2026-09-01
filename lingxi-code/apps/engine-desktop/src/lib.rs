@@ -1824,8 +1824,14 @@ struct TaskRegistryWorkflowLauncher {
     /// from the composition root's `main_session_uuid` so the transcript dir
     /// anchors on the correct session.
     session_uuid: String,
-    /// Shared live plugin workflow registry used by launch resolution and
-    /// telemetry source classification.
+    /// The SAME `workflow::PluginWorkflowRegistry` the composition root hands
+    /// to `plugin::PluginManager` and `tool_workflow::WorkflowTool` (§14).
+    ///
+    /// It must be the same one: `WorkflowTool::validate_input` consults the
+    /// registry to decide whether a name resolves, and this launcher resolves
+    /// the script it validated. Wiring only one of the two would make
+    /// `validate_input` accept `acme:deploy` and then fail here with
+    /// `Workflow "acme:deploy" not found. Available: (none)`.
     plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
@@ -1848,6 +1854,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
+        // §14 — the SAME registry `WorkflowTool::validate_input` checked, so
+        // a name that validated resolves here too.
         let script = tool_workflow::resolve_script_at(
             &cwd,
             &spec,
@@ -1923,7 +1931,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
         // `meta.name` → `workflowName` in the result.
         let workflow_name = workflow::meta_string_value(&script, "name");
-        tool_workflow::apply_local_app_build_default_model(&cwd, &script, &mut spec.args)?;
         // `meta.description` → `summary` in the result (claude-code `p = c.meta.description`).
         let summary = workflow::meta_string_value(&script, "description");
         let task_description = summary
@@ -4885,9 +4892,18 @@ fn merge_agent_frontmatter_mcp_servers(
     {
         return Vec::new();
     }
-    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, gates.strict_plugin_only_mcp);
+    // claude `Zx(r)`: a by-name entry resolves against whatever the session
+    // already has discovered/configured — the SAME `existing` list this
+    // merge folds INTO, snapshotted before the mutation loop below.
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(
+        def,
+        gates.strict_plugin_only_mcp,
+        gates.strict_mcp_config,
+        existing.as_slice(),
+    );
     let mut blocked = Vec::new();
-    for cfg in scoped {
+    for scoped_cfg in scoped {
+        let cfg = scoped_cfg.config;
         // `Yee` — enterprise allow/deny per server (sdk short-circuit inside).
         if !mcp::enterprise_policy::is_server_allowed(&cfg, policy) {
             blocked.push(cfg.name);
@@ -4904,6 +4920,134 @@ fn merge_agent_frontmatter_mcp_servers(
         }
     }
     blocked
+}
+
+/// §24b (claude `Agr`, 2.1.251 @~160977000): connect + build ONE subagent
+/// spawn's per-agent inline `mcpServers` tools. Reuses the SAME `PRn`
+/// conversion as the main-thread-agent merge above
+/// ([`agent::agent_mcp_specs_to_scoped_configs`]) against a snapshot of the
+/// registry's LIVE connected servers (`existing_configs`, for by-name
+/// resolution). An inline RECORD entry (`is_newly_created`) connects under an
+/// agent-scoped table key ([`mcp::McpRegistry::connect_agent_scoped`]) so
+/// concurrent spawns declaring the same plain server name never clobber each
+/// other, and its tools are built with `MCPTool::bound_server_key` set to that
+/// key; a by-name entry connects (or reuses) through the ordinary shared path
+/// with no scoping, exactly like every other session-level server. A connect
+/// failure is logged with claude's exact copy and drops only that one
+/// server's tools — never fatal to the spawn.
+async fn build_agent_mcp_tool_set(
+    mcp_registry: Arc<mcp::McpRegistry>,
+    mcp_tool_ctx: tool_api::BuiltinToolContext,
+    strict_plugin_only_mcp: bool,
+    strict_mcp_config: bool,
+    agent_id: protocol::AgentId,
+    def: agent::AgentDefinition,
+) -> agent::agent_mcp_tools::AgentMcpToolSet {
+    if def.mcp_servers.is_empty() {
+        return agent::agent_mcp_tools::AgentMcpToolSet::default();
+    }
+    let existing_configs: Vec<mcp::McpServerConfig> = {
+        let conns = mcp_registry.connections.read().await;
+        conns.values().map(|s| s.config().clone()).collect()
+    };
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(
+        &def,
+        strict_plugin_only_mcp,
+        strict_mcp_config,
+        &existing_configs,
+    );
+    let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
+    let mut cleanups = Vec::new();
+    for entry in scoped {
+        let plain_name = entry.config.name.clone();
+        let (table_key, bound_key): (String, Option<String>) = if entry.is_newly_created {
+            match mcp_registry
+                .connect_agent_scoped(entry.config, agent_id)
+                .await
+            {
+                Ok((_, key)) => (key.clone(), Some(key)),
+                Err(error) => {
+                    tracing::warn!(
+                        "[Agent: {}] Failed to connect to MCP server '{}': {}",
+                        def.agent_type,
+                        plain_name,
+                        error
+                    );
+                    continue;
+                }
+            }
+        } else {
+            match mcp_registry.connect(entry.config).await {
+                Ok(_) => (plain_name.clone(), None),
+                Err(error) => {
+                    tracing::warn!(
+                        "[Agent: {}] Failed to connect to MCP server '{}': {}",
+                        def.agent_type,
+                        plain_name,
+                        error
+                    );
+                    continue;
+                }
+            }
+        };
+        let dtos: Vec<traits::McpToolDto> = {
+            let conns = mcp_registry.connections.read().await;
+            match conns.get(&table_key) {
+                // §11 Stage 2: `connect`/`connect_agent_scoped` above may have
+                // resolved a discovery-cache hit instead of dialing — the
+                // server is `Cached`, not `Connected`, but carries the same
+                // catalog, so the subagent's tool set must be built from it
+                // exactly the same way.
+                Some(
+                    mcp::McpConnectionState::Connected { tools, .. }
+                    | mcp::McpConnectionState::Cached { tools, .. },
+                ) => tools.clone(),
+                _ => Vec::new(),
+            }
+        };
+        tracing::info!(
+            "[Agent: {}] Connected to MCP server '{}' with {} tools",
+            def.agent_type,
+            plain_name,
+            dtos.len()
+        );
+        for dto in &dtos {
+            let tool = tool_mcp::MCPTool::new_for_tool(
+                mcp_tool_ctx.clone(),
+                dto.full_name.clone(),
+                dto.description().to_string(),
+                dto.input_schema().clone(),
+                dto.search_hint.clone(),
+                dto.always_load.unwrap_or(false),
+                dto.requires_user_interaction(),
+            )
+            .with_output_schema(dto.output_schema().cloned())
+            .with_effective_max_permission(dto.effective_max_permission);
+            let tool = match &bound_key {
+                Some(key) => tool.with_bound_server_key(key.clone()),
+                None => tool,
+            };
+            tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
+        }
+        if entry.is_newly_created {
+            let cleanup_registry = mcp_registry.clone();
+            let cleanup_key = table_key.clone();
+            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
+                server_name: plain_name,
+                run: Arc::new(move || {
+                    let registry = cleanup_registry.clone();
+                    let key = cleanup_key.clone();
+                    Box::pin(async move {
+                        registry
+                            .disconnect_agent_scoped(&key)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                }),
+            });
+        }
+    }
+    agent::agent_mcp_tools::AgentMcpToolSet { tools, cleanups }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -7266,6 +7410,10 @@ pub async fn build(
     let subagent_strict_plugin_hooks_cell =
         subagent_spawner_concrete.strict_plugin_only_hooks_handle();
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
+    // §24b: grab the set-once agent-MCP-tool-builder cell BEFORE boxing, to
+    // fill once `mcp_registry` + `mcp_tool_ctx` exist (same cycle-break as the
+    // hook/skill cells above — see `mcp_tool_builder`'s doc in `agent::handle`).
+    let subagent_mcp_tool_builder_cell = subagent_spawner_concrete.mcp_tool_builder_handle();
     // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
     // boxing, to fill once the permission policy is built (same cycle-break as
     // the registry/catalog/hook cells). Filled inside the enforcement branch
@@ -8667,8 +8815,21 @@ pub async fn build(
     // "no stuck Running" wiring bash + local_agent already have.
     let local_workflow_status_sink =
         Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
-    // One live table is shared by the plugin lifecycle, Workflow tool,
-    // launcher, and nested workflow handler. PluginManager is its only writer.
+    // §14 — THE shared plugin-workflow registry for this session. Constructed
+    // here, before its first consumer, because all FOUR of them must hold the
+    // same `Arc`:
+    //   - `plugin::PluginManager` (below, at the plugin bootstrap) — the sole
+    //     WRITER: `enable`/`disable` seed and remove a plugin's entries.
+    //   - `tasks::handlers::LocalWorkflowHandler` — the nested
+    //     `workflow({name})` resolver.
+    //   - `tool_workflow::WorkflowTool` — `validate_input`'s name resolution
+    //     and its `Available:` listing.
+    //   - `TaskRegistryWorkflowLauncher` — the launch-path `resolve_script_at`
+    //     and the `tengu_workflow_launched` `workflow_source`.
+    // Wiring a strict subset is worse than wiring none: the tool would accept
+    // `acme:deploy` and the launcher would then report it "not found".
+    // The manager fills it at `enable` time, long after the readers are built;
+    // the registry is interior-mutable, so construction order does not matter.
     let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
     let (workflow_event_tx, workflow_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<DesktopWorkflowEvent>();
@@ -8698,7 +8859,10 @@ pub async fn build(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
             .with_workflow_progress_sink(local_workflow_event_sink.clone()
-                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>),
+                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
+            // §14 — nested `workflow({name})` resolves a plugin workflow after
+            // the project/user directories miss.
+            .with_plugin_workflows(plugin_workflow_registry.clone()),
         ),
     );
 
@@ -9516,6 +9680,8 @@ pub async fn build(
                 .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
                 .with_session_enabled(workflow_session_enabled)
                 .with_permission_gate(perms.clone())
+                // §14 — the SAME registry the launcher above holds, so
+                // `validate_input` and `launch` agree on what resolves.
                 .with_plugin_workflows(plugin_workflow_registry.clone()),
         );
         #[cfg(test)]
@@ -9714,6 +9880,34 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    // §24b: fill the agent-MCP-tool-builder now that `mcp_registry` (7935) +
+    // `mcp_tool_ctx` (8967) both exist. The closure owns clones of both plus
+    // the boot-resolved strict-MCP gates (the SAME values
+    // `merge_agent_frontmatter_mcp_servers` used for the main-thread agent
+    // above) so every subagent Task spawn's frontmatter `mcpServers` connects
+    // + builds tools through the identical `PRn` conversion.
+    {
+        let mcp_registry_for_agents = mcp_registry.clone();
+        let mcp_tool_ctx_for_agents = mcp_tool_ctx.clone();
+        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def| {
+            let mcp_registry = mcp_registry_for_agents.clone();
+            let mcp_tool_ctx = mcp_tool_ctx_for_agents.clone();
+            Box::pin(build_agent_mcp_tool_set(
+                mcp_registry,
+                mcp_tool_ctx,
+                strict_plugin_only_mcp,
+                cfg.strict_mcp_config,
+                agent_id,
+                def,
+            ))
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = agent::agent_mcp_tools::AgentMcpToolSet>
+                            + Send,
+                    >,
+                >
+        }));
+    }
     let profile_first_party_for_subagents = profile_first_party.clone();
     let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
         profile_first_party_for_subagents.get(profile).copied()
@@ -10415,6 +10609,9 @@ pub async fn build(
         //   same path as configured `.mcp.json` servers, and the reconnect loop
         //   covers any that fail their initial dial).
         // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
+        // - workflow → `plugin_workflow_registry` (§14; == the registry the
+        //   `WorkflowTool`, its `TaskRegistryWorkflowLauncher`, and the
+        //   `LocalWorkflowHandler` all read). This is its only WRITER.
         // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer yet,
         // so they are local instances here (residual, as at startup).
         // Seed the persisted non-sensitive `userConfig` (settings `pluginConfigs`
@@ -10432,7 +10629,6 @@ pub async fn build(
                 http.clone(),
                 Arc::new(PosixRuntime::new()),
                 credentials.clone(),
-                Arc::new(plugin::PluginBlocklist::new(String::new())),
                 strict_plugin_policy.clone(),
                 shared_command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),
@@ -10955,6 +11151,65 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// §14 — a WIRING gate, not a behaviour test.
+    ///
+    /// `workflow::PluginWorkflowRegistry` is only reachable if the composition
+    /// root hands the SAME `Arc` to all four participants inside `build()`:
+    /// the `PluginManager` (its only writer), the `WorkflowTool`
+    /// (`validate_input` + the `Available:` listing), the
+    /// `TaskRegistryWorkflowLauncher` (`resolve_script_at` on the launch path
+    /// and `tengu_workflow_launched`'s `workflow_source`), and the
+    /// `LocalWorkflowHandler` (nested `workflow({name})`).
+    ///
+    /// Every one of those pieces is unit-tested in its own crate and every one
+    /// of those tests passes with `build()` wiring NOTHING — which is exactly
+    /// how the feature shipped unreachable the first time. Wiring a strict
+    /// SUBSET is worse than wiring none: the tool accepts `acme:deploy` and
+    /// the launcher then reports it "not found". No runtime test can observe
+    /// this without standing up the whole desktop stack, so the gate reads the
+    /// composition root's own source.
+    ///
+    /// The needles are assembled at runtime from split literals on purpose: a
+    /// gate spelled out verbatim here would match ITSELF in `include_str!` and
+    /// stay green with `build()` gutted.
+    #[test]
+    fn build_wires_one_plugin_workflow_registry_into_every_participant() {
+        const SRC: &str = include_str!("lib.rs");
+        let registry_var = "plugin_workflow_registr".to_string() + "y";
+        let construct =
+            format!("let {registry_var} = Arc::new(workflow::PluginWorkflowRegistry::new());");
+        let builder = format!(".with_plugin_workflows({registry_var}.clone())");
+        let launcher_field = format!("plugin_workflows: {registry_var}.clone()");
+
+        assert_eq!(
+            SRC.matches(&construct).count(),
+            1,
+            "build() must construct exactly ONE shared plugin-workflow registry ({construct})"
+        );
+        assert_eq!(
+            SRC.matches(&builder).count(),
+            3,
+            "`{builder}` must appear 3× in build(): LocalWorkflowHandler, WorkflowTool, PluginManager"
+        );
+        assert_eq!(
+            SRC.matches(&launcher_field).count(),
+            1,
+            "TaskRegistryWorkflowLauncher must be built with the shared registry (`{launcher_field}`)"
+        );
+        // …and the launcher must actually USE the field it holds — once in
+        // `resolve_script_at` (the launch path) and once in
+        // `workflow_source_for_name` (the `tengu_workflow_launched` source).
+        // A positive count, not a "no `None` anywhere" grep: `engine-mobile`
+        // legitimately passes `None` (it has no plugin subsystem at all), and
+        // a zero-match assertion would be green by default here.
+        let uses = format!("Some(self.plugin_workflow{}.as_ref())", "s");
+        assert_eq!(
+            SRC.matches(&uses).count(),
+            2,
+            "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+        );
+    }
 
     struct RecordingNetworkPermissionGate {
         calls: AtomicUsize,
@@ -16331,7 +16586,7 @@ mod tests {
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use plugin::{PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -16363,7 +16618,6 @@ mod tests {
             Arc::new(PosixHttp::new()),
             Arc::new(PosixRuntime::new()),
             credentials,
-            Arc::new(PluginBlocklist::new(String::new())),
             Arc::new(StrictPluginOnlyPolicy::empty()),
             command_registry.clone(),
             Arc::new(RwLock::new(SkillRegistry::new())),
@@ -16625,7 +16879,7 @@ mod tests {
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use plugin::{PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -16647,7 +16901,6 @@ mod tests {
                 Arc::new(PosixHttp::new()),
                 Arc::new(PosixRuntime::new()),
                 credentials,
-                Arc::new(PluginBlocklist::new(String::new())),
                 Arc::new(StrictPluginOnlyPolicy::empty()),
                 command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),

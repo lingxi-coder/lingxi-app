@@ -144,6 +144,8 @@ fn phase4_and_phase6_workflows_use_real_orchestration() {
 fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
         .expect("read build workflow");
+    let nested_calls = Arc::new(AtomicUsize::new(0));
+    let nested_calls_for_run = Arc::clone(&nested_calls);
     let args = serde_json::json!({
         "operation": "create",
         "app_id": "aaaa1111",
@@ -155,6 +157,7 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_hermetic1",
             "selector_capability": "sel_00000000000000000000000000000000",
+            "invocation_capability": "mcpv_00000000000000000000000000000000",
             "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r1"]},
             "staging": {"isolated": true, "final_publish": false}
         }
@@ -171,17 +174,234 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
         "motion_check": {"status": "passed"},
         "summary": "hermetic pass"
     });
+    let stage = serde_json::json!({"ok": true, "dependency_input_sha256": "a".repeat(64), "summary": "staged"});
     let build = serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "summary": "built"});
+    let promote = serde_json::json!({"ok": true, "verification_sha256": "b".repeat(64), "catalog_sha256": "c".repeat(64), "publication_state": "published_unverified", "summary": "promoted"});
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    if options.contains("__wf_resolve") {
+                        nested_calls_for_run.fetch_add(1, Ordering::SeqCst);
+                        return "return { status: 'create_approved', approval: { receipt_id: 'mcp-create-receipt' } };".to_string();
+                    }
+                    if options.contains("template-selector") {
+                        return serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r1","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string();
+                    }
+                    if options.contains("designer") {
+                        return serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string();
+                    }
+                    if options.contains("builder-stage") {
+                        return stage.to_string();
+                    }
+                    if options.contains("builder-build") || options.contains("repair-") {
+                        return build.to_string();
+                    }
+                    if prompt.contains("LocalAppQaMcpCandidate") && prompt.contains("LocalAppPromoteMcpCandidate") {
+                        return promote.to_string();
+                    }
+                    report.to_string()
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("hermetic workflow should execute");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("lingxi-local-app:local-app-build"));
+    assert!(result.contains("\"repair_rounds\":0"));
+    assert!(result.contains("\"publication_state\":\"published_unverified\""));
+    assert_eq!(nested_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
+        .expect("read build workflow");
+    let verify_args = serde_json::json!({
+        "operation": "verify",
+        "app_id": "aaaa1111",
+        "quality_level": "balanced",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "verify",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_verify1",
+            "runtime_profile": {
+                "family": "react_dom",
+                "revision": 1,
+                "contract_sha256": "a".repeat(64),
+                "surface": "dom"
+            },
+            "template_catalog": {
+                "catalog_digest": "catalog",
+                "available_template_ids": ["react-dom-r1"]
+            },
+            "expected_writable_collections": [],
+            "dependency_snapshot": {"verified": true}
+        }
+    });
+    let seen_options = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let options_for_run = Arc::clone(&seen_options);
+    let prompts_for_run = Arc::clone(&seen_prompts);
+    let failed_report = serde_json::json!({
+        "ok": false,
+        "findings": [],
+        "checked_matrix": ["webview"],
+        "browser_available": true,
+        "webview_checked": true,
+        "degraded_verification": false,
+        "data_roundtrip": {"status": "passed"},
+        "render_check": {"status": "not_applicable"},
+        "motion_check": {"status": "not_applicable"},
+        "summary": "acceptance check failed"
+    });
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts_for_run
+                .lock()
+                .expect("prompt capture")
+                .extend(prompts.iter().cloned());
+            options_for_run
+                .lock()
+                .expect("option capture")
+                .extend(options.iter().cloned());
+            prompts.iter().map(|_| failed_report.to_string()).collect()
+        },
+        |_progress| {},
+        None,
+        false,
+        Some(verify_args.to_string()),
+        None,
+    )
+    .expect("verify workflow should return a structured failure");
+    let result = outcome.result.expect("verify result");
+    assert!(result.contains("\"status\":\"verification_failed\""));
+    assert!(result.contains("\"repair_rounds\":0"));
+    assert!(result.contains("verification report returned ok=false"));
+    assert!(
+        seen_options
+            .lock()
+            .expect("option capture")
+            .iter()
+            .all(|options| !options.contains("builder") && !options.contains("repair-")),
+        "verify must never invoke a builder or repair agent"
+    );
+    assert!(
+        seen_prompts
+            .lock()
+            .expect("prompt capture")
+            .iter()
+            .all(|prompt| !prompt.contains("Handle=persisted-profile")),
+        "persisted workflows must not manufacture a template-selection handle"
+    );
+
+    let fast_canvas_args = serde_json::json!({
+        "operation": "update",
+        "app_id": "aaaa1111",
+        "quality_level": "fast",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "update",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_update1",
+            "runtime_profile": {
+                "family": "canvas_2d",
+                "revision": 1,
+                "contract_sha256": "b".repeat(64),
+                "surface": "canvas"
+            },
+            "template_catalog": {
+                "catalog_digest": "catalog",
+                "available_template_ids": ["canvas-2d-r1"]
+            },
+            "expected_writable_collections": [],
+            "dependency_snapshot": {"verified": true}
+        }
+    });
+    let error = workflow::run_with_progress(
+        &source,
+        |_prompts, _options| panic!("fast Canvas rejection must happen before any agent call"),
+        |_progress| {},
+        None,
+        false,
+        Some(fast_canvas_args.to_string()),
+        None,
+    )
+    .expect_err("persisted Canvas profiles must reject fast quality");
+    assert!(
+        error.to_string().contains("CANVAS_FAST_REJECTED"),
+        "unexpected fast Canvas error: {error}"
+    );
+}
+
+#[test]
+fn unified_build_update_runs_the_per_app_mcp_impact_check() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
+        .expect("read build workflow");
+    let args = serde_json::json!({
+        "operation": "update",
+        "app_id": "aaaa1111",
+        "revision_prompt": "Add a bounded search filter",
+        "quality_level": "balanced",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "update",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_update2",
+            "invocation_capability": "mcpv_00000000000000000000000000000000",
+            "runtime_profile": {
+                "family": "react_dom",
+                "revision": 1,
+                "contract_sha256": "a".repeat(64),
+                "surface": "dom"
+            },
+            "template_catalog": {
+                "catalog_digest": "catalog",
+                "available_template_ids": ["react-dom-r1"]
+            },
+            "expected_writable_collections": ["items"],
+            "dependency_snapshot": {"verified": true},
+            "active_catalog": {"catalog_sha256": "b".repeat(64)}
+        }
+    });
+    let nested_calls = Arc::new(AtomicUsize::new(0));
+    let nested_calls_for_run = Arc::clone(&nested_calls);
+    let report = serde_json::json!({
+        "ok": true,
+        "findings": [],
+        "checked_matrix": ["webview", "data"],
+        "browser_available": true,
+        "webview_checked": true,
+        "degraded_verification": false,
+        "data_roundtrip": {"status": "passed"},
+        "render_check": {"status": "not_applicable"},
+        "motion_check": {"status": "not_applicable"},
+        "summary": "update verified"
+    });
+    let build = serde_json::json!({
+        "ok": true,
+        "preview_url": "http://127.0.0.1:20000",
+        "summary": "updated"
+    });
     let outcome = workflow::run_with_progress(
         &source,
         move |_prompts, options| {
             options
                 .iter()
                 .map(|options| {
-                    if options.contains("template-selector") {
-                        serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r1","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string()
-                    } else if options.contains("designer") {
-                        serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string()
+                    if options.contains("__wf_resolve") {
+                        nested_calls_for_run.fetch_add(1, Ordering::SeqCst);
+                        "return { status: 'promoted', promotion: { promoted: true } };".to_string()
                     } else if options.contains("builder") {
                         build.to_string()
                     } else {
@@ -192,21 +412,25 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
         },
         |_progress| {},
         None,
-        false,
+        true,
         Some(args.to_string()),
         None,
     )
-    .expect("hermetic workflow should execute");
-    let result = outcome.result.expect("workflow result");
-    assert!(result.contains("lingxi-local-app:local-app-build"));
-    assert!(result.contains("\"repair_rounds\":0"));
+    .expect("update workflow should execute");
+    let result = outcome.result.expect("update result");
+    assert!(result.contains("\"mcp_update\":{\"status\":\"promoted\""));
+    assert_eq!(
+        nested_calls.load(Ordering::SeqCst),
+        1,
+        "every update must run exactly one per-App MCP impact-check"
+    );
 }
 
 #[test]
 fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_path() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-mcp-authoring.js"))
         .expect("read mcp workflow");
-    let args = serde_json::json!({
+    let initial_args = serde_json::json!({
         "app_id": "aaaa1111",
         "user_goal": "Expose the saved recipes search as MCP",
         "host_context": {
@@ -219,6 +443,21 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
             "expected_writable_collections": ["recipes"],
             "dependency_snapshot": {"verified": true},
             "active_catalog": null
+        }
+    });
+    let revise_args = serde_json::json!({
+        "app_id": "aaaa1111",
+        "user_goal": "Expose the saved recipes search as MCP",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "revise",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_mcp_authoring2",
+            "invocation_capability": "mcpv_00000000000000000000000000000000",
+            "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r1"]},
+            "expected_writable_collections": ["recipes"],
+            "dependency_snapshot": {"verified": true},
+            "active_catalog": {"build_id":"build-a","manifest_revision":3,"authoring_revision":1,"catalog_sha256":"9".repeat(64),"approval_contract_sha256":"a".repeat(64),"tool_surface_sha256":"b".repeat(64)}
         }
     });
     let evidence = serde_json::json!({
@@ -277,6 +516,11 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     let approval_calls = Arc::new(AtomicUsize::new(0));
     let approval_calls_for_run = Arc::clone(&approval_calls);
     let evidence_for_promote = evidence.clone();
+    let proposal_for_initial = proposal.clone();
+    let validated_for_initial = validated.clone();
+    let approved_for_initial = approved.clone();
+    let qa_for_initial = qa.clone();
+    let promoted_for_initial = promoted.clone();
     let outcome = workflow::run_with_progress(
         &source,
         move |_prompts, options| {
@@ -286,16 +530,16 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
                     if options.contains("app-evidence") {
                         evidence.to_string()
                     } else if options.contains("host-proposal-validation") {
-                        validated.to_string()
+                        validated_for_initial.to_string()
                     } else if options.contains("native-approval") {
                         approval_calls_for_run.fetch_add(1, Ordering::SeqCst);
-                        approved.to_string()
+                        approved_for_initial.to_string()
                     } else if options.contains("mcp-qa") {
-                        qa.to_string()
+                        qa_for_initial.to_string()
                     } else if options.contains("mcp-promote") {
-                        promoted.to_string()
+                        promoted_for_initial.to_string()
                     } else {
-                        proposal.to_string()
+                        proposal_for_initial.to_string()
                     }
                 })
                 .collect()
@@ -303,15 +547,52 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
         |_progress| {},
         None,
         false,
-        Some(args.to_string()),
+        Some(initial_args.to_string()),
         None,
     )
     .expect("mcp authoring workflow should execute");
     let result = outcome.result.expect("workflow result");
-    assert!(result.contains("\"status\":\"promoted\""));
+    assert!(result.contains("\"status\":\"create_approved\""));
     assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
 
     let evidence_for_zero_tools = evidence_for_promote.clone();
+    let proposal_for_revise = proposal.clone();
+    let validated_for_revise = validated.clone();
+    let approved_for_revise = approved.clone();
+    let qa_for_revise = qa.clone();
+    let promoted_for_revise = promoted.clone();
+    let revise_outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    if options.contains("app-evidence") {
+                        evidence_for_promote.to_string()
+                    } else if options.contains("host-proposal-validation") {
+                        validated_for_revise.to_string()
+                    } else if options.contains("native-approval") {
+                        approved_for_revise.to_string()
+                    } else if options.contains("mcp-qa") {
+                        qa_for_revise.to_string()
+                    } else if options.contains("mcp-promote") {
+                        promoted_for_revise.to_string()
+                    } else {
+                        proposal_for_revise.to_string()
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        false,
+        Some(revise_args.to_string()),
+        None,
+    )
+    .expect("revise mcp authoring workflow should execute");
+    let revise_result = revise_outcome.result.expect("revise workflow result");
+    assert!(revise_result.contains("\"status\":\"promoted\""));
+
     let zero_tool_outcome = workflow::run_with_progress(
         &source,
         move |_prompts, options| {
@@ -348,7 +629,7 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
         |_progress| {},
         None,
         false,
-        Some(args.to_string()),
+        Some(initial_args.to_string()),
         None,
     )
     .expect("zero-tool mcp authoring workflow should execute");

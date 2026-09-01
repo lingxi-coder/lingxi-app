@@ -1,5 +1,5 @@
-//! Composition binding from a Local App build target to the one workflow
-//! authorized to build it (plan v3 Phase -1, tasks P-1.1/P-1.3).
+//! Composition binding from a Local App build target to the one plugin
+//! workflow authorized to build it.
 //!
 //! A build target maps to a workflow NAME string, and that string is then
 //! used as authority: `workflow_support::apply_materialized_local_app_collections_with_identity`
@@ -41,22 +41,9 @@ pub(crate) fn is_plugin_workflow_id(workflow_id: &str) -> bool {
     )
 }
 
-/// The single Local App build workflow authorized for a build target.
-///
-/// This is the map [`LocalAppPluginBinding::resolve`] wraps in a typed
-/// handle. It is deliberately still exactly the pre-Phase -1 match — moved,
-/// not rewritten — so a reader diffing this task's change sees only the
-/// relocation, not a behavior change. Private to this module: nothing outside
-/// `local_app_plugin_binding` may read a workflow name off a build target
-/// directly, only through `resolve`/`enforce`.
 fn required_workflow_id_for(build_target: LocalAppBuildTarget) -> &'static str {
-    match build_target {
-        LocalAppBuildTarget::ReactDomR1 => "local-app-build",
-        LocalAppBuildTarget::Canvas2dR1
-        | LocalAppBuildTarget::Three3dR1
-        | LocalAppBuildTarget::Phaser2dR1
-        | LocalAppBuildTarget::Babylon3dR1 => "local-canvas-build",
-    }
+    let _ = build_target;
+    PLUGIN_BUILD_WORKFLOW_ID
 }
 
 /// A resolved workflow identity for a Local App build target.
@@ -115,14 +102,7 @@ impl LocalAppPluginBinding {
         family: local_apps::AppRuntimeProfile,
         launched_workflow_id: &str,
     ) -> Result<(), tool_workflow::WorkflowLaunchError> {
-        // The Plugin registry uses the fully-qualified identity while legacy
-        // built-in checkpoints still carry the bare pre-Plugin id. Accept the
-        // namespaced spelling as the canonical Phase4 route and retain the
-        // bare spelling only for resumable legacy rows; no family-specific
-        // second workflow is selected by this compatibility branch.
-        let namespaced_plugin_id = PLUGIN_BUILD_WORKFLOW_ID;
-        if launched_workflow_id != self.handle.id() && launched_workflow_id != namespaced_plugin_id
-        {
+        if launched_workflow_id != self.handle.id() {
             return Err(tool_workflow::WorkflowLaunchError(format!(
                 "app {app_id:?} is pinned to runtime profile {family}, which must use {}; \
                  refusing caller-selected workflow {launched_workflow_id}",
@@ -163,18 +143,8 @@ mod tests {
             const ALL_BUILD_TARGETS: &[LocalAppBuildTarget] =
                 &[$(LocalAppBuildTarget::$variant),+];
 
-            /// The runtime-profile family and the LITERAL workflow id every
+            /// The runtime-profile family and the plugin workflow id every
             /// build target must resolve to.
-            ///
-            /// The ids are restated as literals; they are NOT read back out
-            /// of [`required_workflow_id_for`]. Asking the map what the map
-            /// says pins no value — it only proves `resolve` still delegates,
-            /// and passes unchanged if the map itself is rewritten wrongly.
-            /// That matters most for `Babylon3dR1`, whose
-            /// `local-canvas-build` mapping is pinned NOWHERE else in the
-            /// suite: the `workflow_support` seam tests cannot reach it,
-            /// because `detect_build_target` rejects the not-yet-published
-            /// Babylon runtime profile first.
             fn expected_binding(
                 target: LocalAppBuildTarget,
             ) -> (local_apps::AppRuntimeProfile, &'static str) {
@@ -186,21 +156,11 @@ mod tests {
     }
 
     build_targets! {
-        ReactDomR1 => (local_apps::AppRuntimeProfile::ReactDom, "local-app-build"),
-        Canvas2dR1 => (local_apps::AppRuntimeProfile::Canvas2d, "local-canvas-build"),
-        Three3dR1 => (local_apps::AppRuntimeProfile::Three3d, "local-canvas-build"),
-        Phaser2dR1 => (local_apps::AppRuntimeProfile::Phaser2d, "local-canvas-build"),
-        Babylon3dR1 => (local_apps::AppRuntimeProfile::Babylon3d, "local-canvas-build"),
-    }
-
-    /// The other member of the two-element workflow-id set, used to drive the
-    /// refusal path for a target whose required id is `required`.
-    fn the_other_workflow_id(required: &str) -> &'static str {
-        match required {
-            "local-app-build" => "local-canvas-build",
-            "local-canvas-build" => "local-app-build",
-            other => panic!("unexpected required workflow id {other:?}"),
-        }
+        ReactDomR1 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
+        Canvas2dR1 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
+        Three3dR1 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
+        Phaser2dR1 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
+        Babylon3dR1 => (local_apps::AppRuntimeProfile::Babylon3d, PLUGIN_BUILD_WORKFLOW_ID),
     }
 
     #[test]
@@ -255,10 +215,7 @@ mod tests {
                     panic!("{target:?} must resolve to {required}, but it refused it: {error}")
                 });
 
-            // …and the acceptance above is not "accepts everything": the
-            // other workflow id is refused, and the refusal names `required`
-            // as the required id in the required POSITION.
-            let launched = the_other_workflow_id(required);
+            let launched = PLUGIN_USE_TEST_WORKFLOW_ID;
             let error = binding
                 .enforce("demo1234", family, launched)
                 .expect_err("a workflow id other than the pinned one must be refused");
@@ -288,7 +245,7 @@ mod tests {
             .enforce(
                 "demo1234",
                 local_apps::AppRuntimeProfile::ReactDom,
-                "local-app-build",
+                PLUGIN_BUILD_WORKFLOW_ID,
             )
             .expect("matching launched workflow id must be accepted");
     }
@@ -300,7 +257,7 @@ mod tests {
             .enforce(
                 "demo1234",
                 local_apps::AppRuntimeProfile::ReactDom,
-                "local-canvas-build",
+                PLUGIN_USE_TEST_WORKFLOW_ID,
             )
             .expect_err("mismatched launched workflow id must be refused");
         let message = error.to_string();
@@ -322,7 +279,8 @@ mod tests {
         // latter while telling the operator the exact opposite of the truth.
         assert!(
             message.contains(
-                "must use local-app-build; refusing caller-selected workflow local-canvas-build"
+                "must use lingxi-local-app:local-app-build; refusing caller-selected workflow \
+                 lingxi-local-app:local-app-use-test"
             ),
             "must name the required id first and the caller-selected id second: {message}"
         );
@@ -331,7 +289,8 @@ mod tests {
         assert_eq!(
             message,
             "app \"demo1234\" is pinned to runtime profile react_dom, which must use \
-             local-app-build; refusing caller-selected workflow local-canvas-build",
+             lingxi-local-app:local-app-build; refusing caller-selected workflow \
+             lingxi-local-app:local-app-use-test",
             "refusal message must be byte-identical to the pinned form: {message}"
         );
     }

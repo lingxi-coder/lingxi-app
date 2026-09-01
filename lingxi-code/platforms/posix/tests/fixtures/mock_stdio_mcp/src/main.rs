@@ -15,6 +15,7 @@
 //!   text content block; any other tool name -> a per-tool -32601 error so the
 //!   parent's `ToolNotFound` mapping can be exercised
 //! - `resources/list` -> one resource
+//! - `resources/templates/list` -> one parameterized resource template
 //! - `resources/read` -> the resource's text contents
 //! - `prompts/list` -> one prompt, `greet`
 //! - any other -> `{ "error": { "code": -32601, "message": "method not found" } }`
@@ -164,6 +165,20 @@ async fn main() {
                         {
                             "uri": "mock://readme",
                             "name": "README",
+                            "mimeType": "text/plain"
+                        }
+                    ]
+                }
+            })),
+            "resources/templates/list" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resourceTemplates": [
+                        {
+                            "uriTemplate": "mock://files/{path}",
+                            "name": "file-template",
+                            "description": "A file under mock://files",
                             "mimeType": "text/plain"
                         }
                     ]

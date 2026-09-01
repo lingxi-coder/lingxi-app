@@ -312,7 +312,7 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn checked_in_v2_profiled_manifest_is_rejected_without_migration() {
+fn schema_v2_local_app_fixture_is_rejected() {
     let bytes =
         std::fs::read(profiled_manifest_fixture()).expect("read v2 profiled manifest fixture");
     let manifest: AppManifest =
@@ -368,11 +368,11 @@ fn fixture_v1_store_is_rejected_with_reset_guidance() {
 /// Positive direction: a fresh v3 store must round-trip through the real load
 /// and write paths without byte drift.
 #[tokio::test]
-async fn fresh_v2_store_round_trips_through_real_writers() {
+async fn fresh_v3_store_round_trips_through_real_writers() {
     let fixtures = tempfile::tempdir().expect("tempdir");
     drive_canonical_store(fixtures.path()).await;
 
-    let states = storage::load_all(fixtures.path()).expect("fresh v2 store loads");
+    let states = storage::load_all(fixtures.path()).expect("fresh v3 store loads");
     assert_eq!(states, expected_states());
     for app in &states {
         let layout = AppLayout::new(fixtures.path(), &app.record.id).expect("profiled layout");

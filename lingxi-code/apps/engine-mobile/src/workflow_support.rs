@@ -32,12 +32,10 @@ struct WorkflowCheckpoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalAppResumeProvenance {
-    /// A pre-marker checkpoint for a local-app workflow. It is trusted as
-    /// local-app provenance, but its old script body must not be executed.
-    LegacyBuiltin,
-    /// A current checkpoint whose launcher marked the script as bundled.
-    CurrentBuiltin,
-    /// A trusted checkpoint for a custom script that reused a local-app name.
+    /// A trusted plugin-owned Local App workflow resume.
+    TrustedPlugin,
+    /// A trusted checkpoint for a custom script that reused a Local App
+    /// workflow shape without inheriting Local App authority.
     Custom,
 }
 
@@ -165,15 +163,9 @@ impl MobileWorkflowCheckpointStore {
             .cloned()
     }
 
-    /// Classify a resumed script using host-owned provenance from the CURRENT
-    /// session. All launch coordinates must match: workflow run id, persisted
-    /// script path, session, and recorded script hash. A missing
-    /// `scriptIsVerbatimBuiltin` marker is intentionally classified as a legacy
-    /// local-app workflow; it must be rejected before execution rather than
-    /// relying on the newer JS argument gate. The supplied resume body is not
-    /// compared with the recorded hash here: editing a script must preserve
-    /// the checkpoint's marker so the caller cannot turn a bundled row into an
-    /// untrusted custom workflow by changing its bytes.
+    /// Return host-owned provenance for a Local App plugin build resume in the
+    /// current session. All launch coordinates must match: workflow run id,
+    /// persisted script path, session, and recorded script hash.
     fn local_app_resume_record(
         &self,
         session_uuid: &str,
@@ -198,8 +190,8 @@ impl MobileWorkflowCheckpointStore {
                 {
                     return None;
                 }
-                if !(tool_workflow::BUILTIN_WORKFLOWS
-                    .is_local_app_build_workflow(&checkpoint.workflow_id)
+                if !(checkpoint.workflow_id
+                    == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
                     && checkpoint.workflow_run_id == run_id
                     && paths_equivalent(script_path, std::path::Path::new(&checkpoint.script_path)))
                 {
@@ -213,35 +205,35 @@ impl MobileWorkflowCheckpointStore {
             })
     }
 
+    #[cfg(test)]
     fn local_app_resume_provenance(
         &self,
         session_uuid: &str,
         run_id: &str,
         script_path: &std::path::Path,
+        script: &str,
     ) -> Option<LocalAppResumeProvenance> {
         self.local_app_resume_record(session_uuid, run_id, script_path)
-            .map(|record| {
-                let hash_is_current = is_current_local_app_builtin_hash(&record.script_sha256);
-                match record.script_is_verbatim_builtin {
-                    Some(true) if hash_is_current => LocalAppResumeProvenance::CurrentBuiltin,
-                    Some(false) if !hash_is_current => LocalAppResumeProvenance::Custom,
-                    Some(true) | Some(false) | None => LocalAppResumeProvenance::LegacyBuiltin,
-                }
+            .and_then(|record| {
+                local_app_resume_resolution_for_record(&record, script).map(|r| r.provenance)
             })
     }
 
-    /// Compatibility predicate for focused tests and callers that only need to
-    /// know whether the checkpoint belongs to a local-app workflow.
+    /// Compatibility predicate for focused tests that only need to know
+    /// whether the checkpoint belongs to a local-app workflow.
+    #[cfg(test)]
     fn is_trusted_local_app_resume(
         &self,
         session_uuid: &str,
         run_id: &str,
         script_path: &std::path::Path,
+        script: &str,
     ) -> bool {
-        self.local_app_resume_provenance(session_uuid, run_id, script_path)
+        self.local_app_resume_provenance(session_uuid, run_id, script_path, script)
             .is_some()
     }
 
+    #[cfg(test)]
     fn persisted_workflow_script_path(
         &self,
         session_uuid: &str,
@@ -250,21 +242,6 @@ impl MobileWorkflowCheckpointStore {
         self.session_dir(session_uuid)
             .join("workflows")
             .join(format!("{run_id}.js"))
-    }
-
-    fn is_host_owned_workflow_script(
-        &self,
-        session_uuid: &str,
-        run_id: &str,
-        script_path: &std::path::Path,
-    ) -> bool {
-        if session_uuid.is_empty() || !tool_workflow::is_valid_run_id(run_id) {
-            return false;
-        }
-        paths_equivalent(
-            script_path,
-            &self.persisted_workflow_script_path(session_uuid, run_id),
-        )
     }
 
     fn provenance_path(&self, session_uuid: &str, run_id: &str) -> std::path::PathBuf {
@@ -623,7 +600,10 @@ impl MobileWorkflowCheckpointStore {
             let scope = script.as_deref().and_then(|bytes| {
                 resolve_adopted_local_app_build_scope(
                     app_data_root,
+                    &checkpoint.workflow_id,
                     bytes,
+                    checkpoint.script_sha256.as_deref(),
+                    checkpoint.script_is_verbatim_builtin,
                     checkpoint.args_json.as_deref(),
                 )
             });
@@ -982,19 +962,13 @@ pub(crate) struct MobileWorkflowLauncher {
     pub(crate) plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
-/// Return whether a launch resolves to one of the immutable local-app build
-/// workflows. A named fresh built-in must have no `scriptPath`, no non-empty
-/// inline override, and the resolved body must still equal its bundled
-/// descriptor. A fresh script-path launch with today's exact bundled body is
-/// also accepted. A resumed script with today's exact bundled bytes is still
-/// the current built-in even when its terminal checkpoint was cleaned up. A
-/// non-exact resumed script must have host-owned provenance; markerless
-/// checkpoints are conservatively treated as legacy and rejected rather than
-/// executed. A custom workflow that merely happens to use the same `meta.name`
-/// is not treated as a built-in.
+/// Return whether a launch resolves to the Host-verified Local App plugin
+/// build workflow. Fresh launches must come from the verified plugin
+/// registry. Resumes must prove the same workflow through host-owned
+/// provenance plus an exact script-hash match. A custom workflow that merely
+/// happens to reuse the same `meta.name` is not treated as a Local App build.
 fn is_mobile_local_app_builtin(
     spec: &tool_workflow::WorkflowLaunchSpec,
-    script: &str,
     trusted_local_app_resume: bool,
     verified_plugin_workflow: bool,
 ) -> bool {
@@ -1012,17 +986,7 @@ fn is_mobile_local_app_builtin(
         .as_deref()
         .filter(|inline| !inline.is_empty())
         .is_none();
-    let named_builtin = !is_resume
-        && no_script_path
-        && no_inline_override
-        && spec.name.as_deref().is_some_and(|name| {
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get(name)
-                .is_some_and(|descriptor| {
-                    descriptor.is_local_app_build && descriptor.script == script
-                })
-        });
-    // Phase 4's single workflow is supplied by the verified mobile Plugin
+    // Phase 9's single workflow is supplied by the verified mobile Plugin
     // registry. Its fully-qualified name is the identity, while the script
     // itself retains the short `meta.name` required by the workflow parser.
     // Only the named, non-overridden form is accepted here; an inline script
@@ -1031,16 +995,7 @@ fn is_mobile_local_app_builtin(
         && no_script_path
         && no_inline_override
         && spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
-    // Exact current bundled bytes are authoritative even for a resume whose
-    // terminal checkpoint has already been removed. This is safe because the
-    // immutable descriptor body, rather than a caller-controlled name/path,
-    // identifies the built-in. Non-exact resumes still require trusted
-    // checkpoint provenance below.
-    let bundled_script = is_current_local_app_builtin_script(script);
-    named_builtin
-        || (named_plugin_builtin && verified_plugin_workflow)
-        || bundled_script
-        || trusted_local_app_resume
+    (named_plugin_builtin && verified_plugin_workflow) || trusted_local_app_resume
 }
 
 /// A plugin-qualified name is not authority by itself: a project workflow can
@@ -1117,144 +1072,56 @@ fn validate_namespaced_local_app_external_args(
     Ok(())
 }
 
-fn is_current_local_app_builtin_script(script: &str) -> bool {
-    tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_script(script)
-}
-
-fn is_current_local_app_builtin_hash(hash: &str) -> bool {
-    tool_workflow::BUILTIN_WORKFLOWS
-        .local_app_build_descriptors()
-        .any(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
-}
-
-fn local_app_workflow_id_for_hash(hash: &str) -> Option<String> {
-    tool_workflow::BUILTIN_WORKFLOWS
-        .local_app_build_descriptors()
-        .find(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
-        .map(|descriptor| descriptor.name.to_string())
-}
-
-fn local_app_resume_identity_id(
-    spec: &tool_workflow::WorkflowLaunchSpec,
-    script: &str,
-) -> Option<String> {
-    spec.name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .filter(|&name| {
-            is_namespaced_local_app_workflow(name)
-                || tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name)
-        })
-        .map(str::to_string)
-        .or_else(|| {
-            workflow::meta_string_value(script, "name")
-                .filter(|name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
-        })
-}
-
 fn local_app_resume_resolution_for_record(
     record: &WorkflowProvenanceRecord,
-    local_identity_id: Option<String>,
+    script: &str,
 ) -> Option<LocalAppResumeResolution> {
-    let record_is_local = is_namespaced_local_app_workflow(&record.workflow_id)
-        || tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&record.workflow_id);
-    let hash_is_current = is_current_local_app_builtin_hash(&record.script_sha256);
-    let expected_workflow_id = if record_is_local {
-        Some(record.workflow_id.clone())
-    } else {
-        local_app_workflow_id_for_hash(&record.script_sha256).or(local_identity_id)
-    };
-    if expected_workflow_id.is_none() {
+    let exact_hash = record.script_sha256 == sha256_hex(script.as_bytes());
+    if record.workflow_id == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
+        if record.script_is_verbatim_builtin == Some(true) && exact_hash {
+            return Some(LocalAppResumeResolution {
+                provenance: LocalAppResumeProvenance::TrustedPlugin,
+                workflow_id: Some(record.workflow_id.clone()),
+            });
+        }
+        if record.script_is_verbatim_builtin == Some(false) && exact_hash {
+            return Some(LocalAppResumeResolution {
+                provenance: LocalAppResumeProvenance::Custom,
+                workflow_id: None,
+            });
+        }
         return None;
     }
-    let provenance = if !record_is_local {
-        LocalAppResumeProvenance::LegacyBuiltin
-    } else {
-        let record_matches_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get(&record.workflow_id)
-            .is_some_and(|descriptor| {
-                sha256_hex(descriptor.script.as_bytes()) == record.script_sha256
-            });
-        match record.script_is_verbatim_builtin {
-            Some(true) if record_matches_descriptor => LocalAppResumeProvenance::CurrentBuiltin,
-            Some(true) => LocalAppResumeProvenance::LegacyBuiltin,
-            Some(false) if hash_is_current => LocalAppResumeProvenance::LegacyBuiltin,
-            Some(false) => LocalAppResumeProvenance::Custom,
-            None => LocalAppResumeProvenance::LegacyBuiltin,
-        }
-    };
-    Some(LocalAppResumeResolution {
-        provenance,
-        workflow_id: expected_workflow_id,
-    })
+    None
 }
 
-fn is_namespaced_local_app_workflow(workflow_id: &str) -> bool {
-    crate::local_app_plugin_binding::is_plugin_workflow_id(workflow_id)
-}
-
+#[cfg(test)]
 fn local_app_resume_provenance_for_launch(
     checkpoints: &MobileWorkflowCheckpointStore,
-    spec: &tool_workflow::WorkflowLaunchSpec,
     session_uuid: &str,
     run_id: &str,
     script_path: &std::path::Path,
     script: &str,
 ) -> Option<LocalAppResumeProvenance> {
-    local_app_resume_resolution_for_launch(
-        checkpoints,
-        spec,
-        session_uuid,
-        run_id,
-        script_path,
-        script,
-    )
-    .map(|resolution| resolution.provenance)
+    local_app_resume_resolution_for_launch(checkpoints, session_uuid, run_id, script_path, script)
+        .map(|resolution| resolution.provenance)
 }
 
 fn local_app_resume_resolution_for_launch(
     checkpoints: &MobileWorkflowCheckpointStore,
-    spec: &tool_workflow::WorkflowLaunchSpec,
     session_uuid: &str,
     run_id: &str,
     script_path: &std::path::Path,
     script: &str,
 ) -> Option<LocalAppResumeResolution> {
     match checkpoints.read_provenance_sidecar(session_uuid, run_id, script_path) {
-        WorkflowProvenanceLookup::Valid(record) => local_app_resume_resolution_for_record(
-            &record,
-            local_app_resume_identity_id(spec, script),
-        ),
-        WorkflowProvenanceLookup::Invalid { workflow_id } => {
-            let local_workflow_id = workflow_id
-                .as_deref()
-                .filter(|&id| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(id))
-                .map(str::to_string);
-            let identity_id =
-                local_workflow_id.or_else(|| local_app_resume_identity_id(spec, script));
-            (identity_id.is_some()
-                || checkpoints.is_host_owned_workflow_script(session_uuid, run_id, script_path))
-            .then_some(LocalAppResumeResolution {
-                provenance: LocalAppResumeProvenance::LegacyBuiltin,
-                workflow_id: identity_id,
-            })
+        WorkflowProvenanceLookup::Valid(record) => {
+            local_app_resume_resolution_for_record(&record, script)
         }
+        WorkflowProvenanceLookup::Invalid { .. } => None,
         WorkflowProvenanceLookup::Missing => checkpoints
             .local_app_resume_record(session_uuid, run_id, script_path)
-            .and_then(|record| {
-                local_app_resume_resolution_for_record(
-                    &record,
-                    local_app_resume_identity_id(spec, script),
-                )
-            })
-            .or_else(|| {
-                (local_app_resume_identity_id(spec, script).is_some()
-                    && checkpoints.is_host_owned_workflow_script(session_uuid, run_id, script_path))
-                .then_some(LocalAppResumeResolution {
-                    provenance: LocalAppResumeProvenance::LegacyBuiltin,
-                    workflow_id: None,
-                })
-            }),
+            .and_then(|record| local_app_resume_resolution_for_record(&record, script)),
     }
 }
 
@@ -1262,6 +1129,7 @@ fn local_app_resume_resolution_for_launch(
 /// materialized app manifest. The caller's value is intentionally ignored,
 /// including `[]`: an empty caller list must not turn off the native
 /// round-trip gate for a manifest that declares writable collections.
+#[cfg(test)]
 fn apply_materialized_local_app_collections(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
@@ -1270,19 +1138,37 @@ fn apply_materialized_local_app_collections(
     apply_materialized_local_app_collections_with_provenance(app_data_root, spec, script, false)
 }
 
+#[cfg(test)]
 fn apply_materialized_local_app_collections_with_provenance(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     script: &str,
     trusted_local_app_resume: bool,
 ) -> Result<(), tool_workflow::WorkflowLaunchError> {
+    let verified_plugin_workflow = spec.name.as_deref()
+        == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)
+        && spec
+            .script_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .is_none()
+        && spec
+            .script
+            .as_deref()
+            .filter(|inline| !inline.is_empty())
+            .is_none();
+    let expected_workflow_id = (verified_plugin_workflow
+        || (trusted_local_app_resume
+            && spec.name.as_deref()
+                == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)))
+    .then_some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
     apply_materialized_local_app_collections_with_identity(
         app_data_root,
         spec,
         script,
         trusted_local_app_resume,
-        None,
-        false,
+        expected_workflow_id,
+        verified_plugin_workflow,
     )
     // Both thin wrappers exist for callers that only care about the args
     // rewrite; the minted scope is returned by the `_with_identity` form the
@@ -1301,62 +1187,34 @@ fn apply_materialized_local_app_collections_with_provenance(
 fn apply_materialized_local_app_collections_with_identity(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
-    script: &str,
+    _script: &str,
     trusted_local_app_resume: bool,
     expected_workflow_id: Option<&str>,
     verified_plugin_workflow: bool,
 ) -> Result<Option<tasks::scope::LocalAppWorkflowTaskScope>, tool_workflow::WorkflowLaunchError> {
     if let Some(expected_workflow_id) = expected_workflow_id {
-        let expected_script = tool_workflow::BUILTIN_WORKFLOWS
-            .get(expected_workflow_id)
-            .map(|descriptor| descriptor.script);
-        if expected_script.is_none() {
-            if trusted_local_app_resume {
-                return Err(tool_workflow::WorkflowLaunchError(
-                    "cannot resume an obsolete local-app build workflow script; start the current named local-app workflow instead of resuming this run"
-                        .to_string(),
-                ));
-            }
-        } else if is_current_local_app_builtin_script(script) && expected_script != Some(script) {
+        if expected_workflow_id != crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
             return Err(tool_workflow::WorkflowLaunchError(
-                "cannot resume a local-app workflow with a different built-in script; start the matching named local-app workflow instead"
-                    .to_string(),
-            ));
-        } else if trusted_local_app_resume && expected_script != Some(script) {
-            return Err(tool_workflow::WorkflowLaunchError(
-                "cannot resume an obsolete local-app build workflow script; start the current named local-app workflow instead of resuming this run"
+                "cannot resume a local-app workflow with a different plugin workflow id"
                     .to_string(),
             ));
         }
-    } else if trusted_local_app_resume && !is_current_local_app_builtin_script(script) {
+    } else if trusted_local_app_resume {
         return Err(tool_workflow::WorkflowLaunchError(
-            "cannot resume an obsolete local-app build workflow script; start the current named local-app workflow instead of resuming this run"
-                .to_string(),
+            "cannot resume a local-app workflow without a trusted plugin workflow id".to_string(),
         ));
     }
-    if !is_mobile_local_app_builtin(
-        spec,
-        script,
-        trusted_local_app_resume,
-        verified_plugin_workflow,
-    ) {
+    if !is_mobile_local_app_builtin(spec, trusted_local_app_resume, verified_plugin_workflow) {
         // Not one of this Host's Local App build workflows: no args rewrite,
         // and -- crucially -- no scope. A custom workflow that merely reuses a
         // real workflow's `meta.name` lands here, because the predicate above
-        // identifies a built-in by its bundled BYTES (or by host-owned resume
-        // provenance), never by the caller's name.
+        // requires either the exact plugin registry entry or trusted
+        // host-owned resume provenance, never the caller's name alone.
         return Ok(None);
     }
 
     let launched_workflow_id = expected_workflow_id
         .map(str::to_string)
-        .or_else(|| local_app_workflow_id_for_hash(&sha256_hex(script.as_bytes())))
-        .or_else(|| {
-            spec.name
-                .as_deref()
-                .filter(|&name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
-                .map(str::to_string)
-        })
         .or_else(|| {
             spec.name
                 .as_deref()
@@ -1365,7 +1223,7 @@ fn apply_materialized_local_app_collections_with_identity(
         })
         .ok_or_else(|| {
             tool_workflow::WorkflowLaunchError(
-                "cannot identify the local-app built-in workflow being launched".to_string(),
+                "cannot identify the local-app plugin workflow being launched".to_string(),
             )
         })?
         .to_string();
@@ -1397,7 +1255,7 @@ fn apply_materialized_local_app_collections_with_identity(
         .to_string();
     let is_plugin_workflow = launched_workflow_id
         == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
-        && verified_plugin_workflow;
+        && (verified_plugin_workflow || trusted_local_app_resume);
     if is_plugin_workflow && operation == "create" {
         // Create is intentionally allowed to start before Manifest/profile
         // persistence. Read only the host-created record mirror to prove this
@@ -1440,6 +1298,7 @@ fn apply_materialized_local_app_collections_with_identity(
             &workflow_run_id,
         )
         .map_err(tool_workflow::WorkflowLaunchError)?;
+        let invocation_capability = format!("mcpv_{}", uuid::Uuid::new_v4().simple());
         object.insert(
             "selector_capability".into(),
             serde_json::Value::String(selector_capability.clone()),
@@ -1453,6 +1312,7 @@ fn apply_materialized_local_app_collections_with_identity(
                 "scaffolded": false,
                 "workflow_run_id": workflow_run_id,
                 "selector_capability": selector_capability,
+                "invocation_capability": invocation_capability,
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
@@ -1559,6 +1419,7 @@ fn apply_materialized_local_app_collections_with_identity(
         expected_writable_collections.clone(),
     );
     if is_plugin_workflow {
+        let invocation_capability = format!("mcpv_{}", uuid::Uuid::new_v4().simple());
         let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot read verified template catalog: {error}"
@@ -1571,12 +1432,14 @@ fn apply_materialized_local_app_collections_with_identity(
                 "operation": operation,
                 "app_id": app_id,
                 "runtime_profile": runtime_profile,
+                "invocation_capability": invocation_capability,
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
                 },
                 "expected_writable_collections": expected_writable_collections,
                 "dependency_snapshot": {"verified": true},
+                "active_catalog": manifest.active_mcp_catalog.clone(),
                 "staging": {"isolated": true, "final_publish": false}
             }),
         );
@@ -1624,22 +1487,10 @@ fn layout_for_app_record(
 /// [`tasks::registry::AdoptedWorkflow`]'s doc comment for the residual this
 /// closes.
 ///
-/// `workflow_id` is deliberately NOT read from the checkpoint's own recorded
-/// `workflow_id` field: that field is the raw name a launch supplied
-/// (`meta.name` / `spec.name`), and a custom workflow's checkpoint can set it
-/// to any real build workflow's name -- exactly the forged case
-/// `AdoptedWorkflow`'s doc comment warns about. The only signal trusted here
-/// is the SCRIPT BYTES actually persisted at the checkpoint's `script_path`
-/// right now (`script_bytes`): they are hashed and looked up against the
-/// bundled catalog, exactly what `is_current_local_app_builtin_script` /
-/// `local_app_workflow_id_for_hash` do for a live launch's own identity,
-/// applied here to an adopted checkpoint's persisted script instead of a
-/// fresh [`tool_workflow::WorkflowLaunchSpec`]. A script that is not
-/// byte-identical to a currently-bundled build workflow -- including one
-/// whose app has since moved on to a newer bundled revision -- is
-/// conservatively treated as unverifiable and gets no scope, matching this
-/// file's existing stance elsewhere for resume provenance ("a missing marker
-/// is classified as legacy and rejected rather than executed").
+/// Unlike the old built-in transition path, Phase 9 trusts only the plugin
+/// workflow id plus the host-recorded exact script hash/marker pair. A
+/// checkpoint that fails re-validation (wrong workflow id, edited script,
+/// missing marker, forged app id, or unscaffolded app) yields `None`.
 ///
 /// `args_json`'s `app_id` is used only as a HINT for which app to resolve --
 /// the same role it plays in
@@ -1650,14 +1501,22 @@ fn layout_for_app_record(
 /// other unverifiable checkpoint.
 fn resolve_adopted_local_app_build_scope(
     app_data_root: &std::path::Path,
+    workflow_id: &str,
     script_bytes: &[u8],
+    script_sha256: Option<&str>,
+    script_is_verbatim_builtin: Option<bool>,
     args_json: Option<&str>,
 ) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
-    let script = std::str::from_utf8(script_bytes).ok()?;
-    if !is_current_local_app_builtin_script(script) {
+    if workflow_id != crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
         return None;
     }
-    let workflow_id = local_app_workflow_id_for_hash(&sha256_hex(script_bytes))?;
+    if script_is_verbatim_builtin != Some(true) {
+        return None;
+    }
+    let expected_hash = script_sha256.filter(|hash| is_sha256_hex(hash))?;
+    if sha256_hex(script_bytes) != expected_hash {
+        return None;
+    }
     let args_value: serde_json::Value = serde_json::from_str(args_json?).ok()?;
     let app_id = args_value
         .get("app_id")
@@ -1673,7 +1532,7 @@ fn resolve_adopted_local_app_build_scope(
     let plugin_binding =
         crate::local_app_plugin_binding::LocalAppPluginBinding::resolve(build_target);
     plugin_binding
-        .enforce(app_id, binding.family, &workflow_id)
+        .enforce(app_id, binding.family, workflow_id)
         .ok()?;
     tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).ok()
 }
@@ -1804,7 +1663,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         ) {
             (Some(run_id), Some(script_path)) => local_app_resume_resolution_for_launch(
                 &self.checkpoints,
-                &spec,
                 &session_uuid,
                 run_id,
                 &script_path,
@@ -1816,9 +1674,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             resume_resolution
                 .as_ref()
                 .map(|resolution| resolution.provenance),
-            Some(
-                LocalAppResumeProvenance::LegacyBuiltin | LocalAppResumeProvenance::CurrentBuiltin
-            )
+            Some(LocalAppResumeProvenance::TrustedPlugin)
         );
         let expected_workflow_id = resume_resolution
             .as_ref()
@@ -1887,7 +1743,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             }
         }
         let workflow_name = workflow::meta_string_value(&script, "name");
-        tool_workflow::apply_local_app_build_default_model(&cwd, &script, &mut spec.args)?;
         let summary = workflow::meta_string_value(&script, "description");
         let task_description = summary
             .clone()
@@ -1980,7 +1835,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 });
             let script_is_verbatim_builtin = is_mobile_local_app_builtin(
                 &spec,
-                &script,
                 trusted_local_app_resume,
                 verified_plugin_workflow,
             );
@@ -2016,8 +1870,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .filter(|run_id| !run_id.is_empty())
                 .is_none()
                 && !session_uuid.is_empty()
-                && (tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&workflow_id)
-                    || workflow_id.starts_with("lingxi-local-app:"))
+                && verified_plugin_workflow
             {
                 self.checkpoints
                     .write_provenance_sidecar(
@@ -2156,10 +2009,10 @@ fn enrich_persisted_plugin_workflow_context(
         return Ok(());
     }
     let args = spec.args.as_mut().ok_or_else(|| {
-        tool_workflow::WorkflowLaunchError("local-app-use-test requires Host-enriched args".into())
+        tool_workflow::WorkflowLaunchError(format!("{name} requires Host-enriched args"))
     })?;
     let object = args.as_object_mut().ok_or_else(|| {
-        tool_workflow::WorkflowLaunchError("local-app-use-test args must be an object".into())
+        tool_workflow::WorkflowLaunchError(format!("{name} args must be an object"))
     })?;
     let app_id = object
         .get("app_id")
@@ -2225,14 +2078,14 @@ fn enrich_persisted_plugin_workflow_context(
         return Ok(());
     }
     let Some(binding) = binding else {
-        return Err(tool_workflow::WorkflowLaunchError(
-            "local-app-use-test requires a persisted runtime profile".into(),
-        ));
+        return Err(tool_workflow::WorkflowLaunchError(format!(
+            "{name} requires a persisted runtime profile"
+        )));
     };
     if manifest.dependency_snapshot.is_none() {
-        return Err(tool_workflow::WorkflowLaunchError(
-            "local-app-use-test requires a verified dependency snapshot".into(),
-        ));
+        return Err(tool_workflow::WorkflowLaunchError(format!(
+            "{name} requires a verified dependency snapshot"
+        )));
     }
     object.insert(
         "host_context".into(),
@@ -2346,12 +2199,7 @@ mod plugin_args_tests {
             "export const meta = { name: 'local-app-build' }; return forged;",
             &registry,
         ));
-        assert!(!is_mobile_local_app_builtin(
-            &spec,
-            "export const meta = { name: 'local-app-build' }; return forged;",
-            false,
-            false,
-        ));
+        assert!(!is_mobile_local_app_builtin(&spec, false, false,));
     }
 
     #[test]
@@ -2404,6 +2252,16 @@ mod run_id_tests {
             .expect("published runtime profile");
         manifest.surface = Some(family.surface());
         manifest.runtime_profile = Some(binding.clone());
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: format!(
+                "{}-r{}",
+                family.as_str().replace('_', "-"),
+                binding.revision
+            ),
+            template_sha256: binding.contract_sha256.clone(),
+        });
         manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
             requested_sha256: "0".repeat(64),
             package_sha256: "1".repeat(64),
@@ -2439,6 +2297,10 @@ mod run_id_tests {
         std::fs::write(path, body).expect("metadata mirror");
     }
 
+    fn plugin_build_script() -> &'static str {
+        "export const meta = { name: 'local-app-build', description: 'Plugin local app build' };\nreturn 1;\n"
+    }
+
     #[tokio::test]
     async fn checkpoint_round_trip_adopts_a_paused_workflow() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -2464,10 +2326,10 @@ mod run_id_tests {
                 super::WorkflowCheckpoint {
                     task_id: "wabc12345".into(),
                     workflow_run_id: "wf_abcdef".into(),
-                    workflow_id: "local-app-build".into(),
+                    workflow_id: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     script_path: script_path.to_string_lossy().into_owned(),
                     script_sha256: Some(super::sha256_hex(script)),
-                    script_is_verbatim_builtin: None,
+                    script_is_verbatim_builtin: Some(true),
                     args_json: Some(r#"{"app_id":"demo"}"#.into()),
                     description: "Build local app".into(),
                     start_time: Some(1234),
@@ -2497,7 +2359,10 @@ mod run_id_tests {
             panic!("expected workflow")
         };
         assert_eq!(workflow.run_id.as_deref(), Some("wf_abcdef"));
-        assert_eq!(workflow.workflow_id, "local-app-build");
+        assert_eq!(
+            workflow.workflow_id,
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+        );
         assert_eq!(workflow.script_path.as_deref(), script_path.to_str());
 
         store.remove_task("wabc12345");
@@ -2521,7 +2386,7 @@ mod run_id_tests {
                 super::WorkflowCheckpoint {
                     task_id: "wabc12345".into(),
                     workflow_run_id: "wf_abcdef".into(),
-                    workflow_id: "local-app-build".into(),
+                    workflow_id: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     script_path: "/workspace/build.js".into(),
                     script_sha256: None,
                     script_is_verbatim_builtin: None,
@@ -2537,7 +2402,10 @@ mod run_id_tests {
             serde_json::from_slice(&std::fs::read(store.path(session)).expect("read adopt file"))
                 .expect("parse adopt file");
         let workflow = &value["workflows"][0];
-        assert_eq!(workflow["workflowId"], "local-app-build");
+        assert_eq!(
+            workflow["workflowId"],
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+        );
         assert!(workflow.get("scriptSha256").is_none());
         assert!(workflow.get("argsJson").is_none());
         assert!(workflow.get("startTime").is_none());
@@ -2579,63 +2447,6 @@ mod run_id_tests {
     }
 
     #[test]
-    fn persisted_app_model_is_injected_into_local_app_build_args_only_when_missing() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let state_dir = root.path().join(".lingxi");
-        std::fs::create_dir_all(&state_dir).expect("state dir");
-        std::fs::write(
-            state_dir.join("app.json"),
-            serde_json::json!({
-                "schemaVersion": 1,
-                "app": { "workflowModel": "deepseek/deepseek-v4-flash" }
-            })
-            .to_string(),
-        )
-        .expect("app metadata");
-        let real_build_script = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("built-in")
-            .script;
-        let mut args = Some(serde_json::json!({
-            "app_id": "habits-1234",
-            "spec": "confirmed"
-        }));
-
-        tool_workflow::apply_local_app_build_default_model(
-            root.path(),
-            real_build_script,
-            &mut args,
-        )
-        .expect("inject persisted model");
-
-        assert_eq!(
-            args.as_ref()
-                .and_then(|value| value.get("model"))
-                .and_then(serde_json::Value::as_str),
-            Some("deepseek/deepseek-v4-flash")
-        );
-
-        let mut explicit = Some(serde_json::json!({
-            "app_id": "habits-1234",
-            "spec": "confirmed",
-            "model": "anthropic/claude-opus-4-7"
-        }));
-        tool_workflow::apply_local_app_build_default_model(
-            root.path(),
-            real_build_script,
-            &mut explicit,
-        )
-        .expect("preserve explicit model");
-        assert_eq!(
-            explicit
-                .as_ref()
-                .and_then(|value| value.get("model"))
-                .and_then(serde_json::Value::as_str),
-            Some("anthropic/claude-opus-4-7")
-        );
-    }
-
-    #[test]
     fn local_app_builtin_overwrites_expected_collections_from_materialized_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
@@ -2649,11 +2460,9 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
+        let script = plugin_build_script();
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
@@ -2661,7 +2470,7 @@ mod run_id_tests {
             ..Default::default()
         };
 
-        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
+        super::apply_materialized_local_app_collections(root.path(), &mut spec, script)
             .expect("manifest collection ids should be authoritative");
 
         assert_eq!(
@@ -2706,16 +2515,13 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         // A hostile caller-supplied runtime_profile: a different family, a
         // revision far beyond anything published, and a contract hash that
         // cannot correspond to any real catalog entry. If any of this
         // survives, a caller could point the workflow at a
         // collection/persistence contract the Host never verified.
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
                 "runtime_profile": {
@@ -2728,8 +2534,12 @@ mod run_id_tests {
             ..Default::default()
         };
 
-        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
-            .expect("materialized manifest should still resolve through a hostile args block");
+        super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut spec,
+            plugin_build_script(),
+        )
+        .expect("materialized manifest should still resolve through a hostile args block");
 
         let pinned = crate::local_app_runtime_profiles::current_binding_for_family(
             local_apps::AppRuntimeProfile::ReactDom,
@@ -2797,16 +2607,13 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         // A hostile caller-supplied collection the manifest never declared.
         // If it survives, the workflow could be granted write access to a
         // collection the Host never authorized — worse than the `[]` case
         // the existing overwrite test covers, which never asserted a
         // non-empty caller value loses.
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": ["attacker_secrets"],
@@ -2814,8 +2621,12 @@ mod run_id_tests {
             ..Default::default()
         };
 
-        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
-            .expect("materialized manifest should still resolve through a hostile args block");
+        super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut spec,
+            plugin_build_script(),
+        )
+        .expect("materialized manifest should still resolve through a hostile args block");
 
         assert_eq!(
             spec.args
@@ -2874,9 +2685,6 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         let caller_args = serde_json::json!({
             "app_id": "demo1234",
             "spec": "a caller-authored spec",
@@ -2892,13 +2700,17 @@ mod run_id_tests {
             .cloned()
             .collect();
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(caller_args),
             ..Default::default()
         };
 
-        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
-            .expect("materialized manifest should resolve");
+        super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut spec,
+            plugin_build_script(),
+        )
+        .expect("materialized manifest should resolve");
 
         let after = spec
             .args
@@ -2910,11 +2722,14 @@ mod run_id_tests {
             .filter(|key| !caller_keys.contains(*key))
             .cloned()
             .collect();
-        let expected: std::collections::BTreeSet<String> =
-            ["expected_writable_collections", "runtime_profile"]
-                .into_iter()
-                .map(str::to_string)
-                .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "expected_writable_collections",
+            "host_context",
+            "runtime_profile",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
 
         let unexpected: Vec<&String> = injected.difference(&expected).collect();
         assert!(
@@ -2953,14 +2768,14 @@ mod run_id_tests {
             hostile.insert(key.clone(), serde_json::json!("caller-sentinel"));
         }
         let mut hostile_spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::Value::Object(hostile)),
             ..Default::default()
         };
         super::apply_materialized_local_app_collections(
             root.path(),
             &mut hostile_spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect("materialized manifest should resolve through a hostile args block");
         let hostile_after = hostile_spec
@@ -3006,10 +2821,8 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-canvas-build")
-            .expect("local-canvas built-in");
         let mut resumed = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some("persisted-workflow.js".into()),
             resume_from_run_id: Some("wf_resume1".into()),
             args: Some(serde_json::json!({
@@ -3018,12 +2831,15 @@ mod run_id_tests {
             })),
             ..Default::default()
         };
-        super::apply_materialized_local_app_collections(
+        super::apply_materialized_local_app_collections_with_identity(
             root.path(),
             &mut resumed,
-            descriptor.script,
+            plugin_build_script(),
+            true,
+            Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID),
+            false,
         )
-        .expect("resumed built-in should use manifest ids");
+        .expect("trusted resumed plugin workflow should use manifest ids");
         assert_eq!(
             resumed
                 .args
@@ -3060,11 +2876,8 @@ mod run_id_tests {
     #[test]
     fn local_app_builtin_fails_closed_when_manifest_is_missing() {
         let root = tempfile::tempdir().expect("tempdir");
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
@@ -3074,7 +2887,7 @@ mod run_id_tests {
         let error = super::apply_materialized_local_app_collections(
             root.path(),
             &mut spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect_err("missing manifest must not trust caller's empty list");
         assert!(
@@ -3091,11 +2904,8 @@ mod run_id_tests {
         stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
@@ -3110,7 +2920,7 @@ mod run_id_tests {
         let error = super::apply_materialized_local_app_collections(
             root.path(),
             &mut spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect_err("an unscaffolded record must not launch a local-app workflow");
         assert!(
@@ -3127,7 +2937,7 @@ mod run_id_tests {
         let error = super::apply_materialized_local_app_collections(
             root.path(),
             &mut spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect_err("a partial manifest must not launch a local-app workflow");
         assert!(
@@ -3155,18 +2965,15 @@ mod run_id_tests {
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({"app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
             root.path(),
             &mut spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect_err("a corrupt profile hash must fail closed");
         assert!(
@@ -3199,21 +3006,24 @@ mod run_id_tests {
                 .to_string(),
             verified_profile_contract_sha256: "a".repeat(64),
         });
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "babylon-3d-r1".into(),
+            template_sha256: "a".repeat(64),
+        });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-canvas-build")
-            .expect("canvas local-app built-in");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-canvas-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({"app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
             root.path(),
             &mut spec,
-            descriptor.script,
+            plugin_build_script(),
         )
         .expect_err("gated Babylon must not launch");
         assert!(
@@ -3225,18 +3035,12 @@ mod run_id_tests {
     }
 
     #[test]
-    fn local_app_workflow_routes_each_published_profile_to_its_matching_workflow() {
-        for (family, workflow_id) in [
-            (local_apps::AppRuntimeProfile::ReactDom, "local-app-build"),
-            (
-                local_apps::AppRuntimeProfile::Canvas2d,
-                "local-canvas-build",
-            ),
-            (local_apps::AppRuntimeProfile::Three3d, "local-canvas-build"),
-            (
-                local_apps::AppRuntimeProfile::Phaser2d,
-                "local-canvas-build",
-            ),
+    fn local_app_workflow_routes_each_published_profile_to_the_plugin_workflow() {
+        for family in [
+            local_apps::AppRuntimeProfile::ReactDom,
+            local_apps::AppRuntimeProfile::Canvas2d,
+            local_apps::AppRuntimeProfile::Three3d,
+            local_apps::AppRuntimeProfile::Phaser2d,
         ] {
             let root = tempfile::tempdir().expect("tempdir");
             let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
@@ -3245,20 +3049,19 @@ mod run_id_tests {
             local_apps::save_manifest(&layout, &manifest).expect("manifest");
             stamp_record_mirror(&layout, true);
 
-            let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-                .get(workflow_id)
-                .expect("local-app built-in");
             let mut spec = tool_workflow::WorkflowLaunchSpec {
-                name: Some(workflow_id.into()),
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
                 args: Some(serde_json::json!({"app_id": "demo1234"})),
                 ..Default::default()
             };
             super::apply_materialized_local_app_collections(
                 root.path(),
                 &mut spec,
-                descriptor.script,
+                plugin_build_script(),
             )
-            .unwrap_or_else(|error| panic!("{family} should route to {workflow_id}: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("{family} should route to the plugin workflow: {error}")
+            });
             assert_eq!(
                 spec.args
                     .as_ref()
@@ -3281,104 +3084,10 @@ mod run_id_tests {
     // names), not on how the routing is implemented.
 
     #[test]
-    fn react_dom_app_launched_with_canvas_workflow_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
-        let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
-        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
-        local_apps::save_manifest(&layout, &manifest).expect("manifest");
-        stamp_record_mirror(&layout, true);
-
-        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-canvas-build")
-            .expect("canvas local-app built-in");
-        let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-canvas-build".into()),
-            args: Some(serde_json::json!({"app_id": "demo1234"})),
-            ..Default::default()
-        };
-        let error = super::apply_materialized_local_app_collections(
-            root.path(),
-            &mut spec,
-            descriptor.script,
-        )
-        .expect_err("a react-dom app must refuse a caller-selected canvas workflow");
-        let message = error.to_string();
-        assert!(
-            message.contains("demo1234"),
-            "refusal must name the app id: {message}"
-        );
-        // Ordered fragment, not two independent `contains`: asserting only
-        // that both ids appear lets a refactor that SWAPS them ("must use
-        // local-canvas-build; refusing caller-selected workflow
-        // local-app-build") pass every assertion while telling the operator
-        // the exact opposite of the truth. The direction is the security
-        // content of this message, so it is what gets pinned.
-        let expected_refusal =
-            "must use local-app-build; refusing caller-selected workflow local-canvas-build";
-        assert!(
-            message.contains(expected_refusal),
-            "refusal must read {expected_refusal:?}: {message}"
-        );
-    }
-
-    #[test]
-    fn canvas_family_apps_launched_with_the_dom_workflow_are_refused() {
-        // Babylon3d is intentionally excluded: its runtime profile is not yet
-        // published, so it fails earlier with a different error ("not
-        // published in this host build") before this refusal is reached —
-        // see the sibling test that pins that behaviour above.
-        for family in [
-            local_apps::AppRuntimeProfile::Canvas2d,
-            local_apps::AppRuntimeProfile::Three3d,
-            local_apps::AppRuntimeProfile::Phaser2d,
-        ] {
-            let root = tempfile::tempdir().expect("tempdir");
-            let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
-            let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
-            stamp_profile(&mut manifest, family);
-            local_apps::save_manifest(&layout, &manifest).expect("manifest");
-            stamp_record_mirror(&layout, true);
-
-            let descriptor = tool_workflow::BUILTIN_WORKFLOWS
-                .get("local-app-build")
-                .expect("dom local-app built-in");
-            let mut spec = tool_workflow::WorkflowLaunchSpec {
-                name: Some("local-app-build".into()),
-                args: Some(serde_json::json!({"app_id": "demo1234"})),
-                ..Default::default()
-            };
-            let error = super::apply_materialized_local_app_collections(
-                root.path(),
-                &mut spec,
-                descriptor.script,
-            )
-            .expect_err(&format!(
-                "a {family} app must refuse a caller-selected dom workflow"
-            ));
-            let message = error.to_string();
-            assert!(
-                message.contains("demo1234"),
-                "refusal must name the app id (family={family}): {message}"
-            );
-            // The mirror image of the sibling test's assertion, and the
-            // reason both are written as ONE ordered fragment: between the
-            // two tests each id appears in both positions, so a refactor
-            // that swaps them cannot stay green by symmetry.
-            let expected_refusal =
-                "must use local-canvas-build; refusing caller-selected workflow local-app-build";
-            assert!(
-                message.contains(expected_refusal),
-                "refusal must read {expected_refusal:?} (family={family}): {message}"
-            );
-        }
-    }
-
-    #[test]
     fn named_local_app_with_custom_inline_script_is_not_a_builtin() {
         let root = tempfile::tempdir().expect("tempdir");
         let mut spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script: Some("export const meta = { name: 'custom' }; return 1".into()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
@@ -3402,7 +3111,7 @@ mod run_id_tests {
         let custom_path_script = "export const meta = { name: 'local-app-build' };\nreturn 2\n";
         std::fs::write(&custom_path, custom_path_script).expect("custom script path");
         let mut path_spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(custom_path.to_string_lossy().into_owned()),
             args: Some(serde_json::json!({
                 "app_id": "demo1234",
@@ -3426,7 +3135,7 @@ mod run_id_tests {
     }
 
     #[test]
-    fn trusted_legacy_local_app_resume_uses_checkpoint_provenance() {
+    fn trusted_plugin_local_app_resume_uses_checkpoint_provenance() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
         let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
@@ -3440,10 +3149,10 @@ mod run_id_tests {
         stamp_record_mirror(&layout, true);
 
         let session = "00000000-0000-0000-0000-000000000003";
-        let run_id = "wf_legacy1";
-        let script_path = root.path().join("legacy-local-app.js");
-        let legacy_script = "export const meta = { name: 'legacy-local-app' };\nreturn 1\n";
-        std::fs::write(&script_path, legacy_script).expect("legacy script");
+        let run_id = "wf_plugin1";
+        let script_path = root.path().join("plugin-local-app.js");
+        let trusted_script = plugin_build_script();
+        std::fs::write(&script_path, trusted_script).expect("plugin script");
         let checkpoints = super::MobileWorkflowCheckpointStore::new(
             root.path().join(".claude"),
             root.path().to_path_buf(),
@@ -3452,12 +3161,12 @@ mod run_id_tests {
             .upsert(
                 session,
                 super::WorkflowCheckpoint {
-                    task_id: "wlegacy01".into(),
+                    task_id: "wplugin01".into(),
                     workflow_run_id: run_id.into(),
-                    workflow_id: "local-app-build".into(),
+                    workflow_id: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     script_path: script_path.to_string_lossy().into_owned(),
-                    script_sha256: Some(super::sha256_hex(legacy_script.as_bytes())),
-                    script_is_verbatim_builtin: None,
+                    script_sha256: Some(super::sha256_hex(trusted_script.as_bytes())),
+                    script_is_verbatim_builtin: Some(true),
                     args_json: Some(
                         serde_json::json!({
                             "app_id": "demo1234",
@@ -3465,7 +3174,7 @@ mod run_id_tests {
                         })
                         .to_string(),
                     ),
-                    description: "Legacy local app build".into(),
+                    description: "Plugin local app build".into(),
                     start_time: None,
                     transcript_dir: root
                         .path()
@@ -3477,6 +3186,7 @@ mod run_id_tests {
             .expect("checkpoint");
 
         let mut trusted = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(script_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
@@ -3486,166 +3196,48 @@ mod run_id_tests {
             })),
             ..Default::default()
         };
-        assert!(checkpoints.is_trusted_local_app_resume(session, run_id, &script_path,));
-        let error = super::apply_materialized_local_app_collections_with_provenance(
-            root.path(),
-            &mut trusted,
-            legacy_script,
-            true,
-        )
-        .expect_err("obsolete trusted local-app resume must remain rejected");
-        assert!(
-            error.to_string().contains("obsolete local-app"),
-            "unexpected error: {error}"
-        );
-
-        // Before the marker field existed, a custom script could reuse the
-        // built-in name and still be indistinguishable from an old bundled
-        // checkpoint. Treat that ambiguity as legacy and reject it before
-        // execution instead of allowing caller-supplied persistence args.
-        let markerless_same_meta_run_id = "wf_legacy-meta1";
-        let markerless_same_meta_path = root.path().join("legacy-same-meta.js");
-        let markerless_same_meta_script =
-            "export const meta = { name: 'local-app-build' };\nreturn 'legacy-custom'\n";
-        std::fs::write(&markerless_same_meta_path, markerless_same_meta_script)
-            .expect("markerless same-meta script");
-        checkpoints
-            .upsert(
-                session,
-                super::WorkflowCheckpoint {
-                    task_id: "wlegacy02".into(),
-                    workflow_run_id: markerless_same_meta_run_id.into(),
-                    workflow_id: "local-app-build".into(),
-                    script_path: markerless_same_meta_path.to_string_lossy().into_owned(),
-                    script_sha256: Some(super::sha256_hex(markerless_same_meta_script.as_bytes())),
-                    script_is_verbatim_builtin: None,
-                    args_json: None,
-                    description: "Markerless custom local app workflow".into(),
-                    start_time: None,
-                    transcript_dir: root
-                        .path()
-                        .join("markerless-custom-transcript")
-                        .to_string_lossy()
-                        .into_owned(),
-                },
-            )
-            .expect("markerless same-meta checkpoint");
+        assert!(checkpoints.is_trusted_local_app_resume(
+            session,
+            run_id,
+            &script_path,
+            trusted_script
+        ));
         assert_eq!(
-            checkpoints.local_app_resume_provenance(
-                session,
-                markerless_same_meta_run_id,
-                &markerless_same_meta_path,
-            ),
-            Some(super::LocalAppResumeProvenance::LegacyBuiltin)
+            checkpoints.local_app_resume_provenance(session, run_id, &script_path, trusted_script),
+            Some(super::LocalAppResumeProvenance::TrustedPlugin)
         );
-        let mut markerless_same_meta = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
-            script_path: Some(markerless_same_meta_path.to_string_lossy().into_owned()),
-            resume_from_run_id: Some(markerless_same_meta_run_id.into()),
-            session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
-                "app_id": "demo1234",
-                "expected_writable_collections": [],
-            })),
-            ..Default::default()
-        };
-        let error = super::apply_materialized_local_app_collections_with_provenance(
-            root.path(),
-            &mut markerless_same_meta,
-            markerless_same_meta_script,
-            true,
-        )
-        .expect_err("markerless same-meta custom resume must be rejected as legacy");
-        assert!(
-            error.to_string().contains("obsolete local-app"),
-            "unexpected error: {error}"
-        );
-
-        let current_run_id = "wf_current1";
-        let current_path = root.path().join("current-local-app.js");
-        let current_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in")
-            .script;
-        std::fs::write(&current_path, current_descriptor).expect("current script");
-        checkpoints
-            .upsert(
-                session,
-                super::WorkflowCheckpoint {
-                    task_id: "wcurrent1".into(),
-                    workflow_run_id: current_run_id.into(),
-                    workflow_id: "local-app-build".into(),
-                    script_path: current_path.to_string_lossy().into_owned(),
-                    script_sha256: Some(super::sha256_hex(current_descriptor.as_bytes())),
-                    script_is_verbatim_builtin: Some(true),
-                    args_json: None,
-                    description: "Current local app build".into(),
-                    start_time: None,
-                    transcript_dir: root
-                        .path()
-                        .join("current-transcript")
-                        .to_string_lossy()
-                        .into_owned(),
-                },
-            )
-            .expect("current checkpoint");
-        assert_eq!(
-            checkpoints.local_app_resume_provenance(session, current_run_id, &current_path,),
-            Some(super::LocalAppResumeProvenance::CurrentBuiltin)
-        );
-        let mut current = tool_workflow::WorkflowLaunchSpec {
-            script_path: Some(current_path.to_string_lossy().into_owned()),
-            resume_from_run_id: Some(current_run_id.into()),
-            session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
-                "app_id": "demo1234",
-                "expected_writable_collections": [],
-            })),
-            ..Default::default()
-        };
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
-            &mut current,
-            current_descriptor,
+            &mut trusted,
+            trusted_script,
             true,
         )
-        .expect("current trusted local-app resume should use manifest ids");
+        .expect("trusted plugin resume should use manifest ids");
         assert_eq!(
-            current
+            trusted
                 .args
                 .as_ref()
                 .and_then(|args| args.get("expected_writable_collections")),
             Some(&serde_json::json!(["progress"]))
         );
-        let mut checkpoint_dom_to_canvas = current.clone();
-        let checkpoint_resolution = super::local_app_resume_resolution_for_launch(
-            &checkpoints,
-            &checkpoint_dom_to_canvas,
-            session,
-            current_run_id,
-            &current_path,
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get("local-canvas-build")
-                .expect("canvas local-app built-in")
-                .script,
-        )
-        .expect("checkpoint provenance");
+        let trusted_context = trusted
+            .args
+            .as_ref()
+            .and_then(|args| args.get("host_context"))
+            .expect("trusted plugin resume must restore Host-owned workflow context");
         assert_eq!(
-            checkpoint_resolution.workflow_id.as_deref(),
-            Some("local-app-build")
+            trusted_context
+                .get("source")
+                .and_then(serde_json::Value::as_str),
+            Some("verified_host")
         );
-        super::apply_materialized_local_app_collections_with_identity(
-            root.path(),
-            &mut checkpoint_dom_to_canvas,
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get("local-canvas-build")
-                .expect("canvas local-app built-in")
-                .script,
-            true,
-            checkpoint_resolution.workflow_id.as_deref(),
-            false,
-        )
-        .expect_err("checkpoint DOM provenance must reject a canvas swap");
+        assert_eq!(
+            trusted_context
+                .get("runtime_profile")
+                .and_then(|profile| profile.get("family"))
+                .and_then(serde_json::Value::as_str),
+            Some("react_dom")
+        );
 
         let custom_run_id = "wf_custom1";
         let custom_path = root.path().join("custom-local-app.js");
@@ -3657,7 +3249,7 @@ mod run_id_tests {
                 super::WorkflowCheckpoint {
                     task_id: "wcustom1".into(),
                     workflow_run_id: custom_run_id.into(),
-                    workflow_id: "local-app-build".into(),
+                    workflow_id: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                     script_path: custom_path.to_string_lossy().into_owned(),
                     script_sha256: Some(super::sha256_hex(custom_script.as_bytes())),
                     script_is_verbatim_builtin: Some(false),
@@ -3673,11 +3265,16 @@ mod run_id_tests {
             )
             .expect("custom checkpoint");
         assert_eq!(
-            checkpoints.local_app_resume_provenance(session, custom_run_id, &custom_path,),
+            checkpoints.local_app_resume_provenance(
+                session,
+                custom_run_id,
+                &custom_path,
+                custom_script
+            ),
             Some(super::LocalAppResumeProvenance::Custom)
         );
         let mut custom_resume = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(custom_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
@@ -3693,7 +3290,7 @@ mod run_id_tests {
             custom_script,
             false,
         )
-        .expect("marker=false same-meta custom resume should remain custom");
+        .expect("marker=false custom resume should remain custom");
         assert_eq!(
             custom_resume
                 .args
@@ -3703,6 +3300,7 @@ mod run_id_tests {
         );
 
         let mut untrusted = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(script_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
@@ -3716,14 +3314,19 @@ mod run_id_tests {
             root.path().join("missing-checkpoint-home"),
             root.path().to_path_buf(),
         );
-        assert!(!no_checkpoint.is_trusted_local_app_resume(session, run_id, &script_path,));
+        assert!(!no_checkpoint.is_trusted_local_app_resume(
+            session,
+            run_id,
+            &script_path,
+            trusted_script
+        ));
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
             &mut untrusted,
-            legacy_script,
+            trusted_script,
             false,
         )
-        .expect("untrusted legacy resume should remain a custom workflow");
+        .expect("untrusted resume should remain a custom workflow");
         assert_eq!(
             untrusted
                 .args
@@ -3733,9 +3336,15 @@ mod run_id_tests {
         );
 
         let wrong_path = root.path().join("wrong-path.js");
-        std::fs::write(&wrong_path, legacy_script).expect("wrong-path script");
-        assert!(!checkpoints.is_trusted_local_app_resume(session, run_id, &wrong_path,));
+        std::fs::write(&wrong_path, trusted_script).expect("wrong-path script");
+        assert!(!checkpoints.is_trusted_local_app_resume(
+            session,
+            run_id,
+            &wrong_path,
+            trusted_script
+        ));
         let mut wrong_path_spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(wrong_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
@@ -3748,7 +3357,7 @@ mod run_id_tests {
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
             &mut wrong_path_spec,
-            legacy_script,
+            trusted_script,
             false,
         )
         .expect("a run id must not authorize a different script path");
@@ -3760,13 +3369,10 @@ mod run_id_tests {
             Some(&serde_json::json!([]))
         );
 
-        let current_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in")
-            .script;
         let current_path = root.path().join("current-path.js");
-        std::fs::write(&current_path, current_descriptor).expect("current script");
+        std::fs::write(&current_path, trusted_script).expect("current script");
         let mut exact_bytes_untrusted = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(current_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
@@ -3779,24 +3385,25 @@ mod run_id_tests {
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
             &mut exact_bytes_untrusted,
-            current_descriptor,
+            trusted_script,
             false,
         )
-        .expect("exact current bundled bytes remain authoritative without provenance");
+        .expect("exact bytes without provenance remain custom");
         assert_eq!(
             exact_bytes_untrusted
                 .args
                 .as_ref()
                 .and_then(|args| args.get("expected_writable_collections")),
-            Some(&serde_json::json!(["progress"]))
+            Some(&serde_json::json!([]))
         );
     }
 
     #[test]
-    fn cold_start_provenance_sidecar_gates_legacy_scratch_resume() {
+    fn cold_start_provenance_sidecar_requires_exact_plugin_identity() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
         let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
         manifest.collections.push(local_apps::DataCollectionSchema {
             id: "progress".into(),
             name: "Progress".into(),
@@ -3816,50 +3423,32 @@ mod run_id_tests {
             )
         };
 
-        // A pre-sidecar terminal run leaves only its host-owned persisted
-        // script. Its local-app identity is enough to fail closed, but an
-        // ordinary custom script at another path remains untouched below.
-        let legacy_run_id = "wf_legacy-cold1";
-        let legacy_path = store.persisted_workflow_script_path(session, legacy_run_id);
-        std::fs::create_dir_all(legacy_path.parent().expect("legacy parent"))
+        let trusted_run_id = "wf_trusted-cold1";
+        let trusted_path = store.persisted_workflow_script_path(session, trusted_run_id);
+        std::fs::create_dir_all(trusted_path.parent().expect("trusted parent"))
             .expect("legacy script directory");
-        let legacy_script =
-            "export const meta = { name: 'local-app-build' };\nreturn 'legacy body'\n";
-        std::fs::write(&legacy_path, legacy_script).expect("legacy script");
-        assert!(
-            !store.path(session).exists(),
-            "no terminal checkpoint remains"
-        );
-        let mut legacy_spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
-            script_path: Some(legacy_path.to_string_lossy().into_owned()),
-            resume_from_run_id: Some(legacy_run_id.into()),
-            session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
-                "app_id": "demo1234",
-                "expected_writable_collections": [],
-            })),
-            ..Default::default()
-        };
+        let trusted_script = plugin_build_script();
+        std::fs::write(&trusted_path, trusted_script).expect("trusted script");
+        store
+            .write_provenance_sidecar(
+                session,
+                trusted_run_id,
+                &trusted_path,
+                trusted_script,
+                crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
+                true,
+            )
+            .expect("trusted provenance sidecar");
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &legacy_spec,
                 session,
-                legacy_run_id,
-                &legacy_path,
-                legacy_script,
+                trusted_run_id,
+                &trusted_path,
+                trusted_script,
             ),
-            Some(super::LocalAppResumeProvenance::LegacyBuiltin)
+            Some(super::LocalAppResumeProvenance::TrustedPlugin)
         );
-        let error = super::apply_materialized_local_app_collections_with_provenance(
-            root.path(),
-            &mut legacy_spec,
-            legacy_script,
-            true,
-        )
-        .expect_err("legacy host scratch resume must be rejected");
-        assert!(error.to_string().contains("obsolete local-app"));
 
         // A new custom same-meta workflow records marker=false in the
         // transcript sidecar. A fresh process can therefore resume it without
@@ -3875,12 +3464,12 @@ mod run_id_tests {
                 custom_run_id,
                 &custom_path,
                 custom_script,
-                "local-app-build",
+                crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
                 false,
             )
             .expect("custom provenance sidecar");
         let mut custom_spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(custom_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
@@ -3893,7 +3482,6 @@ mod run_id_tests {
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &custom_spec,
                 session,
                 custom_run_id,
                 &custom_path,
@@ -3916,114 +3504,6 @@ mod run_id_tests {
             Some(&serde_json::json!([]))
         );
 
-        let dom_run_id = "wf_dom-swap1";
-        let dom_path = store.persisted_workflow_script_path(session, dom_run_id);
-        let dom_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("dom local-app built-in")
-            .script;
-        std::fs::write(&dom_path, dom_descriptor).expect("dom script");
-        store
-            .write_provenance_sidecar(
-                session,
-                dom_run_id,
-                &dom_path,
-                dom_descriptor,
-                "local-app-build",
-                true,
-            )
-            .expect("dom provenance sidecar");
-        let mut dom_to_canvas = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-canvas-build".into()),
-            script_path: Some(dom_path.to_string_lossy().into_owned()),
-            resume_from_run_id: Some(dom_run_id.into()),
-            session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
-                "app_id": "demo1234",
-                "expected_writable_collections": [],
-            })),
-            ..Default::default()
-        };
-        let dom_to_canvas_resolution = super::local_app_resume_resolution_for_launch(
-            &cold_store(),
-            &dom_to_canvas,
-            session,
-            dom_run_id,
-            &dom_path,
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get("local-canvas-build")
-                .expect("canvas local-app built-in")
-                .script,
-        )
-        .expect("dom provenance");
-        assert_eq!(
-            dom_to_canvas_resolution.workflow_id.as_deref(),
-            Some("local-app-build")
-        );
-        super::apply_materialized_local_app_collections_with_identity(
-            root.path(),
-            &mut dom_to_canvas,
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get("local-canvas-build")
-                .expect("canvas local-app built-in")
-                .script,
-            true,
-            dom_to_canvas_resolution.workflow_id.as_deref(),
-            false,
-        )
-        .expect_err("DOM provenance must reject a canvas script swap");
-
-        let canvas_run_id = "wf_canvas-swap1";
-        let canvas_path = store.persisted_workflow_script_path(session, canvas_run_id);
-        let canvas_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-canvas-build")
-            .expect("canvas local-app built-in")
-            .script;
-        std::fs::write(&canvas_path, canvas_descriptor).expect("canvas script");
-        store
-            .write_provenance_sidecar(
-                session,
-                canvas_run_id,
-                &canvas_path,
-                canvas_descriptor,
-                "local-canvas-build",
-                true,
-            )
-            .expect("canvas provenance sidecar");
-        let mut canvas_to_dom = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
-            script_path: Some(canvas_path.to_string_lossy().into_owned()),
-            resume_from_run_id: Some(canvas_run_id.into()),
-            session_uuid: Some(session.into()),
-            args: Some(serde_json::json!({
-                "app_id": "demo1234",
-                "expected_writable_collections": [],
-            })),
-            ..Default::default()
-        };
-        let canvas_to_dom_resolution = super::local_app_resume_resolution_for_launch(
-            &cold_store(),
-            &canvas_to_dom,
-            session,
-            canvas_run_id,
-            &canvas_path,
-            dom_descriptor,
-        )
-        .expect("canvas provenance");
-        assert_eq!(
-            canvas_to_dom_resolution.workflow_id.as_deref(),
-            Some("local-canvas-build")
-        );
-        super::apply_materialized_local_app_collections_with_identity(
-            root.path(),
-            &mut canvas_to_dom,
-            dom_descriptor,
-            true,
-            canvas_to_dom_resolution.workflow_id.as_deref(),
-            false,
-        )
-        .expect_err("canvas provenance must reject a DOM script swap");
-
         let provenance_path = store.provenance_path(session, custom_run_id);
         let mut tampered_value: serde_json::Value = serde_json::from_slice(
             &std::fs::read(&provenance_path).expect("read custom provenance"),
@@ -4038,30 +3518,26 @@ mod run_id_tests {
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &custom_spec,
                 session,
                 custom_run_id,
                 &custom_path,
                 custom_script,
             ),
-            Some(super::LocalAppResumeProvenance::LegacyBuiltin)
+            None
         );
         let mut tampered_identity = custom_spec.clone();
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
             &mut tampered_identity,
             custom_script,
-            true,
+            false,
         )
-        .expect_err("tampered local-app identity must fail closed");
+        .expect("tampered local-app identity must remain untrusted");
 
-        let current_descriptor = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("local-app built-in")
-            .script;
-        tampered_value["workflowId"] = serde_json::json!("local-app-build");
+        tampered_value["workflowId"] =
+            serde_json::json!(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
         tampered_value["scriptSha256"] =
-            serde_json::json!(super::sha256_hex(current_descriptor.as_bytes()));
+            serde_json::json!(super::sha256_hex(trusted_script.as_bytes()));
         std::fs::write(
             &provenance_path,
             serde_json::to_vec_pretty(&tampered_value).expect("serialize tampered hash"),
@@ -4070,21 +3546,18 @@ mod run_id_tests {
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &custom_spec,
                 session,
                 custom_run_id,
                 &custom_path,
                 custom_script,
             ),
-            Some(super::LocalAppResumeProvenance::LegacyBuiltin)
+            None
         );
 
-        // A path change cannot inherit the sidecar's custom marker; the
-        // invalid path is treated as local-app legacy and fails closed.
         let different_path = root.path().join("different.js");
         std::fs::write(&different_path, custom_script).expect("different path script");
         let mut different_path_spec = tool_workflow::WorkflowLaunchSpec {
-            name: Some("local-app-build".into()),
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             script_path: Some(different_path.to_string_lossy().into_owned()),
             resume_from_run_id: Some(custom_run_id.into()),
             session_uuid: Some(session.into()),
@@ -4097,21 +3570,20 @@ mod run_id_tests {
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &different_path_spec,
                 session,
                 custom_run_id,
                 &different_path,
                 custom_script,
             ),
-            Some(super::LocalAppResumeProvenance::LegacyBuiltin)
+            None
         );
         super::apply_materialized_local_app_collections_with_provenance(
             root.path(),
             &mut different_path_spec,
             custom_script,
-            true,
+            false,
         )
-        .expect_err("different caller path must not inherit provenance");
+        .expect("different caller path must stay untrusted");
 
         // No sidecar plus a custom body/meta at a non-host path remains a
         // direct custom workflow, even when its args happen to contain app_id.
@@ -4131,7 +3603,6 @@ mod run_id_tests {
         assert_eq!(
             super::local_app_resume_provenance_for_launch(
                 &cold_store(),
-                &ordinary_spec,
                 session,
                 "wf_ordinary1",
                 &ordinary_path,
@@ -4365,6 +3836,15 @@ mod run_id_tests {
             session_uuid.clone(),
         ));
         status_sink.bind(registry.clone());
+        let plugin_workflows = workflow::PluginWorkflowRegistry::new();
+        plugin_workflows.register(
+            "lingxi-local-app",
+            vec![workflow::PluginWorkflowEntry {
+                name: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
+                script_path: std::path::PathBuf::from("/plugin/local-app-build.js"),
+                script: plugin_build_script().into(),
+            }],
+        );
         super::MobileWorkflowLauncher {
             registry,
             project_cwd: root.to_path_buf(),
@@ -4374,7 +3854,7 @@ mod run_id_tests {
             session_uuid,
             checkpoints,
             status_sink,
-            plugin_workflows: Arc::new(workflow::PluginWorkflowRegistry::new()),
+            plugin_workflows: Arc::new(plugin_workflows),
         }
     }
 
@@ -4395,23 +3875,9 @@ mod run_id_tests {
     /// point, and it is why "everything is `None`" is not a safe default.
     #[tokio::test]
     async fn a_genuine_in_flight_local_app_build_blocks_that_apps_delete() {
-        // BOTH build workflows, because they are siblings and only one of them
-        // is the routed default: keying the old delete guard on the routed
-        // name alone let a drawn-surface app be deleted mid-build, with
-        // nothing failing. The authority moved, so the sibling coverage has to
-        // move with it -- and running both also proves the mint is not
-        // hard-coded to one runtime family.
-        for (family, workflow_id, app_id) in [
-            (
-                local_apps::AppRuntimeProfile::ReactDom,
-                "local-app-build",
-                "demo1234",
-            ),
-            (
-                local_apps::AppRuntimeProfile::Canvas2d,
-                "local-canvas-build",
-                "canvas1234",
-            ),
+        for (family, app_id) in [
+            (local_apps::AppRuntimeProfile::ReactDom, "demo1234"),
+            (local_apps::AppRuntimeProfile::Canvas2d, "canvas1234"),
         ] {
             let root = tempfile::tempdir().expect("tempdir");
             scaffold_local_app(root.path(), app_id, family);
@@ -4423,53 +3889,52 @@ mod run_id_tests {
                 use tool_workflow::WorkflowLauncher as _;
                 launcher
                     .launch(tool_workflow::WorkflowLaunchSpec {
-                        name: Some(workflow_id.into()),
+                        name: Some(
+                            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
+                        ),
                         args: Some(serde_json::json!({ "app_id": app_id })),
                         session_uuid: Some("session-scope".into()),
                         ..Default::default()
                     })
                     .await
-                    .unwrap_or_else(|error| panic!("{workflow_id} must launch: {error}"))
+                    .unwrap_or_else(|error| panic!("plugin build workflow must launch: {error}"))
             };
 
             assert_eq!(
                 registry.find_nonterminal_local_app_workflows(app_id).await,
                 vec![launched.task_id.clone()],
-                "{workflow_id}: a genuine in-flight build must block its own app's delete"
+                "a genuine in-flight build must block its own app's delete"
             );
             assert!(
                 registry
                     .find_nonterminal_local_app_workflows("some-other-app")
                     .await
                     .is_empty(),
-                "{workflow_id}: and must block ONLY its own app's delete"
+                "and must block ONLY its own app's delete"
             );
 
             // The Host's verdict itself, not only its consequence: the seam mints
             // a scope for the app it RESOLVED, with the purpose the Host chose --
             // so the same run also takes that app's exclusive workspace lease.
             let mut genuine = tool_workflow::WorkflowLaunchSpec {
-                name: Some(workflow_id.into()),
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
                 args: Some(serde_json::json!({ "app_id": app_id })),
                 ..Default::default()
             };
             let minted = super::apply_materialized_local_app_collections_with_identity(
                 root.path(),
                 &mut genuine,
-                tool_workflow::BUILTIN_WORKFLOWS
-                    .get(workflow_id)
-                    .expect("bundled local-app built-in")
-                    .script,
+                plugin_build_script(),
                 false,
-                None,
-                false,
+                Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID),
+                true,
             )
             .expect("the Host resolves this app")
             .expect("a genuine local-app build gets a scope");
             assert_eq!(minted.app_id(), app_id);
             assert!(
                 minted.requires_workspace_lease(),
-                "{workflow_id}: a build scope is what takes the app's exclusive workspace lease"
+                "a build scope is what takes the app's exclusive workspace lease"
             );
         }
     }
@@ -4514,7 +3979,7 @@ mod run_id_tests {
         let inline = launcher
             .launch(tool_workflow::WorkflowLaunchSpec {
                 // Forged launch name...
-                name: Some("local-app-build".into()),
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
                 // ...forged `meta.name` inside a body that is not the
                 // bundled built-in...
                 script: Some(forged_body.into()),
@@ -4565,7 +4030,7 @@ mod run_id_tests {
             (
                 "inline body under a forged name",
                 tool_workflow::WorkflowLaunchSpec {
-                    name: Some("local-app-build".into()),
+                    name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
                     script: Some(forged_body.into()),
                     args: Some(serde_json::json!({ "app_id": "victim12" })),
                     ..Default::default()
@@ -4616,6 +4081,7 @@ mod run_id_tests {
         workflow_id: &str,
         app_id: &str,
         script_bytes: &[u8],
+        script_is_verbatim_builtin: bool,
     ) {
         let transcript_dir = checkpoints
             .session_dir(session_uuid)
@@ -4640,7 +4106,7 @@ mod run_id_tests {
                     workflow_id: workflow_id.to_string(),
                     script_path: script_path.to_string_lossy().into_owned(),
                     script_sha256: Some(super::sha256_hex(script_bytes)),
-                    script_is_verbatim_builtin: None,
+                    script_is_verbatim_builtin: Some(script_is_verbatim_builtin),
                     args_json: Some(serde_json::json!({ "app_id": app_id }).to_string()),
                     description: "Build local app".into(),
                     start_time: Some(1_234),
@@ -4679,10 +4145,7 @@ mod run_id_tests {
             root.path().to_path_buf(),
         );
         let session_uuid = "session-adopt-genuine";
-        let real_script = tool_workflow::BUILTIN_WORKFLOWS
-            .get("local-app-build")
-            .expect("bundled local-app built-in")
-            .script;
+        let real_script = plugin_build_script();
 
         persist_and_adopt_checkpoint(
             &checkpoints,
@@ -4691,9 +4154,10 @@ mod run_id_tests {
             session_uuid,
             "wgenuine1",
             "wf_genuin1",
-            "local-app-build",
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
             app_id,
             real_script.as_bytes(),
+            true,
         )
         .await;
 
@@ -4758,9 +4222,10 @@ mod run_id_tests {
             session_uuid,
             "wforged12",
             "wf_forged1",
-            "local-app-build",
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
             victim_app_id,
             forged_body.as_bytes(),
+            false,
         )
         .await;
 

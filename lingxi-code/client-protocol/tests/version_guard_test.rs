@@ -750,18 +750,6 @@ fn current_contract_index() -> ContractIndex {
         "AppAuthorizationDecisionDto",
     );
     put(
-        "ClientCommand::ResolveAppRuntimeProfileSelection",
-        "resolve_app_runtime_profile_selection",
-    );
-    put(
-        "ClientCommand::ResolveAppRuntimeProfileSelection.request_id",
-        "String",
-    );
-    put(
-        "ClientCommand::ResolveAppRuntimeProfileSelection.selected_family",
-        "Option<AppRuntimeProfileDto>",
-    );
-    put(
         "ClientCommand::ResolveAppDependencyChangeConfirmation",
         "resolve_app_dependency_change_confirmation",
     );
@@ -773,6 +761,8 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::ResolveAppDependencyChangeConfirmation.approved",
         "bool",
     );
+    put("ClientCommand::PluginCommand", "plugin_command");
+    put("ClientCommand::PluginCommand.command", "PluginCommandDto");
     put(
         "ClientCommand::ResolveAppProfileProposal",
         "resolve_app_profile_proposal",
@@ -1412,11 +1402,11 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.capabilities", "Vec<AppCapabilityKindDto>");
     put("AppManifestDto.device_context", "Option<DeviceContextDto>");
     put("AppManifestDto.surface", "Option<AppSurfaceDto>");
-    // The two records `version.rs` names as the whole reason for the 9.0.0
-    // major bump. Omitting them here leaves the guard blind to exactly the
-    // seam the bump was taken for: a later rename of `runtimeProfile` or a
-    // retype of `contract_sha256` is a BREAKING wire change, and with no row
-    // in the index `breaking_entries` would be empty and it would ship green.
+    // These records remain part of the v10 contract after Phase 9 removed the
+    // obsolete runtime-profile selector. Omitting them here would leave the
+    // guard blind to a later `runtimeProfile` rename or `contract_sha256`
+    // retype: both are BREAKING wire changes even though profile selection is
+    // now Host-owned rather than a client command/event exchange.
     put(
         "AppManifestDto.runtime_profile",
         "Option<AppRuntimeProfileBindingDto>",
@@ -1474,17 +1464,6 @@ fn current_contract_index() -> ContractIndex {
     put("AppRuntimeProfileOptionDto.download_status", "String");
     put("AppRuntimeProfileOptionDto.available", "bool");
     put("AppRuntimeProfileOptionDto.reason", "Option<String>");
-    put("AppRuntimeProfileSelectionRequestDto.request_id", "String");
-    put("AppRuntimeProfileSelectionRequestDto.app_id", "String");
-    put("AppRuntimeProfileSelectionRequestDto.reason", "String");
-    put(
-        "AppRuntimeProfileSelectionRequestDto.recommended_family",
-        "Option<AppRuntimeProfileDto>",
-    );
-    put(
-        "AppRuntimeProfileSelectionRequestDto.options",
-        "Vec<AppRuntimeProfileOptionDto>",
-    );
     put("AppDependencyChangeKindDto::Add", "add");
     put("AppDependencyChangeKindDto::Update", "update");
     put("AppDependencyChangeKindDto::Remove", "remove");
@@ -1662,10 +1641,6 @@ fn current_contract_index() -> ContractIndex {
         "restore_checkpoint",
     );
     put(
-        "AppCapabilityKindDto::RuntimeProfileSelection",
-        "runtime_profile_selection",
-    );
-    put(
         "AppCapabilityKindDto::DependencyChange",
         "dependency_change",
     );
@@ -1696,6 +1671,286 @@ fn current_contract_index() -> ContractIndex {
     put("AppAuthorizationDecisionDto::AllowOnce", "allow_once");
     put("AppAuthorizationDecisionDto::AllowSession", "allow_session");
     put("AppAuthorizationDecisionDto::AllowAlways", "allow_always");
+
+    put("PluginActivationStateDto::Loaded", "loaded");
+    put("PluginActivationStateDto::Disabled", "disabled");
+    put("PluginStatusDto.plugin_id", "String");
+    put("PluginStatusDto.state", "PluginActivationStateDto");
+    put("PluginStatusDto.manifest_default_enabled", "bool");
+    put("PluginCommandDto::SetEnabled", "set_enabled");
+    put("PluginCommandDto::SetEnabled.plugin_id", "String");
+    put("PluginCommandDto::SetEnabled.enabled", "bool");
+    put("PluginCommandDto::GetStatus", "get_status");
+    put("PluginCommandDto::GetStatus.plugin_id", "String");
+    put("PluginCommandDto::GetInventory", "get_inventory");
+    put("PluginCommandDto::GetInventory.plugin_id", "String");
+    put(
+        "PluginCommandDto::ResolveCreateConfirmation",
+        "resolve_create_confirmation",
+    );
+    put(
+        "PluginCommandDto::ResolveCreateConfirmation.request_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::ResolveCreateConfirmation.approved",
+        "bool",
+    );
+    put(
+        "PluginCommandDto::ResolveMcpProposalApproval",
+        "resolve_mcp_proposal_approval",
+    );
+    put(
+        "PluginCommandDto::ResolveMcpProposalApproval.request_id",
+        "String",
+    );
+    put(
+        "PluginCommandDto::ResolveMcpProposalApproval.approved",
+        "bool",
+    );
+    put(
+        "PluginCommandDto::GetManagedMcpInventory",
+        "get_managed_mcp_inventory",
+    );
+
+    put(
+        "LocalAppPluginErrorCodeDto::PluginDisabled",
+        "plugin_disabled",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable",
+        "builtin_bundle_unavailable",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::TemplateUnavailable",
+        "template_unavailable",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::ProposalInvalid",
+        "proposal_invalid",
+    );
+    put("LocalAppPluginErrorCodeDto::CatalogStale", "catalog_stale");
+    put(
+        "LocalAppPluginErrorCodeDto::ActiveStateCorrupt",
+        "active_state_corrupt",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::McpAuthoringRequired",
+        "mcp_authoring_required",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::RepairBudgetExhausted",
+        "repair_budget_exhausted",
+    );
+    put(
+        "LocalAppPluginErrorCodeDto::ExposureCapacityReached",
+        "exposure_capacity_reached",
+    );
+    put("LocalAppVerificationStatusDto::Pending", "pending");
+    put("LocalAppVerificationStatusDto::Passed", "passed");
+    put("LocalAppVerificationStatusDto::Failed", "failed");
+    put("LocalAppVerificationStatusDto::Unverified", "unverified");
+    put("LocalAppVerificationStatusDto::Unavailable", "unavailable");
+    put(
+        "LocalAppVerificationSummaryDto.status",
+        "LocalAppVerificationStatusDto",
+    );
+    put("LocalAppVerificationSummaryDto.summary", "String");
+    put("LocalAppVerificationSummaryDto.code", "Option<String>");
+    put("LocalAppGateStatusDto.gate_id", "String");
+    put("LocalAppGateStatusDto.label", "String");
+    put(
+        "LocalAppGateStatusDto.status",
+        "LocalAppVerificationStatusDto",
+    );
+    put("LocalAppGateStatusDto.available", "bool");
+    put("LocalAppGateStatusDto.detail", "Option<String>");
+    put("LocalAppPluginComponentCountsDto.skills", "u32");
+    put("LocalAppPluginComponentCountsDto.agents", "u32");
+    put("LocalAppPluginComponentCountsDto.workflows", "u32");
+    put("LocalAppPluginComponentCountsDto.templates", "u32");
+    put("LocalAppPluginInventoryDto.plugin_id", "String");
+    put("LocalAppPluginInventoryDto.display_name", "String");
+    put("LocalAppPluginInventoryDto.source", "String");
+    put("LocalAppPluginInventoryDto.version", "String");
+    put("LocalAppPluginInventoryDto.bundle_sha256", "String");
+    put(
+        "LocalAppPluginInventoryDto.state",
+        "PluginActivationStateDto",
+    );
+    put(
+        "LocalAppPluginInventoryDto.manifest_default_enabled",
+        "bool",
+    );
+    put(
+        "LocalAppPluginInventoryDto.counts",
+        "LocalAppPluginComponentCountsDto",
+    );
+    put(
+        "LocalAppPluginInventoryDto.validation_error",
+        "Option<String>",
+    );
+    put("LocalAppRejectedCandidateDto.template_id", "String");
+    put("LocalAppRejectedCandidateDto.reason", "String");
+    put("LocalAppTemplateSummaryDto.template_id", "String");
+    put("LocalAppTemplateSummaryDto.surface", "AppSurfaceDto");
+    put("LocalAppTemplateSummaryDto.summary", "String");
+    put("LocalAppMcpToolSurfaceDto.name", "String");
+    put("LocalAppMcpToolSurfaceDto.title", "Option<String>");
+    put("LocalAppMcpToolSurfaceDto.description", "Option<String>");
+    put("LocalAppMcpToolSurfaceDto.input_schema_json", "String");
+    put(
+        "LocalAppMcpToolSurfaceDto.output_schema_json",
+        "Option<String>",
+    );
+    put(
+        "LocalAppMcpToolSurfaceDto.annotations_json",
+        "Option<String>",
+    );
+    put("LocalAppMcpToolSurfaceDto.execution_json", "Option<String>");
+    put(
+        "LocalAppMcpToolSurfaceDto.visible_meta_json",
+        "Option<String>",
+    );
+    put("LocalAppMcpToolSurfaceDto.semantic_flow_json", "String");
+    put("LocalAppMcpToolSurfaceDto.permission_ceiling", "String");
+    put("LocalAppReceiptStatusDto.receipt_id", "String");
+    put("LocalAppReceiptStatusDto.app_id", "String");
+    put("LocalAppReceiptStatusDto.workflow_run_id", "String");
+    put(
+        "LocalAppReceiptStatusDto.approval_contract_sha256",
+        "String",
+    );
+    put("LocalAppReceiptStatusDto.candidate_digest", "String");
+    put("LocalAppReceiptStatusDto.issued_at_ms", "u64");
+    put("LocalAppReceiptStatusDto.expires_at_ms", "u64");
+    put("LocalAppReceiptStatusDto.consumed", "bool");
+    put("LocalAppReceiptStatusDto.superseded", "bool");
+    put("LocalAppCreateConfirmationRequestDto.request_id", "String");
+    put("LocalAppCreateConfirmationRequestDto.app_id", "String");
+    put("LocalAppCreateConfirmationRequestDto.name", "String");
+    put("LocalAppCreateConfirmationRequestDto.brief", "String");
+    put(
+        "LocalAppCreateConfirmationRequestDto.selected_template",
+        "LocalAppTemplateSummaryDto",
+    );
+    put(
+        "LocalAppCreateConfirmationRequestDto.runtime_profile",
+        "AppRuntimeProfileOptionDto",
+    );
+    put("LocalAppCreateConfirmationRequestDto.reason", "String");
+    put(
+        "LocalAppCreateConfirmationRequestDto.rejected",
+        "Vec<LocalAppRejectedCandidateDto>",
+    );
+    put(
+        "LocalAppCreateConfirmationRequestDto.initial_tools",
+        "Vec<LocalAppMcpToolSurfaceDto>",
+    );
+    put(
+        "LocalAppCreateConfirmationRequestDto.required_gates",
+        "Vec<LocalAppGateStatusDto>",
+    );
+    put(
+        "LocalAppCreateConfirmationRequestDto.receipt",
+        "Option<LocalAppReceiptStatusDto>",
+    );
+    put("LocalAppMcpToolFieldDto::Name", "name");
+    put("LocalAppMcpToolFieldDto::Title", "title");
+    put("LocalAppMcpToolFieldDto::Description", "description");
+    put("LocalAppMcpToolFieldDto::InputSchema", "input_schema");
+    put("LocalAppMcpToolFieldDto::OutputSchema", "output_schema");
+    put("LocalAppMcpToolFieldDto::Annotations", "annotations");
+    put("LocalAppMcpToolFieldDto::Execution", "execution");
+    put("LocalAppMcpToolFieldDto::VisibleMeta", "visible_meta");
+    put("LocalAppMcpToolFieldDto::SemanticFlow", "semantic_flow");
+    put(
+        "LocalAppMcpToolFieldDto::PermissionCeiling",
+        "permission_ceiling",
+    );
+    put("LocalAppMcpToolChangeKindDto::Added", "added");
+    put("LocalAppMcpToolChangeKindDto::Removed", "removed");
+    put("LocalAppMcpToolChangeKindDto::Changed", "changed");
+    put(
+        "LocalAppMcpToolDiffDto.kind",
+        "LocalAppMcpToolChangeKindDto",
+    );
+    put("LocalAppMcpToolDiffDto.name", "String");
+    put(
+        "LocalAppMcpToolDiffDto.before",
+        "Option<LocalAppMcpToolSurfaceDto>",
+    );
+    put(
+        "LocalAppMcpToolDiffDto.after",
+        "Option<LocalAppMcpToolSurfaceDto>",
+    );
+    put(
+        "LocalAppMcpToolDiffDto.changed_fields",
+        "Vec<LocalAppMcpToolFieldDto>",
+    );
+    put("LocalAppMcpProposalApprovalRequestDto.request_id", "String");
+    put("LocalAppMcpProposalApprovalRequestDto.app_id", "String");
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.workflow_run_id",
+        "String",
+    );
+    put("LocalAppMcpProposalApprovalRequestDto.summary", "String");
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.proposal_sha256",
+        "String",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.approval_contract_sha256",
+        "String",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.tool_surface_sha256",
+        "String",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.tool_diffs",
+        "Vec<LocalAppMcpToolDiffDto>",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.required_flow_changes",
+        "Vec<String>",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.excluded_capabilities",
+        "Vec<String>",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.pending_gates",
+        "Vec<LocalAppGateStatusDto>",
+    );
+    put(
+        "LocalAppMcpProposalApprovalRequestDto.receipt",
+        "Option<LocalAppReceiptStatusDto>",
+    );
+    put("ManagedLocalAppMcpServerDto.server_name", "String");
+    put("ManagedLocalAppMcpServerDto.app_id", "String");
+    put("ManagedLocalAppMcpServerDto.app_name", "String");
+    put("ManagedLocalAppMcpServerDto.build_id", "String");
+    put("ManagedLocalAppMcpServerDto.catalog_sha256", "String");
+    put("ManagedLocalAppMcpServerDto.tool_surface_sha256", "String");
+    put("ManagedLocalAppMcpServerDto.tool_count", "u32");
+    put("ManagedLocalAppMcpServerDto.authoring_revision", "u64");
+    put(
+        "ManagedLocalAppMcpServerDto.publication_state",
+        "AppWorkflowStateDto",
+    );
+    put(
+        "ManagedLocalAppMcpServerDto.mcp_verification",
+        "LocalAppVerificationSummaryDto",
+    );
+    put(
+        "ManagedLocalAppMcpServerDto.ui_verification",
+        "LocalAppVerificationSummaryDto",
+    );
+    put(
+        "ManagedLocalAppMcpServerDto.tools",
+        "Vec<LocalAppMcpToolSurfaceDto>",
+    );
 
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
@@ -1734,14 +1989,6 @@ fn current_contract_index() -> ContractIndex {
         "AppCapabilityRequestDto",
     );
     put(
-        "AppEventDto::AppRuntimeProfileSelectionRequested",
-        "app_runtime_profile_selection_requested",
-    );
-    put(
-        "AppEventDto::AppRuntimeProfileSelectionRequested.request",
-        "AppRuntimeProfileSelectionRequestDto",
-    );
-    put(
         "AppEventDto::AppDependencyChangeConfirmationRequested",
         "app_dependency_change_confirmation_requested",
     );
@@ -1769,6 +2016,74 @@ fn current_contract_index() -> ContractIndex {
     put("AppEventDto::AppAgentEventPosted.seq", "u64");
     put("AppEventDto::AppAgentEventPosted.topic", "String");
     put("AppEventDto::AppAgentEventPosted.created_at_ms", "u64");
+    put("AppEventDto::PluginStatusChanged", "plugin_status_changed");
+    put("AppEventDto::PluginStatusChanged.status", "PluginStatusDto");
+    put(
+        "AppEventDto::PluginInventoryChanged",
+        "plugin_inventory_changed",
+    );
+    put(
+        "AppEventDto::PluginInventoryChanged.inventory",
+        "LocalAppPluginInventoryDto",
+    );
+    put(
+        "AppEventDto::CreateConfirmationRequested",
+        "create_confirmation_requested",
+    );
+    put(
+        "AppEventDto::CreateConfirmationRequested.request",
+        "LocalAppCreateConfirmationRequestDto",
+    );
+    put(
+        "AppEventDto::McpProposalApprovalRequested",
+        "mcp_proposal_approval_requested",
+    );
+    put(
+        "AppEventDto::McpProposalApprovalRequested.request",
+        "LocalAppMcpProposalApprovalRequestDto",
+    );
+    put(
+        "AppEventDto::ManagedMcpInventoryChanged",
+        "managed_mcp_inventory_changed",
+    );
+    put(
+        "AppEventDto::ManagedMcpInventoryChanged.servers",
+        "Vec<ManagedLocalAppMcpServerDto>",
+    );
+    put(
+        "AppEventDto::VerificationSummaryChanged",
+        "verification_summary_changed",
+    );
+    put("AppEventDto::VerificationSummaryChanged.app_id", "String");
+    put(
+        "AppEventDto::VerificationSummaryChanged.publication_state",
+        "AppWorkflowStateDto",
+    );
+    put(
+        "AppEventDto::VerificationSummaryChanged.mcp_verification",
+        "LocalAppVerificationSummaryDto",
+    );
+    put(
+        "AppEventDto::VerificationSummaryChanged.ui_verification",
+        "LocalAppVerificationSummaryDto",
+    );
+    put(
+        "AppEventDto::LocalAppOperationFailed",
+        "local_app_operation_failed",
+    );
+    put(
+        "AppEventDto::LocalAppOperationFailed.app_id",
+        "Option<String>",
+    );
+    put(
+        "AppEventDto::LocalAppOperationFailed.code",
+        "LocalAppPluginErrorCodeDto",
+    );
+    put("AppEventDto::LocalAppOperationFailed.message", "String");
+    put(
+        "AppEventDto::LocalAppOperationFailed.request_id",
+        "Option<String>",
+    );
 
     ix
 }
@@ -2061,11 +2376,10 @@ fn contract_index_covers_every_dto() {
         AppDataFieldTypeDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
         AppDependencyChangeKindDto, AppDependencySnapshotDto, AppDetailsDto, AppErrorCodeDto,
         AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
-        AppRuntimeProfileBindingDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto,
-        AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
-        AppRuntimeProfileStatusDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-        AppRuntimeSuspensionReasonDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
-        AppUiTargetDto, AppWorkflowStateDto, DeviceContextDto,
+        AppRuntimeProfileBindingDto, AppRuntimeProfileDto, AppRuntimeProfileStatusDto,
+        AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
+        AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
+        DeviceContextDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -2543,26 +2857,6 @@ fn contract_index_covers_every_dto() {
         domain: None,
         reason: String::new(),
     };
-    let app_runtime_profile_selection = AppRuntimeProfileSelectionRequestDto {
-        request_id: String::new(),
-        app_id: String::new(),
-        reason: String::new(),
-        recommended_family: Some(AppRuntimeProfileDto::ReactDom),
-        options: vec![AppRuntimeProfileOptionDto {
-            family: AppRuntimeProfileDto::ReactDom,
-            revision: 1,
-            contract_sha256: String::new(),
-            surface: AppSurfaceDto::Dom,
-            core_packages: vec![AppRuntimeProfilePackageDto {
-                name: String::new(),
-                version: String::new(),
-            }],
-            cache_status: String::new(),
-            download_status: String::new(),
-            available: true,
-            reason: None,
-        }],
-    };
     let app_dependency_change_confirmation = AppDependencyChangeConfirmationRequestDto {
         request_id: String::new(),
         app_id: String::new(),
@@ -2603,9 +2897,6 @@ fn contract_index_covers_every_dto() {
         },
         AppEventDto::AppCapabilityRequested {
             request: app_capability_request,
-        },
-        AppEventDto::AppRuntimeProfileSelectionRequested {
-            request: app_runtime_profile_selection,
         },
         AppEventDto::AppDependencyChangeConfirmationRequested {
             request: app_dependency_change_confirmation,

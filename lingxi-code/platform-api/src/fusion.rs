@@ -32,6 +32,19 @@ pub const DEFAULT_FUSION_DIMENSIONS: [&str; 5] = [
     "actionability",
 ];
 
+/// Human-readable rubric anchors for [`DEFAULT_FUSION_DIMENSIONS`], same
+/// order. The analyst system prompt renders these so the judge model scores
+/// against a shared meaning instead of guessing from the bare dimension name
+/// (F003). A caller-supplied custom dimension list has no built-in
+/// description; the analyst scores those by their plain meaning.
+pub const DEFAULT_FUSION_DIMENSION_DESCRIPTIONS: [&str; 5] = [
+    "evidence_quality: how well the report's claims are grounded in cited evidence (files, URLs, commands actually consulted) rather than unsupported assertion",
+    "coverage: how much of the task's scope the report actually addresses",
+    "reasoning: how sound and internally consistent the report's chain of reasoning is",
+    "safety: whether the report avoids introducing risk (destructive actions, security issues, unverified claims stated as fact)",
+    "actionability: how directly the report's answer can be acted on without further clarification",
+];
+
 /// Minimum and maximum panel sizes.
 pub const FUSION_MIN_PANEL: u8 = 2;
 /// OpenRouter-aligned panel cap.
@@ -326,8 +339,17 @@ pub enum FusionNeedsParentReason {
         /// Reason text.
         reason: String,
     },
-    /// Analyst JSON failed twice.
+    /// Analyst JSON failed to decode / validate after all retries.
     AnalysisParseFailed,
+    /// Analyst call failed for a reason other than a decode failure — a
+    /// timeout, a transport/4xx/5xx error, or (post-panel) an analyst whose
+    /// route turned out not to support structured output. `category` is a
+    /// sanitized category string (never a raw provider body), e.g. `"timeout"`
+    /// or `"structured_output_unsupported"`.
+    AnalysisFailed {
+        /// Sanitized failure category.
+        category: String,
+    },
     /// Unresolved critical contradiction blocked merge.
     CriticalContradiction,
     /// Merge confidence below the host threshold.

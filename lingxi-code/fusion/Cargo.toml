@@ -24,6 +24,12 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# Test-only: asserts the analyst JSON schema is strict-mode compatible
+# (F003). `sidequery` already pulls `llm-client` into the build graph; this
+# just names it so `fusion`'s own tests can call
+# `llm_client::strict_schema::to_strict_schema` directly instead of
+# duplicating that converter.
+llm-client = { path = "../llm-client" }
 
 [lints]
 workspace = true

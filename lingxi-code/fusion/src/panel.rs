@@ -118,6 +118,16 @@ pub fn panel_report_json_schema() -> Value {
 }
 
 /// Run every panel concurrently. Cancel aborts the JoinSet and joins every task.
+///
+/// `overall_deadline` (F004 review fix) is what remains of the end-to-end
+/// `total_timeout_ms` budget at the moment the caller starts the panel stage
+/// (`FusionOrchestrator::remaining(started)`). Each panel's own timeout is
+/// `min(config.panel_total_timeout_ms, overall_deadline)` so a panel stage that
+/// would otherwise run past the whole-run deadline is cut off HERE — with
+/// whatever panels already finished kept in the returned `Vec` — instead of
+/// being cut off by the outer `run()` wrapper, which drops `run_inner` (and every
+/// panel result gathered so far) wholesale and degrades to `TimedOutEmpty` even
+/// when panels had already produced enough successful material for `NeedsParent`.
 pub async fn run_panels(
     spawner: Arc<dyn SubagentSpawner>,
     inherit: &FusionInheritance,
@@ -125,6 +135,7 @@ pub async fn run_panels(
     task_prompt: &str,
     panels: &[ResolvedPanel],
     run_id: &str,
+    overall_deadline: Duration,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
     let mut join_set = JoinSet::new();
@@ -138,7 +149,8 @@ pub async fn run_panels(
         let run_id = run_id.to_string();
         let max_turns = config.panel_max_turns;
         let max_out = config.panel_max_output_tokens_per_turn;
-        let panel_total_timeout = Duration::from_millis(config.panel_total_timeout_ms);
+        let panel_total_timeout =
+            Duration::from_millis(config.panel_total_timeout_ms).min(overall_deadline);
         let panel_watchdog = WorkflowQueryWatchdog {
             stall_timeout_ms: config.panel_idle_timeout_ms,
             max_retries: 0,

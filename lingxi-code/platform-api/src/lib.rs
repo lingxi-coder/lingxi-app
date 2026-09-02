@@ -139,7 +139,8 @@ pub use fusion::{
     FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming, FusionUniqueInsight,
     FusionUsage, NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelOutcome, PanelPosition,
     PanelReport, PanelRisk, PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
-    FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
+    DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
+    FUSION_SCHEMA_VERSION,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{

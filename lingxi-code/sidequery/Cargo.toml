@@ -26,5 +26,10 @@ async-trait.workspace = true
 tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 
+[dev-dependencies]
+# Test-only: asserts the Session-backend `query_json_schema` path emits the
+# `tengu_api_query_source` telemetry event (F003) with an in-memory sink.
+telemetry = { path = "../telemetry" }
+
 [lints]
 workspace = true

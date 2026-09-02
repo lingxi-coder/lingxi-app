@@ -11,18 +11,42 @@ use crate::synthesizer::{synthesize, SynthError};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    normalize_dimensions, FusionAgentSurface, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionProgress,
-    FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming, FusionUsage,
-    PanelOutcome, PanelRunStatus, FUSION_MIN_PANEL,
+    normalize_dimensions, FusionAgentSurface, FusionAnalysis, FusionDecision, FusionError,
+    FusionExecutor, FusionInheritance, FusionNeedsParentReason, FusionOrigin, FusionPreset,
+    FusionProgress, FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming,
+    FusionUsage, PanelOutcome, PanelRunStatus, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::AnalyticsBus;
 use tokio::sync::mpsc::Sender;
+
+/// Extra headroom the OUTER `run()` deadline carries past
+/// `config.total_timeout_ms` (F004 review fix).
+///
+/// Every stage inside `run_inner` bounds itself by [`FusionOrchestrator::remaining`],
+/// which is derived from the SAME `total_timeout_ms` — but `remaining()` computes
+/// its deadline with `Duration::from_millis(total_timeout_ms - millis_since(started))`,
+/// and `millis_since` truncates the elapsed time down to whole milliseconds via
+/// `as_millis()`. That truncation makes `remaining()` over-report the time left by
+/// up to ~1ms, so an inner per-stage deadline built from it can land at
+/// `started + total_timeout_ms + <sub-ms fraction>` — a handful of MICROSECONDS
+/// after the outer wrapper's own `started + total_timeout_ms` deadline. Since both
+/// deadlines are registered with tokio's timer wheel (1ms granularity), whichever
+/// of the two fires first is effectively a coin flip on that fraction, so the OUTER
+/// wrapper can (rarely) win the race and degrade the whole run to
+/// `Err(TimedOutEmpty)` even though an inner stage was about to hand back a
+/// legitimate `Ok(NeedsParent)` with real panel material.
+///
+/// Giving the outer wrapper a fixed grace past `total_timeout_ms` makes it a
+/// strict backstop that can never fire before every inner per-stage deadline has
+/// had its chance — the inner deadlines still bound user-visible latency at
+/// `total_timeout_ms`, this grace only covers the tail (result assembly,
+/// `lease.commit`, telemetry) after an inner stage has already degraded.
+const FINALIZE_GRACE_MS: u64 = 250;
 
 /// Injected Fusion orchestrator. Settings, catalog, spawner, and side-query
 /// client live here; [`FusionInheritance`] carries the parent session handles.
@@ -66,6 +90,14 @@ impl FusionOrchestrator {
     pub fn with_bus(mut self, bus: Arc<AnalyticsBus>) -> Self {
         self.bus = bus;
         self
+    }
+
+    /// Time left until `self.config.total_timeout_ms` from `started` (F004).
+    /// Never negative — once the deadline has passed this returns
+    /// [`Duration::ZERO`], which `tokio::time::timeout` treats as an
+    /// immediate elapse rather than panicking.
+    fn remaining(&self, started: Instant) -> Duration {
+        Duration::from_millis(self.config.total_timeout_ms.saturating_sub(millis_since(started)))
     }
 
     async fn run_inner(
@@ -196,6 +228,7 @@ impl FusionOrchestrator {
             &request.prompt,
             &resolved.panels,
             &run_id,
+            self.remaining(started),
         )
         .await
         {
@@ -278,14 +311,31 @@ impl FusionOrchestrator {
 
         progress::emit(&progress, FusionStage::Analyzing, None, "analyzing panels").await;
         let analyst_started = Instant::now();
-        let analysis_outcome = analyze(
-            Arc::clone(&self.side_query),
-            &self.config,
-            &request,
-            &resolved.analyst,
-            &panels,
+        // F004: bound the analyst stage by what actually remains of the
+        // end-to-end deadline, not just its own `analystTimeoutMs` budget —
+        // `analyze`'s own internal retry loop can otherwise run past `total`
+        // before the outer `run()` timeout ever gets polled (nested
+        // `tokio::time::timeout`s always poll their inner future first, so
+        // this always resolves before — never after — that outer wrapper).
+        // Reusing `AnalystError::Failed("timeout")` here folds this into the
+        // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
+        // below.
+        let remaining_for_analyst = self.remaining(started);
+        let analysis_outcome = match tokio::time::timeout(
+            remaining_for_analyst,
+            analyze(
+                Arc::clone(&self.side_query),
+                &self.config,
+                &request,
+                &resolved.analyst,
+                &panels,
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(AnalystError::Failed("timeout".into())),
+        };
         let analyst_ms = millis_since(analyst_started);
 
         let mut usage = aggregate_panel_usage(&panels);
@@ -312,11 +362,17 @@ impl FusionOrchestrator {
                     FusionDecision::NeedsParent {
                         reason: FusionNeedsParentReason::AnalysisParseFailed,
                     },
-                    needs_parent_text(&panels, "analyst JSON could not be parsed"),
+                    needs_parent_text(&panels, "analyst JSON could not be parsed", None),
                     None,
                     0,
                 )
             }
+            // F004: previously a hard `Err` after every panel had already been
+            // paid for. Reachable only when the catalog's `judge_eligible`
+            // hint was wrong for the model `model_resolver::resolve` picked
+            // (the preflight check there is the normal gate) — degrade to
+            // NeedsParent like every other post-panel analyst failure instead
+            // of throwing the panel material away.
             Err(AnalystError::Unsupported) => {
                 let mut md = fusion_event_metadata(&request);
                 md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
@@ -327,14 +383,24 @@ impl FusionOrchestrator {
                     AnalyticsValue::String("structured_output_unsupported".into()),
                 );
                 self.bus
-                    .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md.clone())
+                    .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
                     .await;
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
-                return Err(FusionError::StructuredOutputUnsupported);
+                (
+                    FusionDecision::NeedsParent {
+                        reason: FusionNeedsParentReason::AnalysisFailed {
+                            category: "structured_output_unsupported".into(),
+                        },
+                    },
+                    needs_parent_text(
+                        &panels,
+                        "analyst structured output is unsupported",
+                        None,
+                    ),
+                    None,
+                    0,
+                )
             }
-            Err(AnalystError::Failed(_)) => {
+            Err(AnalystError::Failed(category)) => {
                 let mut md = fusion_event_metadata(&request);
                 md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
                 add_panel_counts(&mut md, &panels);
@@ -348,9 +414,15 @@ impl FusionOrchestrator {
                     .await;
                 (
                     FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::AnalysisParseFailed,
+                        reason: FusionNeedsParentReason::AnalysisFailed {
+                            category: category.clone(),
+                        },
                     },
-                    needs_parent_text(&panels, "analyst call failed"),
+                    needs_parent_text(
+                        &panels,
+                        &format!("analyst call failed: {category}"),
+                        None,
+                    ),
                     None,
                     0,
                 )
@@ -379,12 +451,17 @@ impl FusionOrchestrator {
                             .and_then(|panel| panel.report.as_ref())
                             .map(|report| report.candidate_answer.clone())
                             .unwrap_or_else(|| {
-                                needs_parent_text(&panels, "picked panel had no candidate")
+                                needs_parent_text(
+                                    &panels,
+                                    "picked panel had no candidate",
+                                    Some(&analysis),
+                                )
                             });
                         (FusionDecision::Picked { panel_id }, text, Some(analysis), 0)
                     }
                     HostDecision::NeedsParent { reason } => {
-                        let summary = needs_parent_text(&panels, &reason_line(&reason));
+                        let summary =
+                            needs_parent_text(&panels, &reason_line(&reason), Some(&analysis));
                         (
                             FusionDecision::NeedsParent { reason },
                             summary,
@@ -401,14 +478,28 @@ impl FusionOrchestrator {
                         )
                         .await;
                         let synth_started = Instant::now();
-                        let synth = synthesize(
-                            Arc::clone(&self.side_query),
-                            &self.config,
-                            &request,
-                            &analysis,
-                            &panels,
+                        // F004: same remaining-budget bound as the analyst
+                        // stage above, so a hanging synthesizer degrades to
+                        // NeedsParent (SynthesisTimedOut, which already
+                        // exists) rather than letting the run blow past
+                        // `total_timeout_ms` and lose everything to the outer
+                        // `TimedOutEmpty`.
+                        let remaining_for_synth = self.remaining(started);
+                        let synth = match tokio::time::timeout(
+                            remaining_for_synth,
+                            synthesize(
+                                Arc::clone(&self.side_query),
+                                &self.config,
+                                &request,
+                                &analysis,
+                                &panels,
+                            ),
                         )
-                        .await;
+                        .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(_) => Err(SynthError::TimedOut),
+                        };
                         let synthesizer_ms = millis_since(synth_started);
                         match synth {
                             Ok((text, synth_usage)) => {
@@ -446,7 +537,11 @@ impl FusionOrchestrator {
                                     FusionDecision::NeedsParent {
                                         reason: FusionNeedsParentReason::SynthesisTimedOut,
                                     },
-                                    needs_parent_text(&panels, "synthesizer timed out"),
+                                    needs_parent_text(
+                                        &panels,
+                                        "synthesizer timed out",
+                                        Some(&analysis),
+                                    ),
                                     Some(analysis),
                                     synthesizer_ms,
                                 )
@@ -470,7 +565,7 @@ impl FusionOrchestrator {
                                     FusionDecision::NeedsParent {
                                         reason: FusionNeedsParentReason::SynthesisFailed,
                                     },
-                                    needs_parent_text(&panels, "synthesizer failed"),
+                                    needs_parent_text(&panels, "synthesizer failed", Some(&analysis)),
                                     Some(analysis),
                                     synthesizer_ms,
                                 )
@@ -600,7 +695,12 @@ impl FusionExecutor for FusionOrchestrator {
         let run_id = new_run_id();
         let request_for_terminal = request.clone();
         let cancel = inherit.cancel.clone();
-        let total = std::time::Duration::from_millis(self.config.total_timeout_ms);
+        // FINALIZE_GRACE_MS: this outer timeout must never fire BEFORE an inner
+        // per-stage deadline (built from `self.remaining(started)`) — see the
+        // constant's doc comment for why a zero-margin outer deadline is flaky.
+        let total = std::time::Duration::from_millis(
+            self.config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS),
+        );
         let outcome = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -864,23 +964,117 @@ fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {
     acc.provider_requests = acc.provider_requests.saturating_add(calls);
 }
 
-fn needs_parent_text(panels: &[PanelInternal], reason: &str) -> String {
+/// Byte cap on each panel's rendered `candidate_answer` inside
+/// [`needs_parent_text`] — the full text is still in `FusionResult.panels`
+/// material via the Agent `analysis`/panel path; this keeps the NeedsParent
+/// summary itself bounded when panels wrote long patches.
+const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
+
+/// Render the NeedsParent summary (F004): unlike a bare status list, this
+/// carries the actual paid deliberation material — consensus, contradictions,
+/// coverage gaps, per-panel scores, and each successful panel's (already
+/// sanitized, see `panel::sanitize_report` / `analyst::sanitize_analysis`)
+/// summary and candidate answer — so the parent does not have to redo the
+/// work from a bare "Fusion failed" line. `analysis` is `None` when the
+/// analyst never returned a usable payload (parse failure, transport
+/// failure, or a pre-analysis abort).
+fn needs_parent_text(
+    panels: &[PanelInternal],
+    reason: &str,
+    analysis: Option<&FusionAnalysis>,
+) -> String {
     let mut lines = vec![format!(
         "Fusion did not produce a conclusive answer ({reason})."
     )];
+
+    if let Some(analysis) = analysis {
+        if !analysis.consensus.is_empty() {
+            lines.push(String::new());
+            lines.push("Consensus:".into());
+            for item in &analysis.consensus {
+                lines.push(format!("- {item}"));
+            }
+        }
+        if !analysis.contradictions.is_empty() {
+            lines.push(String::new());
+            lines.push("Contradictions:".into());
+            for contradiction in &analysis.contradictions {
+                lines.push(format!(
+                    "- [{:?}] {}",
+                    contradiction.severity, contradiction.topic
+                ));
+                for position in &contradiction.positions {
+                    lines.push(format!(
+                        "  - {}: {}",
+                        position.panel_id, position.position
+                    ));
+                }
+            }
+        }
+        if !analysis.coverage_gaps.is_empty() {
+            lines.push(String::new());
+            lines.push("Coverage gaps:".into());
+            for gap in &analysis.coverage_gaps {
+                lines.push(format!("- {gap}"));
+            }
+        }
+    }
+
+    lines.push(String::new());
     lines.push("Panels:".into());
     let mut ordered = panels.to_vec();
     ordered.sort_by(|a, b| a.anonymous_id.cmp(&b.anonymous_id));
-    for panel in ordered {
-        lines.push(format!("- {}: {:?}", panel.anonymous_id, panel.status));
+    for panel in &ordered {
+        let mut row = format!("- {}: {:?}", panel.anonymous_id, panel.status);
+        if let Some(scores) = analysis.and_then(|a| a.scores.get(&panel.anonymous_id)) {
+            let mut dims: Vec<(&String, &u8)> = scores.iter().collect();
+            dims.sort_by(|a, b| a.0.cmp(b.0));
+            if !dims.is_empty() {
+                let rendered = dims
+                    .iter()
+                    .map(|(dim, score)| format!("{dim}={score}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                row.push_str(&format!(" ({rendered})"));
+            }
+        }
+        lines.push(row);
+        if let Some(report) = &panel.report {
+            lines.push(format!("  summary: {}", report.summary));
+            lines.push(format!(
+                "  candidate: {}",
+                truncate_bytes(&report.candidate_answer, NEEDS_PARENT_CANDIDATE_BYTE_CAP)
+            ));
+        }
     }
+
+    lines.push(String::new());
+    lines.push(
+        "Next: review the panel material above and provide the final answer yourself.".into(),
+    );
     lines.join("\n")
+}
+
+/// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary, marking a cut
+/// with a trailing `…`.
+fn truncate_bytes(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 fn reason_line(reason: &FusionNeedsParentReason) -> String {
     match reason {
         FusionNeedsParentReason::AnalystRequested { reason } => reason.clone(),
         FusionNeedsParentReason::AnalysisParseFailed => "analyst JSON could not be parsed".into(),
+        FusionNeedsParentReason::AnalysisFailed { category } => {
+            format!("analyst call failed: {category}")
+        }
         FusionNeedsParentReason::CriticalContradiction => {
             "unresolved critical contradiction".into()
         }

@@ -79,7 +79,15 @@ impl FusionRuntimeConfig {
             panel_total_timeout_ms: 600_000,
             analyst_timeout_ms: 120_000,
             synthesizer_timeout_ms: 180_000,
-            total_timeout_ms: 900_000,
+            // F004: must stay >= panelTotal + analystTimeoutMs*(1 +
+            // analysisProtocolRetries) + synthesizerTimeoutMs, or the
+            // documented per-stage defaults can never all complete before the
+            // end-to-end deadline fires (600_000 + 120_000*2 + 180_000 =
+            // 1_020_000 > the previous 900_000 default). Raised rather than
+            // shrinking the stage defaults, which are independently
+            // documented budgets. `FusionSettingsJson::validate` enforces the
+            // same inequality on any settings override.
+            total_timeout_ms: 1_200_000,
             analysis_protocol_retries: 1,
             slash_cross_provider_default: true,
             allow_cross_provider_for_agent: false,

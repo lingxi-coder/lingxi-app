@@ -407,8 +407,16 @@ impl SideQueryClient for ProviderSideQueryClient {
         let profile = request.profile.clone();
         let resp = match &self.backend {
             ProviderSideQueryBackend::Session(service) => {
+                let query_source = request.query_source.as_str().to_string();
+                // F003 round 2: route through the `_with_thinking` sibling
+                // so an explicit `temperature` override (e.g. the fusion
+                // analyst's 0.0) is never sent alongside a session-derived
+                // `thinking` block — `StrictStructuredQueryRequest` has no
+                // thinking field of its own, so `None` here means the same
+                // "no reasoning field at all" that `SideQueryRequest{thinking:
+                // None}` already means for the non-strict path above.
                 let stream = service
-                    .stream_json_schema(
+                    .stream_json_schema_with_thinking(
                         &request.model,
                         request.profile.as_deref(),
                         request.system_prompt.as_deref(),
@@ -416,6 +424,9 @@ impl SideQueryClient for ProviderSideQueryClient {
                         request.schema,
                         Some(request.max_tokens),
                         None,
+                        None,
+                        request.temperature,
+                        Some(query_source.as_str()),
                     )
                     .await
                     .map_err(map_structured_llm_error)?;
@@ -492,21 +503,29 @@ fn map_structured_llm_error(err: llm_client::LlmError) -> SideQueryError {
     SideQueryError::Api(err)
 }
 
+/// Drive a `query_json_schema` event stream to its final [`llm_client::LlmResponse`].
+///
+/// F003: this previously scanned for an [`llm_client::LlmEvent::Completed`]
+/// event by hand — but the Anthropic codec (the provider every real Fusion
+/// analyst call over the Session backend uses) never emits `Completed`; a
+/// normal stream ends `MessageStart` → `ContentBlockStart/Delta/Stop` →
+/// `MessageDelta` → `MessageStop`, with `Completed` reserved for providers
+/// (OpenAI Responses) that deliver one fully-assembled event. The hand-rolled
+/// scan therefore ran off the end of every real Anthropic stream and always
+/// returned this function's own `InvalidResponse` — the analyst call was
+/// unreachable end-to-end regardless of the schema/prompt. Delegate to the
+/// shared [`llm_client::stream_accumulator::accumulate_stream_salvaging`]
+/// instead, which assembles the response from `MessageStop` (or `Completed`,
+/// when a provider does send it) the same way every other streaming call in
+/// the codebase does.
 async fn collect_completed_response(
-    stream: impl futures_util::Stream<Item = Result<llm_client::LlmEvent, llm_client::LlmError>>,
+    stream: impl futures_util::Stream<Item = Result<llm_client::LlmEvent, llm_client::LlmError>>
+        + Send
+        + 'static,
 ) -> Result<llm_client::LlmResponse, SideQueryError> {
-    use futures_util::StreamExt;
-    futures_util::pin_mut!(stream);
-    while let Some(event) = stream.next().await {
-        match event.map_err(map_structured_llm_error)? {
-            llm_client::LlmEvent::Completed { response } => return Ok(*response),
-            llm_client::LlmEvent::MessageStop => {}
-            _ => {}
-        }
-    }
-    Err(SideQueryError::InvalidResponse(
-        "structured stream ended without a completed response".into(),
-    ))
+    llm_client::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
+        .await
+        .map_err(|(_partial_content, err)| map_structured_llm_error(err))
 }
 
 fn convert_messages(
@@ -1257,5 +1276,302 @@ mod tests {
 
         let err = client.query(req(None)).await.expect_err("should fail");
         assert!(matches!(err, SideQueryError::Api(_)), "got {err:?}");
+    }
+
+    fn strict_req() -> crate::side_query::StrictStructuredQueryRequest {
+        crate::side_query::StrictStructuredQueryRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            profile: Some("anthropic".into()),
+            system_prompt: Some("system".into()),
+            messages: vec![ConversationMessage::user(MessageId::new(), "hi".into())],
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "boolean" } },
+                "required": ["ok"],
+                "additionalProperties": false
+            }),
+            max_tokens: 256,
+            temperature: Some(0.0),
+            query_source: QuerySource::FusionAnalyst,
+            skip_system_prompt_prefix: false,
+        }
+    }
+
+    /// `query_json_schema` on the Session backend is a STREAMING call
+    /// (`build_request(..., stream=true, ..)` -> `ApiService::drive_stream`),
+    /// so it needs a scripted [`llm_client::Transport::open_stream`], not
+    /// [`StubTransport`]'s non-streaming `request` (whose `stream_sse` always
+    /// errors — driving these tests through it hangs behind the streaming
+    /// connect-phase retry/backoff loop instead of failing fast). This mirrors
+    /// `llm-client/tests/transport_stream_test.rs`'s `StreamTransport` /
+    /// `ScriptedFrames` pattern, one layer below the SSE-byte-stream bridge,
+    /// and captures each request's decoded `body_json` for wire assertions.
+    struct ScriptedFrames {
+        items: std::collections::VecDeque<Result<llm_client::RawStreamFrame, llm_client::LlmError>>,
+    }
+
+    impl llm_client::FrameStream for ScriptedFrames {
+        fn next_frame(
+            &mut self,
+        ) -> llm_client::BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, llm_client::LlmError>>
+        {
+            let next = match self.items.pop_front() {
+                Some(Ok(frame)) => Ok(Some(frame)),
+                Some(Err(error)) => Err(error),
+                None => Ok(None),
+            };
+            Box::pin(async move { next })
+        }
+    }
+
+    struct StreamStubTransport {
+        frames: Vec<String>,
+        received_bodies: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl StreamStubTransport {
+        /// One scripted streaming response: a text-content Anthropic SSE
+        /// sequence carrying `text` as its single content block, reusable
+        /// across every scripted call this transport receives.
+        fn text_response(text: &str) -> Self {
+            Self {
+                frames: vec![
+                    serde_json::json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_stream",
+                            "model": "claude-sonnet-4-20250514",
+                            "content": [],
+                            "usage": { "input_tokens": 1, "output_tokens": 0 }
+                        }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": { "type": "text", "text": "" }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "text_delta", "text": text }
+                    })
+                    .to_string(),
+                    serde_json::json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                    serde_json::json!({
+                        "type": "message_delta",
+                        "delta": { "stop_reason": "end_turn" },
+                        "usage": { "input_tokens": 1, "output_tokens": 1 }
+                    })
+                    .to_string(),
+                    serde_json::json!({ "type": "message_stop" }).to_string(),
+                ],
+                received_bodies: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl llm_client::Transport for StreamStubTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a llm_client::ProviderRequest,
+        ) -> llm_client::BoxFuture<'a, Result<llm_client::ProviderResponse, llm_client::LlmError>>
+        {
+            Box::pin(async move {
+                Err(llm_client::LlmError::Transport {
+                    message: "execute not scripted; this stub only serves streaming calls".into(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a llm_client::ProviderRequest,
+        ) -> llm_client::BoxFuture<'a, Result<llm_client::StreamingResponse, llm_client::LlmError>>
+        {
+            self.received_bodies
+                .lock()
+                .unwrap()
+                .push(request.body_json.clone());
+            let items = self
+                .frames
+                .iter()
+                .map(|payload| Ok(llm_client::RawStreamFrame::new(payload.as_bytes().to_vec())))
+                .collect();
+            Box::pin(async move {
+                Ok(llm_client::StreamingResponse {
+                    status: 200,
+                    headers: std::collections::BTreeMap::new(),
+                    frames: Box::new(ScriptedFrames { items }),
+                })
+            })
+        }
+    }
+
+    /// Build a Session-backend client whose one registered model declares
+    /// `structured_output: true` — the capability
+    /// [`sidequery_model_table`]'s Direct-backend catalog never sets, and the
+    /// capability every real Fusion analyst call requires (fusion's own
+    /// `model_resolver` only selects `judge_eligible` catalog entries). This
+    /// is the same backend production Fusion analyst calls use
+    /// ([`ProviderSideQueryClient::from_service`]), so these tests exercise
+    /// the real `query_json_schema` decode path, not the isolated-utility one.
+    fn structured_session_client(
+        transport: Arc<StreamStubTransport>,
+        analytics: Option<Arc<telemetry::AnalyticsBus>>,
+    ) -> ProviderSideQueryClient {
+        let config = ClientConfig {
+            providers: vec![ProviderProfile {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                base_url: DEFAULT_BASE_URL.to_string(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::OAuthBearer,
+                credential: CredentialConfig::Static {
+                    id: "session-key".to_string(),
+                },
+                models: vec![ModelProfile {
+                    display_model: "claude-sonnet-4-20250514".to_string(),
+                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    billing_model: "claude-sonnet-4".to_string(),
+                    aliases: vec![],
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: Capabilities {
+                        streaming: true,
+                        tools: true,
+                        reasoning: true,
+                        structured_output: true,
+                        ..Capabilities::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+            }],
+        };
+        let session_client = DefaultLlmClient::from_config(config)
+            .expect("session client config")
+            .with_credential_provider(Arc::new(StaticCredentialProvider::new(
+                Credential::BearerToken("session-oauth-token".to_string()),
+            )));
+        let session_transport: Arc<dyn llm_client::Transport> = transport;
+        let service = Arc::new(llm_client::ApiService::new(
+            Arc::new(session_client),
+            session_transport,
+            llm_client::SubscriberState::default(),
+            llm_client::model::user_agent::UserAgentEnv::default(),
+            "test",
+            analytics,
+            None,
+        ));
+        ProviderSideQueryClient::from_service(service)
+    }
+
+    /// F003: `query_json_schema` decodes the accumulated text as a strict
+    /// `serde_json::from_str` — a complete, standalone JSON value. Three
+    /// shapes the analyst provider might return:
+    #[tokio::test]
+    async fn query_json_schema_decodes_a_complete_valid_json_value() {
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
+        let client = structured_session_client(transport, None);
+
+        let resp = client
+            .query_json_schema(strict_req())
+            .await
+            .expect("a complete JSON value decodes");
+        assert_eq!(resp.value, serde_json::json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn query_json_schema_rejects_trailing_text_after_the_json_value() {
+        // The model appended prose after an otherwise-valid JSON object —
+        // `serde_json::from_str` rejects trailing non-whitespace, so this must
+        // surface as a decode failure, not a silently-truncated parse.
+        let transport =
+            Arc::new(StreamStubTransport::text_response("{\"ok\":true} hope that helps!"));
+        let client = structured_session_client(transport, None);
+
+        let err = client
+            .query_json_schema(strict_req())
+            .await
+            .expect_err("trailing prose after the JSON value must not decode");
+        assert!(matches!(err, SideQueryError::InvalidResponse(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn query_json_schema_rejects_truncated_json() {
+        // A response cut off mid-value (e.g. hit max_tokens) is not valid JSON.
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":tr"));
+        let client = structured_session_client(transport, None);
+
+        let err = client
+            .query_json_schema(strict_req())
+            .await
+            .expect_err("truncated JSON must not decode");
+        assert!(matches!(err, SideQueryError::InvalidResponse(_)), "got {err:?}");
+    }
+
+    /// F003: the Session backend previously dropped `temperature` and
+    /// `query_source` on `query_json_schema` — `ApiService::stream_json_schema`
+    /// took neither parameter, so the analyst's `temperature: Some(0.0)` never
+    /// reached the wire and no `tengu_api_query_source` telemetry fired.
+    #[tokio::test]
+    async fn session_backend_forwards_temperature_and_query_source_for_structured_queries() {
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let client = structured_session_client(transport.clone(), Some(bus));
+
+        let result = client
+            .query_json_schema(strict_req())
+            .await
+            .expect("session structured query succeeds");
+        assert_eq!(result.value, serde_json::json!({ "ok": true }));
+
+        let received = transport.received_bodies.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0]["temperature"].as_f64(),
+            Some(0.0),
+            "analyst temperature 0.0 must reach the wire: {}",
+            received[0]
+        );
+        // F003 round 2: a strict structured query must never pair a
+        // `temperature` override with the session's `thinking` config —
+        // Anthropic rejects `temperature != 1` while extended thinking is
+        // enabled, and `ThinkingConfig::default()` is `Adaptive` (session
+        // thinking ON) so this pairing is live in the default desktop
+        // configuration. The analyst contract is temperature=0, no
+        // `thinking` field at all — same as `SideQueryRequest{thinking:
+        // None}` used elsewhere.
+        assert!(
+            received[0].get("thinking").is_none(),
+            "a temperature override must not be sent alongside a `thinking` \
+             block — the analyst call must carry neither or override both: {}",
+            received[0]
+        );
+
+        let events = sink.events().await;
+        let query_source_event = events
+            .iter()
+            .find(|event| event.name == "tengu_api_query_source")
+            .expect("tengu_api_query_source telemetry must fire for the analyst call");
+        assert!(
+            matches!(
+                query_source_event.metadata.get("querySource"),
+                Some(telemetry::AnalyticsValue::String(v)) if v == "fusion_analyst"
+            ),
+            "got {:?}",
+            query_source_event.metadata.get("querySource")
+        );
     }
 }

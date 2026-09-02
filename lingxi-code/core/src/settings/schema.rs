@@ -887,7 +887,10 @@ impl FusionSettingsJson {
                 ));
             }
         }
-        let total = self.total_timeout_ms.unwrap_or(900_000);
+        // Default kept in lockstep with `fusion::FusionRuntimeConfig::defaults`
+        // (F004) — both must agree so an absent `fusion.totalTimeoutMs` passes
+        // this validator and then the runtime config builds successfully.
+        let total = self.total_timeout_ms.unwrap_or(1_200_000);
         if total == 0 {
             return Err(SchemaViolation(
                 "fusion.totalTimeoutMs must be positive".into(),
@@ -911,6 +914,23 @@ impl FusionSettingsJson {
                     return Err(SchemaViolation(format!("{name} must be positive")));
                 }
             }
+        }
+        // F004: a run whose panels all completed must not be able to report
+        // "timed out before any panel completed" just because the analyst
+        // retry loop and the synthesizer, summed with the panel stage, can
+        // exceed the end-to-end deadline. Defaults here mirror
+        // `fusion::FusionRuntimeConfig::defaults`.
+        let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
+        let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
+        let synthesizer = self.synthesizer_timeout_ms.unwrap_or(180_000);
+        let retries = u64::from(self.analysis_protocol_retries.unwrap_or(1));
+        let stage_sum = panel_total
+            .saturating_add(analyst.saturating_mul(1 + retries))
+            .saturating_add(synthesizer);
+        if stage_sum > total {
+            return Err(SchemaViolation(format!(
+                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
+            )));
         }
         if let Some(cap) = self.workflow_fusion_call_cap {
             if cap == 0 || cap > 20 {
@@ -1931,7 +1951,7 @@ mod tests {
         assert!(zero_total.validate().is_err());
 
         let exceeds_default_total: SettingsJson = serde_json::from_str(
-            r#"{"fusion":{"panelTotalTimeoutMs":900001}}"#,
+            r#"{"fusion":{"panelTotalTimeoutMs":1200001}}"#,
         )
         .unwrap();
         assert!(exceeds_default_total.validate().is_err());
@@ -1939,5 +1959,38 @@ mod tests {
         let retries: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();
         assert!(retries.validate().is_err());
+    }
+
+    #[test]
+    fn fusion_rejects_stage_timeout_sum_exceeding_total_even_when_each_stage_fits_alone() {
+        // Each individual stage is well under `totalTimeoutMs` on its own, but
+        // panelTotal + analyst*(1+retries) + synthesizer sums past it — every
+        // per-field "must not exceed total" check above passes, so only the
+        // dedicated stage-sum check (F004) can catch this.
+        let sum_exceeds_total: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{
+                "totalTimeoutMs": 100000,
+                "panelTotalTimeoutMs": 60000,
+                "analystTimeoutMs": 30000,
+                "synthesizerTimeoutMs": 30000,
+                "analysisProtocolRetries": 1
+            }}"#,
+        )
+        .unwrap();
+        let err = sum_exceeds_total
+            .validate()
+            .expect_err("60000 + 30000*2 + 30000 = 150000 > totalTimeoutMs 100000");
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("totalTimeoutMs"))
+        );
+
+        // The documented defaults (panelTotal 600_000 + analyst 120_000*2 +
+        // synth 180_000 = 1_020_000) must fit under the default total
+        // (1_200_000) with an absent `totalTimeoutMs`.
+        let defaults_fit: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"enabled":true}}"#).unwrap();
+        defaults_fit
+            .validate()
+            .expect("documented stage defaults must fit under the default total");
     }
 }

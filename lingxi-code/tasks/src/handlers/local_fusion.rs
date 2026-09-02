@@ -19,18 +19,82 @@ use platform_api::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 
 const HANDLER_NAME: &str = "local_fusion";
 
+/// Bounded wait `kill`/`drain_pending_kills` give the worker to unwind
+/// through its own finalize path (`FusionOrchestrator::run`'s cooperative
+/// `cancel.cancelled()` branch — CANCELLED telemetry, `Cancelled` progress,
+/// `run_panels`' abort+join, explicit lease release) after firing `cancel`,
+/// before falling back to `runtime.cancel` (a hard `JoinHandle::abort()` that
+/// would skip all of that — F012). Mirrors `local_workflow`'s
+/// `cancel_workflow_worker`.
+const FUSION_KILL_COMPLETION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
     cancel: CancellationToken,
+    /// Worker completion signal, fired (via [`WorkerCompletionSignal`]'s
+    /// `Drop`) once the spawned worker future is fully done — naturally, or
+    /// forcibly on `runtime.cancel`'s own abort. `kill`/`drain_pending_kills`
+    /// wait on this for up to [`FUSION_KILL_COMPLETION_GRACE`] before falling
+    /// back to the hard abort, so a cooperative `cancel()` gets a real chance
+    /// to run `FusionOrchestrator::run`'s own finalize path (F012).
+    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
     finalizing: bool,
+}
+
+/// Fires its held oneshot on drop, unconditionally — whichever path the
+/// worker future exits through (normal completion, the early
+/// `may_finalize == false` return, or a forced `abort()` dropping the task
+/// mid-poll). Held as the worker future's own first local so its lifetime
+/// exactly brackets "the worker is done, one way or another".
+struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+
+impl WorkerCompletionSignal {
+    fn new(tx: oneshot::Sender<()>) -> Self {
+        Self(Some(tx))
+    }
+}
+
+impl Drop for WorkerCompletionSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// `cancel()` the worker, then wait up to [`FUSION_KILL_COMPLETION_GRACE`] for
+/// its own completion signal before falling back to `runtime.cancel` (a hard
+/// abort that bypasses `FusionOrchestrator::run`'s cooperative cancel branch —
+/// F012). Mirrors `local_workflow::cancel_workflow_worker`.
+async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
+    rec.cancel.cancel();
+    let completion_rx = rec
+        .completion_rx
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let completed = if let Some(completion_rx) = completion_rx {
+        tokio::time::timeout(FUSION_KILL_COMPLETION_GRACE, completion_rx)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    if !completed {
+        rec.runtime
+            .cancel(&rec.handle)
+            .await
+            .map_err(|error| TaskError::Io(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Handler for [`TaskType::LocalFusion`].
@@ -96,8 +160,7 @@ impl LocalFusionHandler {
                 }
             };
             let Some(rec) = rec else { continue };
-            rec.cancel.cancel();
-            let _ = rec.runtime.cancel(&rec.handle).await;
+            let _ = cancel_fusion_worker(rec).await;
             if !self.status_sink.is_terminal(&task_id).await {
                 self.status_sink
                     .set_status(&task_id, TaskStatus::Killed)
@@ -161,8 +224,13 @@ impl Task for LocalFusionHandler {
         } else {
             (None, None)
         };
+        let (completion_tx, completion_rx) = oneshot::channel();
 
         let worker = Box::pin(async move {
+            // Fires unconditionally when this future is done — naturally, or
+            // forced by `runtime.cancel`'s hard abort — so `kill`'s bounded
+            // wait can tell the two apart (F012).
+            let _completion_signal = WorkerCompletionSignal::new(completion_tx);
             if let Some(activation_rx) = activation_rx {
                 if activation_rx.await.is_err() {
                     workers.lock().await.remove(&worker_task_id);
@@ -235,6 +303,7 @@ impl Task for LocalFusionHandler {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
                 cancel,
+                completion_rx: StdMutex::new(Some(completion_rx)),
                 finalizing: false,
             },
         );
@@ -270,8 +339,7 @@ impl Task for LocalFusionHandler {
             workers.remove(task_id)
         };
         if let Some(rec) = rec {
-            rec.cancel.cancel();
-            let _ = rec.runtime.cancel(&rec.handle).await;
+            cancel_fusion_worker(rec).await?;
         }
         if !self.status_sink.is_terminal(task_id).await {
             self.status_sink

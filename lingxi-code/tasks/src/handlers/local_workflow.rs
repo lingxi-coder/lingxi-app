@@ -2131,10 +2131,68 @@ async fn emit_phase_completed(
 /// response adds its output tokens), so `spent()` reads main loop + every
 /// workflow — claude-code's shared pool. When `None` (tests / no orchestrator),
 /// the run uses a fresh private pool counting only its own subagent output.
+/// The plugin namespace the running workflow belongs to, or `None` when it is
+/// not a plugin's workflow.
+///
+/// `workflow_id` is plugin-qualified (`<plugin>:<workflow>`) only when the Host
+/// launched the run BY NAME through the plugin registry. Two production paths
+/// lose that qualification and hand this function the script's bare
+/// `meta.name` instead:
+///   * resume — `apps/engine-mobile/src/host.rs` relaunches a paused/adopted
+///     run with `WorkflowLaunchSpec { script_path: Some(..), name: None, .. }`,
+///     so `workflow_support.rs`'s `namespaced_plugin_workflow` is `None` and
+///     the id falls back to `meta.name`;
+///   * desktop — `apps/engine-desktop/src/lib.rs` derives `workflow_id` from
+///     `meta.name` FIRST and only falls back to `spec.name`.
+/// In both cases the id carries no `:`, so recover the namespace from the
+/// plugin workflow registry itself: a bare id that exactly one plugin
+/// registers as `<plugin>:<id>` belongs to that plugin. Ambiguity (two plugins
+/// registering the same bare workflow name) resolves to `None` rather than
+/// guessing an owner.
+///
+/// Only the FIRST `:` splits — a plugin's workflow (or agent) name can itself
+/// contain `:` when it comes from a nested directory inside the plugin.
+///
+/// This grants no new reach: the caller only uses the namespace to look up a
+/// name that must ALREADY be in the spawner's agent listing, and any script
+/// could always have written that qualified name out in full.
+fn plugin_namespace_for_workflow(
+    workflow_id: &str,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
+) -> Option<String> {
+    if let Some((namespace, _)) = workflow_id.split_once(':') {
+        return (!namespace.is_empty()).then(|| namespace.to_string());
+    }
+    if workflow_id.is_empty() {
+        return None;
+    }
+    let registry = plugin_workflows?;
+    let mut found: Option<String> = None;
+    for name in registry.names() {
+        let Some((namespace, rest)) = name.split_once(':') else {
+            continue;
+        };
+        if namespace.is_empty() || rest != workflow_id {
+            continue;
+        }
+        if found.as_deref().is_some_and(|already| already != namespace) {
+            return None;
+        }
+        found = Some(namespace.to_string());
+    }
+    found
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow_script(
     script: &str,
     subagent_type: &str,
+    // The caller-supplied `workflow_id` this run was launched under (e.g. a
+    // plugin-qualified `<plugin>:<workflow>`, or unqualified for a saved/inline
+    // workflow). Used only to resolve a bare `agentType` against the plugin's
+    // own namespace when the exact name is not in the agent listing -- see the
+    // `agentType` pre-check in the live-agent dispatch loop below.
+    workflow_id: &str,
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -2160,6 +2218,7 @@ pub async fn run_workflow_script(
     run_workflow_script_with_live_updates(
         script,
         subagent_type,
+        workflow_id,
         spawner,
         tool_invoker,
         budget,
@@ -2184,6 +2243,7 @@ pub async fn run_workflow_script(
 async fn run_workflow_script_with_live_updates(
     script: &str,
     subagent_type: &str,
+    workflow_id: &str,
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -2204,6 +2264,7 @@ async fn run_workflow_script_with_live_updates(
     run_workflow_script_with_live_updates_and_fusion(
         script,
         subagent_type,
+        workflow_id,
         spawner,
         tool_invoker,
         budget,
@@ -2233,6 +2294,7 @@ async fn run_workflow_script_with_live_updates(
 async fn run_workflow_script_with_live_updates_and_fusion(
     script: &str,
     subagent_type: &str,
+    workflow_id: &str,
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -2531,6 +2593,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                     let tool_invoker = tool_invoker.clone();
                     let budget = budget.clone();
                     let subagent_type = subagent_type.to_string();
+                    let workflow_id = workflow_id.to_string();
                     let journal = journal.clone();
                     let journal_writer = journal_writer.clone();
                     let spent = spent.clone();
@@ -2614,7 +2677,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                         let (
                             key,
                             prompt,
-                            opts_json,
+                            mut opts_json,
                             call_index,
                             label,
                             phase_index,
@@ -2687,7 +2750,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                 phase_title,
                             ),
                         };
-                        let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                        let mut opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
                         if opts.get("isolation").and_then(Value::as_str) == Some("remote") {
                             return wf_throw("agent({isolation:'remote'}) is not available in this build");
                         }
@@ -2696,17 +2759,56 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             .get("agentType")
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
+                            .map(str::to_string)
                         {
                             let listing = spawner.agent_listing().await;
                             if !listing.iter().any(|e| e.agent_type == at) {
-                                let available = listing
-                                    .iter()
-                                    .map(|e| e.agent_type.clone())
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                return wf_throw(&format!(
-                                    "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
-                                ));
+                                // Not found under its bare name. The plugin loader
+                                // registers agents as `<plugin>:<agent>`
+                                // (manager.rs:1052-1055), but a plugin's own workflow
+                                // scripts author bare agentType names -- they must not
+                                // have to know what namespace they were installed
+                                // under. When the running workflow belongs to a plugin,
+                                // retry once under that plugin's namespace before
+                                // giving up. The namespace comes from
+                                // `plugin_namespace_for_workflow`, which handles both
+                                // the qualified id of a by-name launch and the bare
+                                // `meta.name` the resume and desktop paths hand us.
+                                let namespaced = plugin_namespace_for_workflow(
+                                    &workflow_id,
+                                    nested_plugin_workflows.as_deref(),
+                                )
+                                .map(|namespace| format!("{namespace}:{at}"));
+                                let qualified = namespaced
+                                    .as_deref()
+                                    .filter(|q| listing.iter().any(|e| e.agent_type == *q));
+                                match qualified {
+                                    Some(qualified) => {
+                                        if let Some(obj) = opts.as_object_mut() {
+                                            obj.insert(
+                                                "agentType".to_string(),
+                                                Value::String(qualified.to_string()),
+                                            );
+                                        }
+                                        opts_json =
+                                            serde_json::to_string(&opts).unwrap_or(opts_json);
+                                    }
+                                    None => {
+                                        let available = listing
+                                            .iter()
+                                            .map(|e| e.agent_type.clone())
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        return wf_throw(&match namespaced {
+                                            Some(namespaced) => format!(
+                                                "agent({{agentType}}): agent type '{at}' not found (also tried '{namespaced}'). Available agents: {available}"
+                                            ),
+                                            None => format!(
+                                                "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
+                                            ),
+                                        });
+                                    }
+                                }
                             }
                         }
                         let inherit = SubagentInheritance {
@@ -3322,6 +3424,7 @@ impl Task for LocalWorkflowHandler {
                 let run = run_workflow_script_with_live_updates_and_fusion(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
+                    &workflow_id,
                     workflow_spawner,
                     workflow_tool_invoker,
                     budget,

@@ -65,6 +65,7 @@ fn session_metadata_parity() {
         // immaterial to the assertions below.
         created: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
         message_count: 1,
+        mode: session::jsonl::SessionMode::Code,
         path: PathBuf::from("/tmp/x.jsonl"),
         pr_number: None,
         // Search-only field; `lower_session_metadata` does not map it, so the

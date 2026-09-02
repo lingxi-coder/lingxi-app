@@ -129,6 +129,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // in the developer's real login keychain would make this test
         // machine-dependent.
         isolated_credential_storage: true,
+        credential_storage_policy: platform_api::CredentialStoragePolicy::PlainTextFixture,
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),

@@ -707,14 +707,24 @@ mod tests {
     #[test]
     fn every_tool_has_a_permission_default_row() {
         for &(name, _, _) in LOCAL_APP_TOOLS {
-            // A missing row is indistinguishable from a deliberate deny at the
-            // lookup, so assert the row EXISTS by its documented value rather
-            // than trusting the fallback.
-            let actual = permission::tool_default(name);
+            // `permission::tool_default` collapses "no row" and "a row that
+            // says Deny" to the same DenyByDefault value, so asserting
+            // against IT would let a dropped row pass silently (it would just
+            // look like a deliberate deny). `tool_default_row` returns
+            // `None` for a missing row, so assert ROW EXISTENCE first — by
+            // name, so the failure names the specific missing tool — and
+            // only then check the value.
+            let row = permission::tool_default_row(name).unwrap_or_else(|| {
+                panic!(
+                    "{name} has no row in permission::defaults_per_tool; it \
+                     would silently fall back to DenyByDefault"
+                )
+            });
             let expected_allow = matches!(
                 name,
                 "LocalAppList"
                     | "LocalAppGet"
+                    | "LocalAppRuntimeProfiles"
                     | "LocalAppTemplateCatalog"
                     | "LocalAppResolveTemplateSelection"
                     | "LocalAppStageCreate"
@@ -731,7 +741,7 @@ mod tests {
             } else {
                 permission::PromptDefault::DenyByDefault
             };
-            assert_eq!(actual, expected, "{name} has the wrong permission default");
+            assert_eq!(row, expected, "{name} has the wrong permission default");
         }
     }
 

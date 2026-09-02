@@ -8,14 +8,14 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! MOBILE DIVERGENCE: 27 further `LocalApp*` rows for the first-party
+//! MOBILE DIVERGENCE: 32 further `LocalApp*` rows for the first-party
 //! local-app host operations (`engine_mobile::local_apps_tools`). They have no
 //! oracle counterpart — claude-code has no host-owned local-app surface — and
-//! are split by REVERSIBILITY: 12 `AllowByDefault` (read-only, plus the
+//! are split by REVERSIBILITY: 13 `AllowByDefault` (read-only, plus the
 //! network-disabled build, the restartable local preview runtime, the
-//! shell-scaffolding commit, and template-selection staging), 15
+//! shell-scaffolding commit, and template-selection staging), 19
 //! `DenyByDefault` (user data, UI actuation, view capture, checkpoint restore,
-//! network, and template validation).
+//! network, template validation, and the MCP proposal lifecycle).
 //!
 //! Both splits are asserted in
 //! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` — this
@@ -32,7 +32,7 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(71);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(76);
 
     // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -102,6 +102,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // is not bound to an app workspace.
     m.insert("LocalAppList", AllowByDefault);
     m.insert("LocalAppGet", AllowByDefault);
+    // Read-only: the tool table (`local_apps_tools::LOCAL_APP_TOOLS`) marks
+    // its `read_only` column `true`.
+    m.insert("LocalAppRuntimeProfiles", AllowByDefault);
     m.insert("LocalAppTemplateCatalog", AllowByDefault);
     m.insert("LocalAppResolveTemplateSelection", AllowByDefault);
     m.insert("LocalAppLogs", AllowByDefault);
@@ -141,6 +144,17 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppCreate", DenyByDefault);
     m.insert("LocalAppValidateTemplateSelection", DenyByDefault);
     m.insert("LocalAppStageCreate", AllowByDefault);
+    // MCP proposal lifecycle — the ONLY path by which network-reaching MCP
+    // server configuration gets authored onto an app and promoted into its
+    // live catalog, so every step of it asks. `approve_mcp_proposal` asks even
+    // in its `create_without_mcp=true` branch, which authors no tools: that
+    // branch still seals and persists a signed candidate + journal for the
+    // app and drives the same approval surface, and the row is per-NAME, not
+    // per-input, so it cannot be split by that flag.
+    m.insert("LocalAppValidateMcpProposal", DenyByDefault);
+    m.insert("LocalAppApproveMcpProposal", DenyByDefault);
+    m.insert("LocalAppQaMcpCandidate", DenyByDefault);
+    m.insert("LocalAppPromoteMcpCandidate", DenyByDefault);
     // Effects the user cannot trivially undo, or that reach the network.
     // These two expose an app's CONTENT — user records and the live WebView
     // DOM. Binding scopes them inside an app workspace, but a GLOBAL
@@ -161,19 +175,25 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 27 mobile local-app builtins.
-    debug_assert_eq!(m.len(), 71, "tool defaults table must list all 71 tools");
+    // 44 oracle-parity tools + 32 mobile local-app builtins.
+    debug_assert_eq!(m.len(), 76, "tool defaults table must list all 76 tools");
     m
+}
+
+/// Look up the row for a tool name, distinguishing "no row" from "a row that
+/// happens to say Deny". `tool_default` collapses both to `DenyByDefault`,
+/// which makes a missing row indistinguishable from a deliberate deny at that
+/// call site — callers that need to catch a missing row (e.g. a cross-crate
+/// guard test) must use this instead.
+#[must_use]
+pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
+    TOOL_DEFAULTS.get_or_init(init_defaults).get(name).copied()
 }
 
 /// Look up the default Y/N decision for a tool name. Unknown tools → Deny.
 #[must_use]
 pub fn tool_default(name: &str) -> PromptDefault {
-    TOOL_DEFAULTS
-        .get_or_init(init_defaults)
-        .get(name)
-        .copied()
-        .unwrap_or(PromptDefault::DenyByDefault)
+    tool_default_row(name).unwrap_or(PromptDefault::DenyByDefault)
 }
 
 #[cfg(test)]
@@ -307,7 +327,7 @@ mod tests {
         let oracle = m.keys().filter(|k| !k.starts_with("LocalApp")).count();
         let mobile = m.keys().filter(|k| k.starts_with("LocalApp")).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(mobile, 27, "local-app builtin count changed");
+        assert_eq!(mobile, 32, "local-app builtin count changed");
         assert_eq!(m.len(), oracle + mobile);
     }
 
@@ -333,9 +353,9 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::AllowByDefault),
-            12,
+            13,
             "mobile allow"
         );
-        assert_eq!(count(true, PromptDefault::DenyByDefault), 15, "mobile deny");
+        assert_eq!(count(true, PromptDefault::DenyByDefault), 19, "mobile deny");
     }
 }

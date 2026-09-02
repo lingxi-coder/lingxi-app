@@ -721,21 +721,20 @@ pub fn fork_agent_definition() -> AgentDefinition {
 
 /// Hidden Fusion panel definition. Resolved like `fork` and never listed.
 ///
-/// Tools are an explicit allow-list (not `Except`): Read / Grep / Glob / Bash /
-/// WebFetch. Bash inherits the session permission mode. The structured
-/// `PanelReport` schema is applied at spawn by the fusion orchestrator.
+/// Tools are an explicit read-only allow-list (not `Except`): Read / Grep /
+/// Glob / `WebFetch`. The structured `PanelReport` schema is applied at spawn by
+/// the fusion orchestrator.
 #[must_use]
 pub fn fusion_panel_definition() -> AgentDefinition {
     AgentDefinition {
         agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
         when_to_use:
-            "Hidden Fusion panel — independent read-mostly deliberation. Not selectable via subagent_type."
+            "Hidden Fusion panel — independent read-only deliberation. Not selectable via subagent_type."
                 .to_string(),
         tools: AgentToolPolicy::Explicit(vec![
             "Read".into(),
             "Grep".into(),
             "Glob".into(),
-            "Bash".into(),
             "WebFetch".into(),
         ]),
         max_turns: 12,
@@ -747,8 +746,8 @@ pub fn fusion_panel_definition() -> AgentDefinition {
             r"You are a Fusion panel. Independently answer one task. Other panels exist but you cannot see them and must not address them.
 
 Rules:
-- Use only the tools you have: Read, Grep, Glob, Bash, WebFetch.
-- Do not create, edit, or delete files. Bash inherits the session permission mode; do not use it to mutate the workspace.
+- Use only the read-only tools you have: Read, Grep, Glob, WebFetch.
+- Do not create, edit, delete, or execute files.
 - Do not mention provider names, model names, or that you are part of a multi-model ensemble.
 - Return your answer as a PanelReport through the StructuredOutput tool.
 
@@ -880,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn fusion_panel_definition_is_explicit_five_tools() {
+    fn fusion_panel_definition_is_explicit_read_only_tools() {
         let p = fusion_panel_definition();
         assert_eq!(p.agent_type, "fusion-panel");
         assert_eq!(p.max_turns, 12);
@@ -888,7 +887,7 @@ mod tests {
             AgentToolPolicy::Explicit(tools) => {
                 assert_eq!(
                     tools,
-                    &["Read", "Grep", "Glob", "Bash", "WebFetch"]
+                    &["Read", "Grep", "Glob", "WebFetch"]
                         .iter()
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()

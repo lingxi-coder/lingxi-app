@@ -31,7 +31,7 @@
 | 项 | 决策 |
 |---|---|
 | 形态 | OpenRouter Fusion 式审议，不在父树写文件 |
-| Panel 工具 | Explicit：`Read`, `Grep`, `Glob`, `Bash`, `WebFetch`。Bash **继承 session permission**，不是 OS 只读沙箱 |
+| Panel 工具 | Explicit：`Read`, `Grep`, `Glob`, `WebFetch`。当前不开放 `Bash`，因为继承 session permission 无法结构化保证只读；未来只能通过可信的只读 Shell wrapper 恢复 |
 | Analyst | 无工具；temp=0；严格 JSON Schema |
 | Synthesizer | 仅 Merge；inherit 父 model/profile；失败 → NeedsParent，不换模型 |
 | 默认维度 | `evidence_quality`, `coverage`, `reasoning`, `safety`, `actionability` |
@@ -234,7 +234,9 @@ Cancel / 预检失败 / 0 成功 / 低于 min → Failed | Cancelled
 
 每个 terminal 只跑一次 finalize：取消子任务、释放 Panel slot、释放 spawn reservation 未使用部分、释放预算余额、flush usage/telemetry、只发一次完成通知。迟到事件不得覆盖 terminal。
 
-Panel：JoinSet + CancellationToken。idle + total timeout。成功数 ≥ min 且 partialOk → 进 Analyst。
+Panel：JoinSet + CancellationToken。idle watchdog 作用于 provider stream 建连与每个响应事件，并在每个事件后重置；另有 end-to-end panel total timeout。成功数 ≥ min 且 partialOk → 进 Analyst。
+
+父 provider/profile：优先使用 session 显式身份。legacy/resume 只有 bare model 时，仅当 live catalog 中该 model 唯一对应一个 profile 才回填；多 profile 重名必须 fail-closed，禁止按 catalog 顺序猜测 same-provider 路由。
 
 Analyst 输入：匿名 P1..Pn，`run_id` 派生稳定洗牌。无 provider/model。非法 JSON 同模型重试 1 次，再失败 → NeedsParent(AnalysisParseFailed)。禁止从文本里抠 JSON。
 
@@ -335,13 +337,14 @@ async fn query_json_schema<T: DeserializeOwned>(
 - Modify: `lingxi-code/agent/src/handle.rs` `agent_listing_entries`：**过滤** `fusion-panel`
 
 定义：
-- `AgentToolPolicy::Explicit`（不是 Except）：`Read, Grep, Glob, Bash, WebFetch`
+- `AgentToolPolicy::Explicit`（不是 Except）：`Read, Grep, Glob, WebFetch`
+- 不开放 `Bash`：提示词不能阻止继承父 session 权限的 shell 写入工作区；在有可信的只读 Shell wrapper 前保持结构化只读
 - `permission_mode: Bubble`
 - `max_turns: 12`（可被 request 降低，不能超 settings）
 - `schema`: PanelReport JSON Schema 字符串
 - `model: Inherit`（spawn 时被 per-panel override）
 
-- [ ] 单测：listing 不含 fusion-panel；lookup("fusion-panel") 返回 Explicit 五工具。
+- [ ] 单测：listing 不含 fusion-panel；lookup("fusion-panel") 返回 Explicit 四个只读工具。
 - [ ] `BUILTIN_SUBAGENT_TYPES` 测试仍是 4。
 
 #### Task 2.3 SubagentSpawnRequest / 累计 usage
@@ -578,7 +581,7 @@ Native：`__wf_dispatch_fusion(prompt, optsJson)`。未知字段拒绝。
 #### Task 6.3 mobile + 文档
 
 - engine-mobile 不注入 executor；若有测试调用 → `UnavailableOnPlatform`
-- 用户文档（CLI help / settings 注释）：成本、跨 provider 外发、Panel Bash 权限、NeedsParent
+- 用户文档（CLI help / settings 注释）：成本、跨 provider 外发、Panel 只读工具边界、NeedsParent
 - `docs/architecture-flow.md` Layer 3 加上 `fusion` crate
 
 **PR6 验收:** 三入口齐；默认关闭；相关 crate test + clippy 过。

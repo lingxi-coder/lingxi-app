@@ -889,14 +889,19 @@ impl FusionSettingsJson {
                 ));
             }
         }
-        let total = self.total_timeout_ms;
+        let total = self.total_timeout_ms.unwrap_or(900_000);
+        if total == 0 {
+            return Err(SchemaViolation(
+                "fusion.totalTimeoutMs must be positive".into(),
+            ));
+        }
         for (name, value) in [
             ("fusion.panelIdleTimeoutMs", self.panel_idle_timeout_ms),
             ("fusion.panelTotalTimeoutMs", self.panel_total_timeout_ms),
             ("fusion.analystTimeoutMs", self.analyst_timeout_ms),
             ("fusion.synthesizerTimeoutMs", self.synthesizer_timeout_ms),
         ] {
-            if let (Some(total), Some(stage)) = (total, value) {
+            if let Some(stage) = value {
                 if stage > total {
                     return Err(SchemaViolation(format!(
                         "{name} must not exceed fusion.totalTimeoutMs"
@@ -1926,6 +1931,16 @@ mod tests {
         )
         .unwrap();
         assert!(timeout.validate().is_err());
+
+        let zero_total: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":0}}"#).unwrap();
+        assert!(zero_total.validate().is_err());
+
+        let exceeds_default_total: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelTotalTimeoutMs":900001}}"#,
+        )
+        .unwrap();
+        assert!(exceeds_default_total.validate().is_err());
 
         let retries: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();

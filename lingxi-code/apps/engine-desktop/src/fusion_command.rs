@@ -155,7 +155,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
         let snapshot = self.handle.get_status_snapshot().await;
         let conversation_id = self.handle.current_session_id().await.to_string();
         let surface = self.executor.agent_surface();
-        let preset = parsed.preset;
+        let preset = parsed.preset.unwrap_or(surface.default_preset);
         let cross = parsed
             .cross_provider
             .unwrap_or(surface.slash_cross_provider_default);
@@ -170,6 +170,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             snapshot.model.clone(),
             conversation_id.clone(),
             surface.slash_cross_provider_default,
+            surface.default_preset,
             surface.default_partial_ok,
         );
         let description = request.prompt.clone();

@@ -4888,13 +4888,13 @@ mod tests {
             AgentToolPolicy::Explicit(tools) => {
                 assert_eq!(
                     tools,
-                    vec!["Read", "Grep", "Glob", "Bash", "WebFetch"]
+                    vec!["Read", "Grep", "Glob", "WebFetch"]
                         .into_iter()
                         .map(str::to_string)
                         .collect::<Vec<_>>()
                 );
             }
-            other => panic!("expected Explicit five tools, got {other:?}"),
+            other => panic!("expected Explicit read-only tools, got {other:?}"),
         }
     }
 

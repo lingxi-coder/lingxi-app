@@ -1,7 +1,7 @@
 //! Runtime Fusion settings with defaults applied.
 
 use lingxi_core::settings::schema::FusionSettingsJson;
-use platform_api::{FusionError, FUSION_MAX_PANEL, FUSION_MIN_PANEL};
+use platform_api::{FusionError, FusionPreset, FUSION_MAX_PANEL, FUSION_MIN_PANEL};
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
@@ -9,6 +9,8 @@ use platform_api::{FusionError, FUSION_MAX_PANEL, FUSION_MIN_PANEL};
 pub struct FusionRuntimeConfig {
     /// Agent listing + workflow `fusion()` master switch.
     pub enabled: bool,
+    /// Default preset for all entrypoints when the caller omits one.
+    pub default_preset: FusionPreset,
     /// Quality preset panel count.
     pub quality_panel_count: u8,
     /// Fast preset panel count.
@@ -61,6 +63,7 @@ impl FusionRuntimeConfig {
     pub fn defaults() -> Self {
         Self {
             enabled: false,
+            default_preset: FusionPreset::Quality,
             quality_panel_count: 3,
             fast_panel_count: 2,
             max_panel: FUSION_MAX_PANEL,
@@ -99,6 +102,13 @@ impl FusionRuntimeConfig {
         let mut cfg = Self::defaults();
         if let Some(enabled) = settings.enabled {
             cfg.enabled = enabled;
+        }
+        if let Some(preset) = settings.preset.as_deref() {
+            cfg.default_preset = match preset {
+                "fast" => FusionPreset::Fast,
+                "quality" => FusionPreset::Quality,
+                _ => unreachable!("FusionSettingsJson::validate rejected the preset"),
+            };
         }
         if let Some(n) = settings.quality_panel_count {
             cfg.quality_panel_count = n;
@@ -182,10 +192,21 @@ mod tests {
     fn defaults_keep_fusion_disabled() {
         let cfg = FusionRuntimeConfig::defaults();
         assert!(!cfg.enabled);
+        assert_eq!(cfg.default_preset, FusionPreset::Quality);
         assert_eq!(cfg.quality_panel_count, 3);
         assert_eq!(cfg.fast_panel_count, 2);
         assert_eq!(cfg.max_panel, 8);
         assert_eq!(cfg.panel_max_turns, 12);
         assert_eq!(cfg.panel_reserved_input_tokens_per_turn, 32768);
+    }
+
+    #[test]
+    fn settings_preset_becomes_the_runtime_default() {
+        let settings = FusionSettingsJson {
+            preset: Some("fast".into()),
+            ..FusionSettingsJson::default()
+        };
+        let cfg = FusionRuntimeConfig::from_settings(&settings).expect("valid settings");
+        assert_eq!(cfg.default_preset, FusionPreset::Fast);
     }
 }

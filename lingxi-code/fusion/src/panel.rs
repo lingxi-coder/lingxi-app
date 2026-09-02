@@ -5,10 +5,11 @@ use crate::model_resolver::ResolvedPanel;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
     validate_panel_report, FusionError, FusionInheritance, FusionUsage, PanelReport,
-    PanelRunStatus, FUSION_PANEL_TYPE,
+    PanelRunStatus, WorkflowQueryWatchdog, FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -137,7 +138,11 @@ pub async fn run_panels(
         let run_id = run_id.to_string();
         let max_turns = config.panel_max_turns;
         let max_out = config.panel_max_output_tokens_per_turn;
-        let panel_timeout = Duration::from_millis(config.panel_total_timeout_ms);
+        let panel_total_timeout = Duration::from_millis(config.panel_total_timeout_ms);
+        let panel_watchdog = WorkflowQueryWatchdog {
+            stall_timeout_ms: config.panel_idle_timeout_ms,
+            max_retries: 0,
+        };
         join_set.spawn(async move {
             let started = Instant::now();
             let request = spawn_request(
@@ -156,11 +161,20 @@ pub async fn run_panels(
             let outcome = tokio::select! {
                 biased;
                 () = cancel.cancelled() => PanelFinish::Cancelled,
-                result = timeout(panel_timeout, spawner.spawn(request, inherit)) => {
+                result = timeout(
+                    panel_total_timeout,
+                    spawner.spawn_workflow_with_observer(
+                        request,
+                        inherit,
+                        None,
+                        None,
+                        panel_watchdog,
+                    ),
+                ) => {
                     match result {
                         Ok(Ok(terminal)) => PanelFinish::Done(terminal),
                         Ok(Err(_)) => PanelFinish::Failed("spawn".into()),
-                        Err(_) => PanelFinish::TimedOut,
+                        Err(_) => PanelFinish::TotalTimedOut,
                     }
                 }
             };
@@ -199,7 +213,7 @@ pub async fn run_panels(
 enum PanelFinish {
     Done(SubagentResult),
     Failed(String),
-    TimedOut,
+    TotalTimedOut,
     Cancelled,
 }
 
@@ -255,7 +269,7 @@ fn finish_panel(
         spawn_prompt,
     };
     match outcome {
-        PanelFinish::TimedOut => {
+        PanelFinish::TotalTimedOut => {
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("timeout".into());
         }
@@ -269,6 +283,12 @@ fn finish_panel(
         PanelFinish::Done(SubagentResult::Killed { .. }) => {
             internal.status = PanelRunStatus::Cancelled;
             internal.error_category = Some("cancelled".into());
+        }
+        PanelFinish::Done(SubagentResult::Failed { reason, .. })
+            if is_query_watchdog_timeout(&reason) =>
+        {
+            internal.status = PanelRunStatus::TimedOut;
+            internal.error_category = Some("idle_timeout".into());
         }
         PanelFinish::Done(SubagentResult::Failed { .. }) => {
             internal.error_category = Some("provider".into());
@@ -292,6 +312,10 @@ fn finish_panel(
         }
     }
     internal
+}
+
+fn is_query_watchdog_timeout(reason: &str) -> bool {
+    reason.starts_with(SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX)
 }
 
 fn usage_from_subagent(cumulative: &SubagentUsage, final_turn: &SubagentUsage) -> FusionUsage {

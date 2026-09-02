@@ -1506,6 +1506,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            credential_storage_policy: CredentialStoragePolicy::NativePreferred,
             isolated_credential_storage: false,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),

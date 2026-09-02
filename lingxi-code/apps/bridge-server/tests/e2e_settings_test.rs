@@ -116,6 +116,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         managed_dir(&tmp),
     );
     let cfg = DesktopConfig {
+        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,

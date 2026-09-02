@@ -41,6 +41,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
     let cfg = DesktopConfig {
+        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,

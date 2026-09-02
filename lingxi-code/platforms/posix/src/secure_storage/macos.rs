@@ -1,15 +1,17 @@
-//! macOS Keychain backend for [`SecureStorage`], shelling out to the
-//! `security` CLI.
+//! macOS Keychain backend for [`SecureStorage`]. Production calls Apple's
+//! Keychain Services (`SecItemAdd` / `SecItemUpdate` /
+//! `SecItemCopyMatching` / `SecItemDelete`) through `security-framework`.
+//! The API and ACL behavior follow Apple's Keychain Services documentation:
+//! <https://developer.apple.com/documentation/security/keychain-services>.
 //!
 //! See `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts` for the
 //! reference implementation. Behavior locked here:
 //! - Service name from [`super::helpers::full_service_name`].
-//! - JSON payload hex-encoded into `security -i`'s stdin (`-X <hex>`), with
-//!   a length-checked argv fallback when the command would overflow
-//!   [`super::helpers::SECURITY_STDIN_LINE_LIMIT`].
+//! - JSON payload stored as the generic-password value under the stable
+//!   `(kSecAttrService, kSecAttrAccount)` identity.
 //! - 30 s TTL read cache with generation counter (prevents stale subprocess
 //!   results from overwriting fresh writes) and in-flight dedupe (concurrent
-//!   reads share a single subprocess).
+//!   reads share one Keychain Services query).
 //! - `list` is not supported — claude-code's API doesn't expose prefix
 //!   queries via `security`. Returns
 //!   [`SecureStorageError::BackendUnavailable`] with a documented message.
@@ -53,7 +55,9 @@ pub struct MacOsKeychainStorage {
     config_dir: PathBuf,
     default_config_dir: PathBuf,
     oauth_suffix: String,
-    security_command: PathBuf,
+    /// Tests inject a fake `security` executable to keep Keychain tests
+    /// hermetic. Production always uses Keychain Services directly.
+    security_command: Option<PathBuf>,
     cache: Arc<RwLock<HashMap<CacheKey, CachedEntry>>>,
     generation: Arc<AtomicU64>,
     inflight: Arc<Mutex<HashMap<CacheKey, Arc<InflightLookup>>>>,
@@ -77,23 +81,20 @@ impl MacOsKeychainStorage {
     /// for the standard build.
     ///
     /// # Errors
-    /// Returns [`SecureStorageError::BackendUnavailable`] when the `security`
-    /// CLI is not on `$PATH` (the caller can then fall back to plaintext).
+    /// Construction is infallible. Keychain Services errors are reported by
+    /// the individual storage operation with their OSStatus code.
     pub fn new(
         user: String,
         config_dir: PathBuf,
         default_config_dir: PathBuf,
         oauth_suffix: String,
     ) -> Result<Self, SecureStorageError> {
-        let security_command = which::which("security").map_err(|_| {
-            SecureStorageError::BackendUnavailable("macOS `security` CLI not found on PATH".into())
-        })?;
         Ok(Self {
             user,
             config_dir,
             default_config_dir,
             oauth_suffix,
-            security_command,
+            security_command: None,
             cache: Arc::new(RwLock::new(HashMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -132,7 +133,7 @@ impl MacOsKeychainStorage {
 
     /// Bump the generation counter. Called on every successful store/delete
     /// and on explicit cache invalidation. A pending `retrieve` that
-    /// observes a higher counter when its subprocess returns must NOT write
+    /// observes a higher counter when its Keychain query returns must NOT write
     /// its (now-stale) result to the cache. Matches claude-code's
     /// `keychainCacheState.generation`.
     pub(crate) fn bump_generation(&self) {
@@ -149,7 +150,7 @@ impl SecureStorage for MacOsKeychainStorage {
         data: SecureStorageData,
     ) -> Result<(), SecureStorageError> {
         // Pre-invalidate the cache so a concurrent reader doesn't return
-        // stale data after we bump the generation but before the subprocess
+        // stale data after we bump the generation but before the native call
         // returns.
         let key = (service.to_string(), account.to_string());
         self.cache.write().await.remove(&key);
@@ -157,54 +158,45 @@ impl SecureStorage for MacOsKeychainStorage {
 
         let full_service = self.keychain_service_name(service);
 
-        // JSON → hex. Claude-code uses
-        // `Buffer.from(jsonString, 'utf-8').toString('hex')`.
-        let json = serde_json::to_string(&data)
+        let json = serde_json::to_vec(&data)
             .map_err(|e| SecureStorageError::Io(format!("serialize: {e}")))?;
-        let hex_value = hex::encode(json.as_bytes());
 
-        // Preferred path: `security -i` reads the full add-generic-password
-        // command on stdin. Keeps the hex payload out of argv so process
-        // monitors only see `security -i`.
-        let stdin_command = format!(
-            "add-generic-password -U -a \"{account}\" -s \"{full_service}\" -X \"{hex_value}\" -T \"/usr/bin/security\"\n",
-        );
-
-        let (exit_status, stderr) = if stdin_command.len() <= SECURITY_STDIN_LINE_LIMIT {
-            run_security_stdin(&self.security_command, &stdin_command).await?
-        } else {
-            // Argv fallback. Hex in argv is recoverable by a determined
-            // observer but defeats naive plaintext-grep rules — silent
-            // credential corruption (the alternative) is strictly worse.
-            tracing::warn!(
-                target: "lingxi::secure_storage::macos",
-                "Keychain payload ({} B JSON) exceeds security -i stdin limit; using argv",
-                json.len()
+        if let Some(security_command) = self.security_command.as_deref() {
+            // Hermetic test path: fake the historical CLI adapter without
+            // touching the developer's real login Keychain.
+            let hex_value = hex::encode(&json);
+            let stdin_command = format!(
+                "add-generic-password -U -a \"{account}\" -s \"{full_service}\" -X \"{hex_value}\" -T \"/usr/bin/security\"\n",
             );
-            run_security_argv(
-                &self.security_command,
-                &[
-                    "add-generic-password",
-                    "-U",
-                    "-a",
-                    account,
-                    "-s",
-                    full_service.as_str(),
-                    "-X",
-                    hex_value.as_str(),
-                    "-T",
-                    "/usr/bin/security",
-                ],
-            )
-            .await?
-        };
-
-        if !exit_status.success() {
-            return Err(SecureStorageError::BackendUnavailable(format!(
-                "security add-generic-password exited {}: {}",
-                exit_status.code().unwrap_or(-1),
-                stderr.trim()
-            )));
+            let (exit_status, stderr) = if stdin_command.len() <= SECURITY_STDIN_LINE_LIMIT {
+                run_security_stdin(security_command, &stdin_command).await?
+            } else {
+                run_security_argv(
+                    security_command,
+                    &[
+                        "add-generic-password",
+                        "-U",
+                        "-a",
+                        account,
+                        "-s",
+                        full_service.as_str(),
+                        "-X",
+                        hex_value.as_str(),
+                        "-T",
+                        "/usr/bin/security",
+                    ],
+                )
+                .await?
+            };
+            if !exit_status.success() {
+                return Err(SecureStorageError::BackendUnavailable(format!(
+                    "security add-generic-password exited {}: {}",
+                    exit_status.code().unwrap_or(-1),
+                    stderr.trim()
+                )));
+            }
+        } else {
+            native_keychain_store(full_service, account.to_string(), json).await?;
         }
 
         // Cache the freshly-written data with the new generation.
@@ -267,9 +259,14 @@ impl SecureStorage for MacOsKeychainStorage {
             }
         }
 
-        // We are the responsible spawner.
+        // We own this in-flight Keychain lookup.
         let full_service = self.keychain_service_name(service);
-        let result = match run_security_find(&self.security_command, account, &full_service).await {
+        let fetched = if let Some(security_command) = self.security_command.as_deref() {
+            run_security_find(security_command, account, &full_service).await
+        } else {
+            native_keychain_retrieve(full_service, account.to_string()).await
+        };
+        let result = match fetched {
             Ok(Some(data)) => {
                 // Generation check: if the counter changed during our
                 // subprocess, our result is stale — return it to *this*
@@ -297,15 +294,28 @@ impl SecureStorage for MacOsKeychainStorage {
         result
     }
 
+    async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
+        if self.security_command.is_some() {
+            return self
+                .retrieve(service, account)
+                .await
+                .map(|entry| entry.is_some());
+        }
+        native_keychain_contains(self.keychain_service_name(service), account.to_string()).await
+    }
+
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
         let key = (service.to_string(), account.to_string());
-        // Invalidate cache + bump generation BEFORE the subprocess so any
+        // Invalidate cache + bump generation BEFORE the native call so any
         // racing retrieve sees the bump and discards its result.
         self.cache.write().await.remove(&key);
         self.bump_generation();
 
         let full_service = self.keychain_service_name(service);
-        let mut command = Command::new(&self.security_command);
+        if self.security_command.is_none() {
+            return native_keychain_delete(full_service, account.to_string()).await;
+        }
+        let mut command = Command::new(self.security_command.as_deref().expect("checked above"));
         command
             .args([
                 "delete-generic-password",
@@ -353,6 +363,140 @@ impl SecureStorage for MacOsKeychainStorage {
     fn backend(&self) -> SecureStorageBackend {
         SecureStorageBackend::MacOsKeychain
     }
+}
+
+#[cfg(target_os = "macos")]
+fn native_keychain_error(
+    action: &'static str,
+    error: security_framework::base::Error,
+) -> SecureStorageError {
+    let detail = format!(
+        "Keychain Services {action} failed (OSStatus {}): {error}",
+        error.code()
+    );
+    match error.code() {
+        // errSecAuthFailed and userCanceled are explicit authorization
+        // outcomes; the caller may choose a non-native fallback.
+        -25293 | -128 => SecureStorageError::PermissionDenied(detail),
+        _ => SecureStorageError::BackendUnavailable(detail),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn native_keychain_store(
+    service: String,
+    account: String,
+    payload: Vec<u8>,
+) -> Result<(), SecureStorageError> {
+    tokio::task::spawn_blocking(move || {
+        security_framework::passwords::set_generic_password(&service, &account, &payload)
+            .map_err(|error| native_keychain_error("store", error))
+    })
+    .await
+    .map_err(|error| SecureStorageError::Io(format!("Keychain Services store task: {error}")))?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn native_keychain_store(
+    _service: String,
+    _account: String,
+    _payload: Vec<u8>,
+) -> Result<(), SecureStorageError> {
+    Err(SecureStorageError::BackendUnavailable(
+        "Keychain Services are only available on macOS".to_string(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn native_keychain_retrieve(
+    service: String,
+    account: String,
+) -> Result<Option<SecureStorageData>, SecureStorageError> {
+    let payload = tokio::task::spawn_blocking(move || {
+        security_framework::passwords::get_generic_password(&service, &account)
+    })
+    .await
+    .map_err(|error| SecureStorageError::Io(format!("Keychain Services retrieve task: {error}")))?;
+    let payload = match payload {
+        Ok(payload) => payload,
+        // errSecItemNotFound is a normal absence, not a backend failure.
+        Err(error) if error.code() == -25300 => return Ok(None),
+        Err(error) => return Err(native_keychain_error("retrieve", error)),
+    };
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|error| SecureStorageError::Io(format!("deserialize Keychain payload: {error}")))
+}
+
+#[cfg(target_os = "macos")]
+async fn native_keychain_contains(
+    service: String,
+    account: String,
+) -> Result<bool, SecureStorageError> {
+    tokio::task::spawn_blocking(move || {
+        let mut query = security_framework::item::ItemSearchOptions::new();
+        query
+            .class(security_framework::item::ItemClass::generic_password())
+            .service(&service)
+            .account(&account);
+        match query.search() {
+            // No return-data or return-attributes flag is set: a successful
+            // SecItemCopyMatching proves existence without decrypting the
+            // secret and therefore does not trigger the password-read ACL.
+            Ok(_) => Ok(true),
+            Err(error) if error.code() == -25300 => Ok(false),
+            Err(error) => Err(native_keychain_error("contains", error)),
+        }
+    })
+    .await
+    .map_err(|error| SecureStorageError::Io(format!("Keychain Services contains task: {error}")))?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn native_keychain_contains(
+    _service: String,
+    _account: String,
+) -> Result<bool, SecureStorageError> {
+    Err(SecureStorageError::BackendUnavailable(
+        "Keychain Services are only available on macOS".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn native_keychain_retrieve(
+    _service: String,
+    _account: String,
+) -> Result<Option<SecureStorageData>, SecureStorageError> {
+    Err(SecureStorageError::BackendUnavailable(
+        "Keychain Services are only available on macOS".to_string(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn native_keychain_delete(
+    service: String,
+    account: String,
+) -> Result<(), SecureStorageError> {
+    let result = tokio::task::spawn_blocking(move || {
+        security_framework::passwords::delete_generic_password(&service, &account)
+    })
+    .await
+    .map_err(|error| SecureStorageError::Io(format!("Keychain Services delete task: {error}")))?;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == -25300 => Ok(()),
+        Err(error) => Err(native_keychain_error("delete", error)),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn native_keychain_delete(
+    _service: String,
+    _account: String,
+) -> Result<(), SecureStorageError> {
+    Err(SecureStorageError::BackendUnavailable(
+        "Keychain Services are only available on macOS".to_string(),
+    ))
 }
 
 /// Spawn `security -i` and feed the full command on stdin. Returns the exit
@@ -485,7 +629,7 @@ mod tests {
             config_dir: PathBuf::from(cfg),
             default_config_dir: PathBuf::from(default),
             oauth_suffix: String::new(),
-            security_command,
+            security_command: Some(security_command),
             cache: Arc::new(RwLock::new(HashMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -607,6 +751,19 @@ esac
             "LingXi-credentials"
         );
         assert_eq!(s.keychain_service_name(""), "LingXi");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn production_backend_calls_keychain_services_without_a_cli_adapter() {
+        let storage = MacOsKeychainStorage::new(
+            "tester".into(),
+            PathBuf::from("/Users/x/.lingxi"),
+            PathBuf::from("/Users/x/.lingxi"),
+            String::new(),
+        )
+        .expect("construct native Keychain backend");
+        assert!(storage.security_command.is_none());
     }
 
     #[test]

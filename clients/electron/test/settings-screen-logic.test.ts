@@ -7,6 +7,7 @@ import {
   parseSettingsSnapshot,
   resolveInitialPage,
   restartDisabledReason,
+  SETTINGS_SIDEBAR_TOP_INSET,
 } from '../src/renderer/components/settings/SettingsScreen';
 import { pendingKeys } from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
@@ -56,6 +57,10 @@ test('groupedNav filters to matching pages and drops empty groups', () => {
 
 test('groupedNav with a query matching nothing returns no sections', () => {
   assert.deepEqual(groupedNav('this matches absolutely nothing'), []);
+});
+
+test('settings search clears the macOS hidden-inset titlebar controls', () => {
+  assert.ok(SETTINGS_SIDEBAR_TOP_INSET >= 40);
 });
 
 function rawSnapshot(overrides: Partial<SettingsSnapshotEvent> = {}): SettingsSnapshotEvent {

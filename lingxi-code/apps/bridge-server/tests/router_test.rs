@@ -695,6 +695,10 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             configured_provider_ids: vec!["deepseek".into()],
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
+            credential_previews: std::collections::HashMap::from([(
+                "deepseek".into(),
+                "••••cret".into(),
+            )]),
             error: None,
         })
     );
@@ -721,6 +725,7 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             configured_provider_ids: Vec::new(),
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
+            credential_previews: std::collections::HashMap::new(),
             error: None,
         })
     );
@@ -781,6 +786,7 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
             ClientCommand::ListProviderCredentials {
                 operation_id: 9,
                 provider_ids: vec!["deepseek".into(), "openrouter".into()],
+                preview_provider_ids: vec!["deepseek".into()],
             },
             sink.clone(),
         )
@@ -791,6 +797,7 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
         configured_provider_ids,
         unavailable_provider_ids,
         storage_encrypted,
+        credential_previews,
         error,
         ..
     } = &events[0]
@@ -800,6 +807,10 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
     assert_eq!(configured_provider_ids, &["deepseek"]);
     assert_eq!(unavailable_provider_ids, &["openrouter"]);
     assert!(*storage_encrypted);
+    assert_eq!(
+        credential_previews.get("deepseek").map(String::as_str),
+        Some("••••seek")
+    );
     assert!(error
         .as_deref()
         .is_some_and(|message| message.contains("openrouter")));

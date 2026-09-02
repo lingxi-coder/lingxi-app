@@ -63,9 +63,10 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -104,9 +105,10 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(): Promise<ProviderCredentialMetadata[]>;
+  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;

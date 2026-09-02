@@ -157,6 +157,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
+    // Runtime assembly includes live MCP discovery before publishing the
+    // bridge lockfile. A healthy project can exceed the generic 15s default
+    // on a cold network; keep the test-injected short timeout untouched while
+    // giving the real Desktop launch enough room to finish.
+    lockfileTimeoutMs: 30_000,
     providerIds: PROVIDER_IDS,
     diagnostics,
     accessState: (ref: SessionRef) => {

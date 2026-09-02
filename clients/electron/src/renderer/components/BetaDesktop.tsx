@@ -241,9 +241,9 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
           padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
-          background: active ? t.accentBg : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
+          background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
-          fontSize: 12.5, fontWeight: active ? 600 : 400,
+          fontSize: 13, fontWeight: active ? 600 : 500,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -446,11 +446,11 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
                       width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
-                      border: 0, borderRadius: 8, background: active ? t.accentBg : opening ? t.surface : 'transparent',
+                      border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
                   >
-                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 500 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
                       {opening
                         ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
@@ -479,7 +479,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
 
         <section aria-labelledby="projects-heading">
           <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Projects</h2>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Projects</h2>
             <button
               type="button"
               className="sidebar-header-action"
@@ -527,12 +527,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
                       padding: '7px 62px 7px 8px', border: 0, borderRadius: 8,
-                      background: active ? t.surface : 'transparent', color: active ? t.text : t.text2,
+                      background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text2,
                       cursor: 'pointer', textAlign: 'left',
                     }}
                   >
                     <Icon name="folder" size={16} color={active ? t.text2 : t.text3} stroke={1.7} />
-                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13.5, fontWeight: active ? 600 : 500 }}>{basename(projectPath)}</span>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>{basename(projectPath)}</span>
                   </button>
                   <button
                     type="button"

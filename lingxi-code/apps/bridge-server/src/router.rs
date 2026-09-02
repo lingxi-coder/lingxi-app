@@ -65,6 +65,7 @@
 //! settings files through [`crate::settings_bridge`] using the
 //! [`crate::settings_bridge::SettingsContext`] the composition root supplies.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -205,6 +206,9 @@ pub struct EngineCommandRouter {
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
+    /// HTTP transport used by provider connection probes. Production boot
+    /// supplies the same guarded transport as the runtime's LLM clients.
+    http: Option<Arc<dyn platform_api::HttpTransport>>,
     /// Optional layered-settings context backing the `Settings` listing.
     /// Production boot wires it from the desktop composition root; lightweight
     /// users of the routing seam may omit it, in which case the listing
@@ -464,6 +468,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             credentials: None,
+            http: None,
             settings: None,
             mcp: None,
             turn_active: AtomicBool::new(false),
@@ -475,6 +480,14 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Attach the runtime's provider HTTP transport for low-cost connection
+    /// probes from Desktop settings.
+    #[must_use]
+    pub fn with_http(mut self, http: Arc<dyn platform_api::HttpTransport>) -> Self {
+        self.http = Some(http);
         self
     }
 
@@ -950,6 +963,7 @@ impl EngineCommandRouter {
         &self,
         operation_id: u64,
         provider_ids: &[String],
+        preview_provider_ids: &[String],
         operation_error: Option<String>,
         sink: &dyn ClientEventSink,
     ) {
@@ -959,6 +973,7 @@ impl EngineCommandRouter {
                 configured_provider_ids: Vec::new(),
                 unavailable_provider_ids: provider_ids.to_vec(),
                 storage_encrypted: false,
+                credential_previews: HashMap::new(),
                 error: Some("provider credential storage is unavailable".to_string()),
             })
             .await;
@@ -971,6 +986,7 @@ impl EngineCommandRouter {
                 configured_provider_ids: Vec::new(),
                 unavailable_provider_ids: provider_ids.to_vec(),
                 storage_encrypted: credentials.provider_key_storage_is_encrypted(),
+                credential_previews: HashMap::new(),
                 error: Some(error),
             })
             .await;
@@ -979,11 +995,28 @@ impl EngineCommandRouter {
 
         let mut configured_provider_ids = Vec::new();
         let mut unavailable_provider_ids = Vec::new();
+        let mut credential_previews = HashMap::new();
         let mut failures = Vec::new();
         for provider_id in provider_ids {
-            match credentials.get_provider_key(provider_id).await {
-                Ok(Some(_)) => configured_provider_ids.push(provider_id.clone()),
-                Ok(None) => {}
+            match credentials.has_provider_key(provider_id).await {
+                Ok(true) => {
+                    configured_provider_ids.push(provider_id.clone());
+                    if preview_provider_ids.contains(provider_id) {
+                        match credentials.get_provider_key(provider_id).await {
+                            Ok(Some(secret)) => {
+                                credential_previews.insert(
+                                    provider_id.clone(),
+                                    secret::masked_credential_preview(secret.expose_secret()),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(failure) => {
+                                failures.push(format!("{provider_id} preview: {failure}"))
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {}
                 Err(failure) => {
                     unavailable_provider_ids.push(provider_id.clone());
                     failures.push(format!("{provider_id}: {failure}"));
@@ -1002,6 +1035,7 @@ impl EngineCommandRouter {
             configured_provider_ids,
             unavailable_provider_ids,
             storage_encrypted: credentials.provider_key_storage_is_encrypted(),
+            credential_previews,
             error,
         })
         .await;
@@ -1634,9 +1668,13 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::ListProviderCredentials {
                 operation_id,
                 provider_ids,
+                preview_provider_ids,
             } => {
                 let validation_error = if provider_ids.len() > 32
                     || provider_ids.iter().any(|id| !provider_id_is_valid(id))
+                    || preview_provider_ids
+                        .iter()
+                        .any(|id| !provider_ids.contains(id))
                 {
                     Some("invalid provider credential query".to_string())
                 } else {
@@ -1645,6 +1683,7 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_provider_credential_status(
                     operation_id,
                     &provider_ids,
+                    &preview_provider_ids,
                     validation_error,
                     &*sink,
                 )
@@ -1655,6 +1694,8 @@ impl CommandRouter for EngineCommandRouter {
                 provider_id,
                 credential,
             } => {
+                let credential_preview =
+                    secret::masked_credential_preview(credential.expose_secret());
                 let error = if !provider_id_is_valid(&provider_id)
                     || credential.expose_secret().is_empty()
                     || credential.expose_secret().len() > 16_384
@@ -1671,6 +1712,9 @@ impl CommandRouter for EngineCommandRouter {
                     Some("provider credential storage is unavailable".to_string())
                 };
                 let applied = error.is_none();
+                let credential_previews = applied
+                    .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
+                    .unwrap_or_default();
                 sink.emit(ClientEvent::ProviderCredentialStatus {
                     operation_id,
                     configured_provider_ids: applied
@@ -1685,6 +1729,7 @@ impl CommandRouter for EngineCommandRouter {
                         .credentials
                         .as_ref()
                         .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    credential_previews,
                     error,
                 })
                 .await;
@@ -1716,9 +1761,46 @@ impl CommandRouter for EngineCommandRouter {
                         .credentials
                         .as_ref()
                         .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    credential_previews: HashMap::new(),
                     error,
                 })
                 .await;
+            }
+            ClientCommand::TestProviderConnection {
+                operation_id,
+                provider_id,
+                api_base,
+                model,
+                credential_override,
+            } => {
+                let event = if provider_id_is_valid(&provider_id) {
+                    crate::provider_connection::test(
+                        self.credentials.as_ref(),
+                        self.http.as_ref(),
+                        crate::provider_connection::ProviderConnectionProbe {
+                            operation_id,
+                            provider_id,
+                            api_base,
+                            model,
+                            credential_override,
+                        },
+                    )
+                    .await
+                } else {
+                    ClientEvent::ProviderConnectionTested {
+                        operation_id,
+                        provider_id,
+                        connected: false,
+                        reachable: false,
+                        authenticated: false,
+                        model_available: false,
+                        http_status: None,
+                        latency_ms: 0,
+                        message: "Provider 标识无效".to_string(),
+                        used_stored_credential: credential_override.is_none(),
+                    }
+                };
+                sink.emit(event).await;
             }
 
             // ── Permission mode ────────────────────────────────────────────

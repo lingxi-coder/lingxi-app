@@ -251,6 +251,9 @@ export interface PageContentProps {
   onJumpToLayer(layer: EditableLayer): void;
 }
 
+/** Clears the macOS hidden-inset titlebar controls before the first settings control. */
+export const SETTINGS_SIDEBAR_TOP_INSET = 44;
+
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
   const t = useT();
   const heading = kind === 'not-implemented' ? `${page.label}：尚未实现` : `${page.label}：内容即将到来`;
@@ -583,7 +586,7 @@ export function SettingsScreen({
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflowY: 'auto',
         }}>
-          <div style={{ padding: '14px 14px 8px' }}>
+          <div style={{ padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8,
               background: t.surface, border: `0.5px solid ${t.border}`,

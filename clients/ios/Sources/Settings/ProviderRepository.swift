@@ -966,6 +966,7 @@ final class ProviderRepository {
             configuredProviderIds,
             unavailableProviderIds,
             storageEncrypted,
+            _,
             error
         ) = event else {
             return

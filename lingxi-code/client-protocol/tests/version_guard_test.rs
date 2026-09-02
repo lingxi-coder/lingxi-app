@@ -409,6 +409,35 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ProviderCredentialStatus.error",
         "Option<String>",
     );
+    put(
+        "ClientEvent::ProviderConnectionTested",
+        "provider_connection_tested",
+    );
+    put("ClientEvent::ProviderConnectionTested.operation_id", "u64");
+    put(
+        "ClientEvent::ProviderConnectionTested.provider_id",
+        "String",
+    );
+    put("ClientEvent::ProviderConnectionTested.connected", "bool");
+    put("ClientEvent::ProviderConnectionTested.reachable", "bool");
+    put(
+        "ClientEvent::ProviderConnectionTested.authenticated",
+        "bool",
+    );
+    put(
+        "ClientEvent::ProviderConnectionTested.model_available",
+        "bool",
+    );
+    put(
+        "ClientEvent::ProviderConnectionTested.http_status",
+        "Option<u16>",
+    );
+    put("ClientEvent::ProviderConnectionTested.latency_ms", "u64");
+    put("ClientEvent::ProviderConnectionTested.message", "String");
+    put(
+        "ClientEvent::ProviderConnectionTested.used_stored_credential",
+        "bool",
+    );
 
     put("ClientEvent::McpServers", "mcp_servers");
     put("ClientEvent::McpServers.servers", "Vec<McpServerDto>");
@@ -704,6 +733,21 @@ fn current_contract_index() -> ContractIndex {
     put(
         "ClientCommand::DeleteProviderCredential.operation_id",
         "u64",
+    );
+    put(
+        "ClientCommand::TestProviderConnection",
+        "test_provider_connection",
+    );
+    put("ClientCommand::TestProviderConnection.operation_id", "u64");
+    put(
+        "ClientCommand::TestProviderConnection.provider_id",
+        "String",
+    );
+    put("ClientCommand::TestProviderConnection.api_base", "String");
+    put("ClientCommand::TestProviderConnection.model", "String");
+    put(
+        "ClientCommand::TestProviderConnection.credential_override",
+        "Option<ProviderCredentialSecretDto>",
     );
     put(
         "ClientCommand::DeleteProviderCredential.provider_id",
@@ -2713,6 +2757,7 @@ fn contract_index_covers_every_dto() {
             configured_provider_ids: Vec::new(),
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
+            credential_previews: std::collections::HashMap::new(),
             error: None,
         },
         ClientEvent::ConversationControlsChanged {
@@ -2862,6 +2907,7 @@ fn contract_index_covers_every_dto() {
         ClientCommand::ListProviderCredentials {
             operation_id: 0,
             provider_ids: Vec::new(),
+            preview_provider_ids: Vec::new(),
         },
         ClientCommand::SetProviderCredential {
             operation_id: 0,

@@ -1,8 +1,8 @@
 //! Platform-default [`SecureStorage`] factory.
 //!
-//! On macOS, tries [`super::macos::MacOsKeychainStorage`] first. On any init
-//! or runtime availability error (e.g. `security` CLI absent, a locked login
-//! keychain, or a sandboxed runtime that blocks subprocess spawn), logs a
+//! On macOS, tries [`super::macos::MacOsKeychainStorage`] first. On any
+//! Keychain Services runtime availability error (for example a locked login
+//! keychain or denied authorization), logs a
 //! warning and falls back to [`super::plaintext::PlainTextSecureStorage`].
 //!
 //! On Linux, tries [`super::linux::LinuxSecretStorage`] (the `libsecret`
@@ -127,6 +127,38 @@ impl RuntimeFallbackStorage {
         }
     }
 
+    async fn contains_with_fallback(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<bool, SecureStorageError> {
+        match self.fallback.contains(service, account).await {
+            Ok(true) => {
+                self.fallback_active.store(true, Ordering::Release);
+                Ok(true)
+            }
+            Ok(false) => match self.primary.contains(service, account).await {
+                Ok(present) => {
+                    self.fallback_active.store(false, Ordering::Release);
+                    Ok(present)
+                }
+                Err(error) if runtime_fallback_allowed(&error) => {
+                    self.activate_fallback(&error);
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            },
+            Err(fallback_error) => match self.primary.contains(service, account).await {
+                Ok(present) => Ok(present),
+                Err(primary_error) if runtime_fallback_allowed(&primary_error) => {
+                    self.activate_fallback(&primary_error);
+                    Err(fallback_error)
+                }
+                Err(primary_error) => Err(primary_error),
+            },
+        }
+    }
+
     fn activate_fallback(&self, error: &SecureStorageError) {
         self.fallback_active.store(true, Ordering::Release);
         if !self.warned.swap(true, Ordering::AcqRel) {
@@ -235,11 +267,35 @@ impl SecureStorage for RuntimeFallbackStorage {
         match fallback_result {
             Ok(Some(data)) => {
                 self.fallback_active.store(true, Ordering::Release);
-                return if is_fallback_tombstone(&data) {
-                    Ok(None)
-                } else {
-                    Ok(Some(data))
-                };
+                if is_fallback_tombstone(&data) {
+                    return Ok(None);
+                }
+
+                // A fallback file records a past native-store failure, not a
+                // permanent policy choice. Retry Keychain on a later healthy
+                // launch and remove the plaintext shadow only after the native
+                // write succeeds. The valid fallback value remains readable
+                // even if either recovery step fails.
+                match self.primary.store(service, account, data.clone()).await {
+                    Ok(()) => match self.fallback.delete(service, account).await {
+                        Ok(()) => self.fallback_active.store(false, Ordering::Release),
+                        Err(cleanup_error) => self.mark_fallback_active(
+                            &cleanup_error,
+                            "Warning: native credential storage recovered, but the owner-only \
+                             fallback could not be removed; retaining the current value in both \
+                             stores.",
+                        ),
+                    },
+                    Err(error) if runtime_fallback_allowed(&error) => {
+                        self.activate_fallback(&error);
+                    }
+                    Err(error) => self.mark_fallback_active(
+                        &error,
+                        "Warning: native credential migration failed; retaining the owner-only \
+                         fallback value.",
+                    ),
+                }
+                return Ok(Some(data));
             }
             Ok(None) => {}
             Err(fallback_error) => {
@@ -261,6 +317,10 @@ impl SecureStorage for RuntimeFallbackStorage {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
+        self.contains_with_fallback(service, account).await
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
@@ -781,6 +841,44 @@ mod tests {
             actual.expose_secret_bytes(),
             replacement.expose_secret_bytes()
         );
+    }
+
+    #[tokio::test]
+    async fn healthy_native_store_migrates_a_cold_fallback_value() {
+        let primary = Arc::new(MemoryStorage::new(true));
+        let fallback = Arc::new(MemoryStorage::new(false));
+        let expected = test_payload(b"old-fallback-key");
+        fallback
+            .store("lingxi", "provider-key-deepseek", expected.clone())
+            .await
+            .expect("seed fallback");
+
+        let storage = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let actual = storage
+            .retrieve("lingxi", "provider-key-deepseek")
+            .await
+            .expect("retrieve and migrate")
+            .expect("stored key");
+
+        assert_eq!(actual.expose_secret_bytes(), expected.expose_secret_bytes());
+        assert_eq!(
+            primary
+                .retrieve("lingxi", "provider-key-deepseek")
+                .await
+                .expect("native retrieve")
+                .expect("migrated native key")
+                .expose_secret_bytes(),
+            expected.expose_secret_bytes()
+        );
+        assert!(
+            fallback
+                .retrieve("lingxi", "provider-key-deepseek")
+                .await
+                .expect("fallback retrieve")
+                .is_none(),
+            "successful migration must remove the plaintext shadow"
+        );
+        assert!(storage.is_encrypted());
     }
 
     #[tokio::test]

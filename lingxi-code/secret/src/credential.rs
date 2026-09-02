@@ -141,6 +141,17 @@ pub enum CredentialError {
     Unavailable,
 }
 
+/// Build display-safe credential text without exposing the full value.
+/// Secrets of four characters or fewer are masked completely.
+#[must_use]
+pub fn masked_credential_preview(value: &str) -> String {
+    let suffix = value.chars().rev().take(4).collect::<Vec<_>>();
+    if suffix.len() < 4 || value.chars().count() <= 4 {
+        return "••••".to_string();
+    }
+    format!("••••{}", suffix.into_iter().rev().collect::<String>())
+}
+
 /// Caches the Anthropic API key in process memory and refreshes from
 /// [`SecureStorage`] on TTL expiry.
 ///
@@ -369,6 +380,33 @@ impl CredentialManager {
         let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
         Ok(Some(Secret::new(s)))
+    }
+
+    /// Check whether a provider key exists without loading secret bytes when
+    /// the underlying native store supports an attribute-only lookup.
+    pub async fn has_provider_key(&self, id: &str) -> Result<bool, CredentialError> {
+        if self.provider_key_cache.read().await.contains_key(id) {
+            return Ok(true);
+        }
+        if is_anthropic_api_key_id(id) {
+            if self.storage.contains("lingxi", "anthropic-api-key").await? {
+                return Ok(true);
+            }
+            for legacy_id in ["anthropic", "anthropic-api-key"] {
+                if self
+                    .storage
+                    .contains("lingxi", &provider_key_account(legacy_id))
+                    .await?
+                {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.storage
+            .contains("lingxi", &provider_key_account(id))
+            .await
+            .map_err(CredentialError::from)
     }
 
     /// Persist a sensitive plugin `userConfig` value in [`SecureStorage`],
@@ -807,6 +845,17 @@ mod oauth_tests {
     use platform_api::SecureStorageBackend;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn credential_preview_reveals_only_the_final_four_characters() {
+        assert_eq!(masked_credential_preview("sk-test-secret-abcd"), "••••abcd");
+        assert_eq!(
+            masked_credential_preview("密钥甲乙丙丁戊己"),
+            "••••丙丁戊己"
+        );
+        assert_eq!(masked_credential_preview("abcd"), "••••");
+        assert_eq!(masked_credential_preview("abc"), "••••");
+    }
 
     /// In-memory `(service, account) -> data` store for credential tests.
     #[derive(Default)]

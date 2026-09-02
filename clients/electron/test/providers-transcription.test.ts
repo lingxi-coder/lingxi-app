@@ -36,6 +36,13 @@ test('every provider declares transcriptionCapable explicitly (no accidental und
   }
 });
 
+test('every provider exposes a secure official API base and credential-management link', () => {
+  for (const provider of PROVIDERS) {
+    assert.match(provider.defaultApiBase, /^https:\/\//, `${provider.id} API base must use HTTPS`);
+    assert.match(provider.credentialManagementUrl, /^https:\/\//, `${provider.id} credential link must use HTTPS`);
+  }
+});
+
 test('the providers with no hosted transcription endpoint stay false', () => {
   const incapable = PROVIDERS.filter((p) => !p.transcriptionCapable).map((p) => p.id).sort();
   assert.deepEqual(

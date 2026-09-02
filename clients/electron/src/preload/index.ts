@@ -51,6 +51,7 @@ const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
+const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
 const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -99,9 +100,10 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -138,9 +140,10 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(): Promise<ProviderCredentialMetadata[]>;
+  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -209,9 +212,10 @@ const api: LingxiApi = {
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
   previewWorkspaceFile: (sessionId, path) => ipcRenderer.invoke(CH_WORKSPACE_FILE_PREVIEW, sessionId, path) as Promise<WorkspaceFilePreview>,
-  providerCredentials: () => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET) as Promise<ProviderCredentialMetadata[]>,
+  providerCredentials: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET, providerId) as Promise<ProviderCredentialMetadata[]>,
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,
+  testProviderConnection: (providerId, credentialOverride) => ipcRenderer.invoke(CH_PROVIDER_CONNECTION_TEST, providerId, credentialOverride) as Promise<ProviderConnectionTestResult>,
   restartBridge: (sessionId) => ipcRenderer.invoke(CH_BRIDGE_RESTART, sessionId) as Promise<void>,
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,

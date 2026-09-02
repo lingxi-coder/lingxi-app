@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   isEditableLayer,
@@ -12,9 +14,16 @@ import {
   apiBaseUrlPatch,
   connectButtonLabel,
   credentialStatusKind,
+  ensureProviderEngineConnected,
   initialProviderSelection,
+  providerConnectionStatus,
+  ProviderCredentials,
 } from '../src/renderer/components/settings/pages/ProviderCredentials';
 import { rowState, type SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
+import { Theme } from '../src/renderer/theme/ThemeContext';
+import { tokens } from '../src/renderer/theme/tokens';
+
+(globalThis as { React?: typeof React }).React = React;
 
 /**
  * A fully-typed `SettingsSnapshot`, the same helper every other new settings
@@ -178,6 +187,14 @@ test('credential status: unconfigured with Keychain available (or unknown) has n
   assert.equal(credentialStatusKind(undefined), 'none');
 });
 
+test('provider list status reflects authoritative connection state instead of edit selection', () => {
+  assert.deepEqual(providerConnectionStatus({ configured: true, runtimeOnly: false }, true, true), { kind: 'connected', label: '已连接' });
+  assert.deepEqual(providerConnectionStatus({ configured: false, runtimeOnly: true }, true, true), { kind: 'runtime', label: '运行时连接' });
+  assert.deepEqual(providerConnectionStatus({ configured: false, runtimeOnly: false }, true, true), { kind: 'disconnected', label: '未连接' });
+  assert.deepEqual(providerConnectionStatus({ configured: true, runtimeOnly: false }, false, true), { kind: 'unknown', label: '状态不可用' });
+  assert.deepEqual(providerConnectionStatus(undefined, true, false), { kind: 'unavailable', label: 'CLI / TUI' });
+});
+
 test('connect button label follows the busy > runtimeOnly > configured priority BetaSettings used', () => {
   assert.equal(connectButtonLabel({ connecting: true, modelApplying: false }), '连接中…');
   assert.equal(connectButtonLabel({ connecting: false, modelApplying: true }), '应用模型中…');
@@ -193,6 +210,177 @@ test('apiBaseUrlPatch clears the override on blank input rather than persisting 
   assert.equal(apiBaseUrlPatch('  '), null);
   assert.equal(apiBaseUrlPatch(''), null);
   assert.equal(apiBaseUrlPatch('  https://example.test  '), 'https://example.test');
+});
+
+test('provider recovery opens the current session when its runtime is missing', async () => {
+  const calls: Array<[string, string]> = [];
+  await ensureProviderEngineConnected(
+    false,
+    { projectPath: '/test/project', sessionId: 'session-a' },
+    async (projectPath, sessionId) => { calls.push([projectPath, sessionId]); },
+  );
+  assert.deepEqual(calls, [['/test/project', 'session-a']]);
+});
+
+test('provider recovery does not reopen an already connected engine', async () => {
+  let opened = false;
+  await ensureProviderEngineConnected(
+    true,
+    { projectPath: '/test/project', sessionId: 'session-a' },
+    async () => { opened = true; },
+  );
+  assert.equal(opened, false);
+});
+
+test('disconnected provider settings renders the real form with an engine recovery action', () => {
+  const bridge = {
+    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    bootstrap: {
+      settings: { version: 1, projects: [], pinnedSessions: [] },
+      workspace: { path: '/test/project', trusted: true },
+      providerCredentials: [{ providerId: 'anthropic', configured: false, encryptionAvailable: false }],
+    },
+    desktop: { currentModel: null },
+    connected: false,
+    running: false,
+    openSession: async () => undefined,
+    restartBridge: async () => undefined,
+    setProviderCredential: async () => undefined,
+    clearProviderCredential: async () => undefined,
+    refreshProviderCredential: async () => undefined,
+    setApiBaseUrl: async () => undefined,
+    setModel: async () => undefined,
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: bridge as any,
+      initialProviderId: 'anthropic',
+      snapshot: null,
+      editingLayer: 'user',
+      theme: 'light',
+      onTheme: () => undefined,
+      onNavigate: () => undefined,
+      onClose: () => undefined,
+      onJumpToLayer: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /data-testid="provider-engine-recovery"/);
+  assert.match(markup, /连接引擎/);
+  assert.match(markup, /data-testid="provider-list-back"/);
+  assert.match(markup, /aria-label="Anthropic API key"/);
+  const credentialMarker = markup.indexOf('aria-label="Anthropic API key"');
+  const credentialStart = markup.lastIndexOf('<input', credentialMarker);
+  const credentialEnd = markup.indexOf('>', credentialMarker);
+  assert.ok(credentialMarker >= 0 && credentialStart >= 0 && credentialEnd > credentialMarker);
+  assert.doesNotMatch(markup.slice(credentialStart, credentialEnd + 1), /\bdisabled\b/);
+  const disconnectedTestMarker = markup.indexOf('data-testid="provider-connection-test"');
+  const disconnectedTestStart = markup.lastIndexOf('<button', disconnectedTestMarker);
+  const disconnectedTestEnd = markup.indexOf('>', disconnectedTestMarker);
+  assert.ok(disconnectedTestMarker >= 0 && disconnectedTestStart >= 0 && disconnectedTestEnd > disconnectedTestMarker);
+  assert.match(markup.slice(disconnectedTestStart, disconnectedTestEnd + 1), /\bdisabled\b/);
+  assert.doesNotMatch(markup, /macOS 钥匙串不可用/);
+});
+
+test('provider settings defaults to a clickable status list without mounting a credential form', () => {
+  const bridge = {
+    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    bootstrap: {
+      settings: { version: 1, projects: [], pinnedSessions: [] },
+      workspace: { path: '/test/project', trusted: true },
+      providerCredentials: [
+        { providerId: 'deepseek', configured: true, encryptionAvailable: true, runtimeOnly: false },
+        { providerId: 'openrouter', configured: false, encryptionAvailable: true, runtimeOnly: true },
+      ],
+    },
+    desktop: { currentModel: null },
+    connected: true,
+    running: false,
+    openSession: async () => undefined,
+    restartBridge: async () => undefined,
+    setProviderCredential: async () => undefined,
+    clearProviderCredential: async () => undefined,
+    refreshProviderCredential: async () => undefined,
+    setApiBaseUrl: async () => undefined,
+    setModel: async () => undefined,
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: bridge as any,
+      snapshot: null,
+      editingLayer: 'user',
+      theme: 'light',
+      onTheme: () => undefined,
+      onNavigate: () => undefined,
+      onClose: () => undefined,
+      onJumpToLayer: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /data-testid="provider-list-item-deepseek"/);
+  assert.match(markup, /aria-label="DeepSeek，已连接"/);
+  assert.match(markup, /aria-label="OpenRouter，运行时连接"/);
+  assert.doesNotMatch(markup, /data-testid="provider-list-back"/);
+  assert.doesNotMatch(markup, /aria-label="Anthropic API key"/);
+  assert.doesNotMatch(markup, /正在编辑|>选择<|>当前</);
+});
+
+test('configured provider detail shows only the masked suffix returned by the engine', () => {
+  const bridge = {
+    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    bootstrap: {
+      settings: { version: 1, projects: [], pinnedSessions: [] },
+      workspace: { path: '/test/project', trusted: true },
+      providerCredentials: [{
+        providerId: 'deepseek',
+        configured: true,
+        encryptionAvailable: true,
+        credentialPreview: '••••abcd',
+      }],
+    },
+    desktop: { currentModel: 'deepseek/deepseek-v4-flash' },
+    connected: true,
+    running: false,
+    openSession: async () => undefined,
+    restartBridge: async () => undefined,
+    setProviderCredential: async () => undefined,
+    clearProviderCredential: async () => undefined,
+    refreshProviderCredential: async () => undefined,
+    setApiBaseUrl: async () => undefined,
+    setModel: async () => undefined,
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: bridge as any,
+      initialProviderId: 'deepseek',
+      snapshot: null,
+      editingLayer: 'user',
+      theme: 'light',
+      onTheme: () => undefined,
+      onNavigate: () => undefined,
+      onClose: () => undefined,
+      onJumpToLayer: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /data-testid="provider-credential-preview"/);
+  assert.match(markup, /placeholder="••••abcd"/);
+  assert.match(markup, /data-testid="provider-connection-test"/);
+  assert.match(markup, /测试连接/);
+  const connectedTestMarker = markup.indexOf('data-testid="provider-connection-test"');
+  const connectedTestStart = markup.lastIndexOf('<button', connectedTestMarker);
+  const connectedTestEnd = markup.indexOf('>', connectedTestMarker);
+  assert.ok(connectedTestMarker >= 0 && connectedTestStart >= 0 && connectedTestEnd > connectedTestMarker);
+  assert.doesNotMatch(markup.slice(connectedTestStart, connectedTestEnd + 1), /\bdisabled\b/);
+  assert.match(markup, /href="https:\/\/platform\.deepseek\.com\/api_keys"/);
+  assert.match(markup, /获取或管理 API Key/);
+  assert.doesNotMatch(markup, /sk-test-secret|sk-shared-secret/);
 });
 
 // The runtime half of the same finding: `clients/electron/test/` is not part

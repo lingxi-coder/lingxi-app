@@ -93,16 +93,25 @@ body {
   isolation: isolate;
   overscroll-behavior: contain;
 }
-.desktop-stage::before {
-  content: '';
-  position: absolute;
-  z-index: 0;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(circle at 56% 18%, oklch(66% .16 270 / .055), transparent 31%),
-    radial-gradient(circle at 42% 43%, oklch(70% .11 320 / .028), transparent 26%);
-  mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
+
+.settings-provider-row,
+.settings-provider-back {
+  transition-property: background-color, opacity;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.settings-provider-row:not(:disabled):hover,
+.settings-provider-row:not(:disabled):focus-visible,
+.settings-provider-back:not(:disabled):hover,
+.settings-provider-back:not(:disabled):focus-visible {
+  background: var(--settings-provider-row-hover) !important;
+  outline: none;
+}
+
+.settings-provider-row:disabled,
+.settings-provider-back:disabled {
+  opacity: 0.58;
 }
 .desktop-stage-feed {
   position: relative;

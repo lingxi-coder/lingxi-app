@@ -7387,6 +7387,47 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         }
     }
 
+    // Open exactly the credential the session is about to use. Provider
+    // availability above is intentionally attribute-only on macOS; loading the
+    // selected provider here makes authorization deterministic at session
+    // entry without decrypting every unrelated saved key. Anthropic's resolved
+    // auth was already loaded earlier in this build path.
+    let boot_profile = default_model_profile
+        .clone()
+        .or_else(|| {
+            model_providers
+                .get(&default_model_id)
+                .map(|(profile, _)| profile.clone())
+        })
+        .unwrap_or_else(|| "anthropic".to_string());
+    if boot_profile != "anthropic" {
+        if let Some(source) = assembled
+            .credential_sources
+            .iter()
+            .find(|source| source.profile_name == boot_profile)
+        {
+            match credentials.has_provider_key(&source.credential_id).await {
+                Ok(true) => {
+                    if let Err(error) = credentials.get_provider_key(&source.credential_id).await {
+                        tracing::warn!(
+                            provider = %boot_profile,
+                            credential_id = %source.credential_id,
+                            %error,
+                            "failed to load the session provider credential during boot"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    provider = %boot_profile,
+                    credential_id = %source.credential_id,
+                    %error,
+                    "failed to inspect the session provider credential during boot"
+                ),
+            }
+        }
+    }
+
     // The raw "user model setting" seam (the opusplan/haiku plan-mode swap
     // anchor threaded into subagent/teammate model resolution). When the
     // fallback rerouted the session, the persisted alias no longer describes

@@ -890,18 +890,39 @@ test('provider credential status is sourced from the engine secure store', async
   const command = commands[0]!;
   assert.equal(command['type'], 'list_provider_credentials');
   assert.deepEqual(command['provider_ids'], ['deepseek']);
+  assert.equal(command['preview_provider_ids'], undefined);
 
   (manager as any).handleProviderCredentialStatus({
     type: 'provider_credential_status',
     operation_id: command['operation_id'],
     configured_provider_ids: ['deepseek'],
     storage_encrypted: true,
+    credential_previews: { deepseek: '••••abcd' },
   });
 
   await pending;
   assert.deepEqual(manager.persistedCredentialProviderIds, ['deepseek']);
   assert.deepEqual(manager.activeCredentialProviderIds, ['deepseek']);
   assert.equal(manager.providerCredentialStorageEncrypted, true);
+  assert.deepEqual(manager.providerCredentialPreviews, { deepseek: '••••abcd' });
+});
+
+test('provider credential preview is requested only for an explicitly selected provider', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+
+  const pending = manager.listProviderCredentials(['deepseek'], ['deepseek']);
+  const command = commands[0]!;
+  assert.deepEqual(command['preview_provider_ids'], ['deepseek']);
+  (manager as any).handleProviderCredentialStatus({
+    type: 'provider_credential_status',
+    operation_id: command['operation_id'],
+    configured_provider_ids: ['deepseek'],
+    storage_encrypted: true,
+    credential_previews: { deepseek: '••••abcd' },
+  });
+  await pending;
 });
 
 test('provider credential writes cross only the authenticated bridge command path', async () => {
@@ -922,8 +943,79 @@ test('provider credential writes cross only the authenticated bridge command pat
     operation_id: command['operation_id'],
     configured_provider_ids: ['deepseek'],
     storage_encrypted: true,
+    credential_previews: { deepseek: '••••cret' },
   });
   await pending;
+});
+
+test('provider connection test keeps stored credentials engine-side and correlates the result', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+
+  const pending = manager.testProviderConnection(
+    'deepseek',
+    'https://api.deepseek.com',
+    'deepseek-v4-flash',
+  );
+  const command = commands[0]!;
+  assert.deepEqual(command, {
+    type: 'test_provider_connection',
+    operation_id: command['operation_id'],
+    provider_id: 'deepseek',
+    api_base: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+  });
+  assert.equal(command['credential_override'], undefined);
+
+  (manager as any).handleProviderConnectionTested({
+    type: 'provider_connection_tested',
+    operation_id: command['operation_id'],
+    provider_id: 'deepseek',
+    connected: true,
+    reachable: true,
+    authenticated: true,
+    model_available: true,
+    http_status: 200,
+    latency_ms: 31,
+    message: '连接成功 · 31 ms',
+    used_stored_credential: true,
+  });
+
+  const result = await pending;
+  assert.equal(result.connected, true);
+  assert.equal(result.used_stored_credential, true);
+});
+
+test('provider connection test can use an unsaved draft without persisting it', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+
+  const pending = manager.testProviderConnection(
+    'openai',
+    'https://api.openai.com/v1',
+    'gpt-5',
+    'sk-draft-secret',
+  );
+  const command = commands[0]!;
+  assert.equal(command['credential_override'], 'sk-draft-secret');
+  assert.equal(command['type'], 'test_provider_connection');
+
+  (manager as any).handleProviderConnectionTested({
+    type: 'provider_connection_tested',
+    operation_id: command['operation_id'],
+    provider_id: 'openai',
+    connected: false,
+    reachable: true,
+    authenticated: false,
+    model_available: false,
+    http_status: 401,
+    latency_ms: 18,
+    message: '认证失败，请检查 API Key',
+    used_stored_credential: false,
+  });
+  assert.equal((await pending).used_stored_credential, false);
 });
 
 test('partial credential read failures preserve unavailable providers and publish successful status', async () => {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveThemeMode, watchThemePreference, type SystemColorSchemeQuery } from '../src/renderer/theme/tokens';
+import { resolveThemeMode, tokens, watchThemePreference, type SystemColorSchemeQuery } from '../src/renderer/theme/tokens';
 
 test('resolveThemeMode passes dark/light through and resolves system from the OS query', () => {
   assert.equal(resolveThemeMode('dark', false), 'dark');
@@ -10,6 +10,14 @@ test('resolveThemeMode passes dark/light through and resolves system from the OS
   assert.equal(resolveThemeMode('system', false), 'light');
   assert.equal(resolveThemeMode(undefined, true), 'dark');
   assert.equal(resolveThemeMode(undefined, false), 'light');
+});
+
+test('the main content uses the same neutral surface as Settings in both themes', () => {
+  for (const dark of [false, true]) {
+    const palette = tokens(dark);
+    assert.equal(palette.stageBg, palette.windowBg);
+    assert.equal(palette.transcriptBg, palette.windowBg);
+  }
 });
 
 function fakeMediaQuery(initialMatches: boolean): SystemColorSchemeQuery & {

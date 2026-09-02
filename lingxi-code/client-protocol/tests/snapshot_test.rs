@@ -494,7 +494,26 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 configured_provider_ids: vec!["deepseek".to_string()],
                 unavailable_provider_ids: Vec::new(),
                 storage_encrypted: true,
+                credential_previews: HashMap::from([(
+                    "deepseek".to_string(),
+                    "••••cdef".to_string(),
+                )]),
                 error: None,
+            },
+        ),
+        (
+            "event/provider_connection_tested.json",
+            ClientEvent::ProviderConnectionTested {
+                operation_id: 20,
+                provider_id: "deepseek".to_string(),
+                connected: true,
+                reachable: true,
+                authenticated: true,
+                model_available: true,
+                http_status: Some(200),
+                latency_ms: 86,
+                message: "连接成功 · 86 ms".to_string(),
+                used_stored_credential: true,
             },
         ),
         (
@@ -1221,6 +1240,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ListProviderCredentials {
                 operation_id: 17,
                 provider_ids: vec!["deepseek".to_string(), "openrouter".to_string()],
+                preview_provider_ids: Vec::new(),
             },
         ),
         (
@@ -1236,6 +1256,16 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::DeleteProviderCredential {
                 operation_id: 19,
                 provider_id: "deepseek".to_string(),
+            },
+        ),
+        (
+            "command/test_provider_connection.json",
+            ClientCommand::TestProviderConnection {
+                operation_id: 20,
+                provider_id: "deepseek".to_string(),
+                api_base: "https://api.deepseek.com".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                credential_override: None,
             },
         ),
         (

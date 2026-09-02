@@ -7,6 +7,7 @@ import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-cl
 import type {
   BridgeRuntimeVersions,
   ConnectionState,
+  ProviderConnectionTestResult,
   RuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeManager,
@@ -31,6 +32,8 @@ import type { SettingsStore } from './settings.js';
 export interface CredentialMetadata {
   configured: boolean;
   encryptionAvailable: boolean;
+  /** Display-safe fixed mask plus at most the final four credential characters. */
+  credentialPreview?: string;
   /** The running engine received a credential from an external runtime source. */
   runtimeOnly?: true;
 }
@@ -50,6 +53,7 @@ export const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
+export const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
 export const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 export const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -415,8 +419,13 @@ export class HostController {
       if (canonicalWorkspace(active.projectPath) !== project) throw new Error('session project mismatch');
       return readWorkspaceFilePreview(project, path);
     });
-    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, async (event: IpcMainInvokeEvent, providerId?: unknown) => {
       this.assertSender(event);
+      if (providerId !== undefined) {
+        const provider = this.requireProvider(providerId);
+        this.requireWorkspace();
+        await this.requireCurrentRuntime().listProviderCredentials([provider.id], [provider.id]);
+      }
       return this.providerCredentialSnapshot();
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
@@ -434,6 +443,9 @@ export class HostController {
         providerId: provider.id,
         configured: true,
         encryptionAvailable: stored.storage_encrypted,
+        ...(stored.credential_previews?.[provider.id]
+          ? { credentialPreview: stored.credential_previews[provider.id] }
+          : {}),
       };
       if (provider.defaultModel) this.updateProviderDefaultModel(provider.defaultModel);
       // Persistence is the boundary of this IPC operation. Restart is owned by
@@ -448,6 +460,31 @@ export class HostController {
       await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
       await this.restartIfConfigured();
       return this.providerCredentialMetadata(provider.id);
+    });
+    this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
+      event: IpcMainInvokeEvent,
+      providerId: unknown,
+      credentialOverride?: unknown,
+    ): Promise<ProviderConnectionTestResult> => {
+      this.assertSender(event);
+      const provider = this.requireProvider(providerId);
+      if (credentialOverride !== undefined && typeof credentialOverride !== 'string') {
+        throw new Error('invalid credential');
+      }
+      this.assertNoActiveTurn();
+      this.requireWorkspace();
+      const configuredBase = provider.id === 'anthropic'
+        ? this.settings.getPublic().apiBaseUrl
+        : undefined;
+      const reference = provider.defaultModel ?? '';
+      const slash = reference.indexOf('/');
+      const model = slash >= 0 ? reference.slice(slash + 1) : reference;
+      return this.requireCurrentRuntime().testProviderConnection(
+        provider.id,
+        configuredBase ?? provider.defaultApiBase,
+        model,
+        credentialOverride,
+      );
     });
     this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -626,6 +663,7 @@ export class HostController {
       activeCredentialProviderIds?: readonly string[];
       persistedCredentialProviderIds?: readonly string[];
       providerCredentialStorageEncrypted?: boolean;
+      providerCredentialPreviews?: Readonly<Record<string, string>>;
     };
     const activeProviders = new Set(
       (runtime?.connectionState ?? legacy.connectionState)?.status === 'connected'
@@ -634,12 +672,16 @@ export class HostController {
     );
     const persistedProviders = new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
     const engineStorageEncrypted = runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
+    const credentialPreviews = runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
     return PROVIDER_IDS.map((providerId) => {
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
           configured: true,
           encryptionAvailable: engineStorageEncrypted,
+          ...(credentialPreviews[providerId]
+            ? { credentialPreview: credentialPreviews[providerId] }
+            : {}),
         };
       }
       if (activeProviders.has(providerId)) {
@@ -647,6 +689,9 @@ export class HostController {
           providerId,
           configured: true,
           encryptionAvailable: false,
+          ...(credentialPreviews[providerId]
+            ? { credentialPreview: credentialPreviews[providerId] }
+            : {}),
           runtimeOnly: true,
         };
       }
@@ -872,6 +917,7 @@ export class HostController {
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
+      CH_PROVIDER_CONNECTION_TEST,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
     ]) this.ipc.removeHandler(channel);

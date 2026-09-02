@@ -8485,16 +8485,25 @@ impl MobileEngineHandle {
             ClientCommand::ListProviderCredentials {
                 operation_id,
                 provider_ids,
+                preview_provider_ids,
             } => {
                 let validation_error = if provider_ids.len() > 32
                     || provider_ids.iter().any(|id| !provider_id_is_valid(id))
+                    || preview_provider_ids
+                        .iter()
+                        .any(|id| !provider_ids.contains(id))
                 {
                     Some("invalid provider credential query".to_string())
                 } else {
                     None
                 };
-                self.emit_provider_credential_status(operation_id, &provider_ids, validation_error)
-                    .await;
+                self.emit_provider_credential_status(
+                    operation_id,
+                    &provider_ids,
+                    &preview_provider_ids,
+                    validation_error,
+                )
+                .await;
                 Ok(())
             }
             ClientCommand::SetProviderCredential {
@@ -8502,6 +8511,8 @@ impl MobileEngineHandle {
                 provider_id,
                 credential,
             } => {
+                let credential_preview =
+                    secret::masked_credential_preview(credential.expose_secret());
                 let error = if !provider_id_is_valid(&provider_id)
                     || credential.expose_secret().is_empty()
                     || credential.expose_secret().len() > 16_384
@@ -8517,6 +8528,9 @@ impl MobileEngineHandle {
                         .map(|failure| format!("failed to store provider credential: {failure}"))
                 };
                 let applied = error.is_none();
+                let credential_previews = applied
+                    .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
+                    .unwrap_or_default();
                 self.event_sink
                     .emit(ClientEvent::ProviderCredentialStatus {
                         operation_id,
@@ -8532,6 +8546,7 @@ impl MobileEngineHandle {
                             .inner
                             .credentials
                             .provider_key_storage_is_encrypted(),
+                        credential_previews,
                         error,
                     })
                     .await;
@@ -8564,6 +8579,7 @@ impl MobileEngineHandle {
                             .inner
                             .credentials
                             .provider_key_storage_is_encrypted(),
+                        credential_previews: HashMap::new(),
                         error,
                     })
                     .await;
@@ -9724,6 +9740,7 @@ impl MobileEngineHandle {
         &self,
         operation_id: u64,
         provider_ids: &[String],
+        preview_provider_ids: &[String],
         operation_error: Option<String>,
     ) {
         if let Some(error) = operation_error {
@@ -9733,6 +9750,7 @@ impl MobileEngineHandle {
                     configured_provider_ids: Vec::new(),
                     unavailable_provider_ids: provider_ids.to_vec(),
                     storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                    credential_previews: HashMap::new(),
                     error: Some(error),
                 })
                 .await;
@@ -9741,11 +9759,28 @@ impl MobileEngineHandle {
 
         let mut configured_provider_ids = Vec::new();
         let mut unavailable_provider_ids = Vec::new();
+        let mut credential_previews = HashMap::new();
         let mut failures = Vec::new();
         for provider_id in provider_ids {
-            match self.inner.credentials.get_provider_key(provider_id).await {
-                Ok(Some(_)) => configured_provider_ids.push(provider_id.clone()),
-                Ok(None) => {}
+            match self.inner.credentials.has_provider_key(provider_id).await {
+                Ok(true) => {
+                    configured_provider_ids.push(provider_id.clone());
+                    if preview_provider_ids.contains(provider_id) {
+                        match self.inner.credentials.get_provider_key(provider_id).await {
+                            Ok(Some(secret)) => {
+                                credential_previews.insert(
+                                    provider_id.clone(),
+                                    secret::masked_credential_preview(secret.expose_secret()),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(failure) => {
+                                failures.push(format!("{provider_id} preview: {failure}"))
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {}
                 Err(failure) => {
                     unavailable_provider_ids.push(provider_id.clone());
                     failures.push(format!("{provider_id}: {failure}"));
@@ -9764,6 +9799,7 @@ impl MobileEngineHandle {
                 configured_provider_ids,
                 unavailable_provider_ids,
                 storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                credential_previews,
                 error,
             })
             .await;
@@ -16456,6 +16492,7 @@ mod tests {
                 .submit(ClientCommand::ListProviderCredentials {
                     operation_id: 12,
                     provider_ids: vec!["openai".into()],
+                    preview_provider_ids: vec!["openai".into()],
                 })
                 .await
                 .expect("list provider credentials");

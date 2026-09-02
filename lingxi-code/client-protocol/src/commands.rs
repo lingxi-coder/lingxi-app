@@ -242,12 +242,18 @@ pub enum ClientCommand {
     },
 
     // ── Provider credentials ─────────────────────────────────────────────
-    // Return non-secret availability for the requested provider ids.
+    // Return non-secret availability and masked suffix previews for the
+    // requested provider ids. Plaintext secret values are never returned.
     ListProviderCredentials {
         // Main-process correlator echoed by `ProviderCredentialStatus`.
         operation_id: u64,
-        // Provider/keychain ids to inspect. Secret values are never returned.
+        // Provider/keychain ids to inspect.
         provider_ids: Vec<String>,
+        // Optional provider ids whose masked suffix should be returned. Keep
+        // this empty for status lists so macOS can use an attribute-only
+        // Keychain query without prompting to decrypt every saved secret.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        preview_provider_ids: Vec<String>,
     },
 
     // Persist a provider credential through the engine's shared secure store.
@@ -266,6 +272,24 @@ pub enum ClientCommand {
         operation_id: u64,
         // Provider/keychain id used by CLI, TUI, and Desktop.
         provider_id: String,
+    },
+
+    // Test DNS/TLS, authentication, and model availability without exposing a
+    // stored credential back to the client. An optional draft credential is
+    // used for this request only and is never persisted.
+    TestProviderConnection {
+        // Main-process correlator echoed by `ProviderConnectionTested`.
+        operation_id: u64,
+        // Provider/keychain id used to select authentication semantics.
+        provider_id: String,
+        // Provider API base selected from the built-in catalog (or the saved
+        // Anthropic override).
+        api_base: String,
+        // Model id to verify against a recognized model-list response.
+        model: String,
+        // Unsaved form value, when present. Omitted to use secure storage.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_override: Option<ProviderCredentialSecretDto>,
     },
 
     // ── Model ─────────────────────────────────────────────────────────────

@@ -4884,6 +4884,7 @@ dependencies = [
  "platform-common",
  "protocol",
  "sandbox",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

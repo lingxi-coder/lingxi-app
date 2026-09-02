@@ -721,6 +721,7 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
     activeCredentialProviderIds: ['deepseek'],
     persistedCredentialProviderIds: ['deepseek'],
     providerCredentialStorageEncrypted: true,
+    providerCredentialPreviews: { deepseek: '••••abcd' },
     turnActive: false,
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
@@ -732,6 +733,7 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
     providerId: 'deepseek',
     configured: true,
     encryptionAvailable: true,
+    credentialPreview: '••••abcd',
   });
 });
 

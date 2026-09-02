@@ -60,6 +60,7 @@ import type {
   DiagnosticEntry,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
+  ProviderConnectionTestResult,
   SequencedRuntimeEventEnvelope,
   SessionPinInput,
   SessionRef,
@@ -149,6 +150,8 @@ export interface UseBridge {
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  refreshProviderCredential(providerId: string): Promise<void>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
@@ -1461,6 +1464,19 @@ export function useBridge(): UseBridge {
     } catch (cause) { return capture(cause); }
   }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
 
+  const testProviderConnection = useCallback(async (providerId: string, credentialOverride?: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try { return await host.testProviderConnection(providerId, credentialOverride); }
+    catch (cause) { return capture(cause); }
+  }, [capture, host]);
+
+  const refreshProviderCredential = useCallback(async (providerId: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      patchBootstrap({ providerCredentials: await host.providerCredentials(providerId) });
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const setThemePreference = useCallback(async (theme: 'dark' | 'light' | 'system') => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
@@ -1764,6 +1780,8 @@ export function useBridge(): UseBridge {
     searchWorkspaceFiles,
     setProviderCredential,
     clearProviderCredential,
+    testProviderConnection,
+    refreshProviderCredential,
     setThemePreference,
     setApiBaseUrl,
     setVoicePreferences,

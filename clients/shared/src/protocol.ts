@@ -217,9 +217,17 @@ export type ClientCommand =
   | { type: 'answer_ask_user_question'; request_id: number; answers: Record<string, string> }
   | { type: 'cancel_ask_user_question'; request_id: number }
   // ── Provider credentials (authenticated local bridge only) ──────────────────
-  | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[] }
+  | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[]; preview_provider_ids?: string[] }
   | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
   | { type: 'delete_provider_credential'; operation_id: number; provider_id: string }
+  | {
+      type: 'test_provider_connection';
+      operation_id: number;
+      provider_id: string;
+      api_base: string;
+      model: string;
+      credential_override?: string;
+    }
   // ── Model ─────────────────────────────────────────────────────────────────
   | { type: 'set_model'; model: string }
   | { type: 'list_models' }
@@ -1967,7 +1975,21 @@ export type ClientEvent =
       configured_provider_ids: string[];
       unavailable_provider_ids?: string[];
       storage_encrypted: boolean;
+      credential_previews?: Record<string, string>;
       error?: string;
+    }
+  | {
+      type: 'provider_connection_tested';
+      operation_id: number;
+      provider_id: string;
+      connected: boolean;
+      reachable: boolean;
+      authenticated: boolean;
+      model_available: boolean;
+      http_status?: number;
+      latency_ms: number;
+      message: string;
+      used_stored_credential: boolean;
     }
   | { type: 'mcp_servers'; servers: McpServerDto[] }
   | { type: 'skills'; skills: SkillDto[] }

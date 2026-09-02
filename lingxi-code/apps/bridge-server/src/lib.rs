@@ -32,6 +32,7 @@ pub mod audio_bridge;
 pub mod boot;
 pub mod driver;
 pub mod mcp_bridge;
+mod provider_connection;
 pub mod router;
 pub mod server;
 pub mod settings_bridge;

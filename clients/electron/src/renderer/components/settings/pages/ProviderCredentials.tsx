@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
 import type { PageContentProps } from '../SettingsScreen';
 import { PROVIDERS, providerById } from '../../../../shared/providers';
 import type { ProviderCredentialMetadata } from '../../../bridge/lingxi';
+import type { ProviderConnectionTestResult } from '../../../bridge/lingxi';
+import type { SessionRef } from '../../../../shared/settings.js';
 import { isCurrentCredentialTransaction, persistProviderCredentialAndApplyModel } from '../../../bridge/providerCredentials';
 import { modelReference, waitForModelSelection } from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
@@ -23,6 +25,12 @@ export function initialProviderSelection(initialProviderId?: string): string {
 }
 
 export type CredentialStatusKind = 'runtime' | 'secure' | 'fallback-configured' | 'fallback-unconfigured' | 'none';
+export type ProviderConnectionKind = 'connected' | 'runtime' | 'disconnected' | 'unavailable' | 'unknown';
+
+export interface ProviderConnectionStatus {
+  kind: ProviderConnectionKind;
+  label: string;
+}
 
 /**
  * Which of the four Keychain-availability/runtime-source status paragraphs
@@ -41,6 +49,19 @@ export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata,
   if (metadata.configured && !metadata.encryptionAvailable) return 'fallback-configured';
   if (!metadata.configured && metadata.encryptionAvailable === false) return 'fallback-unconfigured';
   return 'none';
+}
+
+/** The list reports engine-authoritative credential state, never edit selection. */
+export function providerConnectionStatus(
+  metadata: Pick<ProviderCredentialMetadata, 'configured' | 'runtimeOnly'> | undefined,
+  engineConnected: boolean,
+  providerAvailable: boolean,
+): ProviderConnectionStatus {
+  if (!providerAvailable) return { kind: 'unavailable', label: 'CLI / TUI' };
+  if (!engineConnected) return { kind: 'unknown', label: '状态不可用' };
+  if (metadata?.runtimeOnly) return { kind: 'runtime', label: '运行时连接' };
+  if (metadata?.configured) return { kind: 'connected', label: '已连接' };
+  return { kind: 'disconnected', label: '未连接' };
 }
 
 /**
@@ -62,6 +83,22 @@ export function connectButtonLabel(state: { connecting: boolean; modelApplying: 
 export function apiBaseUrlPatch(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Restore the engine through the session-opening path. A failed first launch
+ * removes its runtime from the main-process map, so `restartBridge` cannot
+ * recover it; `openSession` handles both a missing runtime and an existing
+ * disconnected one.
+ */
+export async function ensureProviderEngineConnected(
+  connected: boolean,
+  session: SessionRef | undefined,
+  openSession: (projectPath: string, sessionId: string) => Promise<void>,
+): Promise<void> {
+  if (connected) return;
+  if (!session) throw new Error('打开一个会话后才能连接 Provider。');
+  await openSession(session.projectPath, session.sessionId);
 }
 
 function invoke(action: () => Promise<unknown>): void {
@@ -100,7 +137,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const t = useT();
   const snapshot = bridge.bootstrap;
   const [key, setKey] = useState('');
-  const [selectedProviderId, setSelectedProviderId] = useState(() => initialProviderSelection(initialProviderId));
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(() => (
+    initialProviderId ? initialProviderSelection(initialProviderId) : null
+  ));
   const [pendingModelReference, setPendingModelReference] = useState<string | null>(requestedModelReference ?? null);
   const [connecting, setConnecting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -110,10 +149,15 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState(bridge.bootstrap?.settings.apiBaseUrl ?? '');
   const [apiBaseUrlSaving, setApiBaseUrlSaving] = useState(false);
   const [apiBaseUrlError, setApiBaseUrlError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<ProviderConnectionTestResult | null>(null);
+  const [connectionTestError, setConnectionTestError] = useState<string | null>(null);
 
-  const selectedProvider = providerById(selectedProviderId) ?? PROVIDERS[0];
+  const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
-  const statusKind = credentialStatusKind(selectedMetadata);
+  const statusKind = bridge.connected ? credentialStatusKind(selectedMetadata) : 'none';
 
   const mountedRef = useRef(true);
   const transactionGenerationRef = useRef(0);
@@ -122,6 +166,8 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const recoverySessionIdRef = useRef<string | null>(null);
   const currentModelRef = useRef<string | null>(bridge.desktop.currentModel);
   const credentialRef = useRef<HTMLInputElement>(null);
+  const requestedPreviewProvidersRef = useRef(new Set<string>());
+  const connectionTestGenerationRef = useRef(0);
   currentModelRef.current = bridge.desktop.currentModel;
 
   useEffect(() => {
@@ -130,6 +176,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       mountedRef.current = false;
       ++transactionGenerationRef.current;
       ++applyGenerationRef.current;
+      ++connectionTestGenerationRef.current;
       applyAbortRef.current?.abort();
     };
   }, []);
@@ -153,6 +200,19 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       apiBaseUrlSaving ? current : (bridge.bootstrap?.settings.apiBaseUrl ?? '')
     ));
   }, [apiBaseUrlSaving, bridge.bootstrap?.settings.apiBaseUrl]);
+
+  // The provider list only asks Keychain for item existence. Fetch secret
+  // bytes for a masked suffix lazily after the person opens one provider, so
+  // macOS never presents an authorization-dialog cascade for every saved key.
+  useEffect(() => {
+    if (!selectedProviderId
+      || !bridge.connected
+      || !selectedMetadata?.configured
+      || selectedMetadata.credentialPreview
+      || requestedPreviewProvidersRef.current.has(selectedProviderId)) return;
+    requestedPreviewProvidersRef.current.add(selectedProviderId);
+    void bridge.refreshProviderCredential(selectedProviderId);
+  }, [bridge, selectedMetadata, selectedProviderId]);
 
   const applyPendingModel = async (
     allowWhileConnecting = false,
@@ -198,8 +258,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     // Capture the session before persistence yields — it can change while
     // the secure-store write is pending, and a late completion must never
     // restart whichever session happens to be active then.
-    const restartSessionId = bridge.activeSession?.sessionId ?? bridge.bootstrap?.activeSession?.sessionId;
-    if (!restartSessionId) {
+    const restartSession = bridge.activeSession ?? bridge.bootstrap?.activeSession;
+    const restartSessionId = restartSession?.sessionId;
+    if (!restartSession || !restartSessionId) {
       setSaveError('打开一个会话后才能连接 Provider。');
       return;
     }
@@ -209,9 +270,12 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     setConnecting(true);
     setSaveError(null);
     setApplyError(null);
+    setConnectionTestResult(null);
+    setConnectionTestError(null);
     setPostPersistRecovery(false);
     try {
       recoverySessionIdRef.current = restartSessionId;
+      await ensureProviderEngineConnected(bridge.connected, restartSession, bridge.openSession);
       await persistProviderCredentialAndApplyModel(
         selectedProvider.id,
         submitted,
@@ -245,15 +309,27 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const selectProvider = (providerId: string) => {
-    if (connecting || modelApplying || postPersistRecovery) return;
+    if (connecting || modelApplying || testingConnection || postPersistRecovery) return;
     setSelectedProviderId(providerId);
     setKey('');
     // A manual provider change cancels the model intent from the picker.
     setPendingModelReference(null);
     setSaveError(null);
     setApplyError(null);
+    setConnectionTestResult(null);
+    setConnectionTestError(null);
     ++applyGenerationRef.current;
     applyAbortRef.current?.abort();
+  };
+
+  const showProviderList = () => {
+    if (transactionLocked) return;
+    setSelectedProviderId(null);
+    setKey('');
+    setSaveError(null);
+    setApplyError(null);
+    setConnectionTestResult(null);
+    setConnectionTestError(null);
   };
 
   const retryPostPersistRecovery = async () => {
@@ -292,50 +368,157 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       .finally(() => setApiBaseUrlSaving(false));
   };
 
+  const testConnection = async () => {
+    if (testingConnection || bridge.running || !bridge.connected) return;
+    const providerId = selectedProvider.id;
+    const generation = ++connectionTestGenerationRef.current;
+    setTestingConnection(true);
+    setConnectionTestResult(null);
+    setConnectionTestError(null);
+    try {
+      const result = await bridge.testProviderConnection(providerId, key.trim() ? key : undefined);
+      if (mountedRef.current
+        && generation === connectionTestGenerationRef.current
+        && selectedProviderId === providerId) {
+        setConnectionTestResult(result);
+      }
+    } catch (cause) {
+      if (mountedRef.current
+        && generation === connectionTestGenerationRef.current
+        && selectedProviderId === providerId) {
+        setConnectionTestError(cause instanceof Error ? cause.message : '连接测试失败。');
+      }
+    } finally {
+      if (mountedRef.current && generation === connectionTestGenerationRef.current) {
+        setTestingConnection(false);
+      }
+    }
+  };
+
+  const reconnectEngine = async () => {
+    if (reconnecting) return;
+    const session = bridge.activeSession ?? bridge.bootstrap?.activeSession;
+    if (!session) {
+      setReconnectError('请先打开一个会话，再连接引擎。');
+      return;
+    }
+    setReconnecting(true);
+    setReconnectError(null);
+    try {
+      await ensureProviderEngineConnected(bridge.connected, session, bridge.openSession);
+    } catch (cause) {
+      setReconnectError(cause instanceof Error ? cause.message : '引擎连接失败。');
+    } finally {
+      setReconnecting(false);
+    }
+  };
+
   const statusMessage = saveError ?? applyError;
   const busy = connecting || modelApplying;
-  const transactionLocked = busy || postPersistRecovery;
+  const transactionLocked = busy || testingConnection || postPersistRecovery;
+  const credentialWriteDisabled = reconnecting || transactionLocked || bridge.running;
+  const canTestConnection = selectedProvider.available
+    && bridge.connected
+    && !bridge.running
+    && !transactionLocked
+    && Boolean(key.trim() || selectedMetadata?.configured || selectedMetadata?.runtimeOnly);
+  const testMessage = connectionTestError ?? connectionTestResult?.message;
+  const testMessageColor = connectionTestError
+    ? t.danger
+    : connectionTestResult?.connected
+      ? t.ok
+      : connectionTestResult?.reachable
+        ? t.warn
+        : t.danger;
 
   return (
     <>
-      <Card title="Provider">
-        <Row title="选择 Provider" desc="与 Desktop、CLI、TUI 共享；密钥优先使用 macOS 登录钥匙串。" align="center">
-          <span />
-        </Row>
-        {PROVIDERS.map((provider) => {
-          const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
-          const selected = provider.id === selectedProvider.id;
-          return (
-            <Row
-              key={provider.id}
-              align="center"
-              title={
-                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {metadata?.configured ? <Icon name="check" size={13} color={t.ok} stroke={2.5} /> : <span style={{ width: 13, display: 'inline-block' }} />}
-                  {provider.label}
-                  {selected && (
-                    <span style={{ fontSize: 10.5, padding: '2px 7px', borderRadius: 5, background: t.surfaceHover, color: t.text3, fontWeight: 600 }}>
-                      正在编辑
-                    </span>
-                  )}
-                </span>
-              }
-              desc={provider.available ? provider.description : 'CLI/TUI 登录'}
-            >
-              <button
-                type="button"
-                disabled={transactionLocked}
-                onClick={() => selectProvider(provider.id)}
-                style={ghostButtonStyle(t, transactionLocked || selected)}
-              >
-                {selected ? '当前' : '选择'}
+      {!bridge.connected && (
+        <div data-testid="provider-engine-recovery">
+          <Card title="连接状态">
+            <Row title="引擎未连接" desc="可以先输入密钥；保存时会先恢复引擎连接，再写入安全凭据存储。" align="center">
+              <button type="button" disabled={reconnecting} onClick={() => void reconnectEngine()} style={ghostButtonStyle(t, reconnecting)}>
+                {reconnecting ? '连接中…' : '连接引擎'}
               </button>
             </Row>
-          );
-        })}
-      </Card>
+            {reconnectError && (
+              <Row title="连接失败" align="center">
+                <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{reconnectError}</span>
+              </Row>
+            )}
+          </Card>
+        </div>
+      )}
+      {selectedProviderId === null ? (
+        <Card title="Provider">
+          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项查看或修改连接设置。" align="center">
+            <span />
+          </Row>
+          {PROVIDERS.map((provider) => {
+            const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
+            const status = providerConnectionStatus(metadata, bridge.connected, provider.available);
+            const connected = status.kind === 'connected' || status.kind === 'runtime';
+            const statusColor = connected ? t.ok : status.kind === 'unknown' ? t.warn : t.text3;
+            return (
+              <button
+                key={provider.id}
+                type="button"
+                data-testid={`provider-list-item-${provider.id}`}
+                disabled={transactionLocked}
+                onClick={() => selectProvider(provider.id)}
+                className="settings-provider-row"
+                aria-label={`${provider.label}，${status.label}`}
+                style={{
+                  '--settings-provider-row-hover': t.surfaceHover,
+                  width: '100%', minHeight: 76, padding: '15px 18px',
+                  border: 0, borderTop: `0.5px solid ${t.border}`,
+                  background: 'transparent', color: t.text, font: 'inherit',
+                  display: 'flex', alignItems: 'center', gap: 16,
+                  textAlign: 'left', cursor: transactionLocked ? 'default' : 'pointer',
+                } as CSSProperties}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 500, color: t.text }}>
+                    {provider.label}
+                  </span>
+                  <span style={{ display: 'block', marginTop: 4, fontSize: 12.5, lineHeight: 1.45, color: t.text3 }}>
+                    {provider.available ? provider.description : '通过 CLI / TUI 登录'}
+                  </span>
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 7, minWidth: 96, color: statusColor, fontSize: 12.5, fontWeight: 500 }}>
+                  <Icon name="dot" size={10} color={statusColor} />
+                  {status.label}
+                </span>
+                <Icon name="chevronR" size={15} color={t.text4} stroke={1.8} />
+              </button>
+            );
+          })}
+        </Card>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 40, margin: '-8px 0 16px' }}>
+            <button
+              type="button"
+              data-testid="provider-list-back"
+              disabled={transactionLocked}
+              onClick={showProviderList}
+              className="settings-provider-back"
+              style={{
+                '--settings-provider-row-hover': t.surfaceHover,
+                minHeight: 40, padding: '0 10px 0 7px', border: 0, borderRadius: 8,
+                background: 'transparent', color: t.text2, font: 'inherit', fontSize: 13,
+                fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 5,
+                cursor: transactionLocked ? 'default' : 'pointer',
+              } as CSSProperties}
+            >
+              <Icon name="chevronL" size={15} color="currentColor" stroke={1.9} />
+              Provider
+            </button>
+            <span aria-hidden="true" style={{ width: 1, height: 16, background: t.border }} />
+            <span style={{ color: t.text, fontSize: 13, fontWeight: 600 }}>{selectedProvider.label}</span>
+          </div>
 
-      <Card title={selectedProvider.label}>
+          <Card title={selectedProvider.label}>
         {pendingModelReference && (
           <Row title="待应用的模型" desc={`连接 ${selectedProvider.label} 以使用 ${modelReference(pendingModelReference).label}。`} align="center">
             <Icon name="spark" size={15} color={t.accent} />
@@ -345,41 +528,83 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
           <Row title="来源" desc="正在运行的引擎从外部运行时来源接收了该凭据；LingXi 未存储它。" align="center"><span /></Row>
         )}
         {statusKind === 'secure' && (
-          <Row title="存储方式" desc="已安全保存在本机；出于设计，通用 API 密钥不会出现在“密码”App 中。" align="center"><span /></Row>
+          <Row title="存储方式" desc="已安全保存在 macOS 登录钥匙串中。" align="center"><span /></Row>
         )}
         {statusKind === 'fallback-configured' && (
-          <Row title="存储方式" desc="macOS 钥匙串不可用；当前使用共享的仅所有者本地回退存储。" align="center"><span /></Row>
+          <Row title="存储方式" desc="当前凭据来自仅所有者可读的本地回退存储；引擎会在钥匙串可用时自动迁移。" align="center"><span /></Row>
         )}
         {statusKind === 'fallback-unconfigured' && (
-          <Row title="存储方式" desc="macOS 钥匙串不可用；连接后将使用共享的仅所有者本地回退存储。" align="center"><span /></Row>
+          <Row title="存储方式" desc="安全存储当前处于本地回退模式；保存时会优先尝试 macOS 登录钥匙串。" align="center"><span /></Row>
         )}
         {selectedProvider.available ? (
           <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新密钥以替换现有凭据。' : undefined} align="center">
-            <div style={{ display: 'flex', gap: 7 }}>
-              <input
-                ref={credentialRef}
-                type="password"
-                autoComplete="off"
-                disabled={transactionLocked || bridge.running}
-                value={key}
-                onChange={(event) => setKey(event.target.value)}
-                onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }}
-                placeholder={selectedMetadata?.configured ? '输入新密钥' : selectedProvider.keyPlaceholder}
-                aria-label={selectedProvider.keyLabel}
-                style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
-              />
-              <button type="button" disabled={!key.trim() || transactionLocked || bridge.running} onClick={() => void save()} style={ghostButtonStyle(t, !key.trim() || transactionLocked || bridge.running)}>
-                {connectButtonLabel({ connecting, modelApplying, runtimeOnly: selectedMetadata?.runtimeOnly, configured: selectedMetadata?.configured })}
-              </button>
-              {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
-                <button type="button" disabled={transactionLocked || bridge.running} onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))} style={ghostButtonStyle(t, transactionLocked || bridge.running, true)}>
-                  断开连接
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7 }}>
+              <div style={{ display: 'flex', gap: 7 }}>
+                <input
+                  ref={credentialRef}
+                  type="password"
+                  autoComplete="off"
+                  disabled={credentialWriteDisabled}
+                  value={key}
+                  onChange={(event) => {
+                    setKey(event.target.value);
+                    setConnectionTestResult(null);
+                    setConnectionTestError(null);
+                  }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }}
+                  placeholder={selectedMetadata?.configured ? (selectedMetadata.credentialPreview ?? '••••••••') : selectedProvider.keyPlaceholder}
+                  aria-label={selectedProvider.keyLabel}
+                  data-testid="provider-credential-preview"
+                  style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
+                />
+                <button type="button" disabled={!key.trim() || credentialWriteDisabled} onClick={() => void save()} style={ghostButtonStyle(t, !key.trim() || credentialWriteDisabled)}>
+                  {connectButtonLabel({ connecting, modelApplying, runtimeOnly: selectedMetadata?.runtimeOnly, configured: selectedMetadata?.configured })}
                 </button>
-              )}
+                {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
+                  <button type="button" disabled={credentialWriteDisabled} onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>
+                    断开连接
+                  </button>
+                )}
+              </div>
+              <a
+                href={selectedProvider.credentialManagementUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: t.link ?? t.accent, fontSize: 12, fontWeight: 500, textDecoration: 'none' }}
+              >
+                获取或管理 API Key&nbsp;↗
+              </a>
             </div>
           </Row>
         ) : (
           <Row title={selectedProvider.keyLabel} desc={`${selectedProvider.label} 目前只能通过 CLI/TUI 的登录流程连接。`} align="center"><span /></Row>
+        )}
+        {selectedProvider.available && (
+          <Row
+            title="连接测试"
+            desc={testMessage ? (
+              <span role={connectionTestError ? 'alert' : 'status'} aria-live="polite" style={{ color: testMessageColor }}>
+                {testMessage}
+                {connectionTestResult && (
+                  <span style={{ color: t.text4 }}>
+                    {connectionTestResult.used_stored_credential ? ' · 已保存凭据' : ' · 当前输入'}
+                  </span>
+                )}
+              </span>
+            ) : '验证网络、API Key 与默认模型，不会发起推理请求。'}
+            align="center"
+          >
+            <button
+              type="button"
+              data-testid="provider-connection-test"
+              disabled={!canTestConnection}
+              onClick={() => void testConnection()}
+              style={ghostButtonStyle(t, !canTestConnection)}
+            >
+              <Icon name="activity" size={13} color="currentColor" stroke={1.8} />
+              {testingConnection ? '测试中…' : '测试连接'}
+            </button>
+          </Row>
         )}
         {statusMessage && (
           <Row title="错误" align="center">
@@ -399,14 +624,18 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             <button type="button" disabled={busy} onClick={() => void applyPendingModel()} style={ghostButtonStyle(t, busy)}>使用该模型并返回对话</button>
           </Row>
         )}
-      </Card>
+          </Card>
 
-      <Card title="高级">
+          <Card title="高级">
         <Row title="自定义 API 地址" desc="覆盖引擎连接的默认 API 端点；留空以恢复默认值。修改后引擎会自动重启。" align="center">
           <div style={{ display: 'flex', gap: 7 }}>
             <input
               value={apiBaseUrlInput}
-              onChange={(event) => setApiBaseUrlInput(event.target.value)}
+              onChange={(event) => {
+                setApiBaseUrlInput(event.target.value);
+                setConnectionTestResult(null);
+                setConnectionTestError(null);
+              }}
               placeholder="https://…"
               aria-label="自定义 API 地址"
               style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
@@ -421,7 +650,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{apiBaseUrlError}</span>
           </Row>
         )}
-      </Card>
+          </Card>
+        </>
+      )}
     </>
   );
 }

@@ -108,10 +108,18 @@ export interface BridgeManagerOptions {
 }
 
 type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 
 interface PendingCredentialOperation {
   providerIds: readonly string[];
   resolve: (status: ProviderCredentialStatus) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+interface PendingProviderConnectionTest {
+  providerId: string;
+  resolve: (result: ProviderConnectionTestResult) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }
@@ -363,9 +371,11 @@ export class SessionRuntime {
   private runtimeCredentialProviders = new Set<string>();
   private persistedCredentialProviders = new Set<string>();
   private activeCredentialProviders = new Set<string>();
+  private credentialPreviews = new Map<string, string>();
   private credentialStorageEncrypted = false;
   private nextCredentialOperationId = 1;
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
+  private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private activeTurn = false;
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
@@ -421,6 +431,10 @@ export class SessionRuntime {
 
   get providerCredentialStorageEncrypted(): boolean {
     return this.credentialStorageEncrypted;
+  }
+
+  get providerCredentialPreviews(): Readonly<Record<string, string>> {
+    return Object.fromEntries(this.credentialPreviews);
   }
 
   get runtimeVersions(): BridgeRuntimeVersions | undefined {
@@ -690,6 +704,7 @@ export class SessionRuntime {
     ]);
     this.persistedCredentialProviders.clear();
     this.activeCredentialProviders = new Set(this.runtimeCredentialProviders);
+    this.credentialPreviews.clear();
     this.credentialStorageEncrypted = false;
     const bridgeDir = this.createLaunchDirectory();
     const generation = ++this.generation;
@@ -738,8 +753,9 @@ export class SessionRuntime {
         bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
       );
       this.setState({ status: 'connected' });
-      // Reading credential metadata may consult the login Keychain, so it
-      // must never hold the desktop in a spawning/restarting state.
+      // Status refreshes use attribute-only Keychain existence queries, so
+      // startup never decrypts every saved credential or triggers an ACL
+      // authorization-dialog cascade.
       void this.refreshProviderCredentials();
     } catch (error) {
       if (generation === this.generation) {
@@ -799,13 +815,21 @@ export class SessionRuntime {
     return child;
   }
 
-  listProviderCredentials(providerIds: readonly string[]): Promise<ProviderCredentialStatus> {
+  listProviderCredentials(
+    providerIds: readonly string[],
+    previewProviderIds: readonly string[] = [],
+  ): Promise<ProviderCredentialStatus> {
     const ids = providerIds.map((providerId) => this.validateProviderId(providerId));
+    const previews = previewProviderIds.map((providerId) => this.validateProviderId(providerId));
     if (ids.length > 32) throw new Error('too many provider credentials requested');
+    if (previews.some((providerId) => !ids.includes(providerId))) {
+      throw new Error('credential preview provider must be included in the status query');
+    }
     return this.requestCredentialOperation(ids, (operationId) => ({
       type: 'list_provider_credentials',
       operation_id: operationId,
       provider_ids: ids,
+      ...(previews.length > 0 ? { preview_provider_ids: previews } : {}),
     }));
   }
 
@@ -829,6 +853,47 @@ export class SessionRuntime {
       operation_id: operationId,
       provider_id: id,
     }));
+  }
+
+  testProviderConnection(
+    providerId: string,
+    apiBase: string,
+    model: string,
+    credentialOverride?: string,
+  ): Promise<ProviderConnectionTestResult> {
+    const id = this.validateProviderId(providerId);
+    if (!apiBase || apiBase.length > 2_048 || apiBase.includes('\0')) throw new Error('invalid provider API base');
+    if (model.length > 512 || model.includes('\0')) throw new Error('invalid provider model');
+    if (credentialOverride !== undefined
+      && (!credentialOverride.trim() || credentialOverride.length > 16_384 || credentialOverride.includes('\0'))) {
+      throw new Error('invalid provider credential');
+    }
+    const client = this.client;
+    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
+    const operationId = this.nextCredentialOperationId;
+    this.nextCredentialOperationId = Number.isSafeInteger(operationId + 1) ? operationId + 1 : 1;
+    return new Promise<ProviderConnectionTestResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingProviderConnectionTests.delete(operationId);
+        reject(new Error('provider connection test timed out'));
+      }, 20_000);
+      timer.unref();
+      this.pendingProviderConnectionTests.set(operationId, { providerId: id, resolve, reject, timer });
+      try {
+        client.sendCommand({
+          type: 'test_provider_connection',
+          operation_id: operationId,
+          provider_id: id,
+          api_base: apiBase,
+          model,
+          ...(credentialOverride !== undefined ? { credential_override: credentialOverride } : {}),
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingProviderConnectionTests.delete(operationId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   private requestCredentialOperation(
@@ -938,6 +1003,9 @@ export class SessionRuntime {
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
+      if (event.type === 'provider_connection_tested') {
+        this.handleProviderConnectionTested(event);
+      }
       if (event.type === 'session_resumed') {
         if (event.session_id !== this.sessionId) {
           this.rejectPendingSessionResume(new Error('engine resumed a different session id'));
@@ -1028,6 +1096,7 @@ export class SessionRuntime {
     }
     const configured = new Set(event.configured_provider_ids);
     const unavailable = new Set(event.unavailable_provider_ids ?? []);
+    const previews = event.credential_previews ?? {};
     // The configured/unavailable id sets are authoritative regardless of whether
     // the originating promise is still pending — a LATE (post-timeout) event must
     // still fold into the cached state, or providerCredentialSnapshot() reports
@@ -1040,8 +1109,18 @@ export class SessionRuntime {
     const clearAbsent = !event.error;
     for (const providerId of scope) {
       if (unavailable.has(providerId)) continue;
-      if (configured.has(providerId)) this.persistedCredentialProviders.add(providerId);
-      else if (clearAbsent) this.persistedCredentialProviders.delete(providerId);
+      if (configured.has(providerId)) {
+        this.persistedCredentialProviders.add(providerId);
+        const preview = previews[providerId];
+        if (preview) this.credentialPreviews.set(providerId, preview);
+        // A status-only query intentionally omits previews so it can use an
+        // attribute-only Keychain lookup. Preserve any previously fetched
+        // suffix until an explicit preview query replaces it or deletion
+        // clears the provider below.
+      } else if (clearAbsent) {
+        this.persistedCredentialProviders.delete(providerId);
+        this.credentialPreviews.delete(providerId);
+      }
     }
     this.credentialStorageEncrypted = event.storage_encrypted;
     this.activeCredentialProviders = new Set([
@@ -1053,6 +1132,18 @@ export class SessionRuntime {
       if (event.error) pending.reject(new Error(sanitizeDiagnostic(event.error)));
       else pending.resolve(event);
     }
+  }
+
+  private handleProviderConnectionTested(event: ProviderConnectionTestResult): void {
+    const pending = this.pendingProviderConnectionTests.get(event.operation_id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingProviderConnectionTests.delete(event.operation_id);
+    if (pending.providerId !== event.provider_id) {
+      pending.reject(new Error('provider connection test returned a mismatched provider'));
+      return;
+    }
+    pending.resolve(event);
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {
@@ -1369,6 +1460,11 @@ export class SessionRuntime {
       pending.reject(new Error('bridge credential operation was interrupted'));
     }
     this.pendingCredentialOperations.clear();
+    for (const pending of this.pendingProviderConnectionTests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('provider connection test was interrupted'));
+    }
+    this.pendingProviderConnectionTests.clear();
     this.activeWorkspace = undefined;
     this.activeWorkspaceTrusted = false;
     this.runtimeCredentialProviders.clear();

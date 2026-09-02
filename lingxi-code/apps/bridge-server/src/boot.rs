@@ -1046,6 +1046,7 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
+        .with_http(runtime.http.clone())
         .with_session_store(session_store)
         .with_settings_context(settings_context)
         .with_mcp_paths(mcp_paths),
@@ -1507,6 +1508,7 @@ mod tests {
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
             isolated_credential_storage: false,
+            credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             api_key_helper: None,

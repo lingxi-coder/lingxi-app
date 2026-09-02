@@ -64,6 +64,7 @@ const bridge = {
   },
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
+  refreshProviderCredential: async () => undefined,
   setApiBaseUrl: async () => undefined,
   copyDiagnostics: async () => undefined,
   exportDiagnostics: async () => null,

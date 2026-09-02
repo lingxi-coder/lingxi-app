@@ -396,6 +396,16 @@ fn workflow_fusion_result() -> FusionResult {
     }
 }
 
+fn workflow_fusion_result_with_output_tokens(output_tokens: u64) -> FusionResult {
+    FusionResult {
+        usage: FusionUsage {
+            output_tokens,
+            ..FusionUsage::default()
+        },
+        ..workflow_fusion_result()
+    }
+}
+
 #[test]
 fn workflow_fusion_uses_runtime_preset_and_resolves_a_missing_parent_profile() {
     let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
@@ -1958,6 +1968,7 @@ async fn workflow_fusion_round_trips_a_compact_result() {
         Some("wf_fusion".into()),
         Some("gpt-5.4".into()),
         Some("openai".into()),
+        None,
         Arc::new(AnalyticsBus::new()),
         None,
         None,
@@ -1969,8 +1980,22 @@ async fn workflow_fusion_round_trips_a_compact_result() {
     let value: serde_json::Value =
         serde_json::from_str(outcome.result.as_deref().expect("result")).expect("json");
     assert_eq!(value["run_id"], "fu_test");
-    assert!(value["panels"][0].get("report").is_none());
-    assert!(value["panels"][0].get("candidate_answer").is_none());
+    // Exact key-set assertion, not `.get("report").is_none()` — `PanelOutcome`
+    // (platform-api/src/fusion.rs) never had a `report`/`candidate_answer`
+    // field to begin with, so those two checks passed vacuously regardless
+    // of whether the wire shape stayed compact. Pin the actual serialized
+    // keys so adding a raw-report field back to `PanelOutcome` fails HERE.
+    let panel_keys: std::collections::BTreeSet<&str> = value["panels"][0]
+        .as_object()
+        .expect("panels[0] is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        panel_keys,
+        std::collections::BTreeSet::from(["panel_id", "status", "duration_ms", "usage"]),
+        "fusion() must resolve with PanelOutcome's compact shape, never the raw PanelReport"
+    );
     let seen = executor.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].origin, platform_api::FusionOrigin::Workflow);
@@ -1980,6 +2005,65 @@ async fn workflow_fusion_round_trips_a_compact_result() {
     assert_eq!(seen[0].preset, platform_api::FusionPreset::Fast);
     assert_eq!(seen[0].max_panel, Some(4));
     assert!(!seen[0].partial_ok);
+}
+
+#[tokio::test]
+async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() {
+    // A resumed run pre-loads `journal` from the prior run's
+    // `journal.jsonl` (`WorkflowJournalWriter::load_results`) before the
+    // worker starts — this test skips straight to that loaded state rather
+    // than round-tripping through the filesystem.
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+    let cached_result = serde_json::to_string(&workflow_fusion_result()).unwrap();
+    let key = chain_key(
+        "",
+        "fusion:review this",
+        &normalize_fusion_opts_for_chain_key("{}"),
+    );
+    let journal = Arc::new(StdMutex::new(HashMap::from([(
+        key,
+        cached_result.clone(),
+    )])));
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        "return await fusion('review this');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        Some(journal),
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("resumed fusion() call replays from the journal");
+    assert_eq!(outcome.result.as_deref(), Some(cached_result.as_str()));
+    assert!(
+        executor.seen.lock().unwrap().is_empty(),
+        "a journal-cache hit must never dispatch to the executor"
+    );
 }
 
 #[tokio::test]
@@ -2012,6 +2096,7 @@ async fn workflow_fusion_rejects_unknown_fields_before_executor_runs() {
         Some("wf_fusion".into()),
         Some("gpt-5.4".into()),
         Some("openai".into()),
+        None,
         Arc::new(AnalyticsBus::new()),
         None,
         None,
@@ -2020,6 +2105,16 @@ async fn workflow_fusion_rejects_unknown_fields_before_executor_runs() {
     .await
     .expect_err("unknown field must reject");
     assert!(err.to_string().contains("unknown field"));
+    // The `workflow/src/lib.rs` prelude's `__wf_pump` looks for this exact
+    // marker (anywhere in the message — `FusionError::InvalidRequest`'s
+    // Display prepends "invalid fusion request: ") to set
+    // `err.name = "WorkflowFusionOptionError"`; keep the two byte-locked
+    // together.
+    assert!(
+        err.to_string()
+            .contains("Workflow fusion() received an unknown option"),
+        "{err}"
+    );
     assert!(executor.seen.lock().unwrap().is_empty());
 }
 
@@ -2050,6 +2145,7 @@ async fn workflow_fusion_rejects_when_disabled_without_executor_calls() {
         Some("wf_fusion".into()),
         Some("gpt-5.4".into()),
         Some("openai".into()),
+        None,
         Arc::new(AnalyticsBus::new()),
         None,
         None,
@@ -2091,6 +2187,7 @@ async fn workflow_fusion_surfaces_cross_provider_denials_without_silently_downgr
         Some("wf_fusion".into()),
         Some("gpt-5.4".into()),
         Some("openai".into()),
+        None,
         Arc::new(AnalyticsBus::new()),
         None,
         None,
@@ -2104,6 +2201,106 @@ async fn workflow_fusion_surfaces_cross_provider_denials_without_silently_downgr
     let seen = executor.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert!(seen[0].cross_provider);
+}
+
+#[tokio::test]
+async fn workflow_fusion_refuses_when_the_turn_token_budget_is_already_spent() {
+    // Mirrors the agent() batch's budget ceiling: a workflow that has already
+    // spent its turn budget must not be able to launch a fusion() run (4-5x
+    // the cost of a single agent() call) just because it queues on a
+    // different channel.
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+    let shared_pool = Arc::new(AtomicU64::new(500));
+    let err = run_workflow_script_with_live_updates_and_fusion(
+        "await fusion('review this');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        Some(500),
+        Some(shared_pool.clone()),
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("budget-exhausted fusion() call must reject");
+    assert!(
+        err.to_string()
+            .contains("Workflow token budget exceeded (500 / 500 output tokens)"),
+        "{err}"
+    );
+    assert!(
+        executor.seen.lock().unwrap().is_empty(),
+        "the executor must never be called once the turn budget is spent"
+    );
+    // The budget snapshot itself is untouched by the refusal — nothing was
+    // spent, so nothing should be added to it.
+    assert_eq!(shared_pool.load(AtomicOrdering::SeqCst), 500);
+}
+
+#[tokio::test]
+async fn workflow_fusion_adds_its_output_tokens_to_the_shared_spent_pool() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result_with_output_tokens(777)),
+    );
+    let shared_pool = Arc::new(AtomicU64::new(0));
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        "return await fusion('review this');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        Some(10_000),
+        Some(shared_pool.clone()),
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("fusion budget check passes with headroom");
+    assert!(outcome.result.is_some());
+    assert_eq!(shared_pool.load(AtomicOrdering::SeqCst), 777);
 }
 
 #[tokio::test]
@@ -2136,6 +2333,7 @@ async fn workflow_fusion_enforces_the_per_workflow_call_cap() {
         Some("wf_fusion".into()),
         Some("gpt-5.4".into()),
         Some("openai".into()),
+        None,
         Arc::new(AnalyticsBus::new()),
         None,
         None,
@@ -2148,6 +2346,94 @@ async fn workflow_fusion_enforces_the_per_workflow_call_cap() {
         .contains("Workflow fusion() call cap reached (1)"));
     assert_eq!(executor.seen.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn workflow_fusion_budget_refusal_does_not_consume_a_call_cap_slot() {
+    // Parity with the agent() batch arm (line ~2705 above), which increments
+    // `metrics.call_count` only AFTER the budget-ceiling check passes: a
+    // fusion() call refused for budget must not burn one of the per-workflow
+    // cap slots, or a workflow that keeps retrying after a budget refusal
+    // would exhaust its cap on refusals alone and never see a real cap
+    // failure message once budget is available again. Cap is 1 here; both
+    // calls are made while the turn budget is already fully spent, so BOTH
+    // must fail with the budget message — if the first refusal wrongly
+    // consumed the cap slot, the second call would fail with the cap
+    // message instead.
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        1,
+        Ok(workflow_fusion_result()),
+    );
+    let shared_pool = Arc::new(AtomicU64::new(500));
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        r#"
+let e1 = null;
+try { await fusion('one'); } catch (e) { e1 = e.message; }
+let e2 = null;
+try { await fusion('two'); } catch (e) { e2 = e.message; }
+return { e1, e2 };
+"#,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        Some(500),
+        Some(shared_pool.clone()),
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("script itself does not throw — both calls are caught");
+    let result = outcome.result.expect("script returns {e1, e2}");
+    assert!(
+        result.contains("Workflow token budget exceeded (500 / 500 output tokens)")
+            && result.matches("Workflow token budget exceeded").count() == 2,
+        "both calls must fail with the budget message, not a cap message: {result}"
+    );
+    assert!(
+        !result.contains("call cap reached"),
+        "the first (budget-refused) call must not have consumed a cap slot: {result}"
+    );
+    assert!(
+        executor.seen.lock().unwrap().is_empty(),
+        "the executor must never be called once the turn budget is spent"
+    );
+}
+
+// NOTE (G012, WP7 fix round 1): a
+// `workflow_fusion_run_inherits_the_workflow_transcript_subdir_override` test
+// stood here, asserting that the fusion() arm's
+// `agent::with_transcript_subdir_override` wrap makes Fusion panels inherit
+// this workflow run's transcript subdir the way agent() subagents do. It was
+// removed: the reviewer proved by instrumenting `ImmediateFusionExecutor::run`
+// to read the override from inside a `JoinSet::spawn`ed task (the shape
+// `fusion::panel::run_panels` actually uses to spawn each panel) that the
+// override never crosses that spawn boundary — `tokio::task_local!` scopes
+// do not survive `tokio::spawn`/`JoinSet::spawn`. The test only went green
+// because `ImmediateFusionExecutor::run` read the task-local on the caller's
+// own task, upstream of where production loses it. The production wrap was
+// removed from local_workflow.rs's fusion arm for the same reason (see the
+// comment there); this is an open cross-lane residual — the real fix touches
+// `fusion/src/panel.rs` (lane B / WP2b) and `agent/src/handle.rs`'s
+// `build_subagent_context` (lane A / WP2a), neither owned by this package.
 
 #[tokio::test]
 async fn workflow_kill_cancels_an_inflight_fusion() {

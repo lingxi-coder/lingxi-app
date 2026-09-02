@@ -651,32 +651,22 @@ fn fusion_panel_count(parsed: &AgentToolInput, surface: FusionAgentSurface) -> u
 fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
     match raw {
         None => Err(ToolError::InvalidInput("missing fusion preset".into())),
-        Some("quality") => Ok(FusionPreset::Quality),
-        Some("fast") => Ok(FusionPreset::Fast),
-        Some(other) => Err(ToolError::InvalidInput(format!(
-            "fusion preset `{other}` must be quality or fast"
-        ))),
+        // The wire spelling and rejection message come from the single
+        // `FromStr` impl in platform-api so the Agent tool, `/fusion` and
+        // workflow `fusion()` reject an unknown preset identically.
+        Some(other) => other
+            .parse::<FusionPreset>()
+            .map_err(|error| ToolError::InvalidInput(error.to_string())),
     }
 }
 
+/// Delegates to the single `platform_api::parse_fusion_models` every caller
+/// (Agent tool, `/fusion`) parses caller-supplied model strings through, so a
+/// malformed entry like `"openai:"` is rejected identically from either
+/// entrypoint instead of one silently treating the whole literal as a bare
+/// model id.
 fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError> {
-    let mut out = Vec::with_capacity(raw.len());
-    for item in raw {
-        let item = item.trim();
-        if item.is_empty() {
-            return Err(ToolError::InvalidInput(
-                "fusion models entries must be non-empty".into(),
-            ));
-        }
-        let (profile, model) = match item.split_once(':') {
-            Some((profile, model)) if !profile.is_empty() && !model.is_empty() => {
-                (Some(profile.to_string()), model.to_string())
-            }
-            _ => (None, item.to_string()),
-        };
-        out.push(FusionModelRef { profile, model });
-    }
-    Ok(out)
+    platform_api::parse_fusion_models(raw).map_err(|error| ToolError::InvalidInput(error.to_string()))
 }
 
 fn fusion_request_from_agent(

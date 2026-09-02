@@ -355,25 +355,26 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
     ))
 }
 
+/// `default_preset` keeps its own parameter (the runtime's `fusion.preset`
+/// default when the script omits `opts.preset`) — only the wire-string ⇒
+/// [`FusionPreset`] parse itself delegates to the shared `FromStr` impl, so
+/// an unrecognized preset rejects with the same message the Agent tool and
+/// `/fusion` give.
 fn parse_workflow_fusion_preset(
     raw: Option<&str>,
     default_preset: FusionPreset,
 ) -> Result<FusionPreset, FusionError> {
     match raw {
         None => Ok(default_preset),
-        Some("quality") => Ok(FusionPreset::Quality),
-        Some("fast") => Ok(FusionPreset::Fast),
-        Some(other) => Err(FusionError::InvalidRequest(format!(
-            "fusion preset `{other}` must be quality or fast"
-        ))),
+        Some(other) => other.parse(),
     }
 }
 
 fn workflow_fusion_cap(executor: Option<&Arc<dyn FusionExecutor>>) -> u32 {
     executor
         .map(|executor| executor.workflow_fusion_call_cap())
-        .unwrap_or(WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
-        .clamp(1, WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
+        .unwrap_or(platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
+        .clamp(1, platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
 }
 
 fn workflow_fusion_cap_message(cap: u32) -> String {
@@ -394,8 +395,21 @@ fn parse_workflow_fusion_request(
     if !executor.agent_surface().enabled {
         return Err(FusionError::Disabled);
     }
-    let opts: WorkflowFusionOpts =
-        serde_json::from_str(opts_json).map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
+    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json).map_err(|error| {
+        let detail = error.to_string();
+        // `#[serde(deny_unknown_fields)]` reports this shape ("unknown field
+        // `x`, expected ..."); wrap it in a prefix the prelude's `__wf_pump`
+        // recognizes (workflow/src/lib.rs) so a script can `catch (e)` and
+        // branch on `e.name === "WorkflowFusionOptionError"` instead of
+        // string-matching the raw serde message.
+        if detail.contains("unknown field") {
+            FusionError::InvalidRequest(format!(
+                "Workflow fusion() received an unknown option ({detail})"
+            ))
+        } else {
+            FusionError::InvalidRequest(detail)
+        }
+    })?;
     let surface = executor.agent_surface();
     let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
@@ -770,6 +784,21 @@ fn sort_value(v: Value) -> Value {
     }
 }
 
+/// Deterministic chain-key input for a `fusion()` call's raw opts JSON.
+///
+/// Unlike [`normalize_opts_for_chain_key`] — `agent()`'s fixed-field
+/// projection that strips display-only fields like `label`/`phase` — every
+/// field of `WorkflowFusionOpts` (`preset`, `models`, `dimensions`,
+/// `partialOk`, `maxPanel`, `crossProvider`) affects the run Fusion actually
+/// performs, so none of them can be dropped from cache identity. This only
+/// canonicalizes key ORDER (via the shared recursive [`sort_value`] sorter)
+/// so the same options object hashes identically regardless of the script's
+/// literal key order.
+fn normalize_fusion_opts_for_chain_key(opts_json: &str) -> String {
+    let value: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
+    serde_json::to_string(&sort_value(value)).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// The chained resume-cache key for an `agent(prompt, opts)` call (claude-code
 /// `qKa(se, te, m)`): a running hash that folds in the PREVIOUS key (`prev`), so
 /// any change in the preceding sequence of agent() calls cascades into every
@@ -888,8 +917,6 @@ fn group_en_us(n: u64) -> String {
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "workflow-subagent";
-
-const WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT: u32 = 20;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2221,6 +2248,7 @@ async fn run_workflow_script_with_live_updates(
         None,
         None,
         None,
+        None,
         bus,
         agent_count_out,
         phase_telemetry_ctx,
@@ -2250,6 +2278,17 @@ async fn run_workflow_script_with_live_updates_and_fusion(
     workflow_run_id: Option<String>,
     parent_model: Option<String>,
     parent_model_profile: Option<String>,
+    // The same workflow-scoped child transcript directory the `agent()` batch
+    // path applies via `WorkflowIsolationSpawner::spawn_inner` (`agent::
+    // with_transcript_subdir_override`). NOT currently applied to the
+    // fusion() arm below — see the comment at that call site (G012 residual):
+    // a `tokio::task_local!` scope wrapped only around `executor.run(..)`
+    // does not survive `fusion::panel::run_panels`'s per-panel `JoinSet`
+    // spawn, so wrapping here would have no production effect. Kept as a
+    // parameter (currently unused) rather than threaded through the ~10
+    // call sites below and in local_workflow_test.rs, so the real fix can
+    // wire it up without another signature churn.
+    _transcript_subdir: Option<PathBuf>,
     bus: Arc<AnalyticsBus>,
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
@@ -2430,6 +2469,30 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                         .send(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
                     continue;
                 }
+                // Mirror the agent() batch's budget ceiling (line ~2547 below):
+                // fusion() output tokens are NOT free just because they are
+                // dispatched from a different queue — a workflow that has
+                // already spent its turn budget must not be able to launch a
+                // 4-5x-cost Fusion run. Same message/format as agent()'s
+                // check, so the prelude's `err.name = "WorkflowBudgetExceededError"`
+                // detection (workflow/src/lib.rs) recognizes it identically.
+                //
+                // The cap slot is consumed only AFTER this gate (parity with
+                // the agent() arm's `metrics.call_count += 1`, which also
+                // runs after its budget check below): a call refused for
+                // budget must not burn a cap slot, or a workflow retried
+                // after a budget refusal could exhaust its cap on refusals
+                // alone and never see a real cap failure once budget frees
+                // up.
+                if let Some(total) = token_budget_total.filter(|&t| t > 0) {
+                    let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(turn_start_baseline);
+                    if turn_spent >= total {
+                        let _ = call
+                            .reply
+                            .send(wf_throw(&workflow_budget_exceeded_message(turn_spent, total)));
+                        continue;
+                    }
+                }
                 fusion_calls_seen = fusion_calls_seen.saturating_add(1);
                 let response = match parse_workflow_fusion_request(
                     fusion.as_ref(),
@@ -2440,23 +2503,96 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                     parent_model_profile.as_deref(),
                 ) {
                     Ok(request) => {
-                        let inherit = FusionInheritance::new(
-                            SubagentInheritance {
-                                tool_invoker: tool_invoker.clone(),
-                                budget: budget.clone(),
-                            },
-                            fusion_cancel.clone(),
-                        );
-                        match fusion
-                            .as_ref()
-                            .expect("fusion request parsing requires an executor")
-                            .run(request, inherit, None)
-                            .await
-                        {
-                            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| {
-                                wf_throw("fusion() host could not serialize the result")
-                            }),
-                            Err(error) => wf_throw(&error.to_string()),
+                        // Chain into the SAME resume cursor `agent()` calls
+                        // advance (`running_key`/`gone_live`), discriminated
+                        // by a `fusion:` prefix folded into the hashed prompt
+                        // so a fusion() call can never journal-cache-collide
+                        // with an agent() call that happens to share the same
+                        // prompt text. Every fusion opt participates in the
+                        // key (unlike agent()'s fixed-field projection) since
+                        // `WorkflowFusionOpts` has no display-only fields to
+                        // strip.
+                        let discriminated_prompt = format!("fusion:{}", call.prompt);
+                        let normalized_opts =
+                            normalize_fusion_opts_for_chain_key(&call.opts_json);
+                        let key = chain_key(&running_key, &discriminated_prompt, &normalized_opts);
+                        running_key.clone_from(&key);
+                        let cached = if gone_live {
+                            None
+                        } else {
+                            journal
+                                .as_ref()
+                                .and_then(|j| j.lock().unwrap().get(&key).cloned())
+                        };
+                        if let Some(cached) = cached {
+                            cached
+                        } else {
+                            gone_live = true;
+                            let inherit = FusionInheritance::new(
+                                SubagentInheritance {
+                                    tool_invoker: tool_invoker.clone(),
+                                    budget: budget.clone(),
+                                },
+                                fusion_cancel.clone(),
+                            );
+                            let executor = fusion
+                                .as_ref()
+                                .expect("fusion request parsing requires an executor")
+                                .clone();
+                            // KNOWN GAP (G012, tracked as a cross-lane
+                            // residual — see local_workflow_test.rs's removed
+                            // `workflow_fusion_run_inherits_the_workflow_
+                            // transcript_subdir_override` history / WP7 fix
+                            // round 1 review): panels are ordinary hidden
+                            // subagents spawned through the shared
+                            // `PoolSubagentSpawner`, and ideally would pick up
+                            // this run's transcript subdir the same way
+                            // `WorkflowIsolationSpawner::spawn_inner` wraps
+                            // every agent() spawn in
+                            // `agent::with_transcript_subdir_override`.
+                            // Wrapping ONLY this call does not achieve that:
+                            // `fusion::panel::run_panels` spawns every panel
+                            // on its own `JoinSet` task, and a
+                            // `tokio::task_local!` scope (which is what
+                            // `with_transcript_subdir_override` is) does not
+                            // cross a `tokio::spawn`/`JoinSet::spawn`
+                            // boundary — the override would be invisible
+                            // inside each panel's task and
+                            // `resolved_transcript_subdir()` would fall back
+                            // to the session default there regardless. A real
+                            // fix needs the value re-entered inside each
+                            // panel's spawned future (`fusion/src/panel.rs`,
+                            // not owned by this package) and consumed at
+                            // `agent::handle::AgentHandle::
+                            // build_subagent_context`'s
+                            // `resolved_transcript_subdir()` call (also not
+                            // owned by this package) — e.g. via an additive
+                            // `transcript_subdir` field on
+                            // `FusionInheritance`/`SubagentSpawnRequest`
+                            // threaded through both. Left unwrapped here
+                            // rather than shipping an override that never
+                            // takes effect.
+                            let run_result = executor.run(request, inherit, None).await;
+                            match run_result {
+                                Ok(result) => {
+                                    spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);
+                                    match serde_json::to_string(&result) {
+                                        Ok(encoded) => {
+                                            if let Some(j) = journal.as_ref() {
+                                                j.lock().unwrap().insert(key.clone(), encoded.clone());
+                                            }
+                                            if let Some(writer) = &journal_writer {
+                                                writer.append_result(&key, "", &encoded).await;
+                                            }
+                                            encoded
+                                        }
+                                        Err(_) => wf_throw(
+                                            "fusion() host could not serialize the result",
+                                        ),
+                                    }
+                                }
+                                Err(error) => wf_throw(&error.to_string()),
+                            }
                         }
                     }
                     Err(error) => wf_throw(&error.to_string()),
@@ -3344,6 +3480,7 @@ impl Task for LocalWorkflowHandler {
                     Some(run_id.clone()),
                     parent_model,
                     parent_model_profile,
+                    transcript_subdir.clone(),
                     worker_bus.clone(),
                     None,
                     // Pass the phase telemetry context so run_workflow_script can

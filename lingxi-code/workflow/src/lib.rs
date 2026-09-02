@@ -114,8 +114,21 @@ globalThis.__wf_pump = () => {
     const item = fq[i];
     const r = globalThis.__wf_dispatch_fusion(item.prompt, JSON.stringify(item.opts || {}));
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
+      // Same four host-side refusal shapes `tasks::handlers::local_workflow`
+      // can send back before ever calling the executor (`err.name` mirrors
+      // the agent() throw channel's WorkflowBudgetExceededError /
+      // WorkflowAgentCapError above so a script can branch on `e.name`
+      // instead of string-matching `e.message`).
       const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
-      item.rej(new Error(msg));
+      const err = new Error(msg);
+      if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
+      else if (msg.startsWith("Workflow fusion() call cap reached")) err.name = "WorkflowFusionCapError";
+      else if (msg === "fusion is disabled") err.name = "WorkflowFusionDisabledError";
+      // Unlike the three checks above, this one goes through
+      // `FusionError::InvalidRequest`'s Display, which prepends "invalid
+      // fusion request: " — search rather than anchor at the start.
+      else if (msg.indexOf("Workflow fusion() received an unknown option") !== -1) err.name = "WorkflowFusionOptionError";
+      item.rej(err);
       continue;
     }
     try {
@@ -2544,5 +2557,88 @@ log('wf=' + (typeof workflow))
             }]
         );
         assert_eq!(out.result.as_deref(), Some(r#"{"status":"needs_parent"}"#));
+    }
+
+    /// Host-side `fusion()` rejections carry a distinguishable `err.name`
+    /// (mirroring the `agent()` throw channel's `WorkflowBudgetExceededError`
+    /// / `WorkflowAgentCapError` at lines 87-88) so a script can `catch (e)`
+    /// and branch on `e.name` instead of string-matching `e.message`.
+    fn fusion_rejection_name(thrown_message: &str) -> String {
+        let script = r#"
+try {
+  await fusion('x');
+  log('no throw');
+} catch (e) {
+  log(e.name + ':' + e.message);
+}
+"#;
+        let msg = thrown_message.to_string();
+        let out = run_with_progress_and_fusion(
+            script,
+            no_agents,
+            move |_: &str, _: &str| format!("{}{msg}", WF_THROW_PREFIX),
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        match out.progress.as_slice() {
+            [Progress::Log { message }] => message.clone(),
+            other => panic!("expected exactly one log line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fusion_call_cap_rejection_is_named_workflow_fusion_cap_error() {
+        assert_eq!(
+            fusion_rejection_name("Workflow fusion() call cap reached (20)"),
+            "WorkflowFusionCapError:Workflow fusion() call cap reached (20)"
+        );
+    }
+
+    #[test]
+    fn fusion_disabled_rejection_is_named_workflow_fusion_disabled_error() {
+        assert_eq!(
+            fusion_rejection_name("fusion is disabled"),
+            "WorkflowFusionDisabledError:fusion is disabled"
+        );
+    }
+
+    #[test]
+    fn fusion_budget_rejection_is_named_workflow_budget_exceeded_error_like_agent() {
+        let msg = "Workflow token budget exceeded (500 / 500 output tokens). Stopping further agent() calls. In-flight agents will complete; their results are preserved.";
+        assert_eq!(
+            fusion_rejection_name(msg),
+            format!("WorkflowBudgetExceededError:{msg}")
+        );
+    }
+
+    #[test]
+    fn fusion_unknown_option_rejection_is_named_workflow_fusion_option_error() {
+        // `local_workflow::parse_workflow_fusion_request` wraps the detail in
+        // `FusionError::InvalidRequest`, whose Display prepends "invalid
+        // fusion request: " — the prelude must find the marker anywhere in
+        // the message, not only at its start.
+        let msg = "invalid fusion request: Workflow fusion() received an unknown option (unknown field `nope`, expected one of `preset`, `models`, `dimensions`, `partialOk`, `maxPanel`, `crossProvider`)";
+        assert_eq!(
+            fusion_rejection_name(msg),
+            format!("WorkflowFusionOptionError:{msg}")
+        );
+    }
+
+    #[test]
+    fn fusion_rejection_with_no_recognized_prefix_keeps_the_plain_error_name() {
+        // `new Error(msg)` already carries `.name === "Error"` — the four
+        // recognized prefixes (cap / disabled / budget / unknown option)
+        // OVERRIDE it; anything else is left as a plain `Error`, not
+        // re-labeled or stripped of a name entirely.
+        assert_eq!(
+            fusion_rejection_name(
+                "invalid fusion request: fusion preset `sloppy` must be quality or fast"
+            ),
+            "Error:invalid fusion request: fusion preset `sloppy` must be quality or fast"
+        );
     }
 }

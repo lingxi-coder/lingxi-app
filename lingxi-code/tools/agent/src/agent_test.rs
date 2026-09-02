@@ -817,6 +817,61 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn parse_fusion_models_rejects_a_colon_with_an_empty_model() {
+        // Regression: `"openai:".split_once(':')` used to fall through to
+        // `(None, "openai:")`, silently treating the whole literal (colon
+        // included) as a bare model id instead of rejecting the malformed
+        // `profile:` entry — the exact bug `commands/core/src/fusion.rs`'s
+        // `parse_models` already caught. Both now share
+        // `platform_api::parse_fusion_model_ref`.
+        let err = parse_fusion_models(&["openai:".to_string()]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid input: invalid fusion request: invalid fusion models entry `openai:`"
+        );
+    }
+
+    #[test]
+    fn parse_fusion_models_accepts_profile_colon_model_and_bare_model() {
+        let parsed = parse_fusion_models(&[
+            "anthropic:claude-sonnet-5".to_string(),
+            "gpt-5.6-sol".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                FusionModelRef {
+                    profile: Some("anthropic".into()),
+                    model: "claude-sonnet-5".into(),
+                },
+                FusionModelRef {
+                    profile: None,
+                    model: "gpt-5.6-sol".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_fusion_preset_delegates_to_the_shared_from_str() {
+        assert_eq!(
+            parse_fusion_preset(Some("quality")).unwrap(),
+            FusionPreset::Quality
+        );
+        let err = parse_fusion_preset(Some("bogus")).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(msg) if msg.contains("must be quality or fast")),
+            "{err:?}"
+        );
+        let err = parse_fusion_preset(None).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(msg) if msg == "missing fusion preset"),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn fusion_uses_injected_model_profile_fallback_when_context_profile_is_absent() {
         let spawner = arc_mock_spawner();

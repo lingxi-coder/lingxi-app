@@ -290,17 +290,18 @@ fn parse_csv(raw: &str, flag: &str) -> Result<Vec<String>, String> {
     Ok(values)
 }
 
+/// Splits `raw` on commas, then parses each entry through the single
+/// `platform_api::parse_fusion_model_ref` the Agent tool and workflow
+/// `fusion()`'s preset parsing also route through, so a malformed entry (e.g.
+/// `openai:` — a colon with an empty model) is rejected identically from
+/// every entrypoint.
 fn parse_models(raw: &str) -> Result<Vec<FusionModelRef>, String> {
     let mut out = Vec::new();
     for item in parse_csv(raw, "--models")? {
-        let (profile, model) = match item.split_once(':') {
-            Some((profile, model)) if !profile.is_empty() && !model.is_empty() => {
-                (Some(profile.to_string()), model.to_string())
-            }
-            Some(_) => return Err(format!("invalid --models entry `{item}`")),
-            None => (None, item),
-        };
-        out.push(FusionModelRef { profile, model });
+        out.push(
+            platform_api::parse_fusion_model_ref(&item)
+                .map_err(|error| error.to_string())?,
+        );
     }
     if out.len() < usize::from(FUSION_MIN_PANEL) {
         return Err("explicit --models must contain at least 2 entries".into());
@@ -412,6 +413,19 @@ mod tests {
         assert_eq!(req.preset, FusionPreset::Fast);
         assert_eq!(req.origin, FusionOrigin::Slash);
         assert_eq!(req.conversation_id.as_deref(), Some("conv"));
+    }
+
+    #[test]
+    fn a_colon_with_an_empty_model_is_rejected_with_the_same_message_as_the_agent_tool() {
+        // `platform_api::parse_fusion_model_ref` is the single implementation
+        // both `/fusion` and the Agent tool (`tools/agent/src/agent.rs`'s
+        // `parse_fusion_models`) route a `--models`/`models[]` entry through,
+        // so an invalid entry rejects identically from either entrypoint.
+        let err = parse("/fusion --models openai:,anthropic:opus review").unwrap_err();
+        assert!(
+            err.contains("invalid fusion request: invalid fusion models entry `openai:`"),
+            "{err}"
+        );
     }
 
     #[test]

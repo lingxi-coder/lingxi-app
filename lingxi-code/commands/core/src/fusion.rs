@@ -44,34 +44,48 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let mut dimensions = None;
     let mut partial_ok = None;
     let mut max_panel = None;
-    let mut prompt_parts = Vec::new();
     let tokens = &args.positional_args;
+    let raw = args.raw_args.as_str();
+    // `tokens` is shell-quote output: unquoted `*`/`?` globs are dropped,
+    // `#` truncates the remainder as a comment, `( ) | & ; < >` are operators.
+    // That is fine for recognising leading `--flag` words (always plain
+    // ASCII), but the prompt itself must come back from `raw_args` verbatim
+    // — so we only use `tokens` to find where the flags end, then recover
+    // everything after that point directly from the untokenized string,
+    // preserving punctuation and newlines the tokenizer would have mangled.
+    let mut cursor = 0usize;
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i].as_str();
         match tok {
             "--quality" => {
                 set_preset(&mut preset, FusionPreset::Quality)?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--fast" => {
                 set_preset(&mut preset, FusionPreset::Fast)?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--same-provider" => {
                 set_cross(&mut cross_provider, false)?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--cross-provider" => {
                 set_cross(&mut cross_provider, true)?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--partial-ok" => {
                 set_once(&mut partial_ok, true, "--partial-ok/--no-partial")?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--no-partial" => {
                 set_once(&mut partial_ok, false, "--partial-ok/--no-partial")?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             flag if flag.starts_with("--models=") => {
@@ -80,14 +94,17 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
                     parse_models(&flag["--models=".len()..])?,
                     "--models",
                 )?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--models" => {
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
                 let value = tokens
                     .get(i)
                     .ok_or_else(|| "--models requires a value".to_string())?;
                 set_once(&mut models, parse_models(value)?, "--models")?;
+                cursor = advance_past_token(raw, cursor, value);
                 i += 1;
             }
             flag if flag.starts_with("--dimensions=") => {
@@ -96,14 +113,17 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
                     parse_dimensions(&flag["--dimensions=".len()..])?,
                     "--dimensions",
                 )?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--dimensions" => {
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
                 let value = tokens
                     .get(i)
                     .ok_or_else(|| "--dimensions requires a value".to_string())?;
                 set_once(&mut dimensions, parse_dimensions(value)?, "--dimensions")?;
+                cursor = advance_past_token(raw, cursor, value);
                 i += 1;
             }
             flag if flag.starts_with("--max-panel=") => {
@@ -112,26 +132,26 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
                     parse_max_panel(&flag["--max-panel=".len()..])?,
                     "--max-panel",
                 )?;
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
             }
             "--max-panel" => {
+                cursor = advance_past_token(raw, cursor, tok);
                 i += 1;
                 let value = tokens
                     .get(i)
                     .ok_or_else(|| "--max-panel requires a value".to_string())?;
                 set_once(&mut max_panel, parse_max_panel(value)?, "--max-panel")?;
+                cursor = advance_past_token(raw, cursor, value);
                 i += 1;
             }
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}"));
             }
-            _ => {
-                prompt_parts.extend(tokens[i..].iter().cloned());
-                break;
-            }
+            _ => break,
         }
     }
-    let prompt = prompt_parts.join(" ").trim().to_string();
+    let prompt = raw[cursor.min(raw.len())..].trim().to_string();
     if prompt.is_empty() {
         return Err(FUSION_SLASH_USAGE.to_string());
     }
@@ -144,6 +164,43 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
         max_panel,
         prompt,
     })
+}
+
+/// Advance `cursor` past the next literal occurrence of `token` in `raw`,
+/// searching from `cursor` onward. `token` is a value pulled from the
+/// shell-quote tokenizer's output, so it is always a substring of the raw
+/// text at that position (quotes/backslashes it stripped surround it, but
+/// don't split it). If it can't be found (should not happen for well-formed
+/// input), fall back to skipping to the next whitespace boundary so parsing
+/// still makes forward progress instead of looping.
+fn advance_past_token(raw: &str, cursor: usize, token: &str) -> usize {
+    let cursor = cursor.min(raw.len());
+    let rest = &raw[cursor..];
+    if let Some(rel) = rest.find(token) {
+        let mut end = cursor + rel + token.len();
+        // If the raw text quoted this token (e.g. `--models "a,b"`), the
+        // shell-quote tokenizer already stripped the surrounding quotes from
+        // `token` before handing it to us, so `token` matches only the
+        // INSIDE of the raw quoted span — skip the closing quote too, or it
+        // leaks as the first character of the recovered prompt.
+        let opened_with_quote = rel > 0
+            && matches!(rest.as_bytes().get(rel - 1), Some(b'"' | b'\''));
+        if opened_with_quote {
+            let opening = rest.as_bytes()[rel - 1];
+            if raw.as_bytes().get(end) == Some(&opening) {
+                end += 1;
+            }
+        }
+        return end;
+    }
+    let trimmed_start = rest
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(rest.len());
+    let after_start = &rest[trimmed_start..];
+    let word_end = after_start
+        .find(char::is_whitespace)
+        .unwrap_or(after_start.len());
+    cursor + trimmed_start + word_end
 }
 
 /// Build a [`FusionRequest`] from parsed slash args and parent session identity.
@@ -278,6 +335,15 @@ mod tests {
     }
 
     #[test]
+    fn quoted_flag_value_does_not_leak_its_closing_quote_into_the_prompt() {
+        let args = parse(
+            "/fusion --models \"openai:gpt-5,anthropic:opus\" review the plan",
+        )
+        .unwrap();
+        assert_eq!(args.prompt, "review the plan");
+    }
+
+    #[test]
     fn empty_prompt_is_usage() {
         assert_eq!(parse("/fusion").unwrap_err(), FUSION_SLASH_USAGE);
         assert_eq!(parse("/fusion --quality").unwrap_err(), FUSION_SLASH_USAGE);
@@ -395,6 +461,38 @@ mod tests {
         );
         assert!(parse("/fusion --max-panel 1 review").is_err());
         assert!(parse("/fusion --max-panel 9 review").is_err());
+    }
+
+    #[test]
+    fn prompt_recovers_verbatim_text_shell_quote_would_mangle() {
+        // Bare `*` `?` are dropped as globs, `#` truncates as a comment and
+        // `(` `)` `|` etc. are operators in the shell-quote tokenizer that
+        // `positional_args` goes through — the prompt must NOT be rebuilt
+        // from those tokens, it must come back from `raw_args` verbatim.
+        let args = parse("/fusion what does foo(bar) do?").unwrap();
+        assert_eq!(args.prompt, "what does foo(bar) do?");
+
+        let args = parse("/fusion review PR #123 for races").unwrap();
+        assert_eq!(args.prompt, "review PR #123 for races");
+
+        let args = parse("/fusion find a * b").unwrap();
+        assert_eq!(args.prompt, "find a * b");
+    }
+
+    #[test]
+    fn prompt_preserves_newlines_after_leading_flags() {
+        let args = parse("/fusion --quality line one\nline two").unwrap();
+        assert_eq!(args.prompt, "line one\nline two");
+    }
+
+    #[test]
+    fn flags_before_punctuation_heavy_prompt_are_still_consumed() {
+        let args =
+            parse("/fusion --fast --same-provider --dimensions coverage what about foo(bar)?")
+                .unwrap();
+        assert_eq!(args.preset, Some(FusionPreset::Fast));
+        assert_eq!(args.cross_provider, Some(false));
+        assert_eq!(args.prompt, "what about foo(bar)?");
     }
 
     #[test]

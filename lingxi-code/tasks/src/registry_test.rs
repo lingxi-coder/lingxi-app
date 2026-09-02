@@ -1768,6 +1768,147 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
     );
 }
 
+// ---- WP6 fix round 1: `local_fusion` notification mapping crosses the sink
+// seam. `RegistryStatusSink::set_fusion_error` /
+// `set_fusion_egress_and_usage` / `finish_fusion_terminal` are the ONLY
+// production callers that ever reach `TaskRegistry::set_fusion_error` etc.
+// (a `local_fusion` task never calls the registry methods directly — see
+// `LocalFusionHandler`), so a test that only calls the registry methods
+// straight, or only asserts the handler CALLED the sink, never proves the
+// sink's forwarding + the registry's `take_pending_task_notifications`
+// mapping actually deliver `<error>` / `<result>` / `<usage>` /
+// `<egress-profiles>` end to end. These two tests drive a `TaskState::LocalFusion`
+// entry THROUGH `RegistryStatusSink` (never through `TaskRegistry` directly)
+// and assert the exact drained `TaskNotification` fields.
+
+fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskState {
+    TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+        base: TaskStateBase {
+            id: id.to_string(),
+            task_type: TaskType::LocalFusion,
+            status: TaskStatus::Running,
+            description: "fusion run".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: output_dir.join(format!("{id}.output")),
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        conversation_id: "conv1".into(),
+        prompt: "compare two approaches".into(),
+        run_id: None,
+        preset: "quality".into(),
+        cross_provider: false,
+        final_text: None,
+        error: None,
+        egress_profiles: Vec::new(),
+        usage: None,
+    })
+}
+
+#[tokio::test]
+async fn take_pending_drains_local_fusion_error_through_status_sink() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+
+    let (dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = "fu_err01";
+    registry
+        .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
+        .await;
+
+    // Bind a real `RegistryStatusSink` and drive the failure THROUGH it —
+    // exactly the path `LocalFusionHandler` uses in production, and the seam
+    // WP6 fix-round-1 proved was unpinned by mutation.
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    sink.set_fusion_error(id, "too few fusion models".to_string())
+        .await;
+    sink.set_status(id, TaskStatus::Failed).await;
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1, "one terminal fusion task ⇒ one notification");
+    let n = &drained[0];
+    assert_eq!(n.task_id, id);
+    assert_eq!(n.task_type, "local_fusion");
+    assert_eq!(n.status, "failed");
+    assert_eq!(
+        n.error.as_deref(),
+        Some("too few fusion models"),
+        "a failed local_fusion task notifies with its real reason, not bare \"failed\""
+    );
+    assert!(
+        n.result.is_none(),
+        "no final_text was ever set on this run"
+    );
+    assert!(n.egress_profiles.is_empty());
+}
+
+#[tokio::test]
+async fn take_pending_drains_local_fusion_egress_and_usage_through_status_sink() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+    use platform_api::task_registry::AgentRunUsage;
+
+    let (dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = "fu_ok01";
+    registry
+        .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
+        .await;
+
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+
+    let usage = AgentRunUsage {
+        subagent_tokens: 4200,
+        tool_uses: 6,
+        duration_ms: 8800,
+    };
+    sink.set_fusion_egress_and_usage(
+        id,
+        vec!["anthropic".to_string(), "openai".to_string()],
+        Some(usage.clone()),
+    )
+    .await;
+    sink.finish_fusion_terminal(
+        id,
+        "fu_run_1".to_string(),
+        "final answer text".to_string(),
+        TaskStatus::Completed,
+    )
+    .await;
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1, "one terminal fusion task ⇒ one notification");
+    let n = &drained[0];
+    assert_eq!(n.task_id, id);
+    assert_eq!(n.task_type, "local_fusion");
+    assert_eq!(n.status, "completed");
+    assert!(n.error.is_none());
+    assert_eq!(
+        n.result.as_deref(),
+        Some("final answer text"),
+        "finish_fusion_terminal's final_text reaches <result>"
+    );
+    assert_eq!(
+        n.egress_profiles,
+        vec!["anthropic".to_string(), "openai".to_string()],
+        "set_fusion_egress_and_usage's profiles reach <egress-profiles>"
+    );
+    assert_eq!(
+        n.usage,
+        Some(usage),
+        "set_fusion_egress_and_usage's usage reaches <usage> when no local_agent outcome exists"
+    );
+}
+
 #[test]
 fn state_for_spawn_stamps_local_agent_tool_use_id() {
     // A backgrounded LocalAgent carries the originating `tool_use_id` onto its

@@ -187,6 +187,22 @@ pub trait TaskStatusSink: Send + Sync {
     /// Registry-backed sinks override this; standalone sinks stay no-ops.
     async fn set_fusion_outcome(&self, _task_id: &str, _run_id: String, _final_text: String) {}
 
+    /// Record a Fusion run's failure reason before its terminal `Failed`
+    /// status. Registry-backed sinks override this; standalone sinks stay
+    /// no-ops. Additive — call sites that never fail a Fusion run need not
+    /// change.
+    async fn set_fusion_error(&self, _task_id: &str, _error: String) {}
+
+    /// Record a Fusion run's egress profiles and usage summary. Registry-
+    /// backed sinks override this; standalone sinks stay no-ops. Additive.
+    async fn set_fusion_egress_and_usage(
+        &self,
+        _task_id: &str,
+        _egress_profiles: Vec<String>,
+        _usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+    }
+
     /// Atomically publish a Fusion run's terminal payload together with its
     /// terminal task status. Registry-backed sinks override this to close the
     /// outcome/status race; the default preserves legacy standalone behavior.

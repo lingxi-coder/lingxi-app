@@ -172,6 +172,42 @@ impl FusionExecutor for ImmediateExecutor {
     }
 }
 
+/// Blocks in `run()` until the fusion inheritance's cancel token fires (the
+/// same pattern `local_workflow_test::BlockingFusionExecutor` uses), then
+/// returns `Err(Cancelled)`. Signals `started` once it has actually entered
+/// `run()`, so a test can wait for the worker to be genuinely in-flight
+/// before calling `kill`.
+struct BlockingCancelAwareExecutor {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    runs: AtomicUsize,
+}
+
+impl BlockingCancelAwareExecutor {
+    fn new(started: oneshot::Sender<()>) -> Arc<Self> {
+        Arc::new(Self {
+            started: StdMutex::new(Some(started)),
+            runs: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for BlockingCancelAwareExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = self.started.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        inherit.cancel.cancelled().await;
+        Err(FusionError::Cancelled)
+    }
+}
+
 #[derive(Default)]
 struct CountingCompletionSink(AtomicUsize);
 
@@ -320,6 +356,107 @@ impl TaskStatusSink for BlockingFusionTerminalSink {
     async fn is_terminal(&self, task_id: &str) -> bool {
         self.inner
             .statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| id == task_id)
+            .is_some_and(|(_, status)| status.is_terminal())
+    }
+}
+
+struct FailingExecutor {
+    error: FusionError,
+}
+
+#[async_trait]
+impl FusionExecutor for FailingExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        Err(match &self.error {
+            FusionError::TooFewModels => FusionError::TooFewModels,
+            other => FusionError::InvalidRequest(other.to_string()),
+        })
+    }
+}
+
+/// Records every [`TaskStatusSink`] call in order (event tag first, so a
+/// test can assert both the exact sequence and the payload of each call
+/// rather than only that *some* status/outcome eventually landed).
+#[derive(Default)]
+struct RecordingStatusSink {
+    events: StdMutex<Vec<String>>,
+    statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    errors: StdMutex<Vec<(String, String)>>,
+    egress_and_usage: StdMutex<Vec<(String, Vec<String>, Option<platform_api::task_registry::AgentRunUsage>)>>,
+}
+
+impl RecordingStatusSink {
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn last_status(&self) -> Option<TaskStatus> {
+        self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+    }
+
+    fn errors(&self) -> Vec<(String, String)> {
+        self.errors.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TaskStatusSink for RecordingStatusSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.events.lock().unwrap().push(format!("status:{status:?}"));
+        self.statuses
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), status));
+    }
+
+    async fn set_fusion_error(&self, task_id: &str, error: String) {
+        self.events.lock().unwrap().push(format!("error:{error}"));
+        self.errors
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), error));
+    }
+
+    async fn set_fusion_egress_and_usage(
+        &self,
+        task_id: &str,
+        egress_profiles: Vec<String>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+        self.events.lock().unwrap().push(format!(
+            "egress_and_usage:{}:{}",
+            egress_profiles.len(),
+            usage.is_some()
+        ));
+        self.egress_and_usage
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), egress_profiles, usage));
+    }
+
+    async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        _run_id: String,
+        _final_text: String,
+        status: TaskStatus,
+    ) {
+        self.events.lock().unwrap().push("outcome".to_string());
+        self.set_status(task_id, status).await;
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        self.statuses
             .lock()
             .unwrap()
             .iter()
@@ -541,4 +678,297 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
 
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
     assert_eq!(status_sink.calls(), vec!["status", "outcome", "status"]);
+}
+
+// ---- WP6 item 7: Err -> Failed with a recorded error, spool content,
+// egress/usage recorded before the terminal transition ----------------------
+
+#[tokio::test]
+async fn failing_executor_records_error_before_failed_status_and_spools_it() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = Arc::new(FailingExecutor {
+        error: FusionError::TooFewModels,
+    });
+    let handler = make_handler(
+        executor,
+        output_manager.clone(),
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs.clone()),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // Status is Failed, exactly one error was recorded, and it carries the
+    // real error text (not folded away into a generic "failed").
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Failed));
+    let errors = status_sink.errors();
+    assert_eq!(errors.len(), 1, "exactly one error recorded: {errors:?}");
+    assert_eq!(errors[0].1, FusionError::TooFewModels.to_string());
+    // Ordering: the error must land BEFORE the terminal status flip so a
+    // concurrent notification drain can never observe `Failed` with no error.
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            format!("error:{}", FusionError::TooFewModels),
+            "status:Failed".to_string(),
+        ]
+    );
+    // The Fusion run never published a completion (it failed).
+    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 0);
+
+    // Spool contains the raw error text.
+    let path = output_manager.path_for(&handle.task_id).unwrap();
+    let spooled = fs
+        .read_file(&path.to_string_lossy(), None, None)
+        .await
+        .expect("spool readable");
+    assert_eq!(spooled.content, FusionError::TooFewModels.to_string());
+}
+
+#[tokio::test]
+async fn ok_executor_records_egress_and_usage_before_completed_status() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = ImmediateExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
+    let egress_and_usage = status_sink.egress_and_usage.lock().unwrap().clone();
+    assert_eq!(
+        egress_and_usage.len(),
+        1,
+        "egress/usage recorded exactly once: {egress_and_usage:?}"
+    );
+    // `dummy_result()` carries no egress profiles and zeroed usage — assert
+    // the concrete content the handler forwarded, not just "some value".
+    assert_eq!(egress_and_usage[0].1, Vec::<String>::new());
+    let usage = egress_and_usage[0].2.as_ref().expect("usage summary set");
+    assert_eq!(usage.subagent_tokens, 0);
+    assert_eq!(usage.tool_uses, 0);
+    assert_eq!(usage.duration_ms, 0);
+    // Ordering: egress/usage lands before the terminal `outcome` publish.
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            "egress_and_usage:0:true".to_string(),
+            "outcome".to_string(),
+            "status:Completed".to_string(),
+        ]
+    );
+    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+}
+
+// ---- WP6 item 7: kill-while-running and a sink that never gets to publish
+// must not corrupt the terminal status ---------------------------------
+
+#[tokio::test]
+async fn kill_while_running_ends_status_killed_exactly_once() {
+    // Full cooperative-cancellation OBSERVABILITY by the executor (proving
+    // `inherit.cancel.cancelled()` resolves before the worker task is
+    // aborted) is F012/WP8's kill-path fix, landing on this same file from a
+    // different work package/lane — not re-verified here to avoid
+    // conflicting with that in-flight change. This test covers what WP6 owns:
+    // killing a task whose executor is genuinely still in-flight must still
+    // converge on exactly one `Killed` transition, not hang and not leave
+    // `workers` holding a stale entry a second `kill` could double-fire on.
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = BlockingCancelAwareExecutor::new(started_tx);
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+    let ctx = make_ctx(fs);
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("worker should enter the blocking executor")
+        .expect("started signal");
+    assert_eq!(
+        executor.runs.load(Ordering::SeqCst),
+        1,
+        "the executor was genuinely invoked before kill"
+    );
+
+    handler
+        .kill(&handle.task_id, ctx.clone())
+        .await
+        .expect("kill succeeds while the executor is in-flight");
+
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Killed));
+    let terminal_transitions = status_sink
+        .statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, s)| s.is_terminal())
+        .count();
+    assert_eq!(
+        terminal_transitions, 1,
+        "exactly one terminal transition: {:?}",
+        status_sink.statuses.lock().unwrap()
+    );
+    assert_eq!(
+        completion_sink.0.load(Ordering::SeqCst),
+        0,
+        "a killed run must never publish a completion"
+    );
+
+    // A second kill on the now-terminal task is a harmless no-op, not a
+    // double transition.
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill is idempotent once terminal");
+    assert_eq!(
+        status_sink
+            .statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| s.is_terminal())
+            .count(),
+        1,
+        "kill after terminal must not add a second transition"
+    );
+}
+
+#[tokio::test]
+async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed() {
+    // `LocalFusionHandler`'s own doc comment (top of this file) states the
+    // invariant: "Sink failures must not rewrite the task's terminal
+    // status." This pins it with a sink that captures the status AT THE
+    // MOMENT it is invoked (proving the terminal transition already
+    // happened) and then does nothing further — the run must still read
+    // back as Completed.
+    struct FailingCompletionSink {
+        calls: AtomicUsize,
+        status_at_publish: StdMutex<Option<TaskStatus>>,
+        status_sink: Arc<RecordingStatusSink>,
+    }
+
+    #[async_trait]
+    impl FusionCompletionSink for FailingCompletionSink {
+        async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.status_at_publish.lock().unwrap() = self.status_sink.last_status();
+            // Simulate a sink that fails to reach the client (e.g.
+            // `DesktopFusionCompletionSink::publish`'s real `append_meta_..`
+            // erroring) — it logs and returns, touching nothing else.
+        }
+    }
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(FailingCompletionSink {
+        calls: AtomicUsize::new(0),
+        status_at_publish: StdMutex::new(None),
+        status_sink: status_sink.clone(),
+    });
+    let executor = ImmediateExecutor::new();
+    let handler = make_handler(
+        executor,
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(completion_sink.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *completion_sink.status_at_publish.lock().unwrap(),
+        Some(TaskStatus::Completed),
+        "the terminal status must already be Completed by the time publish runs"
+    );
+    // The "failing" sink changed nothing: status stays Completed, not Failed.
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
 }

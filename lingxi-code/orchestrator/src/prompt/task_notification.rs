@@ -483,6 +483,67 @@ fn render_one(n: &TaskNotification) -> String {
                 escape_xml(&summary)
             )
         }
+        "local_fusion" => {
+            // No claude-code counterpart — Fusion is this engine's own
+            // feature — so this format is designed rather than ported.
+            // Mirrors `local_agent`'s summary verbs plus a `<result>`
+            // (reusing the workflow truncation-to-output-file logic), a
+            // dedicated `<error>` section, and one-line `<usage>` /
+            // `<egress-profiles>` sections so a headless/print user (and the
+            // model) can see WHO the run's prompt was sent to and what it
+            // cost, closing the F006 gap where a failed/completed Fusion run
+            // notified with no result and no diagnostic at all.
+            let summary = match n.status.as_str() {
+                "completed" => format!("Fusion \"{}\" finished", n.description),
+                "failed" => {
+                    let err = n.error.as_deref().unwrap_or("Unknown error");
+                    format!("Fusion \"{}\" failed: {err}", n.description)
+                }
+                _ => format!("Fusion \"{}\" was stopped", n.description),
+            };
+            let result_section = n
+                .result
+                .as_deref()
+                .map(|result| {
+                    let escaped = escape_xml(result);
+                    let length = utf16_len(&escaped);
+                    if length > WORKFLOW_RESULT_PREVIEW_UTF16 {
+                        let preview = truncate_utf16(&escaped, WORKFLOW_RESULT_PREVIEW_UTF16);
+                        format!(
+                            "\n<result>{preview}\n... (truncated {} chars, full result in {output_file})</result>",
+                            length - WORKFLOW_RESULT_PREVIEW_UTF16
+                        )
+                    } else {
+                        format!("\n<result>{escaped}</result>")
+                    }
+                })
+                .unwrap_or_default();
+            let error_section = match &n.error {
+                Some(err) => format!("\n<error>{}</error>", escape_xml(err)),
+                None => String::new(),
+            };
+            let usage_section = match &n.usage {
+                Some(u) => format!(
+                    "\n<usage><subagent_tokens>{}</subagent_tokens><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>",
+                    u.subagent_tokens, u.tool_uses, u.duration_ms
+                ),
+                None => String::new(),
+            };
+            let egress_section = if n.egress_profiles.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n<egress-profiles>{}</egress-profiles>",
+                    escape_xml(&n.egress_profiles.join(", "))
+                )
+            };
+            format!(
+                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>{result_section}{error_section}{usage_section}{egress_section}\n</task-notification>",
+                n.task_id,
+                n.status,
+                escape_xml(&summary)
+            )
+        }
         "local_bash" => {
             // `enqueueShellNotification` (bash kind) — no `<task-type>`; summary
             // escaped. The exit-code clause is omitted when `exit_code` is None.
@@ -704,6 +765,74 @@ mod tests {
         let block = render_one(&n);
         assert!(
             block.contains("<summary>Background command \"sleeper\" was stopped</summary>"),
+            "got: {block}"
+        );
+    }
+
+    // ---- F006/WP6: `local_fusion` had no render arm at all, so a run fell
+    // through the generic `other` arm — no `<result>`, no `<error>`, and the
+    // whole prompt interpolated unescaped into `<summary>`. ----------------
+
+    #[test]
+    fn fusion_completed_renders_result_and_omits_error() {
+        let mut n = base("f12345678", "local_fusion", "completed", "Fusion quality same: review");
+        n.result = Some("final <answer>".into());
+        n.usage = Some(platform_api::task_registry::AgentRunUsage {
+            subagent_tokens: 4200,
+            tool_uses: 6,
+            duration_ms: 91_000,
+        });
+        n.egress_profiles = vec!["anthropic".into(), "openai".into()];
+
+        let block = render_one(&n);
+        assert!(
+            block.contains("<summary>Fusion \"Fusion quality same: review\" finished</summary>"),
+            "got: {block}"
+        );
+        assert!(block.contains("<result>final &lt;answer&gt;</result>"), "got: {block}");
+        assert!(!block.contains("<error>"), "completed run must not render <error>: {block}");
+        assert!(
+            block.contains(
+                "<usage><subagent_tokens>4200</subagent_tokens><tool_uses>6</tool_uses><duration_ms>91000</duration_ms></usage>"
+            ),
+            "got: {block}"
+        );
+        assert!(
+            block.contains("<egress-profiles>anthropic, openai</egress-profiles>"),
+            "got: {block}"
+        );
+    }
+
+    #[test]
+    fn fusion_failed_renders_error_section_and_summary() {
+        let mut n = base("f12345678", "local_fusion", "failed", "review the plan");
+        n.error = Some("too few fusion models".into());
+
+        let block = render_one(&n);
+        assert!(
+            block.contains(
+                "<summary>Fusion \"review the plan\" failed: too few fusion models</summary>"
+            ),
+            "got: {block}"
+        );
+        assert!(
+            block.contains("<error>too few fusion models</error>"),
+            "got: {block}"
+        );
+        assert!(!block.contains("<result>"), "no result on a failed run: {block}");
+        assert!(!block.contains("<usage>"), "no usage clause when None: {block}");
+        assert!(
+            !block.contains("<egress-profiles>"),
+            "no egress clause when empty: {block}"
+        );
+    }
+
+    #[test]
+    fn fusion_killed_is_was_stopped() {
+        let n = base("f12345678", "local_fusion", "killed", "review");
+        let block = render_one(&n);
+        assert!(
+            block.contains("<summary>Fusion \"review\" was stopped</summary>"),
             "got: {block}"
         );
     }

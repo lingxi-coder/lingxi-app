@@ -1330,6 +1330,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn emit_background_system_notice(&self, body: &str) {
+        self.output.emit_system_notice(body, false).await;
+    }
+
     async fn get_status_snapshot(&self) -> StatusSnapshot {
         let s = self.session.lock().await;
         let cost = CostSnapshot {

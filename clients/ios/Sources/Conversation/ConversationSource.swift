@@ -1816,7 +1816,7 @@ final class MockConversationSource: ConversationSource {
         /// iOS must override the host's five-row default with the full u32 range.
         private static let completeSessionListLimit = UInt32.max
 
-        typealias HandleBuilder = @MainActor (
+        typealias HandleBuilder = (
             _ config: IosEngineLaunchConfigFfi,
             _ listener: IosEventListener,
             _ permissions: IosPermissionSink
@@ -1830,8 +1830,10 @@ final class MockConversationSource: ConversationSource {
         private let permissionModeRepository: PermissionModeConfigurationRepository
         private var handle: MobileEngineHandle?
         /// One shared bootstrap attempt for every entry point that needs the
-        /// engine. Keeping the task on the main actor prevents two callers that
-        /// interleave at an async submit from constructing competing handles.
+        /// engine. Access to this property remains main-actor-confined, which
+        /// prevents interleaving callers from constructing competing handles;
+        /// the task itself runs off-main because engine construction may install
+        /// and boot the bundled Linux runtime.
         private var handleBuildTask: Task<MobileEngineHandle, Error>?
         private var handleBuildAttemptID: UInt64 = 0
         private var listener: EngineListener?
@@ -3236,7 +3238,12 @@ final class MockConversationSource: ConversationSource {
             let handleBuilder = self.handleBuilder
             handleBuildAttemptID &+= 1
             let attemptID = handleBuildAttemptID
-            let buildTask = Task { @MainActor [handleBuilder, launchConfig, listener, permissionSink] in
+            // `buildIosEngineWithConfig` is synchronous and can enter the iSH
+            // bridge, verify the bundled archive, and extract the rootfs on a
+            // first launch. A child `Task` would inherit MainActor here and make
+            // the entire setup UI unresponsive until that work completed.
+            let buildTask = Task.detached(priority: .userInitiated) {
+                [handleBuilder, launchConfig, listener, permissionSink] in
                 let handle = try handleBuilder(launchConfig, listener, permissionSink)
                 // Bootstrap listings are part of construction: never publish a
                 // handle that failed halfway through initialization.
@@ -3279,7 +3286,7 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        private static func buildDefaultHandle(
+        private nonisolated static func buildDefaultHandle(
             config: IosEngineLaunchConfigFfi,
             listener: IosEventListener,
             permissions: IosPermissionSink

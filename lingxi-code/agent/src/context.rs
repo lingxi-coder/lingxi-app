@@ -191,6 +191,11 @@ pub struct SubagentContext {
     /// runner injects a forced `StructuredOutput` tool and returns the model's
     /// tool input as the result. `None` ⇒ free-form text output.
     pub schema: Option<String>,
+    /// Per-turn `tool_choice` policy applied while [`Self::schema`] is `Some`,
+    /// forwarded from
+    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
+    /// Ignored when [`Self::schema`] is `None`.
+    pub structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.
@@ -260,4 +265,12 @@ pub struct SubagentContext {
     pub max_input_bytes_per_turn: Option<u64>,
     /// Optional COGS query-source label forwarded to the API client.
     pub query_source_label: Option<String>,
+    /// Caller correlation id, forwarded from
+    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::correlation_id`]
+    /// (Fusion's `{run_id}:p{index}` stamp, `fusion::panel::spawn_request`).
+    /// `None` for spawns that don't set one. Threaded onto the transcript's
+    /// metadata (via [`crate::transcript::AgentTranscriptWriter`]) so a
+    /// panel's transcript file can be matched back to its run and panel
+    /// index (G011).
+    pub correlation_id: Option<String>,
 }

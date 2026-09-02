@@ -448,6 +448,7 @@ mod tests {
             }),
             duration_ms: 1,
             error_category: None,
+            error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
         }

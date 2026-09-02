@@ -279,6 +279,7 @@ mod tests {
             new_diagnostics_source: None,
             tool_schemas: vec![],
             schema: None,
+            structured_output_mode: Default::default(),
             budget: None,
             hook_executor: None,
             strict_plugin_only_hooks: false,
@@ -292,6 +293,7 @@ mod tests {
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
             query_source_label: None,
+            correlation_id: None,
         }
     }
 

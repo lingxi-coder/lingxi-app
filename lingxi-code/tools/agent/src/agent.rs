@@ -774,6 +774,17 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
             "usage": result.usage,
             "timing": result.timing,
             "egress": result.egress_profiles,
+            // G008: tells the orchestrator's subagent-hook chokepoint
+            // (turn_loop.rs) this result carries NO single child `agentId` to
+            // attribute a hook pair to — a Fusion run is N panels, each
+            // hook-silent by runner-side design (`agent_type ==
+            // FUSION_PANEL_TYPE` skips the in-child SubagentStart; a panel
+            // definition has no frontmatter Stop). Reusing the chokepoint's
+            // existing `subagentHooksFired` field name (rather than a Fusion-
+            // specific one) keeps the ordinary Agent-tool `runner_fired_start`
+            // reader unchanged; the chokepoint tells the two cases apart by
+            // this data's absent `agentId`.
+            "subagentHooksFired": true,
         }),
         model_content: Some(result.final_text),
         new_messages: vec![],
@@ -1969,6 +1980,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             fork_parent_system_prompt: None,
             // The Agent (Task) tool has no structured-output schema param.
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             // Thread the originating tool_use_id so the backgrounded agent's
             // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
@@ -3098,6 +3110,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 None
             },
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             // Sync spawn: no background task / notification, so no tool_use_id
             // to stamp (only the async/background path threads it).

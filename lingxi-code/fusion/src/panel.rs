@@ -4,14 +4,15 @@ use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::ResolvedPanel;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
-    SubagentResult, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    StructuredOutputMode, SubagentResult, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
     SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
     validate_panel_report, FusionError, FusionInheritance, FusionUsage, PanelReport,
-    PanelRunStatus, WorkflowQueryWatchdog, FUSION_PANEL_TYPE,
+    PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
@@ -37,6 +38,9 @@ pub struct PanelInternal {
     pub duration_ms: u64,
     /// Sanitized error category.
     pub error_category: Option<String>,
+    /// Sanitized, length-capped one-line detail of the source error (G011).
+    /// Never a raw provider body — see [`sanitize_detail`].
+    pub error_detail: Option<String>,
     /// Usage rollup.
     pub usage: Option<FusionUsage>,
     /// Prompt actually sent (tests assert mutual invisibility).
@@ -117,7 +121,17 @@ pub fn panel_report_json_schema() -> Value {
     })
 }
 
-/// Run every panel concurrently. Cancel aborts the JoinSet and joins every task.
+/// Run every panel concurrently.
+///
+/// Cancel aborts the JoinSet and joins every task. Re-evaluates the panel bar
+/// after every completion (G004): once no combination of the still-running
+/// panels could reach `config.min_successful_panels` (or, when
+/// `!config.partial_ok`, as soon as any panel fails), the remaining siblings
+/// are aborted immediately rather than left to spend the full
+/// `panel_total_timeout_ms` paying a provider for a run that is already
+/// sealed. A panicked or aborted task's slot is synthesized from the
+/// `JoinError` (F012-join) so `result.len() == panels.len()` always holds —
+/// the bar and telemetry never silently lose a panel.
 ///
 /// `overall_deadline` (F004 review fix) is what remains of the end-to-end
 /// `total_timeout_ms` budget at the moment the caller starts the panel stage
@@ -138,12 +152,27 @@ pub async fn run_panels(
     overall_deadline: Duration,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
+    let total = panels.len();
+    let min_successful = usize::from(
+        config
+            .min_successful_panels
+            .min(u8::try_from(total).unwrap_or(u8::MAX)),
+    )
+    .max(usize::from(FUSION_MIN_PANEL))
+    .min(total);
+    // Every panel's prompt is identical (panels are anonymized to each
+    // other, so the task text never varies by identity) — built once and
+    // reused both for spawning and for synthesizing a panicked/aborted slot.
+    let generic_prompt = panel_prompt(task_prompt);
+    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
+
     let mut join_set = JoinSet::new();
+    let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(total);
     for (index, panel) in panels.iter().cloned().enumerate() {
         let spawner = Arc::clone(&spawner);
         let subagent = inherit.subagent.clone();
         let cancel = inherit.cancel.clone();
-        let prompt = panel_prompt(task_prompt);
+        let prompt = generic_prompt.clone();
         let spawn_prompt = prompt.clone();
         let schema = schema.clone();
         let run_id = run_id.to_string();
@@ -155,10 +184,18 @@ pub async fn run_panels(
             stall_timeout_ms: config.panel_idle_timeout_ms,
             max_retries: 0,
         };
-        join_set.spawn(async move {
+        let abort_handle = join_set.spawn(async move {
             let started = Instant::now();
-            let request =
-                spawn_request(&panel, prompt, &schema, max_turns, max_out, &run_id, index);
+            let request = spawn_request(
+                &panel,
+                prompt,
+                &schema,
+                max_turns,
+                max_out,
+                max_input_bytes,
+                &run_id,
+                index,
+            );
             let inherit = platform_api::subagent_spawn::SubagentInheritance {
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
@@ -178,17 +215,24 @@ pub async fn run_panels(
                 ) => {
                     match result {
                         Ok(Ok(terminal)) => PanelFinish::Done(terminal),
-                        Ok(Err(_)) => PanelFinish::Failed("spawn".into()),
+                        Ok(Err(err)) => PanelFinish::Failed {
+                            category: "spawn".into(),
+                            detail: Some(sanitize_detail(&err.to_string())),
+                        },
                         Err(_) => PanelFinish::TotalTimedOut,
                     }
                 }
             };
             (index, panel, spawn_prompt, started.elapsed(), outcome)
         });
+        task_index.insert(abort_handle.id(), index);
     }
 
-    let mut collected = Vec::new();
-    loop {
+    let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut bar_aborted = false;
+    while collected.len() < total {
         tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => {
@@ -196,38 +240,80 @@ pub async fn run_panels(
                 while join_set.join_next().await.is_some() {}
                 return Err(FusionError::Cancelled);
             }
-            next = join_set.join_next() => {
+            next = join_set.join_next_with_id() => {
                 match next {
-                    Some(Ok(item)) => collected.push(item),
-                    Some(Err(_)) => {}
+                    Some(Ok((_id, (index, panel, spawn_prompt, elapsed, outcome)))) => {
+                        let internal = finish_panel(index, panel, spawn_prompt, elapsed, outcome);
+                        if internal.status == PanelRunStatus::Completed {
+                            succeeded += 1;
+                        } else {
+                            failed += 1;
+                        }
+                        collected.push((index, internal));
+                    }
+                    Some(Err(join_err)) => {
+                        // A panicked or (post-abort) cancelled task loses its
+                        // `(index, panel, ..)` payload with the join error —
+                        // recover the index from the id map planted at spawn
+                        // time and the panel identity from the ORIGINAL
+                        // `panels` slice (still borrowed for the whole call),
+                        // so the slot is never simply dropped (F012-join).
+                        if let Some(&index) = task_index.get(&join_err.id()) {
+                            let category = if join_err.is_panic() { "panic" } else { "aborted" };
+                            let internal = finish_panel(
+                                index,
+                                panels[index].clone(),
+                                generic_prompt.clone(),
+                                Duration::default(),
+                                PanelFinish::Failed {
+                                    category: category.into(),
+                                    detail: Some(sanitize_detail(&join_err.to_string())),
+                                },
+                            );
+                            failed += 1;
+                            collected.push((index, internal));
+                        }
+                    }
                     None => break,
                 }
             }
         }
+        if !bar_aborted {
+            let remaining = total.saturating_sub(collected.len());
+            let cannot_reach_min = succeeded.saturating_add(remaining) < min_successful;
+            let any_failure_requires_all = !config.partial_ok && failed > 0;
+            if remaining > 0 && (cannot_reach_min || any_failure_requires_all) {
+                join_set.abort_all();
+                bar_aborted = true;
+            }
+        }
     }
 
-    collected.sort_by_key(|(index, _, _, _, _)| *index);
-    Ok(collected
-        .into_iter()
-        .map(|(index, panel, spawn_prompt, elapsed, outcome)| {
-            finish_panel(index, panel, spawn_prompt, elapsed, outcome)
-        })
-        .collect())
+    collected.sort_by_key(|(index, _)| *index);
+    Ok(collected.into_iter().map(|(_, internal)| internal).collect())
 }
 
 enum PanelFinish {
     Done(SubagentResult),
-    Failed(String),
+    /// Sanitized category label plus an optional sanitized, length-capped
+    /// one-line detail of the source error (G011) — never a raw provider
+    /// body. `detail` is `None` only when there was nothing to attach.
+    Failed {
+        category: String,
+        detail: Option<String>,
+    },
     TotalTimedOut,
     Cancelled,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_request(
     panel: &ResolvedPanel,
     prompt: String,
     schema: &str,
     max_turns: u32,
     max_out: u32,
+    max_input_bytes: u64,
     run_id: &str,
     index: usize,
 ) -> SubagentSpawnRequest {
@@ -237,10 +323,23 @@ fn spawn_request(
         model: Some(panel.model.clone()),
         model_profile: Some(panel.profile.clone()),
         schema: Some(schema.to_string()),
+        // Auto tool_choice while turns remain, forced only on the last turn
+        // (or a no-progress nudge) — so the panel can actually use its
+        // Read/Grep/Glob/WebFetch tools instead of answering blind on turn 1
+        // (F002).
+        structured_output_mode: StructuredOutputMode::WhenDone,
         max_turns_override: Some(max_turns),
         max_output_tokens_per_turn: Some(max_out),
+        // Per-turn input cap derived from the reserved-token budget basis
+        // (F002): `cap_input_bytes` is pair-aware (see `runner::cap_input_bytes`)
+        // so this can never orphan a tool_use/tool_result half.
+        max_input_bytes_per_turn: Some(max_input_bytes),
         query_source_label: Some("fusion_panel".into()),
         correlation_id: Some(format!("{run_id}:p{index}")),
+        // Host-side observability name (F005 prerequisite) — without this a
+        // spawn observer falls back to the bare agent_type and every panel
+        // in a run renders as an indistinguishable "fusion-panel" row.
+        name: Some(format!("Fusion P{}", index + 1)),
         ..SubagentSpawnRequest::default()
     }
 }
@@ -270,6 +369,7 @@ fn finish_panel(
         report: None,
         duration_ms,
         error_category: None,
+        error_detail: None,
         usage: None,
         spawn_prompt,
     };
@@ -282,8 +382,9 @@ fn finish_panel(
             internal.status = PanelRunStatus::Cancelled;
             internal.error_category = Some("cancelled".into());
         }
-        PanelFinish::Failed(category) => {
+        PanelFinish::Failed { category, detail } => {
             internal.error_category = Some(category);
+            internal.error_detail = detail;
         }
         PanelFinish::Done(SubagentResult::Killed { .. }) => {
             internal.status = PanelRunStatus::Cancelled;
@@ -295,16 +396,22 @@ fn finish_panel(
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("idle_timeout".into());
         }
-        PanelFinish::Done(SubagentResult::Failed { .. }) => {
+        PanelFinish::Done(SubagentResult::Failed { reason, .. }) => {
             internal.error_category = Some("provider".into());
+            internal.error_detail = Some(sanitize_detail(&reason));
         }
         PanelFinish::Done(SubagentResult::Completed {
             content,
             usage,
             cumulative_usage,
+            assistant_message_count,
             ..
         }) => {
-            internal.usage = Some(usage_from_subagent(&cumulative_usage, &usage));
+            internal.usage = Some(usage_from_subagent(
+                &cumulative_usage,
+                &usage,
+                assistant_message_count,
+            ));
             match parse_and_sanitize(&content) {
                 Ok(report) => {
                     internal.status = PanelRunStatus::Completed;
@@ -323,7 +430,11 @@ fn is_query_watchdog_timeout(reason: &str) -> bool {
     reason.starts_with(SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX)
 }
 
-fn usage_from_subagent(cumulative: &SubagentUsage, final_turn: &SubagentUsage) -> FusionUsage {
+fn usage_from_subagent(
+    cumulative: &SubagentUsage,
+    final_turn: &SubagentUsage,
+    assistant_message_count: u64,
+) -> FusionUsage {
     let src = if cumulative.total_tokens == 0 && cumulative.input_tokens == 0 {
         final_turn
     } else {
@@ -334,9 +445,31 @@ fn usage_from_subagent(cumulative: &SubagentUsage, final_turn: &SubagentUsage) -
         output_tokens: src.output_tokens,
         cache_read_tokens: src.cache_read_input_tokens,
         cache_write_tokens: src.cache_creation_input_tokens,
-        provider_requests: 1,
+        // The real assistant-turn count (G011) — the runner's per-turn round
+        // trips, not a hardcoded 1 that undercounts a multi-turn panel by up
+        // to `panelMaxTurns`x in the result/spool/telemetry and the
+        // per-request fee quote.
+        provider_requests: u32::try_from(assistant_message_count).unwrap_or(u32::MAX),
         ..FusionUsage::default()
     }
+}
+
+/// Cap and neutralize a source error string before it is surfaced as
+/// [`platform_api::PanelOutcome::error_detail`] (G011): the same NUL-strip +
+/// prompt-injection guard [`sanitize_text`] applies to panel report fields,
+/// plus a hard byte cap so a verbose provider error body cannot balloon the
+/// spool/telemetry payload.
+fn sanitize_detail(input: &str) -> String {
+    const MAX_DETAIL_BYTES: usize = 500;
+    let sanitized = sanitize_text(input);
+    if sanitized.len() <= MAX_DETAIL_BYTES {
+        return sanitized;
+    }
+    let mut end = MAX_DETAIL_BYTES;
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &sanitized[..end])
 }
 
 /// Parse panel content as [`PanelReport`], then NUL-strip + output-guard.

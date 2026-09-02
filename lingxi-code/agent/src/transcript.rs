@@ -42,6 +42,11 @@ pub struct TranscriptEntry {
     /// Provider profile paired with [`Self::model`], when pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_profile: Option<String>,
+    /// Caller correlation id (`SubagentContext::correlation_id`, e.g.
+    /// Fusion's `{run_id}:p{index}`), when the spawn set one. Lets a
+    /// transcript be matched back to the run/panel that produced it (G011).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
@@ -56,6 +61,7 @@ pub struct AgentTranscriptWriter {
     agent_type: Option<String>,
     model: Option<String>,
     model_profile: Option<String>,
+    correlation_id: Option<String>,
 }
 
 impl AgentTranscriptWriter {
@@ -70,6 +76,7 @@ impl AgentTranscriptWriter {
             agent_type: None,
             model: None,
             model_profile: None,
+            correlation_id: None,
         }
     }
 
@@ -90,6 +97,15 @@ impl AgentTranscriptWriter {
         self
     }
 
+    /// Attach the caller correlation id (G011) copied onto each entry.
+    /// Separate from [`Self::with_metadata`] so existing callers of that
+    /// builder are unaffected.
+    #[must_use]
+    pub fn with_correlation_id(mut self, correlation_id: Option<String>) -> Self {
+        self.correlation_id = correlation_id;
+        self
+    }
+
     /// Append one [`TranscriptEntry`] for `message`.
     pub async fn record(&self, message: &ConversationMessage) -> Result<(), platform_api::FsError> {
         let entry = TranscriptEntry {
@@ -102,6 +118,7 @@ impl AgentTranscriptWriter {
             agent_type: self.agent_type.clone(),
             model: self.model.clone(),
             model_profile: self.model_profile.clone(),
+            correlation_id: self.correlation_id.clone(),
         };
         self.append_entry(&entry).await
     }
@@ -129,6 +146,7 @@ impl AgentTranscriptWriter {
             agent_type: self.agent_type.clone(),
             model: self.model.clone(),
             model_profile: self.model_profile.clone(),
+            correlation_id: self.correlation_id.clone(),
         };
         self.append_entry(&entry).await
     }

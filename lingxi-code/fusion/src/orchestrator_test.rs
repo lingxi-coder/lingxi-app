@@ -205,6 +205,10 @@ enum FakePanel {
     MalformedReport,
     Fail,
     Hang,
+    /// Fails at the SPAWN layer (`Err(SubagentSpawnError)`), distinct from
+    /// `Fail` which is a terminal `SubagentResult::Failed` — used to exercise
+    /// the pool-admission early-abort path (G004).
+    SpawnErr,
 }
 
 impl FakeSpawner {
@@ -256,6 +260,7 @@ impl SubagentSpawner for FakeSpawner {
                 agent_id: AgentId::new(),
                 reason: "panel failed".into(),
             }),
+            Some(FakePanel::SpawnErr) => Err(SubagentSpawnError::PoolFull),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
@@ -2191,4 +2196,234 @@ async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
          model key \"sol\"); analyst_overlaps_panel must be true, got {:?}",
         started.metadata.get("analyst_overlaps_panel")
     );
+}
+
+// ---- WP2b: panel spawn contract, early abort, panic synthesis, usage ----
+
+#[tokio::test]
+async fn panel_spawn_requests_are_when_done_capped_and_named() {
+    let spawner = FakeSpawner::new(three_ok());
+    let config = test_config();
+    let panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        "task",
+        &[
+            ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+            },
+            ResolvedPanel {
+                profile: "openai".into(),
+                model: "gpt-5.6-terra".into(),
+            },
+        ],
+        "fu_named",
+        std::time::Duration::from_millis(config.panel_total_timeout_ms),
+    )
+    .await
+    .expect("panel collection");
+    assert_eq!(panels.len(), 2);
+
+    let requests = spawner.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let expected_cap = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(
+            request.structured_output_mode,
+            platform_api::subagent_spawn::StructuredOutputMode::WhenDone,
+            "panel {index} must not force StructuredOutput every turn"
+        );
+        assert_eq!(
+            request.max_input_bytes_per_turn,
+            Some(expected_cap),
+            "panel {index} must cap per-turn input bytes from the reserved-token budget"
+        );
+        assert_eq!(
+            request.name,
+            Some(format!("Fusion P{}", index + 1)),
+            "panel {index} must be named for host-side observability"
+        );
+    }
+}
+
+struct MessageCountSpawner {
+    assistant_message_count: u64,
+}
+
+#[async_trait]
+impl SubagentSpawner for MessageCountSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        Ok(SubagentResult::Completed {
+            agent_id: AgentId::new(),
+            content: serde_json::to_value(report("ANSWER")).unwrap(),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 1,
+            total_tokens: 0,
+            assistant_message_count: self.assistant_message_count,
+            response_char_count: 1,
+            last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one() {
+    let spawner = Arc::new(MessageCountSpawner {
+        assistant_message_count: 7,
+    });
+    let panels = crate::panel::run_panels(
+        spawner,
+        &inherit(),
+        &test_config(),
+        "task",
+        &[ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }],
+        "fu_count",
+        std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
+    )
+    .await
+    .expect("panel collection");
+    assert_eq!(panels.len(), 1);
+    let usage = panels[0].usage.as_ref().expect("completed panel has usage");
+    assert_eq!(
+        usage.provider_requests, 7,
+        "provider_requests must come from the real assistant_message_count, not a hardcoded 1"
+    );
+}
+
+#[tokio::test]
+async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
+    let mut config = test_config();
+    config.min_successful_panels = 2;
+    config.panel_total_timeout_ms = 5_000;
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let wall_started = std::time::Instant::now();
+    let panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        "task",
+        &[
+            ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+            },
+            ResolvedPanel {
+                profile: "openai".into(),
+                model: "gpt-5.6-terra".into(),
+            },
+        ],
+        "fu_early_abort",
+        std::time::Duration::from_millis(config.panel_total_timeout_ms),
+    )
+    .await
+    .expect("panel collection");
+
+    // The hanging sibling must be ABORTED promptly, not run out its full
+    // 5s panel_total_timeout_ms — proving `run_panels` re-evaluated the bar
+    // after the PoolFull failure and cancelled the sibling early rather than
+    // waiting for the per-panel total-timeout wrapper to fire on its own.
+    assert!(
+        wall_started.elapsed() < std::time::Duration::from_millis(1_000),
+        "run_panels took {:?}, which means the sibling ran to its full \
+         5s panel_total_timeout_ms instead of being aborted early",
+        wall_started.elapsed()
+    );
+    for _ in 0..200 {
+        if spawner.live() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        spawner.live(),
+        0,
+        "the hanging sibling task must be dropped by the early abort"
+    );
+    assert_eq!(panels.len(), 2, "every requested panel must have a slot");
+    assert_eq!(
+        spawner.requests.lock().unwrap().len(),
+        2,
+        "both panels must have actually been spawned (one fails fast, one hangs)"
+    );
+    let spawn_failed = panels
+        .iter()
+        .filter(|panel| panel.error_category.as_deref() == Some("spawn"))
+        .count();
+    let aborted = panels
+        .iter()
+        .filter(|panel| panel.error_category.as_deref() == Some("aborted"))
+        .count();
+    assert_eq!(
+        (spawn_failed, aborted),
+        (1, 1),
+        "exactly one panel must carry the PoolFull spawn failure and exactly \
+         one must carry the synthesized early-abort category, got: {:?}",
+        panels
+            .iter()
+            .map(|p| (p.anonymous_id.clone(), p.error_category.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+struct PanickingSpawner;
+
+#[async_trait]
+impl SubagentSpawner for PanickingSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        panic!("boom: simulated panel task panic");
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_panel_task_still_yields_a_slot_instead_of_vanishing() {
+    let spawner = Arc::new(PanickingSpawner);
+    let resolved = [
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        },
+        ResolvedPanel {
+            profile: "openai".into(),
+            model: "gpt-5.6-terra".into(),
+        },
+    ];
+    let panels = crate::panel::run_panels(
+        spawner,
+        &inherit(),
+        &test_config(),
+        "task",
+        &resolved,
+        "fu_panic",
+        std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
+    )
+    .await
+    .expect("panel collection");
+
+    assert_eq!(
+        panels.len(),
+        resolved.len(),
+        "a panicked task must not shrink the panel set"
+    );
+    assert!(panels.iter().all(|panel| {
+        panel.status == PanelRunStatus::Failed && panel.error_category.as_deref() == Some("panic")
+    }));
 }

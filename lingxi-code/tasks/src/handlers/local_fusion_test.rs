@@ -147,6 +147,38 @@ impl FileSystem for InMemoryFs {
     }
 }
 
+/// An executor that blocks on the inherited cancel token instead of resolving
+/// immediately — lets a test observe whether `kill` gives the run a real
+/// chance to unwind cooperatively (F012) or hard-aborts it mid-flight.
+struct CancelAwareExecutor {
+    runs: AtomicUsize,
+    observed_cancel: AtomicUsize,
+}
+
+impl CancelAwareExecutor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            runs: AtomicUsize::new(0),
+            observed_cancel: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for CancelAwareExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        inherit.cancel.cancelled().await;
+        self.observed_cancel.fetch_add(1, Ordering::SeqCst);
+        Err(FusionError::Cancelled)
+    }
+}
+
 struct ImmediateExecutor {
     runs: AtomicUsize,
 }
@@ -262,6 +294,36 @@ impl RecordingSink {
 
     fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn count(&self, status: TaskStatus) -> usize {
+        self.statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| *s == status)
+            .count()
+    }
+}
+
+#[async_trait]
+impl TaskStatusSink for RecordingSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.calls.lock().unwrap().push("status");
+        self.statuses
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), status));
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        self.statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| id == task_id)
+            .is_some_and(|(_, status)| status.is_terminal())
     }
 }
 
@@ -541,4 +603,74 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
 
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
     assert_eq!(status_sink.calls(), vec!["status", "outcome", "status"]);
+}
+
+/// F012: `kill` on a run that is genuinely still executing (not already in
+/// the terminalizing window) must let the executor observe cooperative
+/// cancellation through its own inherited token before falling back to a
+/// hard `runtime.cancel` abort, and must reach `Killed` exactly once —
+/// never once from the worker's own `Err(FusionError::Cancelled)` arm AND
+/// again from `kill`'s fallback.
+#[tokio::test]
+async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed_once() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = CancelAwareExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+    let ctx = make_ctx(fs);
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    // Wait until the worker has genuinely entered the executor and is
+    // blocked on the inherited cancel token — not yet cancelled.
+    for _ in 0..200 {
+        if executor.runs.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        executor.runs.load(Ordering::SeqCst),
+        1,
+        "executor must have started"
+    );
+    assert_eq!(
+        executor.observed_cancel.load(Ordering::SeqCst),
+        0,
+        "executor must still be genuinely blocked before kill"
+    );
+
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill succeeds");
+
+    assert_eq!(
+        executor.observed_cancel.load(Ordering::SeqCst),
+        1,
+        "kill must let the executor observe cooperative cancellation through its own \
+         inherited token, not get hard-aborted mid-await"
+    );
+    assert_eq!(
+        status_sink.count(TaskStatus::Killed),
+        1,
+        "status must reach Killed exactly once; got: {:?}",
+        status_sink.calls()
+    );
 }

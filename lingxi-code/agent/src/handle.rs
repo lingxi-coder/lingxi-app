@@ -1377,6 +1377,8 @@ impl PoolSubagentSpawner {
             tool_schemas: vec![],
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
             schema: None,
+            // Overwritten by `build_subagent_context` from `request.structured_output_mode`.
+            structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
             budget: None,
             // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
@@ -1397,6 +1399,7 @@ impl PoolSubagentSpawner {
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
             query_source_label: None,
+            correlation_id: None,
         }
     }
 
@@ -1697,6 +1700,7 @@ impl PoolSubagentSpawner {
                         .map(Arc::from)
                 });
         ctx.schema = request.schema.clone();
+        ctx.structured_output_mode = request.structured_output_mode;
         // Preserve the spawn's human identity on every dispatched tool call.
         // Claude's per-agent async-local context exposes `getAgentName()` and
         // `getTeammateContext()?.teamName`; SendMessage and the V2 task tools
@@ -1735,6 +1739,9 @@ impl PoolSubagentSpawner {
         ctx.max_output_tokens_per_turn = request.max_output_tokens_per_turn;
         ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
         ctx.query_source_label = request.query_source_label.clone();
+        // G011: thread the caller's correlation id (Fusion's `{run_id}:p{index}`)
+        // onto the child so its transcript can be matched back to a run.
+        ctx.correlation_id = request.correlation_id.clone();
         if let Some(turns) = request.max_turns_override {
             if turns > 0 {
                 ctx.agent_definition.max_turns = ctx.agent_definition.max_turns.min(turns);
@@ -2110,17 +2117,41 @@ fn rule_tool_name(rule: &str) -> &str {
     }
 }
 
+/// Grace period [`SpawnDeallocGuard`]'s early-drop path gives the runner to
+/// observe a cooperative `UserInterrupt` — reach its own `record_terminal`
+/// transcript write and return on its own — before the hard `abort()`
+/// fallback. Kept short: this directly extends how long a caller that dropped
+/// the spawn future (Fusion panel timeout/cancel racing
+/// `spawn_workflow_with_observer`, or any other future combinator race) waits
+/// for cleanup. A named constant rather than a magic literal so the ceiling is
+/// easy to find and retune (G007 / F012).
+const SPAWN_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Cancel-safety guard for [`PoolSubagentSpawner::spawn`]. The runner runs as a
 /// DETACHED pool task (`allocate` spawns it via the `RuntimeSpawner`); the
 /// `spawn` future only pumps events and calls `deallocate` on the terminal
 /// event. If a caller races `spawn` against a `CancellationToken` and DROPS the
 /// future before that terminal event (timeout / cancel), `deallocate` would
 /// never run and the detached runner would keep executing tools + leak its
-/// slot. This guard deallocates (which `runtime.cancel`s the task) on early
-/// drop; it is disarmed on the normal terminal path.
+/// slot.
+///
+/// On early drop this guard first delivers a cooperative `UserInterrupt` and
+/// gives the runner [`SPAWN_CANCEL_GRACE`] to reach its own terminal state (the
+/// runner's turn loop races `event_rx` against the in-flight model call and,
+/// on `UserInterrupt`, writes `record_terminal("cancelled")` before returning
+/// — see `runner::emit_killed`) rather than hard-aborting it mid-turn, which
+/// would leave `agent-<id>.jsonl` stuck reporting `"status":"running"`
+/// forever. Only after the grace elapses does it fall back to
+/// `deallocate`/`abort()`. Because the dropped `spawn` future never reaches
+/// its own normal terminal-emit path (`observer_events.emit_terminal` below),
+/// this guard also emits the caller-visible `Killed` observation itself, so
+/// observers still see exactly one terminal lifecycle event per spawn. The
+/// guard is disarmed on the normal terminal path, where all of this already
+/// happened inline.
 struct SpawnDeallocGuard {
     pool: Arc<StateMachinePool>,
     agent_id: AgentId,
+    observer_events: crate::api::ObserverEventSink,
     armed: bool,
 }
 
@@ -2129,13 +2160,24 @@ impl Drop for SpawnDeallocGuard {
         if !self.armed {
             return;
         }
-        // `deallocate` is async; hand it to the current runtime best-effort. If
-        // no runtime is active (shutdown) there is nothing left to clean up.
+        // The cleanup below is async; hand it to the current runtime
+        // best-effort. If no runtime is active (shutdown) there is nothing
+        // left to clean up.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let pool = self.pool.clone();
             let id = self.agent_id;
+            let observer_events = self.observer_events.clone();
             handle.spawn(async move {
+                // Best-effort: a slot that is already gone (naturally
+                // completed, or raced by another deallocate) makes this a
+                // no-op — `send_event` and `deallocate` are both graceful on
+                // a missing agent id.
+                let _ = pool
+                    .send_event(&id, lingxi_core::Event::UserInterrupt)
+                    .await;
+                tokio::time::sleep(SPAWN_CANCEL_GRACE).await;
                 let _ = pool.deallocate(&id).await;
+                observer_events.emit_terminal(SubagentObservation::Killed { agent_id: id });
             });
         }
     }
@@ -2255,6 +2297,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         let mut dealloc_guard = SpawnDeallocGuard {
             pool: self.pool.clone(),
             agent_id,
+            observer_events: observer_events.clone(),
             armed: true,
         };
         observer_events.try_emit(SubagentObservation::Allocated {
@@ -2981,6 +3024,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -3310,6 +3354,137 @@ mod tests {
             events.last(),
             Some(SubagentObservation::Completed { .. })
         ));
+    }
+
+    /// A `SubagentApiClient` whose model round-trip never resolves — pins a
+    /// spawned runner inside its `event_rx` vs. `api_call` race indefinitely,
+    /// so a test can drop the caller's `spawn` future while the runner is
+    /// still genuinely in flight (not already finished on its own).
+    struct HangingApi;
+
+    #[async_trait]
+    impl crate::api::SubagentApiClient for HangingApi {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<protocol::ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            std::future::pending().await
+        }
+    }
+
+    /// G007 / F012: dropping the `spawn` future mid-flight (Fusion panel
+    /// timeout/cancel racing `spawn_workflow_with_observer`, or any other
+    /// future combinator that drops it) must not silently hard-abort the
+    /// runner. `SpawnDeallocGuard`'s early-drop path must give the runner a
+    /// grace window to reach its own cooperative terminal write (so the
+    /// transcript never gets stuck reporting `"status":"running"` forever)
+    /// and must itself emit exactly one terminal `Killed` observation, since
+    /// the dropped future never reaches its own normal terminal-emit code.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(HangingApi))
+            .with_spawn_observer(observer.clone())
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::from("/tmp"),
+                Some(dir.path().to_path_buf()),
+            )
+            .with_transcript_fs(fs);
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "go"
+        }))
+        .expect("minimal spawn request");
+
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging API call must still be in flight when the caller times out"
+        );
+
+        let agent_id = match observer.events.lock().unwrap().first() {
+            Some(SubagentObservation::Allocated { agent_id, .. }) => *agent_id,
+            other => panic!("expected an Allocated observation first, got {other:?}"),
+        };
+
+        // Poll under the paused virtual clock (auto-fast-forwards each
+        // `sleep` through the guard's grace-period wait once the runtime is
+        // otherwise idle) until the guard's cleanup task reaches its OWN
+        // terminal emit — the last step, after the grace period. No real
+        // wall-clock waiting; bounded so a regression hangs the test instead
+        // of looping forever.
+        let terminal = |events: &[SubagentObservation]| {
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        SubagentObservation::Completed { .. }
+                            | SubagentObservation::Failed { .. }
+                            | SubagentObservation::Killed { .. }
+                    )
+                })
+                .count()
+        };
+        for _ in 0..200 {
+            if terminal(&observer.events.lock().unwrap()) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let terminal_count = terminal(&observer.events.lock().unwrap());
+        assert_eq!(
+            terminal_count,
+            1,
+            "exactly one terminal observer event for a dropped spawn future; got: {:?}",
+            observer.events.lock().unwrap()
+        );
+
+        // The runner's OWN cooperative write happens strictly before the
+        // guard's grace period elapses (it races `event_rx` against the
+        // still-pending model call and reacts to `UserInterrupt`
+        // immediately) — by the time the guard's later terminal emit above
+        // has landed, the transcript must already show it, not the initial
+        // `"running"` write.
+        let transcript_path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+        let body = std::fs::read_to_string(&transcript_path).unwrap_or_else(|e| {
+            panic!(
+                "transcript at {} should exist: {e}",
+                transcript_path.display()
+            )
+        });
+        let last_status = body.lines().rev().find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str().map(str::to_string)))
+        });
+        assert_eq!(
+            last_status.as_deref(),
+            Some("cancelled"),
+            "the runner must reach its own cooperative terminal write before the hard-abort \
+             fallback, not get killed mid-turn with the transcript stuck \"running\": {body}"
+        );
     }
 
     /// Runtime used to prove pool-level cancellation cleanup: it records
@@ -4718,6 +4893,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -4780,6 +4956,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5356,6 +5533,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5481,6 +5659,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5598,6 +5777,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5673,6 +5853,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5738,6 +5919,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5785,6 +5967,73 @@ mod tests {
             "the one-shot spawn path must NOT park"
         );
         assert!(!one_shot.is_async);
+    }
+
+    /// G011: `SubagentSpawnRequest::correlation_id` (Fusion's `{run_id}:p{index}`
+    /// stamp, `fusion::panel::spawn_request`) must reach the child's
+    /// `SubagentContext` — otherwise it is a field that is set at the one
+    /// call site and read by nothing, and N transcripts titled
+    /// `fusion-panel` can never be matched back to a run or panel index.
+    #[tokio::test]
+    async fn build_subagent_context_copies_correlation_id() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            observer: None,
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            structured_output_mode: Default::default(),
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
+            resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: Some("fu_abc123:p0".into()),
+        };
+        let mk_inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+
+        let ctx = spawner
+            .build_subagent_context(&req, mk_inherit(), false)
+            .await
+            .expect("context should build")
+            .0;
+        assert_eq!(
+            ctx.correlation_id.as_deref(),
+            Some("fu_abc123:p0"),
+            "the request's correlation_id must reach the child SubagentContext"
+        );
     }
 
     #[tokio::test]
@@ -5861,6 +6110,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5969,6 +6219,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -6063,6 +6314,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -6478,6 +6730,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,

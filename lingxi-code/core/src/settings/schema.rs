@@ -850,9 +850,17 @@ impl FusionSettingsJson {
             }
         }
         if let Some(turns) = self.panel_max_turns {
-            if !(1..=32).contains(&turns) {
+            // The `fusion-panel` agent definition
+            // (`agent::builtins::fusion_panel_definition`) hard-codes
+            // `max_turns: 12` and a request override only ever LOWERS it
+            // (`.min()`), so the runner can never actually run a panel past
+            // 12 turns. Accepting a configured value above that would only
+            // inflate `budget::quote`'s per-turn reservation (up to 2.7x)
+            // for turns that could never be spent — a spurious
+            // `BudgetExceeded` (F002).
+            if !(1..=12).contains(&turns) {
                 return Err(SchemaViolation(
-                    "fusion.panelMaxTurns must be in 1..=32".into(),
+                    "fusion.panelMaxTurns must be in 1..=12".into(),
                 ));
             }
         }
@@ -2094,5 +2102,30 @@ mod tests {
         defaults_fit
             .validate()
             .expect("documented stage defaults must fit under the default total");
+    }
+
+    /// The `fusion-panel` agent definition (`agent::builtins::fusion_panel_definition`)
+    /// hard-codes `max_turns: 12` and only ever LOWERS it via `.min()` — the
+    /// runner will never actually run a panel past 12 turns. A configured
+    /// `panelMaxTurns` above 12 therefore only inflates
+    /// `budget::quote`'s per-turn reservation (up to 2.7x for the schema's
+    /// old 32 ceiling) without buying any more real turns — a spurious
+    /// `BudgetExceeded` for money that could never be spent (F002).
+    #[test]
+    fn fusion_panel_max_turns_is_capped_at_the_runner_ceiling_of_12() {
+        let at_ceiling: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelMaxTurns":12}}"#).unwrap();
+        assert!(
+            at_ceiling.validate().is_ok(),
+            "12 matches the runner's hard-coded fusion-panel max_turns and must stay valid"
+        );
+
+        let above_ceiling: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelMaxTurns":13}}"#).unwrap();
+        assert!(
+            above_ceiling.validate().is_err(),
+            "13 can never actually run — the runner caps every panel at 12 turns \
+             regardless of this setting, so accepting it only over-reserves budget"
+        );
     }
 }

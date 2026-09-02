@@ -388,6 +388,7 @@ fn workflow_fusion_result() -> FusionResult {
             status: PanelRunStatus::Completed,
             duration_ms: 7,
             error_category: None,
+            error_detail: None,
             usage: Some(FusionUsage::default()),
         }],
         usage: FusionUsage::default(),

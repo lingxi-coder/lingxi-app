@@ -897,6 +897,7 @@ fn panel_outcome(panel: &PanelInternal) -> PanelOutcome {
         status: panel.status,
         duration_ms: panel.duration_ms,
         error_category: panel.error_category.clone(),
+        error_detail: panel.error_detail.clone(),
         usage: panel.usage.clone(),
     }
 }

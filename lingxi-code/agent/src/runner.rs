@@ -1201,6 +1201,7 @@ async fn run_subagent_loop(
             Some(resolve_model(&ctx)),
             ctx.model_profile.clone(),
         )
+        .with_correlation_id(ctx.correlation_id.clone())
     });
     // Mark a child as live before its first round-trip. A persistent child may
     // later transition to `idle` without terminating; the lifecycle records
@@ -2350,6 +2351,40 @@ fn accumulate_usage(acc: &mut llm_client::Usage, turn: &llm_client::Usage) {
         .saturating_add(turn.billable_tokens.reasoning_output);
 }
 
+/// Group `messages` into atomic trim units: an assistant message whose
+/// content is entirely (or partly) `ToolUse` blocks, immediately followed by
+/// a user message whose content is entirely `ToolResult` blocks, is one unit
+/// — every other message is its own unit. Every provider rejects a
+/// `tool_result` with no matching `tool_use` in the same request (and vice
+/// versa), so [`cap_input_bytes`] must never keep one half of such a pair.
+fn tool_pair_units(messages: &[protocol::ConversationMessage]) -> Vec<&[protocol::ConversationMessage]> {
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        let is_tool_use_turn = matches!(
+            &messages[i],
+            protocol::ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, protocol::ContentBlock::ToolUse { .. }))
+        );
+        if is_tool_use_turn && i + 1 < messages.len() {
+            let next_is_all_tool_result = matches!(
+                &messages[i + 1],
+                protocol::ConversationMessage::User { content, .. }
+                    if !content.is_empty()
+                        && content.iter().all(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }))
+            );
+            if next_is_all_tool_result {
+                units.push(&messages[i..=i + 1]);
+                i += 2;
+                continue;
+            }
+        }
+        units.push(&messages[i..=i]);
+        i += 1;
+    }
+    units
+}
+
 fn cap_input_bytes(
     messages: &[protocol::ConversationMessage],
     max_bytes: Option<u64>,
@@ -2357,25 +2392,33 @@ fn cap_input_bytes(
     let Some(max) = max_bytes else {
         return messages.to_vec();
     };
-    let mut out = Vec::new();
+    let units = tool_pair_units(messages);
+    let unit_bytes = |unit: &[protocol::ConversationMessage]| -> u64 {
+        unit.iter()
+            .map(|msg| {
+                serde_json::to_vec(msg)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0)
+            })
+            .sum()
+    };
+    let mut out: Vec<&[protocol::ConversationMessage]> = Vec::new();
     let mut used = 0u64;
-    for msg in messages.iter().rev() {
-        let size = serde_json::to_vec(msg)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0);
+    for unit in units.iter().rev() {
+        let size = unit_bytes(unit);
         if !out.is_empty() && used.saturating_add(size) > max {
             break;
         }
         used = used.saturating_add(size);
-        out.push(msg.clone());
+        out.push(unit);
     }
     out.reverse();
     if out.is_empty() {
-        if let Some(last) = messages.last() {
-            out.push(last.clone());
+        if let Some(last_unit) = units.last() {
+            out.push(last_unit);
         }
     }
-    out
+    out.into_iter().flatten().cloned().collect()
 }
 
 #[cfg(test)]

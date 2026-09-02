@@ -199,6 +199,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         max_output_tokens_per_turn: None,
         max_input_bytes_per_turn: None,
         query_source_label: None,
+        correlation_id: None,
     }
 }
 

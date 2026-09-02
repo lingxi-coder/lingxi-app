@@ -923,6 +923,9 @@ impl InProcessTeammateHandler {
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
             query_source_label: None,
+            // Teammates are not spawned through `SubagentSpawnRequest`, so
+            // there is no caller correlation id to thread.
+            correlation_id: None,
         })
     }
 }

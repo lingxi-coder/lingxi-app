@@ -1399,6 +1399,7 @@ impl PoolSubagentSpawner {
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
             query_source_label: None,
+            correlation_id: None,
         }
     }
 
@@ -1738,6 +1739,9 @@ impl PoolSubagentSpawner {
         ctx.max_output_tokens_per_turn = request.max_output_tokens_per_turn;
         ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
         ctx.query_source_label = request.query_source_label.clone();
+        // G011: thread the caller's correlation id (Fusion's `{run_id}:p{index}`)
+        // onto the child so its transcript can be matched back to a run.
+        ctx.correlation_id = request.correlation_id.clone();
         if let Some(turns) = request.max_turns_override {
             if turns > 0 {
                 ctx.agent_definition.max_turns = ctx.agent_definition.max_turns.min(turns);
@@ -5796,6 +5800,73 @@ mod tests {
             "the one-shot spawn path must NOT park"
         );
         assert!(!one_shot.is_async);
+    }
+
+    /// G011: `SubagentSpawnRequest::correlation_id` (Fusion's `{run_id}:p{index}`
+    /// stamp, `fusion::panel::spawn_request`) must reach the child's
+    /// `SubagentContext` — otherwise it is a field that is set at the one
+    /// call site and read by nothing, and N transcripts titled
+    /// `fusion-panel` can never be matched back to a run or panel index.
+    #[tokio::test]
+    async fn build_subagent_context_copies_correlation_id() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            observer: None,
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            structured_output_mode: Default::default(),
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
+            resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: Some("fu_abc123:p0".into()),
+        };
+        let mk_inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+
+        let ctx = spawner
+            .build_subagent_context(&req, mk_inherit(), false)
+            .await
+            .expect("context should build")
+            .0;
+        assert_eq!(
+            ctx.correlation_id.as_deref(),
+            Some("fu_abc123:p0"),
+            "the request's correlation_id must reach the child SubagentContext"
+        );
     }
 
     #[tokio::test]

@@ -383,6 +383,12 @@ pub struct PanelOutcome {
     /// Sanitized error category. Never a raw provider body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_category: Option<String>,
+    /// Sanitized, length-capped one-line detail of the source error (G011).
+    /// Additive: absent on older serialized results, and `None` when there
+    /// was nothing beyond [`Self::error_category`] to attach. Never a raw
+    /// provider body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Cumulative usage for this panel when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<FusionUsage>,
@@ -882,6 +888,37 @@ mod tests {
         let result: FusionResult = serde_json::from_value(json).unwrap();
         assert_eq!(result.final_text, "ok");
         assert_eq!(result.status, FusionStatus::Completed);
+    }
+
+    /// G011: `PanelOutcome::error_detail` is additive — a result serialized
+    /// before this field existed must still deserialize (defaulting to
+    /// `None`), and a populated value must round-trip byte-exact.
+    #[test]
+    fn panel_outcome_error_detail_is_additive_and_round_trips() {
+        let pre_existing_json = serde_json::json!({
+            "panel_id": "P1",
+            "status": "failed",
+            "duration_ms": 12,
+            "error_category": "provider"
+        });
+        let outcome: PanelOutcome = serde_json::from_value(pre_existing_json).unwrap();
+        assert_eq!(outcome.error_detail, None);
+
+        let with_detail = PanelOutcome {
+            panel_id: "P1".into(),
+            status: PanelRunStatus::Failed,
+            duration_ms: 12,
+            error_category: Some("provider".into()),
+            error_detail: Some("rate limited by upstream".into()),
+            usage: None,
+        };
+        let json = serde_json::to_value(&with_detail).unwrap();
+        assert_eq!(
+            json.get("error_detail").and_then(|v| v.as_str()),
+            Some("rate limited by upstream")
+        );
+        let back: PanelOutcome = serde_json::from_value(json).unwrap();
+        assert_eq!(back, with_detail);
     }
 
     #[test]

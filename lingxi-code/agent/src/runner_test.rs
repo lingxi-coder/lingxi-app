@@ -556,6 +556,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         max_output_tokens_per_turn: None,
         max_input_bytes_per_turn: None,
         query_source_label: None,
+        correlation_id: None,
     }
 }
 
@@ -4553,4 +4554,76 @@ fn a_stalled_stream_is_terminal_and_an_ordinary_interruption_still_recovers() {
             "{error:?} is in CTy and must still recover as api_error_partial"
         );
     }
+}
+
+// ---- Fusion panel input cap must not split tool_use/tool_result pairs ----
+
+/// Build an assistant message whose only content block is a `ToolUse`.
+fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
+    ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolUse {
+            id,
+            name: name.to_string(),
+            input: serde_json::json!({}),
+            provider_id: None,
+        }],
+        stop_reason: Some("tool_use".into()),
+    }
+}
+
+/// Build a user message whose only content block is the matching `ToolResult`.
+fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
+    ConversationMessage::User {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id,
+            content: content.to_string(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    }
+}
+
+/// A byte cap tight enough to keep only the LAST message by itself would,
+/// under naive whole-message trimming from the tail, keep a trailing
+/// `ToolResult` while dropping the `ToolUse` message that produced it —
+/// wire-invalid history (a `tool_result` with no matching `tool_use` in the
+/// same request). `cap_input_bytes` must keep or drop such a pair together.
+#[test]
+fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
+    let tool_id = ToolUseId::new();
+    let history = vec![
+        assistant_text("turn one, filler text to add up bytes so the cap bites here"),
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id.clone(), "file contents"),
+    ];
+    // Sized to fit only the trailing `ToolResult` message on its own — not
+    // the `ToolUse` before it. A naive per-message trim from the tail always
+    // keeps the very last message unconditionally, then finds the `ToolUse`
+    // message doesn't fit and stops — leaving a `ToolResult` with no
+    // matching `ToolUse` in the kept history, which is wire-invalid.
+    let tool_result_bytes = serde_json::to_vec(&history[2]).unwrap().len() as u64;
+    let capped = super::cap_input_bytes(&history, Some(tool_result_bytes));
+
+    let has_tool_use = capped.iter().any(|m| {
+        matches!(m, ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if *id == tool_id)))
+    });
+    let has_tool_result = capped.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tool_id)))
+    });
+    assert_eq!(
+        has_tool_use, has_tool_result,
+        "cap_input_bytes split a tool_use/tool_result pair: tool_use kept={has_tool_use}, tool_result kept={has_tool_result}"
+    );
+    assert!(
+        has_tool_result,
+        "the pair that fits the budget must be kept, not dropped entirely"
+    );
 }

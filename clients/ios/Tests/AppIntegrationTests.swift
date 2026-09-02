@@ -45,17 +45,38 @@ final class AppIntegrationTests: XCTestCase {
             LingxiDeepLink.action(
                 from: URL(string: "lingxi://open_conversation?sessionId=session-a&turnId=42")!
             ),
-            .openConversation(sessionID: "session-a", turnID: 42)
+            .openConversation(
+                sessionID: "session-a",
+                turnID: 42,
+                workspaceKey: nil,
+                mode: .code
+            )
         )
         XCTAssertEqual(
             LingxiDeepLink.action(
                 from: URL(string: "lingxi://open_conversation?sessionId=session-a")!
             ),
-            .openConversation(sessionID: "session-a", turnID: nil)
+            .openConversation(
+                sessionID: "session-a",
+                turnID: nil,
+                workspaceKey: nil,
+                mode: .code
+            )
         )
         XCTAssertEqual(
             LingxiDeepLink.conversationURL(sessionID: "session-a", turnID: 42)?.absoluteString,
-            "lingxi://open_conversation?sessionId=session-a&turnId=42"
+            "lingxi://open_conversation?sessionId=session-a&turnId=42&sessionMode=code"
+        )
+        XCTAssertEqual(
+            LingxiDeepLink.action(from: URL(
+                string: "lingxi://open_conversation?sessionId=chat-a&workspaceKey=app.weather&sessionMode=chat"
+            )!),
+            .openConversation(
+                sessionID: "chat-a",
+                turnID: nil,
+                workspaceKey: "app.weather",
+                mode: .chat
+            )
         )
     }
 

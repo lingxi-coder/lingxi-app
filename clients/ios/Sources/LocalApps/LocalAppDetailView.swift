@@ -37,9 +37,9 @@ struct LocalAppDetailView: View {
     let appID: String
     @Binding var path: [LocalAppsRoute]
     var activeConversationID: String = ""
-    /// `(appID, sessionUUID)` — RootView dismisses the cover and resumes the
-    /// session inside the app's conversation scope.
-    var onOpenAppSession: (String, String) -> Void = { _, _ in }
+    /// `(appID, sessionUUID, mode)` — RootView dismisses the cover and resumes
+    /// the session inside the matching app capability profile.
+    var onOpenAppSession: (String, String, SessionMode) -> Void = { _, _, _ in }
     /// RootView dismisses the cover and starts a fresh conversation in the
     /// app's scope.
     var onNewAppSession: (String) -> Void = { _ in }
@@ -163,7 +163,7 @@ struct LocalAppDetailView: View {
             LocalAppSessionsSection(
                 store: store,
                 appID: appID,
-                onOpenSession: { onOpenAppSession(appID, $0) },
+                onOpenSession: { onOpenAppSession(appID, $0.uuid, $0.mode) },
                 onNewSession: { onNewAppSession(appID) }
             )
         case .overview:
@@ -565,7 +565,7 @@ struct LocalAppSessionsSection: View {
     @Environment(\.theme) private var theme
     @Bindable var store: LocalAppsStore
     let appID: String
-    let onOpenSession: (String) -> Void
+    let onOpenSession: (LocalAppSessionRow) -> Void
     let onNewSession: () -> Void
 
     private var page: LocalAppSessionPage? { store.sessionPages[appID] }
@@ -584,7 +584,7 @@ struct LocalAppSessionsSection: View {
             Section {
                 ForEach(page?.rows ?? []) { row in
                     Button {
-                        onOpenSession(row.uuid)
+                        onOpenSession(row)
                     } label: {
                         LocalAppSessionRowView(row: row)
                     }

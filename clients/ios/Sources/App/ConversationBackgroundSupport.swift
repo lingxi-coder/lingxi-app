@@ -9,18 +9,24 @@ enum ConversationNotificationRoute {
     static let routeKey = "lingxi.route"
     static let sessionIDKey = "lingxi.conversation.session_id"
     static let turnIDKey = "lingxi.conversation.turn_id"
+    static let workspaceKeyKey = "lingxi.conversation.workspace_key"
+    static let sessionModeKey = "lingxi.conversation.session_mode"
     static let eventClassKey = "lingxi.conversation.event_class"
     static let routeValue = "conversation"
 
     static func userInfo(
         sessionID: String,
         turnID: UInt64?,
+        workspaceKey: String = "global",
+        sessionMode: SessionMode = .code,
         eventClass: ConversationNotificationEventClass
     ) -> [AnyHashable: Any] {
         var userInfo: [AnyHashable: Any] = [
             routeKey: routeValue,
             sessionIDKey: sessionID,
             eventClassKey: eventClass.rawValue,
+            workspaceKeyKey: workspaceKey,
+            sessionModeKey: sessionMode.rawValue,
         ]
         if let turnID {
             userInfo[turnIDKey] = String(turnID)
@@ -36,7 +42,16 @@ enum ConversationNotificationRoute {
             !sessionID.isEmpty
         else { return nil }
         let turnID = (userInfo[turnIDKey] as? String).flatMap(UInt64.init)
-        return .openConversation(sessionID: sessionID, turnID: turnID)
+        let workspaceKey = (userInfo[workspaceKeyKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mode = (userInfo[sessionModeKey] as? String)
+            .flatMap(SessionMode.init(rawValue:)) ?? .code
+        return .openConversation(
+            sessionID: sessionID,
+            turnID: turnID,
+            workspaceKey: workspaceKey?.isEmpty == false ? workspaceKey : nil,
+            mode: mode
+        )
     }
 }
 
@@ -54,6 +69,28 @@ struct ConversationBackgroundSnapshot: Equatable {
     let pendingQuestions: [ConversationPendingQuestion]
     let backgroundTasks: [BackgroundTaskSnapshot]
     let requiresExecutionLease: Bool
+    let workspaceKey: String
+    let sessionMode: SessionMode
+
+    init(
+        sessionID: String,
+        turnToken: ConversationTurnToken?,
+        turnCompletion: ConversationTurnCompletion?,
+        pendingQuestions: [ConversationPendingQuestion],
+        backgroundTasks: [BackgroundTaskSnapshot],
+        requiresExecutionLease: Bool,
+        workspaceKey: String = "global",
+        sessionMode: SessionMode = .code
+    ) {
+        self.sessionID = sessionID
+        self.turnToken = turnToken
+        self.turnCompletion = turnCompletion
+        self.pendingQuestions = pendingQuestions
+        self.backgroundTasks = backgroundTasks
+        self.requiresExecutionLease = requiresExecutionLease
+        self.workspaceKey = workspaceKey
+        self.sessionMode = sessionMode
+    }
 }
 
 struct ConversationNotificationPayload {
@@ -66,6 +103,8 @@ struct ConversationNotificationPayload {
         sessionID: String,
         turnID: UInt64?,
         eventClass: ConversationNotificationEventClass,
+        workspaceKey: String = "global",
+        sessionMode: SessionMode = .code,
         // Distinguishes notifications that share a session, turn and class.
         // Background tasks all posted with `turnID: nil`, so every task in a
         // session collapsed onto ONE identifier and `post`'s delivered-set
@@ -102,6 +141,8 @@ struct ConversationNotificationPayload {
             userInfo: ConversationNotificationRoute.userInfo(
                 sessionID: sessionID,
                 turnID: turnID,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode,
                 eventClass: eventClass
             )
         )
@@ -210,12 +251,16 @@ final class ConversationBackgroundAlertController {
                 post(
                     sessionID: snapshot.sessionID,
                     turnID: completion.token.clientTurnId,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode,
                     eventClass: .completed
                 )
             case .failed:
                 post(
                     sessionID: snapshot.sessionID,
                     turnID: completion.token.clientTurnId,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode,
                     eventClass: .failed
                 )
             case .maxTurns, .cancelled:
@@ -229,6 +274,8 @@ final class ConversationBackgroundAlertController {
             post(
                 sessionID: snapshot.sessionID,
                 turnID: snapshot.turnToken?.clientTurnId,
+                workspaceKey: snapshot.workspaceKey,
+                sessionMode: snapshot.sessionMode,
                 eventClass: .waitingForUser
             )
         }
@@ -242,22 +289,50 @@ final class ConversationBackgroundAlertController {
             let turnID = snapshot.turnToken?.clientTurnId
             switch task.status {
             case .completed:
-                post(sessionID: snapshot.sessionID, turnID: turnID, eventClass: .completed, discriminator: task.id)
+                post(
+                    sessionID: snapshot.sessionID,
+                    turnID: turnID,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode,
+                    eventClass: .completed,
+                    discriminator: task.id
+                )
             case .failed:
-                post(sessionID: snapshot.sessionID, turnID: turnID, eventClass: .failed, discriminator: task.id)
+                post(
+                    sessionID: snapshot.sessionID,
+                    turnID: turnID,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode,
+                    eventClass: .failed,
+                    discriminator: task.id
+                )
             case .paused:
-                post(sessionID: snapshot.sessionID, turnID: turnID, eventClass: .pausedRecoverable, discriminator: task.id)
+                post(
+                    sessionID: snapshot.sessionID,
+                    turnID: turnID,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode,
+                    eventClass: .pausedRecoverable,
+                    discriminator: task.id
+                )
             case .pending, .running, .cancelled:
                 break
             }
         }
     }
 
-    func markRecoverablePause(sessionID: String, turnToken: ConversationTurnToken?) {
+    func markRecoverablePause(
+        sessionID: String,
+        turnToken: ConversationTurnToken?,
+        workspaceKey: String = "global",
+        sessionMode: SessionMode = .code
+    ) {
         guard scenePhase != .active else { return }
         post(
             sessionID: sessionID,
             turnID: turnToken?.clientTurnId,
+            workspaceKey: workspaceKey,
+            sessionMode: sessionMode,
             eventClass: .pausedRecoverable
         )
     }
@@ -269,6 +344,8 @@ final class ConversationBackgroundAlertController {
     private func post(
         sessionID: String,
         turnID: UInt64?,
+        workspaceKey: String,
+        sessionMode: SessionMode,
         eventClass: ConversationNotificationEventClass,
         discriminator: String? = nil
     ) {
@@ -276,6 +353,8 @@ final class ConversationBackgroundAlertController {
             sessionID: sessionID,
             turnID: turnID,
             eventClass: eventClass,
+            workspaceKey: workspaceKey,
+            sessionMode: sessionMode,
             discriminator: discriminator
         )
         guard deliveredNotificationIDs.insert(payload.identifier).inserted else { return }
@@ -297,7 +376,9 @@ extension ConversationBackgroundSnapshot {
                 title: String(localized: "chat_background_waiting_title"),
                 subtitle: String(localized: "chat_background_waiting_text"),
                 status: .waiting,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode.rawValue
             )
         }
         if requiresExecutionLease {
@@ -307,7 +388,9 @@ extension ConversationBackgroundSnapshot {
                 title: String(localized: "chat_background_service_title"),
                 subtitle: String(localized: "chat_background_service_text"),
                 status: .running,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode.rawValue
             )
         }
         if let completion = turnCompletion {
@@ -331,7 +414,9 @@ extension ConversationBackgroundSnapshot {
                         ? String(localized: "chat_background_completed_text")
                         : String(localized: "chat_background_failed_text"),
                     status: status,
-                    updatedAt: .now
+                    updatedAt: .now,
+                    workspaceKey: workspaceKey,
+                    sessionMode: sessionMode.rawValue
                 )
             }
         }
@@ -342,7 +427,9 @@ extension ConversationBackgroundSnapshot {
                 title: String(localized: "chat_background_paused_title"),
                 subtitle: String(localized: "chat_background_paused_text"),
                 status: .paused,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode.rawValue
             )
         }
         if backgroundTasks.contains(where: { $0.status == .failed }) {
@@ -352,7 +439,9 @@ extension ConversationBackgroundSnapshot {
                 title: String(localized: "chat_background_failed_title"),
                 subtitle: String(localized: "chat_background_failed_text"),
                 status: .failed,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode.rawValue
             )
         }
         if backgroundTasks.contains(where: { $0.status == .completed }) {
@@ -362,7 +451,9 @@ extension ConversationBackgroundSnapshot {
                 title: String(localized: "chat_background_completed_title"),
                 subtitle: String(localized: "chat_background_completed_text"),
                 status: .completed,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: workspaceKey,
+                sessionMode: sessionMode.rawValue
             )
         }
         return nil

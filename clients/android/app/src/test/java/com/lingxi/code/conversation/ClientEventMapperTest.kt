@@ -11,6 +11,7 @@ import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.PlanTaskDto
 import com.lingxi.code.bindings.PlanTaskStateDto
+import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.bindings.StructuredDiffDto
 import com.lingxi.code.bindings.SyntaxClassDto
 import com.lingxi.code.bindings.ToolHeaderDto
@@ -271,6 +272,7 @@ class ClientEventMapperTest {
         val r = clientEventToReply(
             ClientEvent.SessionResumed(
                 sessionId = "s",
+                mode = SessionModeDto.CODE,
                 messages = listOf(MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("hi")))),
             ),
         )

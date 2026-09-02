@@ -1382,6 +1382,7 @@ class ChatViewModel(
         newSession: Boolean = target.id == "new",
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
+        allowInactiveWaitingRecovery: Boolean = false,
         /**
          * The scope the replacement source is bound to. Defaults to the
          * project/global split [projectId] already implies so existing project
@@ -1393,7 +1394,7 @@ class ChatViewModel(
         persistSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
-        if (refuseWhileDurableTurnParked()) return@withLock false
+        if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return@withLock false
         if (_state.value.streaming ||
             (_state.value.sessionTransitioning && !replacePendingTransition)
         ) {
@@ -1461,6 +1462,10 @@ class ChatViewModel(
             return@withLock false
         }
 
+        if (allowInactiveWaitingRecovery) {
+            releaseDurableRecoveryForSessionChange()
+        }
+
         if (replacePendingTransition && _state.value.sessionTransitioning) {
             abandonPendingSessionTransition()
         }
@@ -1500,6 +1505,7 @@ class ChatViewModel(
             } else {
                 strings.resolve(R.string.chat_status_resuming_project_session, "正在恢复项目会话…")
             },
+            allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
         )
         true
     }

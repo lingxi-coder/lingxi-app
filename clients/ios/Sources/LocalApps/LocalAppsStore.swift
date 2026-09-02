@@ -448,7 +448,20 @@ final class LocalAppsStore {
                 let liveAppIDs = Set(updatedApps.map(\.id))
                 runtimeProfileStatuses = runtimeProfileStatuses.filter { liveAppIDs.contains($0.key) }
                 managedMcpInventories = managedMcpInventories.filter { liveAppIDs.contains($0.value.appID) }
+                sessionPages = sessionPages.filter { liveAppIDs.contains($0.key) }
+                pendingSessionRequestOffsets = pendingSessionRequestOffsets.filter {
+                    liveAppIDs.contains($0.key)
+                }
                 apps = updatedApps
+                let missingSessionAppIDs = updatedApps.map(\.id).filter {
+                    sessionPages[$0] == nil && pendingSessionRequestOffsets[$0] == nil
+                }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    for appID in missingSessionAppIDs {
+                        await self.listSessions(appID: appID)
+                    }
+                }
                 scheduleWidgetSnapshotPublish()
                 scheduleWebsiteDataCleanup(activeAppIDs: Set(updatedApps.map(\.id)))
                 // No claim here any more.
@@ -893,7 +906,9 @@ final class LocalAppsStore {
     /// reply arrives out-of-band as `AppSessionsChanged`.
     func listSessions(appID: String, offset: UInt64? = nil, limit: UInt32? = nil) async {
         #if canImport(engine_mobileFFI)
-            pendingSessionRequestOffsets[appID] = offset ?? 0
+            let normalizedOffset = offset ?? 0
+            if pendingSessionRequestOffsets[appID] == normalizedOffset { return }
+            pendingSessionRequestOffsets[appID] = normalizedOffset
             let submitted = await send(.listAppSessions(appId: appID, offset: offset, limit: limit))
             if !submitted { pendingSessionRequestOffsets[appID] = nil }
         #endif

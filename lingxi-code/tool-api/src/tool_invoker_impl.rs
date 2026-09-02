@@ -685,6 +685,22 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn session_allowlist_blocks_final_dispatch() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(TestEchoTool {
+            requires_user_interaction: false,
+        }));
+        registry.set_session_tool_allowlist(&["Read".to_string()]);
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        let result = invoker.invoke("TestEcho", json!({}), no_ctx()).await;
+        assert!(
+            matches!(result, Err(ToolInvokerError::NotFound(ref name)) if name == "TestEcho"),
+            "a tool hidden by the session capability profile must not dispatch: {result:?}"
+        );
+    }
+
     // ──── Task 10: dispatch preserves subagent_registry Arc identity ──────────────
     #[tokio::test]
     async fn registry_invoker_preserves_subagent_registry_arc_into_tool_use_ctx() {

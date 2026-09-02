@@ -24,6 +24,8 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.TaskStatusDto
 import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.sessionModeFromWireValue
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -203,6 +205,7 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
                         appContext,
                         snapshot.sessionId,
                         snapshot.turnId,
+                        snapshot.recoverySpec,
                     ),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 ),
@@ -558,6 +561,8 @@ internal object ConversationHeadlessRecovery {
                 val source = EngineConversationSource.create(
                     context = context.applicationContext,
                     projectWorkspace = spec.projectWorkspace(),
+                    workspaceKey = spec.workspaceKey,
+                    sessionMode = spec.sessionMode,
                     linuxRuntimeMode = spec.linuxRuntimeMode,
                     reuseProcessSource = false,
                 ) as? EngineConversationSource ?: run {
@@ -1045,7 +1050,14 @@ class ConversationTurnService : Service() {
             this,
             0,
             latestSnapshot
-                ?.let { ConversationNotificationRoute.openIntent(this, it.sessionId, it.turnId) }
+                ?.let {
+                    ConversationNotificationRoute.openIntent(
+                        this,
+                        it.sessionId,
+                        it.turnId,
+                        it.recoverySpec,
+                    )
+                }
                 ?: Intent(this, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
@@ -1072,6 +1084,8 @@ class ConversationTurnService : Service() {
         internal const val EXTRA_STATUS_TEXT = "conversation_status_text"
         internal const val EXTRA_PROJECT_ID = "conversation_project_id"
         internal const val EXTRA_HOST_PATH = "conversation_host_path"
+        internal const val EXTRA_SESSION_MODE = "conversation_session_mode"
+        internal const val EXTRA_WORKSPACE_KEY = "conversation_workspace_key"
         internal const val EXTRA_LINUX_RUNTIME_MODE = "conversation_linux_runtime_mode"
         internal const val EXTRA_ACTIVE_TASK_IDS = "conversation_active_task_ids"
         private const val NO_PROMOTION_TOKEN = -1L
@@ -1098,7 +1112,9 @@ class ConversationTurnService : Service() {
                     snapshot.recoverySpec?.let { spec ->
                         putExtra(EXTRA_PROJECT_ID, spec.projectId)
                         putExtra(EXTRA_HOST_PATH, spec.hostPath)
+                        putExtra(EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
                         putExtra(EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
+                        putExtra(EXTRA_WORKSPACE_KEY, spec.workspaceKey)
                     }
                     putExtra(EXTRA_ACTIVE_TASK_IDS, snapshot.activeTaskIds.toTypedArray())
                 }
@@ -1116,17 +1132,24 @@ private fun Intent.snapshot(): ConversationBackgroundSnapshot? {
         null
     }
     val status = getStringExtra(ConversationTurnService.EXTRA_STATUS_TEXT)
+    val sessionMode = sessionModeFromWireValue(
+        getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE),
+    )
     val runtimeMode = getStringExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE)
         ?.let { encoded -> LinuxRuntimeMode.entries.firstOrNull { it.name == encoded } }
         ?: LinuxRuntimeMode.Legacy
     val recoverySpec = if (
         hasExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE) ||
-        hasExtra(ConversationTurnService.EXTRA_HOST_PATH)
+        hasExtra(ConversationTurnService.EXTRA_HOST_PATH) ||
+        hasExtra(ConversationTurnService.EXTRA_SESSION_MODE) ||
+        hasExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY)
     ) {
         ConversationRecoverySpec(
             projectId = getStringExtra(ConversationTurnService.EXTRA_PROJECT_ID),
             hostPath = getStringExtra(ConversationTurnService.EXTRA_HOST_PATH),
+            sessionMode = sessionMode,
             linuxRuntimeMode = runtimeMode,
+            workspaceKey = getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY),
         )
     } else {
         null

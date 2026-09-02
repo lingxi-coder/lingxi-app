@@ -18,6 +18,7 @@
 //! that does not exist would be a defect, not fidelity.
 
 use clap::{Args, Subcommand};
+use platform_api::CredentialStoragePolicy;
 use platform_posix::{PosixClock, PosixHttp};
 use std::sync::Arc;
 
@@ -546,16 +547,41 @@ async fn storage_and_clock() -> Result<
     String,
 > {
     let home = crate::run::lingxi_home_dir();
-    let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
-    let storage = platform_posix::secure_storage_for_platform(
-        user,
-        home.clone(),
-        home.join(".credentials.json"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "default".to_string());
+    let storage = credential_storage(user, home.clone(), home.join(".credentials.json"))
+        .await
+        .map_err(|e| e.to_string())?;
     let clock: Arc<dyn platform_api::Clock> = Arc::new(PosixClock::new());
     Ok((storage, clock))
+}
+
+async fn credential_storage(
+    user: String,
+    home: std::path::PathBuf,
+    credentials_path: std::path::PathBuf,
+) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+    #[cfg(windows)]
+    {
+        platform_windows::secure_storage_for_policy(
+            user,
+            home,
+            credentials_path,
+            CredentialStoragePolicy::NativePreferred,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        platform_posix::secure_storage_for_policy(
+            user,
+            home,
+            credentials_path,
+            CredentialStoragePolicy::NativePreferred,
+        )
+        .await
+    }
 }
 
 fn http_transport() -> Result<Arc<dyn platform_api::HttpTransport>, String> {

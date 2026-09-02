@@ -9,12 +9,19 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         let userInfo = ConversationNotificationRoute.userInfo(
             sessionID: "session-a",
             turnID: 42,
+            workspaceKey: "project.weather",
+            sessionMode: .chat,
             eventClass: .completed
         )
 
         XCTAssertEqual(
             ConversationNotificationRoute.appAction(from: userInfo),
-            .openConversation(sessionID: "session-a", turnID: 42)
+            .openConversation(
+                sessionID: "session-a",
+                turnID: 42,
+                workspaceKey: "project.weather",
+                mode: .chat
+            )
         )
     }
 
@@ -179,7 +186,12 @@ final class ConversationBackgroundSupportTests: XCTestCase {
         XCTAssertEqual(payload.identifier, "conversation:session-a:5:pausedRecoverable:-")
         XCTAssertEqual(
             ConversationNotificationRoute.appAction(from: payload.userInfo),
-            .openConversation(sessionID: "session-a", turnID: 5)
+            .openConversation(
+                sessionID: "session-a",
+                turnID: 5,
+                workspaceKey: "global",
+                mode: .code
+            )
         )
     }
 

@@ -203,7 +203,9 @@ final class ConversationContinuedProcessingController {
                 title: String(localized: "chat_background_service_title"),
                 subtitle: String(localized: "chat_background_service_text"),
                 status: .running,
-                updatedAt: .now
+                updatedAt: .now,
+                workspaceKey: snapshot.workspaceKey,
+                sessionMode: snapshot.sessionMode.rawValue
             )
         let identifier = ConversationContinuedProcessingIdentifier.make(
             sessionID: liveSnapshot.sessionID,
@@ -409,7 +411,9 @@ final class ConversationLiveActivityController {
                     subtitle: snapshot.subtitle,
                     status: snapshot.status,
                     turnID: snapshot.turnID,
-                    updatedAt: snapshot.updatedAt
+                    updatedAt: snapshot.updatedAt,
+                    workspaceKey: snapshot.workspaceKey,
+                    sessionMode: snapshot.sessionMode
                 ),
                 staleDate: nil
             )

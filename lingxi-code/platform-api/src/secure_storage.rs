@@ -6,7 +6,9 @@
 use async_trait::async_trait;
 use protocol::SecureStorageData;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 /// Persistent secure store for opaque secret payloads keyed by
 /// `(service, account)`.
@@ -59,6 +61,8 @@ pub enum SecureStorageBackend {
     LinuxLibsecret,
     /// Windows Credential Vault (`CredRead`/`CredWrite`).
     WindowsCredVault,
+    /// Process memory only. Never persisted to disk.
+    MemorySession,
     /// Android `Keystore` system.
     AndroidKeystore,
     /// iOS Keychain Services.
@@ -67,6 +71,21 @@ pub enum SecureStorageBackend {
     EncryptedFile,
     /// File-backed store without encryption. Development only.
     PlainText,
+}
+
+/// Host policy for selecting the credential fallback behind the shared
+/// [`SecureStorage`] handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CredentialStoragePolicy {
+    /// Prefer the native credential store and fall back to the existing
+    /// owner-only plaintext sidecar when the native backend is unavailable.
+    NativePreferred,
+    /// Prefer the native credential store and fall back only to process
+    /// memory. Used by packaged desktop builds that must not write plaintext.
+    NativeOrMemory,
+    /// Skip native storage and use the explicit plaintext fixture directly.
+    /// Tests and isolated boots opt into this on purpose.
+    PlainTextFixture,
 }
 
 /// Failure modes for [`SecureStorage`] calls.
@@ -91,4 +110,79 @@ pub enum SecureStorageError {
     /// Catch-all for underlying I/O failures.
     #[error("io error: {0}")]
     Io(String),
+}
+
+/// Non-persistent in-process [`SecureStorage`] fallback.
+///
+/// This is intentionally separate from the plaintext file fallback: packaged
+/// desktop builds may keep credentials for the current process lifetime only,
+/// but must never write them to disk when the OS-native backend is unavailable.
+#[derive(Default)]
+pub struct InMemorySecureStorage {
+    entries: Mutex<BTreeMap<(String, String), SecureStorageData>>,
+}
+
+impl InMemorySecureStorage {
+    /// Construct the non-persistent current-session fallback store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl SecureStorage for InMemorySecureStorage {
+    async fn store(
+        &self,
+        service: &str,
+        account: &str,
+        data: SecureStorageData,
+    ) -> Result<(), SecureStorageError> {
+        self.entries
+            .lock()
+            .await
+            .insert((service.to_string(), account.to_string()), data);
+        Ok(())
+    }
+
+    async fn retrieve(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+        Ok(self
+            .entries
+            .lock()
+            .await
+            .get(&(service.to_string(), account.to_string()))
+            .cloned())
+    }
+
+    async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+        self.entries
+            .lock()
+            .await
+            .remove(&(service.to_string(), account.to_string()));
+        Ok(())
+    }
+
+    async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+        Ok(self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|((stored_service, account), _)| {
+                (stored_service == service).then_some(account.clone())
+            })
+            .collect())
+    }
+
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+
+    fn backend(&self) -> SecureStorageBackend {
+        SecureStorageBackend::MemorySession
+    }
 }

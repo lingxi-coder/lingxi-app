@@ -376,6 +376,11 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
       return input['limit'] === undefined ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
+    case 'login':
+    case 'logout':
+    case 'force_compact':
+      exactKeys(input, ['type']);
+      return { type };
     case 'task_list': {
       exactKeys(input, ['type', 'status_filter']);
       const status = input['status_filter'];
@@ -407,7 +412,7 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     }
     case 'refresh_listings': {
       exactKeys(input, ['type', 'which']);
-      if (!Array.isArray(input['which']) || input['which'].length === 0 || input['which'].length > 3) {
+      if (!Array.isArray(input['which']) || input['which'].length === 0 || input['which'].length > 8) {
         throw new Error('invalid listing selection');
       }
       const which = input['which'].map((value) => {
@@ -486,11 +491,14 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
       || command.type === 'set_reasoning_selection'
       || command.type === 'set_fast_mode'
       || command.type === 'run_slash_command'
+      || command.type === 'login'
+      || command.type === 'logout'
+      || command.type === 'force_compact'
       || command.type === 'new_session'
       || command.type === 'resume_session'
     )
   ) {
-    throw new Error('cancel the active turn before changing the model, session, or running a slash command');
+    throw new Error('cancel the active turn before changing session controls, authentication, compaction, or running a slash command');
   }
 }
 

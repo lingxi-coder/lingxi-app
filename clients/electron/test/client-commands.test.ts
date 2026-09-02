@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import {
+  ALLOWED_CLIENT_COMMAND_TYPES,
+  ALLOWED_REFRESH_LISTING_KINDS,
+  CLIENT_COMMAND_DISPOSITIONS,
+  CLIENT_EVENT_DISPOSITIONS,
+  REFRESH_LISTING_DISPOSITIONS,
+} from '../src/shared/clientCommands';
+
 const root = join(import.meta.dirname, '..');
 
 test('the allowed-command list has exactly one definition', () => {
@@ -30,6 +38,9 @@ test('the guard can actually fail', () => {
 test('the shared definition covers every newly-added command and listing kind', () => {
   const shared = readFileSync(join(root, 'src/shared/clientCommands.ts'), 'utf8');
   const newCommands = [
+    'login',
+    'logout',
+    'force_compact',
     'list_session_agents',
     'load_session_agent_transcript',
     'update_settings',
@@ -42,10 +53,34 @@ test('the shared definition covers every newly-added command and listing kind', 
   for (const name of newCommands) {
     assert.ok(shared.includes(`'${name}'`), `expected AllowedClientCommand to mention '${name}'`);
   }
-  const newListingKinds = ['settings', 'mcp', 'skills'];
+  const newListingKinds = ['auth', 'settings', 'mcp', 'skills', 'hooks', 'agents'];
   for (const kind of newListingKinds) {
     assert.ok(shared.includes(`'${kind}'`), `expected refresh_listings.which to mention '${kind}'`);
   }
+});
+
+test('the allowlists are the exposed subset of the exhaustive desktop disposition tables', () => {
+  assert.deepEqual(
+    [...ALLOWED_CLIENT_COMMAND_TYPES].sort(),
+    Object.entries(CLIENT_COMMAND_DISPOSITIONS)
+      .filter(([, disposition]) => disposition === 'exposed')
+      .map(([type]) => type)
+      .filter((type) => type !== 'refresh_listings')
+      .sort(),
+  );
+  assert.deepEqual(
+    [...ALLOWED_REFRESH_LISTING_KINDS].sort(),
+    Object.entries(REFRESH_LISTING_DISPOSITIONS)
+      .filter(([, disposition]) => disposition === 'exposed')
+      .map(([type]) => type)
+      .filter((type) => type !== 'models')
+      .sort(),
+  );
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.clear_session, 'host_private');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.request_exit, 'not_applicable');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.resume_workflow, 'not_applicable');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.turn_recovery_state, 'degraded');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.app_event, 'not_applicable');
 });
 
 test('audio_response is on the one shared array both gates derive from', () => {

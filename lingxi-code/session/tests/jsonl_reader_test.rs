@@ -118,6 +118,8 @@ const MIXED: &str = concat!(
     "\n",
     r#"{"type":"permission-mode","sessionId":"sid-1","mode":"acceptEdits"}"#,
     "\n",
+    r#"{"type":"session-mode","sessionId":"sid-1","sessionMode":"chat"}"#,
+    "\n",
     r#"{"type":"assistant","uuid":"u-2","parentUuid":"u-1","sessionId":"sid-1","timestamp":"2026-05-25T12:00:01.000Z","cwd":"/p","version":"0.6.0","isSidechain":false,"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
     "\n",
     r#"{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"trackedFileBackups":{}}}"#,
@@ -179,6 +181,10 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     assert_eq!(
         routed.ai_titles.get("sid-1").map(String::as_str),
         Some("Greeting")
+    );
+    assert_eq!(
+        routed.session_modes.get("sid-1").map(String::as_str),
+        Some("chat")
     );
 }
 

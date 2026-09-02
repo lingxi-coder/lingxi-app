@@ -27,7 +27,14 @@ import type {
   PermissionRequest,
   PermissionResolved,
 } from '../src/protocol.js';
-import { ALL_CLIENT_COMMAND_TYPES, ALL_CLIENT_EVENT_TYPES } from '../src/protocolCoverage.js';
+import {
+  ALL_APP_EVENT_TYPES,
+  ALL_CLIENT_COMMAND_TYPES,
+  ALL_CLIENT_EVENT_TYPES,
+  ALL_LOCAL_APP_PLUGIN_ERROR_CODES,
+  ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES,
+  ALL_PLUGIN_COMMAND_TYPES,
+} from '../src/protocolCoverage.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SNAP_ROOT = join(
@@ -76,6 +83,36 @@ function typeTagsOnDisk(category: string): Set<string> {
   }
   return tags;
 }
+
+function nestedPluginCommandTypeTagsOnDisk(): Set<string> {
+  const tags = new Set<string>();
+  for (const file of listSnapshots('command')) {
+    const snapshot = loadSnapshot<{ type: string; command?: { type?: string } }>('command', file);
+    if (snapshot.type !== 'plugin_command') continue;
+    assert.ok(snapshot.command && typeof snapshot.command.type === 'string', `command snapshot ${file} must carry command.type`);
+    tags.add(snapshot.command.type);
+  }
+  return tags;
+}
+
+function nestedAppEventTypeTagsOnDisk(): Set<string> {
+  const tags = new Set<string>();
+  for (const file of listSnapshots('event')) {
+    const snapshot = loadSnapshot<{ type: string; event?: { type?: string } }>('event', file);
+    if (snapshot.type !== 'app_event') continue;
+    assert.ok(snapshot.event && typeof snapshot.event.type === 'string', `event snapshot ${file} must carry event.type`);
+    tags.add(snapshot.event.type);
+  }
+  return tags;
+}
+
+const APP_EVENT_TYPES_WITH_EXPLICIT_NON_SNAPSHOT_TESTS = [
+  'app_created',
+  'app_llm_activity_changed',
+  'app_agent_event_posted',
+  'app_background_task_changed',
+  'app_bridge_stream_frame',
+] as const;
 
 // ── Generic structural helpers ───────────────────────────────────────────────
 
@@ -830,6 +867,7 @@ function validateAppSessionRow(v: unknown): void {
   const o = rec(v);
   assert.ok(
     isString(o['uuid']) &&
+      ['chat', 'code'].includes(String(o['mode'])) &&
       isString(o['title']) &&
       isString(o['modified_rfc3339']) &&
       isNumber(o['message_count']),
@@ -1220,6 +1258,8 @@ function validateAppEvent(v: unknown): void {
           'proposal_invalid',
           'catalog_stale',
           'active_state_corrupt',
+          'revision_conflict',
+          'invalid_mcp_settings',
           'mcp_authoring_required',
           'repair_budget_exhausted',
           'exposure_capacity_reached',
@@ -1455,6 +1495,12 @@ function validateCommand(name: string, v: unknown): void {
     case 'list_sessions':
       if ('limit' in o) assert.ok(isNumber(o['limit']));
       break;
+    case 'fork_session':
+      assert.ok(
+        isString(o['session_id']) &&
+          ['chat', 'code'].includes(String(o['target_mode'])),
+      );
+      break;
     case 'login':
     case 'logout':
     case 'force_compact':
@@ -1520,6 +1566,12 @@ function validateCommand(name: string, v: unknown): void {
         isString(o['app_id']) &&
           isString(o['approval_token']) &&
           isBool(o['approved']),
+      );
+      break;
+    case 'resolve_app_runtime_profile_selection':
+      assert.ok(
+        isString(o['request_id']) &&
+          ['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(o['selected_family'] as string),
       );
       break;
     case 'restore_app_checkpoint':
@@ -1758,14 +1810,21 @@ function validateEvent(name: string, v: unknown): void {
       );
       break;
     case 'session_started':
-      assert.ok(isString(o['session_id']));
+      assert.ok(isString(o['session_id']) && ['chat', 'code'].includes(String(o['mode'])));
       break;
     case 'session_resumed':
-      assert.ok(isString(o['session_id']));
+      assert.ok(isString(o['session_id']) && ['chat', 'code'].includes(String(o['mode'])));
       // `messages` is REQUIRED (Vec<MessageDto>, no skip_serializing_if) — it
       // carries the full restored transcript (oldest-first); may be empty.
       assert.ok(Array.isArray(o['messages']));
       for (const m of o['messages'] as unknown[]) validateMessage(m);
+      break;
+    case 'session_forked':
+      assert.ok(
+        isString(o['source_session_id']) &&
+          isString(o['session_id']) &&
+          ['chat', 'code'].includes(String(o['mode'])),
+      );
       break;
     case 'session_ended':
       break;
@@ -1775,6 +1834,7 @@ function validateEvent(name: string, v: unknown): void {
         const r = rec(s);
         assert.ok(
           isString(r['uuid']) &&
+            ['chat', 'code'].includes(String(r['mode'])) &&
             isString(r['title']) &&
             isString(r['modified_rfc3339']) &&
             isNumber(r['message_count']) &&
@@ -2181,6 +2241,63 @@ test('ALL_CLIENT_EVENT_TYPES matches the `type` tags on disk exactly', () => {
   );
 });
 
+test('ALL_PLUGIN_COMMAND_TYPES matches the nested plugin_command tags on disk exactly', () => {
+  const onDisk = [...nestedPluginCommandTypeTagsOnDisk()].sort();
+  const declared = Object.keys(ALL_PLUGIN_COMMAND_TYPES).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'ALL_PLUGIN_COMMAND_TYPES (src/protocolCoverage.ts) must declare exactly the nested PluginCommandDto tags carried by the command goldens — no more, no fewer',
+  );
+});
+
+test('ALL_APP_EVENT_TYPES matches the nested app_event tags on disk plus explicit non-snapshot coverage', () => {
+  const onDisk = new Set([
+    ...nestedAppEventTypeTagsOnDisk(),
+    ...APP_EVENT_TYPES_WITH_EXPLICIT_NON_SNAPSHOT_TESTS,
+  ]);
+  const declared = Object.keys(ALL_APP_EVENT_TYPES).sort();
+  assert.deepEqual(
+    APP_EVENT_TYPES_WITH_EXPLICIT_NON_SNAPSHOT_TESTS,
+    [
+      'app_created',
+      'app_llm_activity_changed',
+      'app_agent_event_posted',
+      'app_background_task_changed',
+      'app_bridge_stream_frame',
+    ],
+    'keep the explicit non-snapshot coverage list intentional and audited',
+  );
+  assert.deepEqual(
+    declared,
+    [...onDisk].sort(),
+    'ALL_APP_EVENT_TYPES (src/protocolCoverage.ts) must declare exactly the nested AppEventDto tags covered by snapshots plus explicit non-snapshot tests — no more, no fewer',
+  );
+});
+
+test('local app status/code coverage tables stay exhaustive for the native control plane', () => {
+  assert.deepEqual(
+    Object.keys(ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES).sort(),
+    ['authoring', 'disabled', 'enabled', 'error', 'needs_revalidation', 'needs_setup'],
+  );
+  assert.deepEqual(
+    Object.keys(ALL_LOCAL_APP_PLUGIN_ERROR_CODES).sort(),
+    [
+      'active_state_corrupt',
+      'builtin_bundle_unavailable',
+      'catalog_stale',
+      'exposure_capacity_reached',
+      'invalid_mcp_settings',
+      'mcp_authoring_required',
+      'plugin_disabled',
+      'proposal_invalid',
+      'repair_budget_exhausted',
+      'revision_conflict',
+      'template_unavailable',
+    ],
+  );
+});
+
 // `turn_recovery_state`'s golden only exercises `paused_recoverable` — this
 // test both proves `state` is checked against the real 6-kind
 // TurnRecoveryStateDto (until now that field wasn't checked at all: the
@@ -2484,6 +2601,21 @@ test('background task app events mirror the Rust wire contract', () => {
     status: 'succeeded',
     result_json: '{"ok":true}',
     retryable: false,
+  });
+});
+
+test('llm-activity and mailbox app events remain in the shared AppEventDto union', () => {
+  validateAppEvent({
+    type: 'app_llm_activity_changed',
+    app_id: 'abc12345',
+    active: true,
+  });
+  validateAppEvent({
+    type: 'app_agent_event_posted',
+    app_id: 'abc12345',
+    seq: 7,
+    topic: 'mailbox:new',
+    created_at_ms: 1_750_000_000_000,
   });
 });
 

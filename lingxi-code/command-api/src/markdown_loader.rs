@@ -100,6 +100,8 @@ struct RawFrontmatter {
     disallowed_tools: Option<ToolsField>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default, rename = "session-modes")]
+    session_modes: Option<ToolsField>,
     #[serde(default, rename = "argument-hint")]
     argument_hint: Option<String>,
     #[serde(default)]
@@ -762,6 +764,11 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         Some(ToolsField::One(s)) => Some(parse_slash_command_tools_from_frontmatter(&[s])),
         Some(ToolsField::Many(v)) => Some(parse_slash_command_tools_from_frontmatter(&v)),
     };
+    let session_modes = match raw.session_modes {
+        None => None,
+        Some(ToolsField::One(s)) => Some(parse_session_modes_from_frontmatter(&[s])),
+        Some(ToolsField::Many(v)) => Some(parse_session_modes_from_frontmatter(&v)),
+    };
     let argument_hints = raw.argument_hint.map(|h| vec![h]).unwrap_or_default();
     let argument_names = match raw.arguments {
         None => Vec::new(),
@@ -795,6 +802,7 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         description: raw.description.unwrap_or_default(),
         allowed_tools,
         model: raw.model,
+        session_modes,
         argument_hints,
         argument_names,
         thinking: None,
@@ -817,6 +825,16 @@ fn parse_slash_command_tools_from_frontmatter(tools: &[String]) -> Vec<String> {
     } else {
         parsed
     }
+}
+
+fn parse_session_modes_from_frontmatter(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split([',', ' ']))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
 }
 
 /// Faithful port of TS `parseToolListFromCLI` (`permissionSetup.ts`): split each
@@ -1141,6 +1159,21 @@ mod tests {
         // (TS `parseToolListString`).
         let (fm, _) = parse_frontmatter("---\nallowed-tools: Bash, *\n---\nx");
         assert_eq!(fm.allowed_tools, Some(vec!["*".to_string()]));
+    }
+
+    #[test]
+    fn frontmatter_session_modes_parse_from_list_and_string() {
+        let (fm, _) = parse_frontmatter("---\nsession-modes:\n  - chat\n  - code\n---\nx");
+        assert_eq!(
+            fm.session_modes,
+            Some(vec!["chat".to_string(), "code".to_string()])
+        );
+
+        let (fm, _) = parse_frontmatter("---\nsession-modes: chat, code\n---\nx");
+        assert_eq!(
+            fm.session_modes,
+            Some(vec!["chat".to_string(), "code".to_string()])
+        );
     }
 
     #[test]

@@ -136,10 +136,20 @@ final class ProjectStore {
         publish(next, preservingConflicts: true)
     }
 
-    func recordStartedSession(projectId: String?, sessionId: String, title: String) async throws {
+    func recordStartedSession(
+        projectId: String?,
+        sessionId: String,
+        title: String,
+        mode: SessionMode = .code
+    ) async throws {
         let repository = repository
         let next = try await executionDomain.async {
-            try repository.recordStartedSession(projectId: projectId, sessionId: sessionId, title: title)
+            try repository.recordStartedSession(
+                projectId: projectId,
+                sessionId: sessionId,
+                title: title,
+                mode: mode
+            )
         }
         publish(next, preservingConflicts: true)
     }

@@ -33,7 +33,7 @@ test('project catalog uses the allowlisted environment and validates session UUI
       spawnedEnv = options.env;
       return fakeChild(JSON.stringify({
         version: 1,
-        sessions: [{ uuid: validId, title: 'Session', modified_rfc3339: '', message_count: 1, path: 'session.jsonl', empty_session: false }],
+        sessions: [{ uuid: validId, title: 'Session', modified_rfc3339: '', message_count: 1, mode: 'chat', path: 'session.jsonl', empty_session: false }],
       }));
     }) as any,
   });
@@ -42,10 +42,29 @@ test('project catalog uses the allowlisted environment and validates session UUI
   try {
     const result = await catalog.list(project);
     assert.equal(result.sessions[0]?.uuid, validId);
+    assert.equal(result.sessions[0]?.mode, 'chat');
     assert.equal(spawnedEnv?.['ANTHROPIC_API_KEY'], undefined);
   } finally {
     if (previousSecret === undefined) delete process.env['ANTHROPIC_API_KEY'];
     else process.env['ANTHROPIC_API_KEY'] = previousSecret;
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('project catalog defaults missing mode metadata to code for older payloads', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-legacy-mode-'));
+  const validId = '11111111-2222-4333-8444-555555555557';
+  const catalog = new ProjectSessionCatalog({
+    serverBin: '/bridge-server',
+    spawnProcess: (() => fakeChild(JSON.stringify({
+      version: 1,
+      sessions: [{ uuid: validId, title: 'Legacy', modified_rfc3339: '', message_count: 1, path: 'legacy.jsonl', empty_session: false }],
+    }))) as any,
+  });
+  try {
+    const result = await catalog.list(project);
+    assert.equal(result.sessions[0]?.mode, 'code');
+  } finally {
     rmSync(project, { recursive: true, force: true });
   }
 });

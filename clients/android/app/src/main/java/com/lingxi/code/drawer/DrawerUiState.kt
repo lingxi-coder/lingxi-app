@@ -8,23 +8,19 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import com.lingxi.code.model.SessionMode
 
-/**
- * The four lists the drawer can show — the 对话 / 项目 / 定时 / 应用 tabs.
- *
- * Mirrors the iOS `Drawer.Section` enum; the raw string is the persisted key.
- */
+/** The three top-level mobile drawers: Chat / Code / Cron. */
 enum class DrawerSection(val key: String) {
-    Chats("chats"),
-    Projects("projects"),
-    Crons("crons"),
-    Apps("apps"),
+    Chat("chat"),
+    Code("code"),
+    Cron("cron"),
 }
 
 /**
  * Hoisted UI state for the drawer panel — the Compose analog of the iOS
  * `Drawer`'s `@Binding activeWs / activeSession` plus its local `@State section`
- * and `openProjects`.
+ * and expanded workspace set.
  *
  * Held by [rememberDrawerUiState] so a config change / process death restores
  * the active workspace, selected session, current tab and expanded projects.
@@ -36,12 +32,14 @@ class DrawerUiState(
     activeWs: String,
     activeSession: String,
     section: DrawerSection,
-    openProjects: Set<String>,
+    collapsedWorkspaces: Set<String>,
+    pinnedWorkspaces: Map<String, Long>,
 ) {
     var activeWs by mutableStateOf(activeWs)
     var activeSession by mutableStateOf(activeSession)
     var section by mutableStateOf(section)
-    var openProjects by mutableStateOf(openProjects)
+    var collapsedWorkspaces by mutableStateOf(collapsedWorkspaces)
+    var pinnedWorkspaces by mutableStateOf(pinnedWorkspaces)
 
     fun selectWorkspace(id: String) {
         activeWs = id
@@ -51,20 +49,78 @@ class DrawerUiState(
         activeSession = id
     }
 
-    fun toggleProject(id: String) {
-        openProjects = if (id in openProjects) openProjects - id else openProjects + id
+    private fun workspaceModeKey(mode: SessionMode, workspaceKey: String): String =
+        "${mode.wireKey}:$workspaceKey"
+
+    fun isWorkspaceCollapsed(mode: SessionMode, workspaceKey: String): Boolean =
+        workspaceModeKey(mode, workspaceKey) in collapsedWorkspaces
+
+    fun toggleWorkspaceCollapsed(mode: SessionMode, workspaceKey: String) {
+        val key = workspaceModeKey(mode, workspaceKey)
+        collapsedWorkspaces = if (key in collapsedWorkspaces) {
+            collapsedWorkspaces - key
+        } else {
+            collapsedWorkspaces + key
+        }
+    }
+
+    fun setWorkspaceCollapsed(mode: SessionMode, workspaceKey: String, collapsed: Boolean) {
+        val key = workspaceModeKey(mode, workspaceKey)
+        collapsedWorkspaces = if (collapsed) collapsedWorkspaces + key else collapsedWorkspaces - key
+    }
+
+    fun pinnedAt(mode: SessionMode, workspaceKey: String): Long? =
+        pinnedWorkspaces[workspaceKey]
+
+    fun toggleWorkspacePinned(
+        mode: SessionMode,
+        workspaceKey: String,
+        nowEpochMillis: Long = System.currentTimeMillis(),
+    ) {
+        pinnedWorkspaces = if (workspaceKey in pinnedWorkspaces) {
+            pinnedWorkspaces - workspaceKey
+        } else {
+            pinnedWorkspaces + (workspaceKey to nowEpochMillis)
+        }
+    }
+
+    fun replaceWorkspacePresentation(
+        collapsed: Set<String>,
+        pinned: Map<String, Long>,
+    ) {
+        collapsedWorkspaces = collapsed
+        pinnedWorkspaces = pinned
     }
 
     companion object {
         /** Production defaults contain no prototype workspace/session/project identifiers. */
         val Saver: Saver<DrawerUiState, *> = listSaver(
-            save = { listOf(it.activeWs, it.activeSession, it.section.key, it.openProjects.joinToString(",")) },
+            save = {
+                listOf(
+                    it.activeWs,
+                    it.activeSession,
+                    it.section.key,
+                    it.collapsedWorkspaces.joinToString(","),
+                    it.pinnedWorkspaces.entries.joinToString(",") { entry -> "${entry.key}:${entry.value}" },
+                )
+            },
             restore = {
                 DrawerUiState(
                     activeWs = it[0],
                     activeSession = it[1],
-                    section = DrawerSection.entries.firstOrNull { s -> s.key == it[2] } ?: DrawerSection.Chats,
-                    openProjects = it[3].split(",").filter(String::isNotEmpty).toSet(),
+                    section = DrawerSection.entries.firstOrNull { s -> s.key == it[2] } ?: DrawerSection.Chat,
+                    collapsedWorkspaces = it.getOrNull(3)?.split(",")?.filter(String::isNotEmpty)?.toSet().orEmpty(),
+                    pinnedWorkspaces = it.getOrNull(4)
+                        ?.split(",")
+                        ?.mapNotNull { entry ->
+                            val index = entry.lastIndexOf(':')
+                            if (index <= 0) return@mapNotNull null
+                            val key = entry.substring(0, index)
+                            val value = entry.substring(index + 1).toLongOrNull() ?: return@mapNotNull null
+                            key to value
+                        }
+                        ?.toMap()
+                        .orEmpty(),
                 )
             },
         )
@@ -76,11 +132,12 @@ class DrawerUiState(
 fun rememberDrawerUiState(
     activeWs: String = "",
     activeSession: String = "",
-    section: DrawerSection = DrawerSection.Chats,
-    openProjects: Set<String> = emptySet(),
+    section: DrawerSection = DrawerSection.Chat,
+    collapsedWorkspaces: Set<String> = emptySet(),
+    pinnedWorkspaces: Map<String, Long> = emptyMap(),
 ): DrawerUiState = rememberSaveable(saver = DrawerUiState.Saver) {
-    DrawerUiState(activeWs, activeSession, section, openProjects)
+    DrawerUiState(activeWs, activeSession, section, collapsedWorkspaces, pinnedWorkspaces)
 }
 
-/** Grouping order for the chats list (matches the prototype's 今天/昨天/本周). */
+/** Legacy mock-chat grouping order retained for the still-compiled fallback section. */
 internal val ChatGroupOrder = listOf("今天", "昨天", "本周")

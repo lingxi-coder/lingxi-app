@@ -885,6 +885,37 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(page?.nextOffset)
         }
 
+        func testAppSessionsPreserveChatModeForNavigation() async {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            store.handle(event: .appSessionsChanged(
+                appId: "tracker",
+                sessions: [appSessionRow(uuid: "s-chat", mode: .chat)],
+                nextOffset: nil
+            ))
+
+            XCTAssertEqual(store.sessionPages["tracker"]?.rows.first?.mode, .chat)
+        }
+
+        func testAppsSnapshotEagerlyLoadsEveryMissingSessionCatalog() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "tracker", name: "Tracker"),
+                appRecord(id: "weather", name: "Weather"),
+            ]))
+
+            try await waitUntil("all app session catalogs to be requested") {
+                Set(submitted.compactMap { command -> String? in
+                    guard case let .listAppSessions(appID, _, _) = command else { return nil }
+                    return appID
+                }) == Set(["tracker", "weather"])
+            }
+        }
+
         /// Paging: `loadMoreSessions` requests the reply's `nextOffset`, the
         /// later page APPENDS (deduplicating a row the pages share), and a
         /// fresh offset-0 refresh REPLACES the accumulated rows.

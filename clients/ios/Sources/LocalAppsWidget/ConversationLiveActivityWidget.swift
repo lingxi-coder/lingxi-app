@@ -87,7 +87,12 @@ import SwiftUI
             .padding()
             .activityBackgroundTint(Color(.systemBackground))
             .activitySystemActionForegroundColor(.accentColor)
-            .widgetURL(ConversationDeepLink.makeURL(sessionID: sessionID, turnID: state.turnID))
+            .widgetURL(ConversationDeepLink.makeURL(
+                sessionID: sessionID,
+                turnID: state.turnID,
+                workspaceKey: state.workspaceKey,
+                sessionMode: state.sessionMode
+            ))
         }
 
         private var statusLabel: String {

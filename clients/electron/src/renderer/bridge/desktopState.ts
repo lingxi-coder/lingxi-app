@@ -1,7 +1,11 @@
 import type {
+  AgentDto,
+  AuthStateDto,
   ClientEvent,
+  CostDto,
   DoctorReportDto,
   ConversationControlsDto,
+  HookDto,
   ModelDetailsDto,
   SlashCommandDto,
   PermissionModeId,
@@ -30,6 +34,13 @@ export interface DesktopState {
   readonly taskOutput: Readonly<Record<string, TaskOutputState>>;
   readonly status: StatusSnapshotDto | null;
   readonly doctor: DoctorReportDto | null;
+  readonly auth: AuthStateDto | null;
+  readonly hooks: HookDto[];
+  readonly agents: AgentDto[];
+  readonly lastCost: CostDto | null;
+  readonly lastCompaction: Extract<ClientEvent, { type: 'compaction_completed' }> | null;
+  readonly lastPermissionResolution: Extract<ClientEvent, { type: 'permission_request_resolved' }> | null;
+  readonly lastApiRetry: Extract<ClientEvent, { type: 'api_retry' }> | null;
 }
 
 export function emptyDesktopState(): DesktopState {
@@ -47,6 +58,13 @@ export function emptyDesktopState(): DesktopState {
     taskOutput: {},
     status: null,
     doctor: null,
+    auth: null,
+    hooks: [],
+    agents: [],
+    lastCost: null,
+    lastCompaction: null,
+    lastPermissionResolution: null,
+    lastApiRetry: null,
   };
 }
 
@@ -64,15 +82,20 @@ function mergeSessionCatalog(
   return [...provisional, ...incoming];
 }
 
-function startSession(state: DesktopState, sessionId: string): DesktopState {
+function startSession(
+  state: DesktopState,
+  sessionId: string,
+  mode: SessionRowDto['mode'] = 'code',
+): DesktopState {
   const existing = state.sessions.find((session) => session.uuid === sessionId);
   const sessions = existing
-    ? state.sessions
-    : [{
+      ? state.sessions
+      : [{
         uuid: sessionId,
         title: 'New session',
         modified_rfc3339: new Date().toISOString(),
         message_count: 0,
+        mode,
         // Empty path marks a renderer-side row that SessionList replaces once
         // the first turn creates the durable JSONL transcript.
         path: '',
@@ -85,7 +108,7 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_list':
       return { ...state, sessions: mergeSessionCatalog(state.sessions, event.sessions) };
     case 'session_started':
-      return startSession(state, event.session_id);
+      return startSession(state, event.session_id, event.mode);
     case 'session_resumed':
       return { ...state, activeSessionId: event.session_id };
     case 'session_ended':
@@ -96,10 +119,26 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, currentModel: event.model };
     case 'conversation_controls_changed':
       return { ...state, conversationControls: event.controls };
+    case 'permission_request_resolved':
+      return { ...state, lastPermissionResolution: event };
     case 'fast_mode_changed':
       return { ...state, fastMode: event.enabled };
     case 'permission_mode_changed':
       return { ...state, permissionMode: event.mode };
+    case 'cost_update':
+      return {
+        ...state,
+        lastCost: {
+          total_usd: event.total_usd,
+          input_tokens: event.input_tokens,
+          output_tokens: event.output_tokens,
+          api_calls: event.api_calls,
+          session_duration_secs: event.session_duration_secs,
+          formatted: event.formatted,
+        },
+      };
+    case 'compaction_completed':
+      return { ...state, lastCompaction: event };
     case 'task_row':
       return { ...state, tasks: { ...state.tasks, [event.task.task_id]: event.task } };
     case 'task_status_changed': {
@@ -126,9 +165,17 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, status: event.snapshot };
     case 'doctor_report':
       return { ...state, doctor: event.report };
+    case 'auth_state':
+      return { ...state, auth: event.state };
+    case 'hooks':
+      return { ...state, hooks: [...event.hooks] };
+    case 'agents':
+      return { ...state, agents: [...event.agents] };
     case 'slash_command_catalog':
     case 'commands_changed':
       return { ...state, slashCommands: [...event.commands] };
+    case 'api_retry':
+      return { ...state, lastApiRetry: event };
     default:
       return state;
   }

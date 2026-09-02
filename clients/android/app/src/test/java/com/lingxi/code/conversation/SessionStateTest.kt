@@ -4,6 +4,7 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
+import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.bindings.SessionRowDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -65,11 +66,13 @@ class SessionStateTest {
         title: String,
         modified: String,
         count: Int,
+        mode: SessionModeDto = SessionModeDto.CODE,
     ) = SessionRowDto(
         uuid = uuid,
         title = title,
         modifiedRfc3339 = modified,
         messageCount = count.toUInt(),
+        mode = mode,
         path = "/x/$uuid.jsonl",
     )
 
@@ -140,10 +143,17 @@ class SessionStateTest {
         val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 3, "刚刚")))
         // TextDelta / Error / lifecycle events must NOT disturb the catalog.
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi"), now))
-        assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionStarted(sessionId = "x"), now))
         assertSame(
             prev,
-            reduceSessionEvent(prev, ClientEvent.SessionResumed(sessionId = "x", messages = emptyList()), now),
+            reduceSessionEvent(prev, ClientEvent.SessionStarted(sessionId = "x", mode = SessionModeDto.CODE), now),
+        )
+        assertSame(
+            prev,
+            reduceSessionEvent(
+                prev,
+                ClientEvent.SessionResumed(sessionId = "x", mode = SessionModeDto.CODE, messages = emptyList()),
+                now,
+            ),
         )
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionEnded, now))
         assertSame(
@@ -238,6 +248,7 @@ class SessionStateTest {
         val restored = sessionActivationFrom(
             ClientEvent.SessionResumed(
                 sessionId = "22222222-2222-4222-8222-222222222222",
+                mode = SessionModeDto.CHAT,
                 messages = listOf(
                     userDto("第一条问题"),
                     assistantDto(
@@ -264,9 +275,15 @@ class SessionStateTest {
     fun sessionActivationFrom_canonicalizesLegacyDisplayPrefix() {
         val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
 
-        val started = sessionActivationFrom(ClientEvent.SessionStarted(sessionId = "sess:$uuid"))
+        val started = sessionActivationFrom(
+            ClientEvent.SessionStarted(sessionId = "sess:$uuid", mode = SessionModeDto.CODE),
+        )
         val resumed = sessionActivationFrom(
-            ClientEvent.SessionResumed(sessionId = "sess:$uuid", messages = emptyList()),
+            ClientEvent.SessionResumed(
+                sessionId = "sess:$uuid",
+                mode = SessionModeDto.CODE,
+                messages = emptyList(),
+            ),
         )
 
         assertEquals(uuid, started?.sessionId)
@@ -293,7 +310,7 @@ class SessionStateTest {
     @Test
     fun sessionActivationFrom_sessionStarted_yieldsEmptyTranscript() {
         val restored = sessionActivationFrom(
-            ClientEvent.SessionStarted(sessionId = "s"),
+            ClientEvent.SessionStarted(sessionId = "s", mode = SessionModeDto.CHAT),
         )
         assertNotNull(restored)
         assertTrue(restored!!.transcript.isEmpty())
@@ -304,7 +321,7 @@ class SessionStateTest {
     @Test
     fun sessionActivationFrom_emptyTranscript_isNonNullWithNoMessages() {
         val restored = sessionActivationFrom(
-            ClientEvent.SessionResumed(sessionId = "s", messages = emptyList()),
+            ClientEvent.SessionResumed(sessionId = "s", mode = SessionModeDto.CODE, messages = emptyList()),
         )
         assertNotNull(restored)
         assertTrue(restored!!.transcript.isEmpty())

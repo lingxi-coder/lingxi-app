@@ -51,7 +51,10 @@ fn register_dataviz_skill(reg: &mut CommandRegistry) {
         menu_description: Some("Chart and dashboard design guidance".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter::default(),
+            frontmatter: CommandFrontmatter {
+                session_modes: Some(vec!["chat".into(), "code".into()]),
+                ..CommandFrontmatter::default()
+            },
             prompt_fn: Some(Arc::new(dataviz_skill::DatavizPromptFn)),
         },
         loaded_from: Some("bundled".into()),

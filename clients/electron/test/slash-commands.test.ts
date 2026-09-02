@@ -6,6 +6,7 @@ import {
   filterSlashCommands,
   moveSlashSelectionIndex,
   reconcileSlashSelectionIndex,
+  renderDesktopSlashHelp,
   slashCommandText,
   slashMenuLabel,
   slashNavigationDirection,
@@ -83,4 +84,25 @@ test('arrow navigation survives keyup reconciliation and clamps at both ends', (
   assert.equal(slashNavigationDirection('Down'), 'next');
   assert.equal(slashNavigationDirection('ArrowUp'), 'previous');
   assert.equal(slashNavigationDirection('Up'), 'previous');
+});
+
+test('Desktop hides unsupported builtins without hiding a project command of the same name', () => {
+  const catalog = [
+    { name: 'rename', description: 'Unavailable builtin', source: 'builtin' },
+    { name: 'rename-project', description: 'Project rename workflow', source: 'project' },
+    { name: 'help', description: 'Show help', source: 'builtin' },
+  ];
+  assert.deepEqual(filterSlashCommands(catalog, '').map((command) => command.name), ['help', 'rename-project']);
+});
+
+test('Desktop help is rendered from the same filtered live catalog as completion', () => {
+  const help = renderDesktopSlashHelp([
+    { name: 'help', description: 'Show help', source: 'builtin' },
+    { name: 'tasks', description: 'Open tasks', source: 'builtin' },
+    { name: 'tui', description: 'Terminal renderer', source: 'builtin' },
+  ]);
+  assert.match(help, /^Commands:/);
+  assert.match(help, /\/help\s+Show help/);
+  assert.match(help, /\/tasks\s+Open tasks/);
+  assert.doesNotMatch(help, /\/tui/);
 });

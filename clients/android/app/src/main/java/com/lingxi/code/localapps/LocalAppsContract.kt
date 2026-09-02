@@ -2,6 +2,7 @@ package com.lingxi.code.localapps
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
+import com.lingxi.code.model.SessionMode
 
 /**
  * Resolves a localized string for localapps-package code that runs OUTSIDE a
@@ -354,6 +355,8 @@ data class LocalAppSessionRow(
     val messageCount: Int,
     /** True for the app's pinned init session — listed first with a badge. */
     val isInit: Boolean,
+    val mode: SessionMode = SessionMode.Code,
+    val modifiedAtEpochSeconds: Long? = null,
 )
 
 /**

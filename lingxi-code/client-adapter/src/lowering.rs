@@ -38,8 +38,8 @@ use client_protocol::events::CostDto;
 use client_protocol::listings::{
     AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, ModelBillingModeDto,
-    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionRowDto,
-    SkillDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionModeDto,
+    SessionRowDto, SkillDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 
@@ -315,6 +315,10 @@ pub fn lower_session_metadata(meta: &SessionMetadata) -> SessionRowDto {
         title: meta.title.clone(),
         modified_rfc3339: system_time_to_rfc3339(meta.modified),
         message_count: usize_to_u32(meta.message_count),
+        mode: match meta.mode {
+            session::jsonl::SessionMode::Chat => SessionModeDto::Chat,
+            session::jsonl::SessionMode::Code => SessionModeDto::Code,
+        },
         path: meta.path.to_string_lossy().into_owned(),
     }
 }

@@ -12,6 +12,7 @@ import {
   BetaComposer,
   BetaSidebar,
   clampSidebarWidth,
+  composerGoalActive,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -207,6 +208,7 @@ test('a running turn keeps drafting and local composer controls interactive', ()
       ready: true,
       onOpenSettings: () => undefined,
       onSetTheme: () => undefined,
+      onOpenProviderSettings: () => undefined,
     }),
   ));
   const promptMarker = 'aria-label="Prompt"';
@@ -218,9 +220,10 @@ test('a running turn keeps drafting and local composer controls interactive', ()
 
   assert.match(promptTag, /contentEditable="true"/i);
   assert.match(promptTag, /aria-disabled="false"/);
-  for (const marker of ['aria-label="Attach image"', 'aria-label="Search workspace files"', 'aria-label="Toggle goal mode"', 'aria-label="Start ordinary recording"']) {
+  for (const marker of ['aria-label="Attach image"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
     assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
   }
+  assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(openingTag(markup, 'aria-label="Stop current turn"'), /\bdisabled\b/);
   assert.match(markup, /aria-label="Send pending message"/);
 
@@ -229,6 +232,65 @@ test('a running turn keeps drafting and local composer controls interactive', ()
   const submitEnd = source.indexOf('const chooseSlashCommand', submitStart);
   assert.ok(submitStart >= 0 && submitEnd > submitStart);
   assert.doesNotMatch(source.slice(submitStart, submitEnd), /if \(!ready \|\| bridge\.running\) return/);
+});
+
+test('composer keeps its idle input compact and aligns the primary action controls', () => {
+  const bridge = composerBridgeFixture();
+  bridge.running = false;
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaComposer, {
+      bridge: bridge as any,
+      ready: true,
+      onOpenSettings: () => undefined,
+      onSetTheme: () => undefined,
+      onOpenProviderSettings: () => undefined,
+    }),
+  ));
+  const promptMarker = 'aria-label="Prompt"';
+  const promptIndex = markup.indexOf(promptMarker);
+  const promptStart = markup.lastIndexOf('<div', promptIndex);
+  const promptEnd = markup.indexOf('>', promptIndex);
+  assert.ok(promptIndex >= 0 && promptStart >= 0 && promptEnd > promptIndex);
+  assert.match(markup.slice(promptStart, promptEnd + 1), /min-height:56px/);
+
+  for (const marker of ['aria-label="Start ordinary recording"', 'aria-label="开启心流模式"', 'aria-label="Send prompt"']) {
+    const tag = openingTag(markup, marker);
+    assert.match(tag, /width:40px/);
+    assert.match(tag, /height:40px/);
+    assert.match(tag, /border-radius:50%/);
+  }
+
+  assert.doesNotMatch(markup, /aria-label="Goal active"/);
+  assert.doesNotMatch(markup, /Enter to send/);
+  assert.doesNotMatch(markup, /Goal mode enabled/);
+});
+
+test('composer hides an inactive goal and shows only an active goal status', () => {
+  const userGoal = { type: 'narration', id: 'g1', role: 'user', text: '/goal ship the desktop' } as const;
+  const cleared = { type: 'command', id: 'g2', name: '/goal', output: 'Goal cleared: ship the desktop', isError: false } as const;
+  assert.equal(composerGoalActive([]), false);
+  assert.equal(composerGoalActive([userGoal]), true);
+  assert.equal(composerGoalActive([userGoal, cleared]), false);
+
+  const bridge = composerBridgeFixture();
+  bridge.running = false;
+  (bridge as any).conversation = { items: [userGoal] };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaComposer, {
+      bridge: bridge as any,
+      ready: true,
+      onOpenSettings: () => undefined,
+      onSetTheme: () => undefined,
+      onOpenProviderSettings: () => undefined,
+    }),
+  ));
+  assert.match(markup, /role="status" aria-label="Goal active"/);
+  assert.match(markup, />Goal<\/span>/);
+  assert.doesNotMatch(markup, /Toggle goal mode/);
 });
 
 test('each project row exposes a focused edit action routed to that project draft', () => {

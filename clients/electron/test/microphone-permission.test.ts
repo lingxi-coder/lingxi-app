@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -310,7 +310,8 @@ function rendererSources(): { path: string; source: string }[] {
   const paths = execFileSync('git', ['ls-files', '--', 'clients/electron/src/renderer'],
     { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split('\n')
-    .filter((path) => path.endsWith('.ts') || path.endsWith('.tsx'));
+    .filter((path) => (path.endsWith('.ts') || path.endsWith('.tsx'))
+      && existsSync(join(repositoryRoot, path)));
   return paths.map((path) => ({ path, source: readFileSync(join(repositoryRoot, path), 'utf8') }));
 }
 

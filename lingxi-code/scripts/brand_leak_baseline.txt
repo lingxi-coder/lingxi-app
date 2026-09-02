@@ -30,6 +30,7 @@ G1	clients/android/app/src/main/java/com/lingxi/code/settings/ProviderSettingsRe
 G1	clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppCodeBrowserTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppWebViewTest.kt	LINGXI_
 G1	clients/android/app/src/test/java/com/lingxi/code/secure/EngineCredentialsTest.kt	LINGXI_
+G1	clients/electron/scripts/package-desktop.mjs	LINGXI_
 G1	clients/electron/scripts/package-mac.mjs	LINGXI_
 G1	clients/electron/scripts/package-support.mjs	LINGXI_
 G1	clients/electron/scripts/packaged-app-smoke.mjs	CLAUDE\.local\.md
@@ -37,6 +38,7 @@ G1	clients/electron/scripts/packaged-app-smoke.mjs	CLAUDE\.md
 G1	clients/electron/scripts/packaged-app-smoke.mjs	LINGXI_
 G1	clients/electron/scripts/packaged-app-smoke.mjs	\.claude(?![A-Za-z0-9_.\-])
 G1	clients/electron/scripts/packaged-app-smoke.mjs	\.lingxi(?![A-Za-z0-9_.\-])
+G1	clients/electron/scripts/packaged-sidecar-smoke.mjs	LINGXI_
 G1	clients/electron/src/main/bridge.ts	LINGXI_
 G1	clients/electron/src/main/file-search.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/electron/src/main/host-utils.ts	CLAUDE\.local\.md
@@ -546,6 +548,8 @@ G1	lingxi-code/platforms/posix/tests/mcp_ws_test.rs	LingXi
 G1	lingxi-code/platforms/posix/tests/process_spawn_env_test.rs	LINGXI
 G1	lingxi-code/platforms/pty/Cargo.toml	LingXi
 G1	lingxi-code/platforms/windows/src/process/runner.rs	LINGXI
+G1	lingxi-code/platforms/windows/src/secure_storage.rs	LingXi
+G1	lingxi-code/platforms/windows/src/secure_storage.rs	\.lingxi
 G1	lingxi-code/platforms/windows/src/worktree.rs	\.lingxi
 G1	lingxi-code/platforms/windows/tests/mcp_ide_test.rs	LingXi
 G1	lingxi-code/plugin/src/brand_normalize.rs	LingXi
@@ -1229,6 +1233,7 @@ G3	lingxi-code/platforms/posix/src/secure_storage/macos.rs	.lingxi
 G3	lingxi-code/platforms/posix/src/worktree.rs	.lingxi
 G3	lingxi-code/platforms/posix/src/worktree_tmux.rs	.lingxi
 G3	lingxi-code/platforms/posix/tests/keychain_macos_service_name_test.rs	.lingxi
+G3	lingxi-code/platforms/windows/src/secure_storage.rs	.lingxi
 G3	lingxi-code/platforms/windows/src/worktree.rs	.lingxi
 G3	lingxi-code/plugin/src/brand_normalize.rs	.lingxi
 G3	lingxi-code/plugin/src/discovery.rs	.lingxi-plugin

@@ -68,8 +68,9 @@ use platform_api::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto,
-    ModelPricingDto, ModelPricingTierDto, PermissionRequestSink, ProviderConnectionTestDto,
+    MobileEngineHandle, MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto,
+    ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, PermissionRequestSink,
+    ProviderConnectionTestDto, SessionModeDto,
 };
 
 /// The foreign (Kotlin) capability objects + config needed to build an
@@ -298,6 +299,7 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub session_mode: SessionModeDto,
     pub vision_delegation_enabled: bool,
     pub app_files_root: String,
     /// Optional Android Project workspace. When present it must resolve to
@@ -3843,6 +3845,7 @@ pub fn build_android_engine(
             api_base,
             api_key,
             model,
+            session_mode: SessionModeDto::Code,
             vision_delegation_enabled: true,
             app_files_root,
             project_cwd: None,
@@ -3899,6 +3902,7 @@ pub fn build_android_engine_with_mobile_linux(
         api_base,
         api_key,
         model,
+        session_mode,
         vision_delegation_enabled,
         app_files_root,
         project_cwd,
@@ -3942,6 +3946,10 @@ pub fn build_android_engine_with_mobile_linux(
         let mut cfg = MobileConfig {
             cwd,
             lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
+            session_mode: match session_mode {
+                SessionModeDto::Chat => MobileSessionMode::Chat,
+                SessionModeDto::Code => MobileSessionMode::Code,
+            },
             local_apps_full_runtime,
             local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
             physical_memory_bytes,

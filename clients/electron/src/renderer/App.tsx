@@ -7,6 +7,7 @@ import {
   BetaTopBar,
   ErrorBanner,
 } from './components/BetaDesktop';
+import { DesktopCommandPalette } from './components/DesktopCommandPalette';
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
@@ -20,6 +21,7 @@ import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/Runt
 export function App() {
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const workspace = bridge.bootstrap?.workspace;
@@ -39,9 +41,23 @@ export function App() {
     const preference = bridge.bootstrap?.settings.theme;
     return watchThemePreference(preference, window.matchMedia('(prefers-color-scheme: dark)'), setTheme);
   }, [bridge.bootstrap?.settings.theme]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isCommandPaletteShortcut(event)) return;
+      event.preventDefault();
+      setCommandPaletteOpen((open) => !open);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
   const changeTheme = (value: ThemeMode) => {
     setTheme(value);
     void bridge.setThemePreference(value).catch(() => undefined);
+  };
+  const openSettings = (route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference'>) => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setCommandPaletteOpen(false);
+    setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
   };
 
   const emptyMessage = bridge.sessionLoading
@@ -55,33 +71,25 @@ export function App() {
   return (
     <Theme.Provider value={palette}>
       <div
+        className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
         style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.windowBg, color: palette.text }}
       >
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar
             bridge={bridge}
-            onOpenSettings={() => {
-              // Read the focused element HERE, in the event handler, not in the
-              // dialog's mount effect: `SettingsBackground` applies `inert` in a
-              // LAYOUT effect, which runs before the dialog's passive mount
-              // effect, and the browser's unfocusing steps have already moved
-              // focus to <body> by then. Without this the gear path restores
-              // focus to a non-tabbable <body> and a keyboard user restarts
-              // from the top of the app. The model-picker path already threads
-              // `restoreFocus`; this gives the gear the same contract.
-              const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-              setSettingsRoute({ restoreFocus: () => opener?.focus() });
-            }}
+            onOpenSettings={() => openSettings()}
           />
 
-          <main style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+          <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <BetaTopBar
             bridge={bridge}
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
             theme={theme}
             onTheme={changeTheme}
+            onOpenSettingsPage={(pageId) => openSettings(pageId ? { pageId } : undefined)}
+            onOpenCommandPalette={() => setCommandPaletteOpen(true)}
           />
           {!bridge.sessionLoading && <RuntimeCenterOverview bridge={bridge} />}
           <ErrorBanner bridge={bridge} />
@@ -113,11 +121,11 @@ export function App() {
                   // capture the opener HERE, before `SettingsBackground`'s
                   // layout effect marks the tree `inert` and the browser has
                   // already moved focus to <body>. See the sidebar handler.
-                  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-                  setSettingsRoute({ restoreFocus: () => opener?.focus() });
+                  openSettings();
                 }}
+                onOpenSettingsPage={(pageId) => openSettings({ pageId })}
                 onSetTheme={changeTheme}
-                onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ providerId, pendingModelReference: modelReference, restoreFocus })}
+                onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
               />
             </>
           )}
@@ -144,11 +152,20 @@ export function App() {
           {!bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
         </SettingsBackground>
 
+        <DesktopCommandPalette
+          open={commandPaletteOpen}
+          bridge={bridge}
+          theme={theme}
+          onClose={() => setCommandPaletteOpen(false)}
+          onOpenSettingsPage={(pageId) => openSettings(pageId ? { pageId } : undefined)}
+        />
+
         {settingsRoute && (
           <SettingsScreen
             bridge={bridge}
             theme={theme}
             onTheme={changeTheme}
+            initialPageId={settingsRoute.pageId}
             initialProviderId={settingsRoute.providerId}
             pendingModelReference={settingsRoute.pendingModelReference}
             onClose={() => {
@@ -161,6 +178,15 @@ export function App() {
       </div>
     </Theme.Provider>
   );
+}
+
+export function isCommandPaletteShortcut(
+  event: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>,
+): boolean {
+  return !event.altKey
+    && !event.shiftKey
+    && (event.metaKey || event.ctrlKey)
+    && event.key.toLowerCase() === 'k';
 }
 
 export function setSettingsBackgroundInert(
@@ -185,6 +211,7 @@ export function SettingsBackground({ active, children }: { active: boolean; chil
 }
 
 export interface SettingsRoute {
+  pageId?: string;
   providerId?: string;
   pendingModelReference?: string;
   restoreFocus?: () => void;

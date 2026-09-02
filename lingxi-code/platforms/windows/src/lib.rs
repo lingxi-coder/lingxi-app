@@ -44,6 +44,9 @@ pub use mcp::{connect_ws, spawn_stdio, McpTransportError};
 pub use process::WindowsProcess;
 pub use runtime::WindowsRuntime;
 pub use sandbox::WindowsSandbox;
-pub use secure_storage::PlainTextSecureStorage;
+pub use secure_storage::{
+    plaintext_secure_storage, secure_storage_for_platform, secure_storage_for_policy,
+    PlainTextSecureStorage, WindowsCredentialVaultStorage,
+};
 pub use swarm::WindowsSwarmBackend;
 pub use worktree::WindowsWorktreeManager;

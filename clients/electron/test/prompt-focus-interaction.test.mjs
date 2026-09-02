@@ -169,7 +169,7 @@ test('real Electron restores an independent unsent composer draft for each sessi
       runningInteraction: {
         editable: true,
         attachEnabled: true,
-        goalEnabled: true,
+        goalEnabled: false,
         stopEnabled: true,
       },
       sentPending: 'pending follow-up',

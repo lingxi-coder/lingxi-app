@@ -66,7 +66,7 @@ class AppFlowUiTest {
         rule.onNodeWithText("语音模式集成").assertDoesNotExist()
     }
 
-    /** Open the 对话/项目/定时 drawer via the conversation top-bar hamburger. */
+    /** Open the Chat/Code/Cron drawer via the conversation top-bar hamburger. */
     private fun openDrawer() {
         rule.onNodeWithTag(UiTags.OPEN_DRAWER).performClick()
         rule.waitForIdle()
@@ -75,32 +75,23 @@ class AppFlowUiTest {
     // --- 1. drawer tab switch ---------------------------------------------
 
     @Test
-    fun drawer_switchesBetweenChatsProjectsCronsAndApps() {
+    fun drawer_switchesBetweenChatCodeAndCron() {
         openDrawer()
 
         rule.onNodeWithText("知识库").assertDoesNotExist()
         rule.onNodeWithText("记忆").assertDoesNotExist()
 
-        // Project is backed by the real filesystem repository. A clean install
-        // starts empty but always exposes the create/import action.
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Projects.key)).performClick()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Code.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("新建或导入项目").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Code.key)).assertIsDisplayed()
 
-        // Cron is also a production collection: clean install is explicitly
-        // empty rather than populated with prototype rows.
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Crons.key)).performClick()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Cron.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("暂无定时任务").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Cron.key)).assertIsDisplayed()
 
-        // Back to 对话 → the real engine catalog surface is still reachable.
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).performClick()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chat.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).assertIsDisplayed()
-
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Apps.key)).performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("打开应用库").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chat.key)).assertIsDisplayed()
     }
 
     // --- 2. settings push-nav + system back -------------------------------

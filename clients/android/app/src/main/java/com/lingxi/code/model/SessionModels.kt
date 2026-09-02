@@ -123,6 +123,8 @@ data class SessionRow(
     val messageCount: Int,
     /** A short, human relative time ("刚刚" / "5 分钟前" / "3 天前" / "5月3日"). */
     val relativeTime: String,
+    val mode: SessionMode = SessionMode.Code,
+    val modifiedAtEpochSeconds: Long? = null,
 )
 
 /**
@@ -151,12 +153,18 @@ object SessionCatalog {
         modifiedRfc3339: String,
         nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
         strings: SessionCatalogStrings = DefaultSessionCatalogStrings,
-    ): SessionRow = SessionRow(
-        uuid = canonicalSessionId(uuid),
-        title = title.ifBlank { strings.resolve(R.string.session_untitled, "未命名会话") },
-        messageCount = messageCount,
-        relativeTime = relativeTime(modifiedRfc3339, nowEpochSeconds, strings),
-    )
+        mode: SessionMode = SessionMode.Code,
+    ): SessionRow {
+        val modifiedAt = parseRfc3339ToEpochSeconds(modifiedRfc3339)
+        return SessionRow(
+            uuid = canonicalSessionId(uuid),
+            title = title.ifBlank { strings.resolve(R.string.session_untitled, "未命名会话") },
+            messageCount = messageCount,
+            mode = mode,
+            modifiedAtEpochSeconds = modifiedAt,
+            relativeTime = relativeTime(modifiedRfc3339, nowEpochSeconds, strings),
+        )
+    }
 
     /**
      * Humanize an RFC 3339 timestamp into a short, Chinese relative-time label,

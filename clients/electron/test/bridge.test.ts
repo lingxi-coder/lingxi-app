@@ -1059,7 +1059,7 @@ test('the settings and MCP commands reach the engine through dispatchCommand', a
 
 test('a real protocol command outside the desktop surface never reaches the engine', async () => {
   const { manager, commands } = trustedManager();
-  await assert.rejects((manager as any).dispatchCommand({ type: 'login' }), /command is not allowed/);
+  await assert.rejects((manager as any).dispatchCommand({ type: 'clear_session' }), /command is not allowed/);
   assert.equal(commands.length, 0, 'a rejected command must never be forwarded');
 });
 

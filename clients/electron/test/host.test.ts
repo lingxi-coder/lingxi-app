@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
+  CH_SESSION_CLEAR,
   CH_SETTINGS_UPDATE,
   CH_WORKSPACE_FILE_PREVIEW,
   HostController,
@@ -186,6 +187,66 @@ test('bridge restart IPC re-checks session ownership and active work at executio
       /session runtime is not open/,
     );
     assert.equal(restartCalls, 0);
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
+
+test('session clear uses dedicated IPC and re-checks active work plus pending interactions', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-clear-session-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-clear-session-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const replacementId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession({ projectPath: project, sessionId });
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const runtime = { pendingInteractions: 0, pendingAskUserQuestions: [] as unknown[] };
+  let activeWork = true;
+  let closeCalls = 0;
+  let newCalls = 0;
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    get: (requestedSessionId: string) => requestedSessionId === sessionId ? runtime : undefined,
+    hasActiveWork: (projectPath: string) => projectPath === project && activeWork,
+    closeSession: async () => { closeCalls += 1; },
+    newSession: async () => {
+      newCalls += 1;
+      return { projectPath: project, sessionId: replacementId };
+    },
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const clear = handlers.get(CH_SESSION_CLEAR);
+  assert.ok(clear);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    await assert.rejects(() => Promise.resolve(clear!(event, sessionId)), /cancel the active turn/);
+    activeWork = false;
+    runtime.pendingInteractions = 1;
+    await assert.rejects(() => Promise.resolve(clear!(event, sessionId)), /resolve pending interactions/);
+    runtime.pendingInteractions = 0;
+    runtime.pendingAskUserQuestions = [{}];
+    await assert.rejects(() => Promise.resolve(clear!(event, sessionId)), /resolve pending interactions/);
+    runtime.pendingAskUserQuestions = [];
+    await clear!(event, sessionId);
+
+    assert.equal(closeCalls, 1);
+    assert.equal(newCalls, 1);
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId: replacementId });
   } finally {
     host.dispose();
     rmSync(userData, { recursive: true, force: true });

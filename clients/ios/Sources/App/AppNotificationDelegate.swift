@@ -52,13 +52,6 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
     }
 
     private func conversationAction(from userInfo: [AnyHashable: Any]) -> LingxiAppAction? {
-        guard (userInfo["lingxi.route"] as? String) == "conversation" else { return nil }
-        guard
-            let sessionID = (userInfo["lingxi.conversation.session_id"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-            !sessionID.isEmpty
-        else { return nil }
-        let turnID = (userInfo["lingxi.conversation.turn_id"] as? String).flatMap(UInt64.init)
-        return .openConversation(sessionID: sessionID, turnID: turnID)
+        ConversationNotificationRoute.appAction(from: userInfo)
     }
 }

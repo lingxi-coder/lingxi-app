@@ -80,4 +80,10 @@
 /// family confirmation now flows only through the Host-owned Local App create
 /// confirmation sheet and plugin commands, so keeping the old client command
 /// family would preserve a dead incompatible UniFFI surface.
-pub const CLIENT_PROTOCOL_VERSION: &str = "10.0.0";
+///
+/// Bumped to 11.0.0 for mobile session-mode propagation. Session rows, app
+/// session rows, and session started/resumed/forked events now carry a
+/// required Chat/Code mode, and the Android/iOS launch configs gained a
+/// session-mode field. Those binding layouts are positional on mobile, so this
+/// is a real major bump.
+pub const CLIENT_PROTOCOL_VERSION: &str = "11.0.0";

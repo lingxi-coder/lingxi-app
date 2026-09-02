@@ -20,15 +20,15 @@ function MarkdownBlockView({ block, t }: { block: MarkdownBlock; t: ReturnType<t
     return <p style={{ margin: 0, whiteSpace: 'pre-wrap', textWrap: 'pretty' }}><InlineMarkdown text={block.text} t={t} /></p>;
   }
   if (block.type === 'heading') {
-    const sizes = [0, 20, 18, 16, 15, 14, 13.5];
-    return <div style={{ margin: '4px 0 0', color: t.text, fontSize: sizes[block.level], lineHeight: 1.35, fontWeight: 650 }}><InlineMarkdown text={block.text} t={t} /></div>;
+    const sizes = [0, 20, 17, 15.5, 14.5, 14, 13.5];
+    return <div style={{ margin: '3px 0 0', color: t.text, fontSize: sizes[block.level], lineHeight: 1.35, fontWeight: 600, letterSpacing: '-.012em', textWrap: 'balance' }}><InlineMarkdown text={block.text} t={t} /></div>;
   }
   if (block.type === 'blockquote') {
     return <blockquote style={{ margin: 0, padding: '2px 0 2px 12px', borderLeft: `3px solid ${t.accentBorder}`, color: t.text2 }}><MarkdownContent text={block.text} /></blockquote>;
   }
   if (block.type === 'list') {
     const Tag = block.ordered ? 'ol' : 'ul';
-    return <Tag style={{ margin: 0, paddingLeft: 23, display: 'grid', gap: 5 }}>{block.items.map((item, index) => <li key={index} style={{ paddingLeft: 3 }}><InlineMarkdown text={item} t={t} /></li>)}</Tag>;
+    return <Tag style={{ margin: 0, paddingLeft: 22, display: 'grid', gap: 4 }}>{block.items.map((item, index) => <li key={index} style={{ paddingLeft: 3 }}><InlineMarkdown text={item} t={t} /></li>)}</Tag>;
   }
   return <CodeBlock code={block.text} language={block.language} closed={block.closed} />;
 }

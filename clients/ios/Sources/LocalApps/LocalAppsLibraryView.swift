@@ -36,10 +36,10 @@ struct LocalAppsRootView: View {
     let initialAppID: String?
     var activeConversationID: String = ""
     let onDismiss: () -> Void
-    /// Called with `(appID, sessionUUID)` when the user taps a row of the
-    /// app's session catalog. RootView dismisses this cover and switches the
-    /// conversation scope to the app, resuming that session.
-    var onOpenAppSession: (String, String) -> Void = { _, _ in }
+    /// Called with `(appID, sessionUUID, mode)` when the user taps a row of the
+    /// app's session catalog. The mode is part of the resume identity: Rust
+    /// rejects a transcript opened under the other capability profile.
+    var onOpenAppSession: (String, String, SessionMode) -> Void = { _, _, _ in }
     /// Called with `appID` for「新会话」. RootView dismisses this cover and
     /// starts a fresh conversation in the app's scope.
     var onNewAppSession: (String) -> Void = { _ in }
@@ -403,7 +403,7 @@ private struct LocalAppsLibraryScreen: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
     let onDismiss: () -> Void
-    let onOpenAppSession: (String, String) -> Void
+    let onOpenAppSession: (String, String, SessionMode) -> Void
     let onNewAppSession: (String) -> Void
     @State private var pendingDelete: LocalAppSummary?
     /// True between tapping "+" and the command reaching the engine. Only the
@@ -525,7 +525,7 @@ private struct LocalAppsLibraryScreen: View {
             return
         }
         if let sessionID = app.initSessionId {
-            onOpenAppSession(app.id, sessionID)
+            onOpenAppSession(app.id, sessionID, .code)
         } else {
             onNewAppSession(app.id)
         }

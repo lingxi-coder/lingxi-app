@@ -45,6 +45,7 @@ test('a started session stays visible until the file-backed catalog catches up',
   assert.equal(started.activeSessionId, 'fresh-session');
   assert.deepEqual(started.sessions.map((session) => session.uuid), ['fresh-session']);
   assert.equal(started.sessions[0]?.message_count, 0);
+  assert.equal(started.sessions[0]?.mode, 'code');
   assert.equal(started.sessions[0]?.path, '');
 
   const beforeFirstTurnPersists = reduceDesktopEvent(started, {
@@ -65,6 +66,16 @@ test('a started session stays visible until the file-backed catalog catches up',
     sessions: [durable],
   });
   assert.deepEqual(afterFirstTurnPersists.sessions, [durable]);
+});
+
+test('session_started preserves the engine-provided mode when present', () => {
+  const started = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'session_started',
+    session_id: 'chat-session',
+    mode: 'chat',
+  });
+
+  assert.equal(started.sessions[0]?.mode, 'chat');
 });
 
 test('task rows, output and status updates remain correlated by id', () => {

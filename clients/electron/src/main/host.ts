@@ -60,6 +60,7 @@ export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
+export const CH_SESSION_CLEAR = 'lingxi:session:clear';
 export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export interface WorkspaceFilePreview {
@@ -358,6 +359,11 @@ export class HostController {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         return this.openSessionAndActivateInternal(ref);
       });
+    });
+    this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(sessionId)) throw new Error('invalid session id');
+      await this.clearActiveSession(sessionId);
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
@@ -839,12 +845,31 @@ export class HostController {
     return ref;
   }
 
+  private async clearActiveSession(sessionId: string): Promise<void> {
+    const active = this.settings.getPublic().activeSession;
+    if (!active || active.sessionId !== sessionId) {
+      throw new Error('the requested session is no longer active');
+    }
+    const runtime = this.bridge.get(active.sessionId);
+    if (this.hasActiveWork(active.projectPath)) {
+      throw new Error('cancel the active turn before clearing the session');
+    }
+    if ((runtime?.pendingInteractions ?? 0) > 0 || (runtime?.pendingAskUserQuestions.length ?? 0) > 0) {
+      throw new Error('resolve pending interactions before clearing the session');
+    }
+    await this.bridge.closeSession(active);
+    const replacement = await this.bridge.newSession(active.projectPath);
+    this.settings.activateProject(active.projectPath);
+    this.settings.setActiveSessionDraft(replacement);
+    this.workspaceFiles.invalidate();
+  }
+
   dispose(): void {
     if (!this.registered) return;
     for (const channel of [
       CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
-      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN,
+      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,

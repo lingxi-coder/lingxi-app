@@ -17,6 +17,7 @@ import XCTest
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
                 projectCwd: nil,
+                sessionMode: .code,
                 visionDelegationEnabled: true
             )
             let source = EngineConversationSource(config: config)

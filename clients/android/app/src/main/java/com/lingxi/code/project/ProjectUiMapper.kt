@@ -34,6 +34,7 @@ fun ProjectSnapshot.toDrawerProject(): Project {
         desc = "$storage · ${record.syncState.label}",
         storageKind = record.storageKind.wireName,
         syncState = record.syncState.label,
+        updatedAtEpochMillis = record.updatedAtEpochMillis,
         sessions = sessions.map { session ->
             ProjectSession(
                 id = session.sessionId,
@@ -41,6 +42,8 @@ fun ProjectSnapshot.toDrawerProject(): Project {
                 activity = session.relativeTime,
                 preview = "",
                 msgs = session.messageCount,
+                mode = session.mode,
+                updatedAtEpochMillis = session.updatedAtEpochMillis,
             )
         },
     )

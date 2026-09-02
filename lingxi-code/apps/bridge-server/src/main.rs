@@ -144,15 +144,42 @@ async fn main() -> anyhow::Result<()> {
         "bridge-server: listening (ctrl-c to stop)"
     );
 
-    // Block until ctrl-c.
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to install ctrl-c handler: {e}"))?;
-    tracing::info!("bridge-server: ctrl-c received, shutting down");
+    // Desktop hosts terminate sidecars with SIGTERM on Unix. Listen for both
+    // interactive Ctrl-C and host termination so the lockfile guard and socket
+    // endpoint always receive a graceful teardown opportunity.
+    let shutdown_signal = wait_for_shutdown_signal().await?;
+    tracing::info!(shutdown_signal, "bridge-server: shutdown signal received");
 
     // Explicit teardown: stop accepting, then `lock_guard` drops at end of scope
     // (removing the discovery file).
     endpoint.shutdown().await;
     drop(lock_guard);
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> anyhow::Result<&'static str> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| anyhow::anyhow!("failed to install SIGTERM handler: {e}"))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|e| anyhow::anyhow!("failed to install ctrl-c handler: {e}"))?;
+                Ok("ctrl-c")
+            }
+            signal = terminate.recv() => {
+                signal.ok_or_else(|| anyhow::anyhow!("SIGTERM handler closed unexpectedly"))?;
+                Ok("SIGTERM")
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to install ctrl-c handler: {e}"))?;
+        Ok("ctrl-c")
+    }
 }

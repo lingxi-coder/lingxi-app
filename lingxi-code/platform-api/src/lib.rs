@@ -206,7 +206,10 @@ pub use sandbox::{
     SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
     SandboxedTag,
 };
-pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
+pub use secure_storage::{
+    CredentialStoragePolicy, InMemorySecureStorage, SecureStorage, SecureStorageBackend,
+    SecureStorageError,
+};
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};
 pub use skill_loader::{SkillLoad, SkillLoader};
 pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};

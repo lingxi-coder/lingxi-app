@@ -35,7 +35,7 @@ import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
-  fontSize: 14.5,
+  fontSize: 13,
   fontWeight: 500,
   minWidth: 0,
   overflow: 'hidden',
@@ -145,7 +145,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
         className={item.status === 'running' ? 'tool-row-title running-sweep' : 'tool-row-title'}
         style={{
           flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap', fontSize: 14.5, lineHeight: 1.45, fontWeight: 500,
+          whiteSpace: 'nowrap', fontSize: 13, lineHeight: 1.4, fontWeight: 500,
         }}
       >
         {title}

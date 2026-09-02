@@ -84,10 +84,11 @@ use client_protocol::controls::{
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::listings::{
-    AuthStateDto, SessionAgentSummaryDto, SlashCommandDto, TaskStatusDto,
+    AuthStateDto, SessionAgentSummaryDto, SessionModeDto, SlashCommandDto, TaskStatusDto,
 };
 use command_api::builtin_support::names::{core_description, is_palette_hidden};
 use command_api::model::CommandSource;
+use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
 use platform_api::auth::{AuthHandle, LoginInfo};
 use platform_api::orchestrator::OrchestratorHandle;
@@ -379,6 +380,73 @@ async fn read_session_agent_summary(
 }
 
 impl EngineCommandRouter {
+    async fn dispatch_desktop_slash(&self, raw: &str) -> Option<platform_api::SlashDispatchResult> {
+        let parsed = parse_slash_command(raw)?;
+        match parsed.name.as_str() {
+            "diff" => {
+                let focus = parsed.raw_args.trim();
+                let prompt = if focus.is_empty() {
+                    "Inspect the current working tree and show the user the uncommitted diff. Do not modify any files.".to_string()
+                } else {
+                    format!(
+                        "Inspect the current working tree and show the user the uncommitted diff, focusing on: {focus}. Do not modify any files."
+                    )
+                };
+                Some(platform_api::SlashDispatchResult::RunAsTurn { prompt })
+            }
+            "plan" => Some(self.dispatch_desktop_plan(&parsed.raw_args).await),
+            _ => None,
+        }
+    }
+
+    async fn dispatch_desktop_plan(&self, args: &str) -> platform_api::SlashDispatchResult {
+        let previous_permission = self
+            .handle
+            .permission_mode()
+            .await
+            .unwrap_or_else(|| "default".to_string());
+        let was_plan_mode = self.handle.plan_mode().await;
+
+        if previous_permission != "plan" {
+            if let Err(error) = self.handle.set_permission_mode("plan").await {
+                return platform_api::SlashDispatchResult::Handled {
+                    display: format!("Could not enable plan mode: {error}"),
+                };
+            }
+            platform_api::live_sessions::set_process_permission_mode("plan", false);
+        }
+        if !was_plan_mode {
+            if let Err(error) = self.handle.set_plan_mode(true).await {
+                if previous_permission != "plan" {
+                    let _ = self.handle.set_permission_mode(&previous_permission).await;
+                    platform_api::live_sessions::set_process_permission_mode(
+                        &previous_permission,
+                        previous_permission == "bypassPermissions",
+                    );
+                }
+                return platform_api::SlashDispatchResult::Handled {
+                    display: format!("Could not enable plan mode: {error}"),
+                };
+            }
+        }
+
+        let request = args.trim();
+        if request.is_empty() || matches!(request, "open" | "share") {
+            let display = if was_plan_mode {
+                "Plan mode is already enabled. The current plan is shown above the composer."
+            } else {
+                "Plan mode enabled. The next request will be planned before any changes are made."
+            };
+            platform_api::SlashDispatchResult::Handled {
+                display: display.to_string(),
+            }
+        } else {
+            platform_api::SlashDispatchResult::RunAsTurn {
+                prompt: request.to_string(),
+            }
+        }
+    }
+
     /// Build a router from the engine handles a desktop runtime exposes.
     #[must_use]
     pub fn new(
@@ -1544,9 +1612,11 @@ impl Drop for TaskPoll {
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
     async fn dispatch_slash(&self, raw: &str) -> Option<SlashDispatchOutcome> {
-        let dispatcher = self.dispatcher.as_ref()?;
         let before = self.capture_slash_authority().await;
-        let result = dispatcher.dispatch(raw).await;
+        let result = match self.dispatch_desktop_slash(raw).await {
+            Some(result) => result,
+            None => self.dispatcher.as_ref()?.dispatch(raw).await,
+        };
         let after = self.capture_slash_authority().await;
         Some(SlashDispatchOutcome {
             result,
@@ -1980,7 +2050,11 @@ impl CommandRouter for EngineCommandRouter {
                 }
 
                 let session_id = self.handle.current_session_id().await.to_string();
-                sink.emit(ClientEvent::SessionStarted { session_id }).await;
+                sink.emit(ClientEvent::SessionStarted {
+                    session_id,
+                    mode: SessionModeDto::Code,
+                })
+                .await;
             }
             ClientCommand::ResumeSession { session_id, cwd } => {
                 if self.is_turn_active() {
@@ -2101,6 +2175,7 @@ impl CommandRouter for EngineCommandRouter {
 
                 sink.emit(ClientEvent::SessionResumed {
                     session_id: uuid.to_string(),
+                    mode: SessionModeDto::Code,
                     messages,
                 })
                 .await;

@@ -12,7 +12,7 @@ import { pendingKeys } from '../src/renderer/components/settings/useEngineSettin
 import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
 
 test('resolveInitialPage opens the provider-credentials deep link when a provider id is given', () => {
-  assert.equal(resolveInitialPage('anthropic'), 'provider-credentials');
+  assert.equal(resolveInitialPage(undefined, 'anthropic'), 'provider-credentials');
 });
 
 test('resolveInitialPage falls back to the first nav page with no deep link', () => {
@@ -45,7 +45,7 @@ test('groupedNav lists every group in a fixed order with no query', () => {
   const sections = groupedNav('');
   assert.deepEqual(sections.map((s) => s.group), ['个人', '模型与服务', '编码', '高级']);
   const allIds = sections.flatMap((s) => s.pages.map((p) => p.id));
-  assert.equal(allIds.length, 15);
+  assert.equal(allIds.length, 16);
 });
 
 test('groupedNav filters to matching pages and drops empty groups', () => {

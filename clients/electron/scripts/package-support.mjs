@@ -82,6 +82,55 @@ export function artifactPaths(root = packageRoot, packageJson = readJson(join(ro
   };
 }
 
+export const DESKTOP_TARGETS = Object.freeze({
+  'darwin-arm64': { platform: 'darwin', arch: 'arm64', extension: 'zip' },
+  'darwin-x64': { platform: 'darwin', arch: 'x64', extension: 'zip' },
+  'win32-x64': { platform: 'win32', arch: 'x64', extension: 'zip' },
+  'linux-x64': { platform: 'linux', arch: 'x64', extension: 'tar.gz' },
+});
+
+export function desktopTarget(platform, arch) {
+  const id = `${platform}-${arch}`;
+  const target = DESKTOP_TARGETS[id];
+  if (!target) {
+    throw new Error(`unsupported Desktop target ${id}; expected ${Object.keys(DESKTOP_TARGETS).join(', ')}`);
+  }
+  return { ...target, id };
+}
+
+export function desktopArtifactPaths(
+  root = packageRoot,
+  platform,
+  arch,
+) {
+  const target = desktopTarget(platform, arch);
+  const releaseRoot = join(root, 'dist');
+  const artifactName = `${target.id}.${target.extension}`;
+  return {
+    ...target,
+    releaseRoot,
+    stageRoot: join(releaseRoot, 'stage', target.id),
+    payloadRoot: join(releaseRoot, 'stage', target.id, target.platform === 'darwin' ? `${APP_NAME}.app` : APP_NAME),
+    artifactName,
+    artifactPath: join(releaseRoot, artifactName),
+    checksumPath: join(releaseRoot, `${artifactName}.sha256`),
+    metadataPath: join(releaseRoot, `${target.id}.build-metadata.json`),
+  };
+}
+
+export function parseDesktopTargetArgs(argv) {
+  let platform;
+  let arch;
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--platform') platform = argv[++index];
+    else if (value === '--arch') arch = argv[++index];
+    else throw new Error(`unknown package argument: ${value}`);
+  }
+  if (!platform || !arch) throw new Error('both --platform and --arch are required');
+  return desktopTarget(platform, arch);
+}
+
 export function runtimePackageJson(source) {
   const {
     devDependencies: _devDependencies,

@@ -37,7 +37,9 @@ use serde::Deserialize;
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
-use platform_api::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
+use platform_api::{
+    CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
+};
 use platform_posix::PosixFileSystem;
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
@@ -380,6 +382,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // legitimate source here (see `needs_credential_driver`, which treats a
         // stored provider key as "connected").
         isolated_credential_storage: false,
+        credential_storage_policy: if args.packaged_credential_stdin_only {
+            CredentialStoragePolicy::NativeOrMemory
+        } else {
+            CredentialStoragePolicy::NativePreferred
+        },
         api_key_helper,
         // (M13) The bridge host does not resolve managed login-method forcing
         // (the Electron parent owns credential policy) and passes no
@@ -1075,7 +1082,10 @@ struct RegistrySlashDispatcherClone {
 impl RegistrySlashDispatcherClone {
     fn wrap(runtime: &DesktopRuntime) -> Self {
         Self {
-            inner: runtime.dispatcher.clone_shared(),
+            inner: runtime
+                .dispatcher
+                .clone_shared()
+                .with_injected_messages_as_turns(),
         }
     }
 }

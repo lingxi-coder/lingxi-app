@@ -1,8 +1,13 @@
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { CommandRunItem, RunItem } from '../model/runItem';
-import { commandShouldCollapse, narrationDefaultOpen, narrationShouldCollapse } from '../model/runItem';
+import type { RunItem } from '../model/runItem';
+import {
+  commandDefaultOpen,
+  narrationDefaultOpen,
+  narrationShouldCollapse,
+} from '../model/runItem';
 import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
+import { CommandOutput } from './CommandOutput';
 import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
@@ -28,7 +33,8 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
       borderRadius: user ? 22 : 0,
       border: 0,
       background: user ? t.surfaceHover : 'transparent',
-      fontSize: 15, lineHeight: 1.68, color, fontWeight: item.strong ? 500 : 400,
+      fontSize: 14, lineHeight: 1.65, letterSpacing: '-.01em',
+      color, fontWeight: item.strong ? 600 : 400,
     }}>
       {images.length > 0 && (
         <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
@@ -96,7 +102,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
         id={item.id}
         open={open}
         onToggle={() => onSetOpen(item.id, !open)}
-        buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12.5, fontWeight: 500 }}
+        buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
         summary={
           <span
             className={item.done ? undefined : 'running-sweep'}
@@ -112,7 +118,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
         <div
           style={{
             borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
-            fontSize: 14, lineHeight: 1.6, color: t.text3, fontStyle: 'italic',
+            fontSize: 13.5, lineHeight: 1.6, letterSpacing: '-.006em', color: t.text3,
             whiteSpace: 'pre-wrap',
           }}
         >
@@ -123,37 +129,6 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
         </div>
       </Disclosure>
     </div>
-  );
-});
-
-const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen }: {
-  item: CommandRunItem;
-  open: boolean;
-  onSetOpen: (id: string, next: boolean) => void;
-}) {
-  const t = useT();
-  // Deliberately NOT MarkdownContent: /help and /status are column-aligned
-  // plain text and a markdown pass destroys the alignment.
-  const body = (
-    <pre
-      className="mono"
-      style={{
-        margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-        fontSize: 12, lineHeight: 1.55,
-        color: item.isError ? t.danger : t.text2,
-      }}
-    >{item.output}</pre>
-  );
-  if (!commandShouldCollapse(item)) return body;
-  return (
-    <Disclosure
-      id={item.id}
-      open={open}
-      onToggle={() => onSetOpen(item.id, !open)}
-      summary={item.name || 'Command output'}
-    >
-      {body}
-    </Disclosure>
   );
 });
 
@@ -214,23 +189,46 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
   }, [items.length, running]);
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto', background: t.transcriptBg, position: 'relative' }}>
+    <div className="desktop-stage" style={{ flex: 1, overflowY: 'auto', background: t.transcriptBg, position: 'relative' }}>
       <div
+        className="desktop-stage-feed"
         style={{
-          maxWidth: 920, margin: '0 auto',
-          padding: '28px 32px 12px',
-          display: 'flex', flexDirection: 'column', gap: 18,
+          width: '100%', maxWidth: 1040, margin: '0 auto',
+          padding: '24px clamp(18px, 2.2vw, 24px) 12px',
+          display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
         {items.length === 0 && !running && (
           <div
+            className="desktop-empty-state-wrap"
             role="status"
             style={{
               minHeight: 260, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: t.text3, fontSize: 14, textAlign: 'center', lineHeight: 1.6,
+              color: t.text3, textAlign: 'center',
             }}
           >
-            {emptyMessage}
+            <div
+              className="desktop-empty-state"
+              style={{
+                '--empty-accent': t.accent,
+                '--empty-accent-bg': t.accentBg,
+                '--empty-border': t.accentBorder,
+                '--empty-text': t.text,
+                '--empty-muted': t.text2,
+              } as CSSProperties}
+            >
+              <div className="desktop-empty-mark" aria-hidden="true">
+                <Icon name="spark" size={21} stroke={1.55} />
+              </div>
+              <div className="desktop-empty-kicker">LingXi desktop</div>
+              <h1>Turn intent into working code.</h1>
+              <p>{emptyMessage}</p>
+              <div className="desktop-empty-steps" aria-hidden="true">
+                <span><b>01</b> Add context</span>
+                <span><b>02</b> Set the goal</span>
+                <span><b>03</b> Review the result</span>
+              </div>
+            </div>
           </div>
         )}
         {/*
@@ -241,7 +239,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
         {items.map((item) => {
           if (item.type === 'narration') {
             return (
-              <div key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="narration" key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
                 <NarrationLine
                   item={item}
                   open={collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item)}
@@ -252,7 +250,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           if (item.type === 'thinking') {
             return (
-              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="thinking" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ThinkingBlock
                     item={item}
@@ -265,7 +263,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           if (item.type === 'tool') {
             return (
-              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="tool" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ToolCall item={item} open={collapseOpen(visible, sessionKey, item.id)} onSetOpen={setOpen} />
                 </div>
@@ -274,11 +272,11 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           }
           if (item.type === 'command') {
             return (
-              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <CommandOutput
                     item={item}
-                    open={collapseOpen(visible, sessionKey, item.id) ?? false}
+                    open={collapseOpen(visible, sessionKey, item.id) ?? commandDefaultOpen(item)}
                     onSetOpen={setOpen}
                   />
                 </div>
@@ -290,7 +288,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
 
         {/* Streaming affordance — shown at the tail while a live turn runs. */}
         {running && (
-          <div style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+          <div className="transcript-run-item" data-run-type="status" style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
             <div style={{ display: 'flex', alignItems: 'center', color: t.text3, fontSize: 13.5 }}>
               <span
                 className="running-sweep"

@@ -19,8 +19,8 @@ use client_protocol::events::ClientEvent;
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, SessionRowDto,
-    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, SessionModeDto,
+    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 
@@ -37,6 +37,7 @@ fn session_list_round_trips() {
             title: "Refactor the parser".to_string(),
             modified_rfc3339: "2026-06-02T15:04:05Z".to_string(),
             message_count: 42,
+            mode: SessionModeDto::Code,
             path: "/Users/x/.lingxi/projects/p/0b3e2f10.jsonl".to_string(),
         }],
     };
@@ -56,6 +57,7 @@ fn session_row_carries_path() {
         title: "t".to_string(),
         modified_rfc3339: "2026-06-02T15:04:05Z".to_string(),
         message_count: 1,
+        mode: SessionModeDto::Chat,
         path: "/abs/path/to/s.jsonl".to_string(),
     };
     let json = serde_json::to_value(&row).expect("serialize SessionRowDto");
@@ -75,6 +77,7 @@ fn session_row_carries_path() {
 fn session_lifecycle_events_round_trip() {
     let started = ClientEvent::SessionStarted {
         session_id: "sess-1".to_string(),
+        mode: SessionModeDto::Code,
     };
     let json = serde_json::to_value(&started).expect("serialize SessionStarted");
     assert_eq!(json["type"], "session_started");
@@ -87,6 +90,7 @@ fn session_lifecycle_events_round_trip() {
     // client renders the rehydrated conversation atomically on resume.
     let resumed = ClientEvent::SessionResumed {
         session_id: "sess-2".to_string(),
+        mode: SessionModeDto::Chat,
         messages: vec![MessageDto {
             role: "user".to_string(),
             blocks: vec![MessageBlockDto::Text {

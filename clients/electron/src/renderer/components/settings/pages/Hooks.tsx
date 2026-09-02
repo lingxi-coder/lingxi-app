@@ -50,25 +50,49 @@ export function hooksPageModel(effective: Record<string, unknown>): HooksPageMod
  * `Permissions`/`ToolsAgent` all have to answer does not apply; only "what
  * is currently active" does.
  */
-export function Hooks({ snapshot, editingLayer, onNavigate, onJumpToLayer }: PageContentProps) {
+export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLayer }: PageContentProps) {
   const t = useT();
   const model = hooksPageModel(snapshot?.effective ?? {});
+  const runtimeHooks = [...bridge.hooksCatalog].sort((left, right) => (
+    left.event.localeCompare(right.event) || left.name.localeCompare(right.name)
+  ));
 
   return (
-    <Card title="Hooks（只读）">
-      <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-        Hooks 是嵌套 JSON，这个页面只做罗列，不提供编辑；需要修改时请跳转到原始 JSON 页面。
-      </div>
-      <FieldProvenanceNotice snapshot={snapshot} fieldKey="hooks" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="生效值" />
-      {model.events.length === 0 && (
-        <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有配置任何 hook。</div>
-      )}
-      {model.events.map((entry) => (
-        <Row key={entry.event} align="center" title={entry.event} desc={`${entry.count} 条匹配规则`}>{null}</Row>
-      ))}
-      <Row title="在 JSON 中编辑" desc="跳转到当前层的原始 JSON 页面。" align="center">
-        <button type="button" data-testid="hooks-open-raw-json" onClick={() => onNavigate(model.escapeHatch)} style={ghostButtonStyle(t)}>打开原始 JSON</button>
-      </Row>
-    </Card>
+    <>
+      <Card title="Hooks（只读）">
+        <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+          Hooks 是嵌套 JSON，这个页面只做罗列，不提供编辑；需要修改时请跳转到原始 JSON 页面。
+        </div>
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="hooks" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="生效值" />
+        {model.events.length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有配置任何 hook。</div>
+        )}
+        {model.events.map((entry) => (
+          <Row key={entry.event} align="center" title={entry.event} desc={`${entry.count} 条匹配规则`}>{null}</Row>
+        ))}
+        <Row title="在 JSON 中编辑" desc="跳转到当前层的原始 JSON 页面。" align="center">
+          <button type="button" data-testid="hooks-open-raw-json" onClick={() => onNavigate(model.escapeHatch)} style={ghostButtonStyle(t)}>打开原始 JSON</button>
+        </Row>
+      </Card>
+
+      <Card title="运行时 Hook Catalog">
+        <Row title="刷新 Catalog" desc="来自引擎当前加载的 hooks，而不是静态设置快照。" align="center">
+          <button type="button" onClick={() => void bridge.refreshHooks()} style={ghostButtonStyle(t)}>刷新</button>
+        </Row>
+        {runtimeHooks.length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>当前 runtime 没有加载任何 hook。</div>
+        )}
+        {runtimeHooks.map((hook) => (
+          <Row
+            key={`${hook.event}:${hook.name}:${hook.matcher ?? '*'}`}
+            title={hook.name}
+            desc={`${hook.event}${hook.matcher ? ` · matcher ${hook.matcher}` : ''} · timeout ${hook.timeout_ms} ms`}
+            align="center"
+          >
+            {null}
+          </Row>
+        ))}
+      </Card>
+    </>
   );
 }

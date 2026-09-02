@@ -42,6 +42,8 @@ data class ProjectSession(
     val preview: String,
     val pinned: Boolean = false,
     val msgs: Int,
+    val mode: SessionMode = SessionMode.Code,
+    val updatedAtEpochMillis: Long = 0L,
 )
 
 data class Project(
@@ -54,6 +56,7 @@ data class Project(
     val sessions: List<ProjectSession>,
     val storageKind: String = "internal",
     val syncState: String = "",
+    val updatedAtEpochMillis: Long = 0L,
 )
 
 data class Cron(

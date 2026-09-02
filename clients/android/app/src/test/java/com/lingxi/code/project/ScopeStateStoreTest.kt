@@ -1,8 +1,10 @@
 package com.lingxi.code.project
 
 import com.lingxi.code.model.ConversationScope
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.conversationScopeFromKey
 import com.lingxi.code.model.persistenceKey
+import com.lingxi.code.model.sessionStateKey
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -23,6 +25,7 @@ class ScopeStateStoreTest {
         assertEquals("global", ConversationScope.Global.persistenceKey())
         assertEquals("project.p1", ConversationScope.Project("p1").persistenceKey())
         assertEquals("app.tracker", ConversationScope.LocalApp("tracker").persistenceKey())
+        assertEquals("project.p1#code", ConversationScope.Project("p1").sessionStateKey(SessionMode.Code))
 
         assertEquals(ConversationScope.Global, conversationScopeFromKey("global"))
         assertEquals(ConversationScope.Project("p1"), conversationScopeFromKey("project.p1"))
@@ -36,16 +39,22 @@ class ScopeStateStoreTest {
     fun `last-active session and draft persist per scope across store instances`() = runTest {
         val first = store()
         first.persistActiveScope("app.tracker")
-        first.persistLastActiveSession("app.tracker", "session-1")
-        first.persistDraft("app.tracker", "还没发出去的话")
-        first.persistDraft("project.p1", "项目草稿")
+        first.persistActiveMode(SessionMode.Chat)
+        first.persistLastActiveSession("app.tracker#chat", "session-1")
+        first.persistDraft("app.tracker#chat", "还没发出去的话")
+        first.persistDraft("project.p1#code", "项目草稿")
+        first.persistWorkspacePinned("app.tracker", 42L)
+        first.persistWorkspaceCollapsed("chat:app.tracker", true)
 
         // A NEW instance reads the same file — durability, not memory.
         val second = store()
         assertEquals("app.tracker", second.readActiveScopeKey())
-        assertEquals("session-1", second.read("app.tracker")?.lastActiveSessionId)
-        assertEquals("还没发出去的话", second.read("app.tracker")?.draft)
-        assertEquals("项目草稿", second.read("project.p1")?.draft)
+        assertEquals(SessionMode.Chat, second.readActiveMode())
+        assertEquals("session-1", second.read("app.tracker#chat")?.lastActiveSessionId)
+        assertEquals("还没发出去的话", second.read("app.tracker#chat")?.draft)
+        assertEquals("项目草稿", second.read("project.p1#code")?.draft)
+        assertEquals(42L, second.readWorkspacePresentation()["app.tracker"]?.pinnedAtEpochMillis)
+        assertEquals(true, second.readWorkspacePresentation()["chat:app.tracker"]?.collapsed)
         assertNull(second.read("global"))
     }
 
@@ -55,7 +64,10 @@ class ScopeStateStoreTest {
         file.writeText("{ not json")
         val store = ScopeStateStore(file)
         assertNull(store.readActiveScopeKey())
+        assertEquals(SessionMode.Code, store.readActiveMode())
         store.persistActiveScope("global")
+        store.persistWorkspaceCollapsed("code:global", true)
         assertEquals("global", store.readActiveScopeKey())
+        assertEquals(true, store.readWorkspacePresentation()["code:global"]?.collapsed)
     }
 }

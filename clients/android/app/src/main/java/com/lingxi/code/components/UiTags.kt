@@ -107,6 +107,15 @@ object UiTags {
 
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
+    const val DRAWER_WORKSPACE_PREFIX = "tag.drawerWorkspace."
+    const val DRAWER_WORKSPACE_PIN_PREFIX = "tag.drawerWorkspacePin."
+    const val DRAWER_WORKSPACE_COLLAPSE_PREFIX = "tag.drawerWorkspaceCollapse."
+    const val DRAWER_SESSION_FORK_PREFIX = "tag.drawerSessionFork."
 
     fun drawerTab(sectionKey: String): String = DRAWER_TAB_PREFIX + sectionKey
+    fun drawerWorkspace(workspaceKey: String): String = DRAWER_WORKSPACE_PREFIX + workspaceKey
+    fun drawerWorkspacePin(workspaceKey: String): String = DRAWER_WORKSPACE_PIN_PREFIX + workspaceKey
+    fun drawerWorkspaceCollapse(workspaceKey: String): String = DRAWER_WORKSPACE_COLLAPSE_PREFIX + workspaceKey
+    fun drawerSessionFork(sessionId: String, targetModeKey: String): String =
+        DRAWER_SESSION_FORK_PREFIX + sessionId + "." + targetModeKey
 }

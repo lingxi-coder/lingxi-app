@@ -102,7 +102,7 @@ mod mobile_lsp;
 #[cfg(feature = "uniffi")]
 pub use client_protocol::listings::{
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
-    ModelPricingTierDto,
+    ModelPricingTierDto, SessionModeDto,
 };
 #[cfg(feature = "uniffi")]
 pub use host::{
@@ -112,6 +112,8 @@ pub use host::{
     MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto,
     MobileOAuthStateDto, MobileRuntime, ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
+#[cfg(feature = "uniffi")]
+pub use session::jsonl::SessionMode as MobileSessionMode;
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`
 // shim (fs/http/clock stubs over a temp root), a recording `ClientEventListener`,
@@ -710,6 +712,32 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
     reg
 }
 
+#[cfg(feature = "uniffi")]
+pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
+    "AskUserQuestion",
+    "Glob",
+    "Grep",
+    "Read",
+    "Skill",
+    "StructuredOutput",
+    "WebFetch",
+    "WebSearch",
+];
+
+#[cfg(feature = "uniffi")]
+pub(crate) fn apply_mobile_session_tool_policy(
+    registry: &mut ToolRegistry,
+    mode: session::jsonl::SessionMode,
+) {
+    if mode == session::jsonl::SessionMode::Chat {
+        let allowlist = MOBILE_CHAT_TOOL_ALLOWLIST
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        registry.set_session_tool_allowlist(&allowlist);
+    }
+}
+
 /// Register the mobile tool set into an existing registry, with the `Skill` tool
 /// INERT (the hermetic `EmptySkillLoader`). Used by tests and the non-FFI host
 /// build. The FFI host instead calls [`register_mobile_tools_with_skill_loader`]
@@ -1041,6 +1069,48 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
+        }
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn chat_profile_exposes_only_the_read_only_mobile_allowlist() {
+        let ctx = shell_test_ctx(dummy_out());
+        let code_registry = mobile_tool_registry(ctx.clone());
+        assert!(code_registry.find_by_name("Write").is_some());
+        assert!(code_registry.find_by_name("TaskCreate").is_some());
+
+        let mut chat_registry = mobile_tool_registry(ctx);
+        apply_mobile_session_tool_policy(&mut chat_registry, session::jsonl::SessionMode::Chat);
+        let names = chat_registry
+            .available_tools(&ToolStaticContext::default())
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(names.contains("Read"));
+        assert!(names.contains("WebFetch"));
+        assert!(names.contains("AskUserQuestion"));
+        assert!(names
+            .iter()
+            .all(|name| MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name.as_str())));
+        for denied in [
+            "Write",
+            "Edit",
+            "NotebookEdit",
+            "Shell",
+            "Git",
+            "LSP",
+            "Workflow",
+            "TaskCreate",
+            "CronCreate",
+            "ToolSearch",
+            "camera",
+            "notification",
+        ] {
+            assert!(
+                chat_registry.find_by_name(denied).is_none(),
+                "{denied} must not be reachable in Chat mode"
+            );
         }
     }
 

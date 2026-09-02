@@ -16,6 +16,7 @@ fn rows(n: usize) -> Vec<SessionMetadata> {
             created: UNIX_EPOCH
                 + Duration::from_secs(1_700_000_000 + u64::try_from(i).unwrap_or(0)),
             message_count: 3,
+            mode: session::jsonl::SessionMode::Code,
             path: PathBuf::from(format!("s{i}.jsonl")),
             pr_number: None,
             custom_or_ai_title: Some(format!("title-{i}")),

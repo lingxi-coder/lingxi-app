@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseSlashLine, resolveDesktopCommand, type DesktopCommand } from '../src/renderer/bridge/slashDispatch';
-import { DESKTOP_COMMANDS } from '../src/renderer/bridge/desktopCommands';
+import {
+  desktopCommandIsShadowed,
+  parseSlashLine,
+  resolveDesktopCommand,
+  type DesktopCommand,
+} from '../src/renderer/bridge/slashDispatch';
+import { ALL_DESKTOP_COMMANDS, DESKTOP_COMMANDS } from '../src/renderer/bridge/desktopCommands';
 
 const noop = () => undefined;
 const table: DesktopCommand[] = [
@@ -34,6 +39,19 @@ test('a command outside the table is not intercepted', () => {
   assert.equal(resolveDesktopCommand('/status', table), null);
 });
 
+test('a project command shadows a same-named Desktop builtin', () => {
+  assert.equal(desktopCommandIsShadowed('/rewind checkpoint', [{
+    name: 'rewind',
+    description: 'Project rewind workflow',
+    source: 'project',
+  }]), true);
+  assert.equal(desktopCommandIsShadowed('/rewind checkpoint', [{
+    name: 'rewind',
+    description: 'Builtin rewind',
+    source: 'builtin',
+  }]), false);
+});
+
 test('resolution is case-insensitive on the name only', () => {
   assert.equal(resolveDesktopCommand('/MODEL Opus', table)?.args, 'Opus');
 });
@@ -59,6 +77,18 @@ function recordingContext() {
     openModelPicker: (s: string) => { calls.push(`openModelPicker:${s}`); },
     openPermissionPicker: () => { calls.push('openPermissionPicker'); },
     openSettings: () => { calls.push('openSettings'); },
+    openSettingsPage: (page: string) => { calls.push(`openSettingsPage:${page}`); },
+    addWorkspaceDirectory: async (path: string) => { calls.push(`addWorkspaceDirectory:${path}`); },
+    chooseProject: async () => { calls.push('chooseProject'); },
+    activateProject: async (path: string) => { calls.push(`activateProject:${path}`); },
+    clearSession: async () => { calls.push('clearSession'); },
+    forceCompact: async () => { calls.push('forceCompact'); },
+    copyLastResponse: async () => { calls.push('copyLastResponse'); return true; },
+    login: async () => { calls.push('login'); },
+    logout: async () => { calls.push('logout'); },
+    reloadPlugins: async () => { calls.push('reloadPlugins'); },
+    openTasks: async () => { calls.push('openTasks'); },
+    showHelp: () => { calls.push('showHelp'); },
     emit: (output: string, isError?: boolean) => { calls.push(`emit:${isError ? 'error' : 'ok'}:${output}`); },
   };
   return { ctx, calls };
@@ -112,4 +142,35 @@ test('/fast off turns fast mode off explicitly, not just toggling it', async () 
 
 test('/theme with an unrecognized argument reports itself instead of silently doing nothing', async () => {
   assert.deepEqual(await run('/theme sepia'), ['emit:error:/theme takes dark or light, not: sepia']);
+});
+
+test('Desktop-owned slash commands call real GUI and IPC actions', async () => {
+  assert.deepEqual(await run('/help'), ['showHelp']);
+  assert.deepEqual(await run('/clear'), ['clearSession']);
+  assert.deepEqual(await run('/compact'), ['forceCompact']);
+  assert.deepEqual(await run('/login'), ['login']);
+  assert.deepEqual(await run('/logout'), ['logout']);
+  assert.deepEqual(await run('/add-dir /tmp/work'), [
+    'addWorkspaceDirectory:/tmp/work',
+    'emit:ok:Added working directory: /tmp/work',
+  ]);
+  assert.deepEqual(await run('/add-dir'), ['openSettingsPage:permissions']);
+  assert.deepEqual(await run('/cd'), ['chooseProject']);
+  assert.deepEqual(await run('/cd /tmp/work'), ['activateProject:/tmp/work']);
+  assert.deepEqual(await run('/copy'), [
+    'copyLastResponse',
+    'emit:ok:Copied the last response to the clipboard.',
+  ]);
+  assert.deepEqual(await run('/tasks'), ['openTasks']);
+  assert.deepEqual(await run('/plugin'), ['openSettingsPage:plugins']);
+  assert.deepEqual(await run('/reload-plugins'), ['reloadPlugins']);
+});
+
+test('a directly typed unsupported command reports Desktop unavailability locally', async () => {
+  const { ctx, calls } = recordingContext();
+  const resolved = resolveDesktopCommand('/rewind now', ALL_DESKTOP_COMMANDS);
+  assert.ok(resolved);
+  await resolved.command.run(resolved.args, ctx as never);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!, /^emit:error:\/rewind is not available in Desktop:/);
 });

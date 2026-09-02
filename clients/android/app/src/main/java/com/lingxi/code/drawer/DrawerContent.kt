@@ -48,9 +48,11 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.Chat
+import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Project
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.Workspace
@@ -69,6 +71,7 @@ data class DrawerProductionData(
     val projects: List<Project>? = null,
     val crons: List<Cron>? = null,
     val projectStatusMessage: String? = null,
+    val localAppWorkspaces: List<DrawerLocalAppWorkspace> = emptyList(),
 )
 
 /**
@@ -114,6 +117,7 @@ fun DrawerContent(
     engineSessions: EngineSessionState = EngineSessionState.loading(),
     /** Resume a real engine session by its wire uuid. */
     onResumeSession: (String) -> Unit = { onSelectSession(SessionRef(it, it)) },
+    onNewGlobalSession: () -> Unit = { onSelectSession(SessionRef("new", "")) },
     /** Real project/cron/workspace collections. Null collections render unavailable. */
     productionData: DrawerProductionData = DrawerProductionData(),
     onCreateProject: () -> Unit = {},
@@ -141,6 +145,15 @@ fun DrawerContent(
     onSelectAppScopeSession: (SessionRef) -> Unit = {},
     /** Start a fresh session in the active app's workspace. */
     onNewAppScopeSession: () -> Unit = {},
+    onSelectLocalAppSession: (String, SessionRef) -> Unit = { _, session -> onSelectAppScopeSession(session) },
+    onNewLocalAppSession: (String) -> Unit = { onNewAppScopeSession() },
+    onContinueSession: (ConversationScope, SessionRow, SessionMode) -> Unit = { _, _, _ -> },
+    onOpenLocalAppDetails: (String) -> Unit = {},
+    onSelectSection: (DrawerSection) -> Unit = { ui.section = it },
+    isWorkspaceCollapsed: (SessionMode, String) -> Boolean = { _, _ -> false },
+    onToggleWorkspaceCollapsed: (SessionMode, String) -> Unit = { _, _ -> },
+    pinnedAtEpochMillis: (SessionMode, String) -> Long? = { _, _ -> null },
+    onToggleWorkspacePinned: (SessionMode, String) -> Unit = { _, _ -> },
 ) {
     val t = LingXiTheme.palette
 
@@ -150,22 +163,67 @@ fun DrawerContent(
     // closes); the workspace-scoped lists below recompute on every keystroke.
     var query by remember { mutableStateOf("") }
 
-    val filteredEngineSessions = remember(engineSessions.rows, query) {
-        filterSessions(engineSessions.rows, query)
+    val globalName = stringResource(R.string.drawer_workspace_global)
+    val projects = productionData.projects.orEmpty()
+    val localAppWorkspaces = remember(productionData.localAppWorkspaces, appScope) {
+        val activeScopeWorkspace = appScope?.let { scope ->
+            DrawerLocalAppWorkspace(
+                appId = scope.appId,
+                name = scope.appName,
+                sessions = scope.sessions.map { row ->
+                    com.lingxi.code.localapps.LocalAppSessionRow(
+                        uuid = row.uuid,
+                        title = row.title,
+                        relativeTime = row.relativeTime,
+                        messageCount = row.messageCount,
+                        mode = row.mode,
+                        modifiedAtEpochSeconds = row.modifiedAtEpochSeconds,
+                        isInit = false,
+                    )
+                },
+            )
+        }
+        val merged = productionData.localAppWorkspaces.toMutableList()
+        if (activeScopeWorkspace != null && merged.none { it.appId == activeScopeWorkspace.appId }) {
+            merged += activeScopeWorkspace
+        }
+        merged.toList()
     }
-    val projects = remember(productionData.projects, ui.activeWs, query) {
-        productionData.projects
-            ?.let { rows ->
-                if (ui.activeWs.isBlank()) rows else rows.filter { it.wsId == ui.activeWs }
-            }
-            ?.let { filterProjects(it, query) }
+    val chatWorkspaceGroups = remember(engineSessions.rows, projects, localAppWorkspaces, query) {
+        filterWorkspaceGroups(
+            buildWorkspaceGroups(
+                mode = SessionMode.Chat,
+                globalName = globalName,
+                globalSessions = engineSessions.rows,
+                projects = projects,
+                localApps = localAppWorkspaces,
+                pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Chat, workspaceKey) },
+            ),
+            query,
+        )
     }
-    val crons = remember(productionData.crons, ui.activeWs, query) {
-        productionData.crons
-            ?.let { rows ->
-                if (ui.activeWs.isBlank()) rows else rows.filter { it.wsId == ui.activeWs }
-            }
-            ?.let { filterCrons(it, query) }
+    val codeWorkspaceGroups = remember(engineSessions.rows, projects, localAppWorkspaces, query) {
+        filterWorkspaceGroups(
+            buildWorkspaceGroups(
+                mode = SessionMode.Code,
+                globalName = globalName,
+                globalSessions = engineSessions.rows,
+                projects = projects,
+                localApps = localAppWorkspaces,
+                pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Code, workspaceKey) },
+            ),
+            query,
+        )
+    }
+    val cronWorkspaceGroups = remember(productionData.crons, projects, query) {
+        filterCronWorkspaceGroups(
+            buildCronWorkspaceGroups(
+                globalName = globalName,
+                crons = productionData.crons.orEmpty(),
+                projects = projects,
+            ),
+            query,
+        )
     }
 
     Column(
@@ -175,21 +233,14 @@ fun DrawerContent(
             .windowInsetsPadding(WindowInsets.statusBars),
     ) {
         DrawerHeader(onClose = onClose)
-        WorkspaceSource(
-            workspaces = productionData.workspaces,
-            activeWs = ui.activeWs,
-            onSelect = ui::selectWorkspace,
-        )
-        if (ui.section != DrawerSection.Apps) {
-            SearchBar(query = query, onQueryChange = { query = it })
-        }
+        SearchBar(query = query, onQueryChange = { query = it })
         SectionTabs(
             section = ui.section,
-            chats = filteredEngineSessions.size,
-            projects = projects?.size ?: 0,
-            crons = crons?.size ?: 0,
+            chats = chatWorkspaceGroups.sumOf { it.sessions.size },
+            projects = codeWorkspaceGroups.sumOf { it.sessions.size },
+            crons = cronWorkspaceGroups.sumOf { it.crons.size },
             apps = appsCount,
-            onSelect = { ui.section = it },
+            onSelect = onSelectSection,
         )
 
         // Scrolling section body — fills the space above shortcuts/account.
@@ -202,55 +253,52 @@ fun DrawerContent(
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
             when (ui.section) {
-                DrawerSection.Chats -> Column(Modifier.fillMaxWidth()) {
-                    // The active app's sessions render ABOVE the global list
-                    // (the project-section pattern: name header, indented
-                    // session rows, a trailing 新会话 affordance).
-                    appScope?.let { scope ->
-                        AppScopeSection(
-                            scope = scope.copy(sessions = filterSessions(scope.sessions, query)),
-                            activeSession = ui.activeSession,
-                            onSelectSession = onSelectAppScopeSession,
-                            onNewSession = onNewAppScopeSession,
-                        )
-                    }
-                    EngineSessionsSection(
-                        state = engineSessions.copy(rows = filteredEngineSessions),
-                        activeSession = ui.activeSession,
-                        onSelectSession = { onResumeSession(it) },
-                    )
-                }
+                DrawerSection.Chat -> WorkspaceGroupsSection(
+                    groups = chatWorkspaceGroups,
+                    mode = SessionMode.Chat,
+                    activeWs = ui.activeWs,
+                    activeSession = ui.activeSession,
+                    onSelectWorkspace = ui::selectWorkspace,
+                    isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Chat, it) },
+                    onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Chat, it) },
+                    isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Chat, it) != null },
+                    onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Chat, it) },
+                    onSelectGlobalSession = { onResumeSession(it.uuid) },
+                    onSelectProjectSession = onSelectProjectSession,
+                    onSelectLocalAppSession = onSelectLocalAppSession,
+                    onNewGlobalSession = onNewGlobalSession,
+                    onNewProjectSession = onNewProjectSession,
+                    onNewLocalAppSession = onNewLocalAppSession,
+                    onContinueSession = onContinueSession,
+                    onOpenLocalAppLibrary = { onOpenApps() },
+                    onOpenLocalAppDetails = onOpenLocalAppDetails,
+                )
 
-                DrawerSection.Projects -> when {
-                    projects == null -> DrawerCollectionState(stringResource(R.string.drawer_projects_unavailable))
-                    else -> ProjectsSection(
-                        projects = projects,
-                        activeSession = ui.activeSession,
-                        openProjects = ui.openProjects,
-                        onToggleProject = ui::toggleProject,
-                        onSelectSession = onSelectProjectSession,
-                        onNewSession = onNewProjectSession,
-                        onCreateProject = onCreateProject,
-                        onReimportProject = onReimportProject,
-                        onExportProject = onExportProject,
-                        onReauthorizeProject = onReauthorizeProject,
-                        statusMessage = productionData.projectStatusMessage,
-                    )
-                }
+                DrawerSection.Code -> WorkspaceGroupsSection(
+                    groups = codeWorkspaceGroups,
+                    mode = SessionMode.Code,
+                    activeWs = ui.activeWs,
+                    activeSession = ui.activeSession,
+                    onSelectWorkspace = ui::selectWorkspace,
+                    isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Code, it) },
+                    onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Code, it) },
+                    isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Code, it) != null },
+                    onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Code, it) },
+                    onSelectGlobalSession = { onResumeSession(it.uuid) },
+                    onSelectProjectSession = onSelectProjectSession,
+                    onSelectLocalAppSession = onSelectLocalAppSession,
+                    onNewGlobalSession = onNewGlobalSession,
+                    onNewProjectSession = onNewProjectSession,
+                    onNewLocalAppSession = onNewLocalAppSession,
+                    onContinueSession = onContinueSession,
+                    onOpenLocalAppLibrary = { onOpenApps() },
+                    onOpenLocalAppDetails = onOpenLocalAppDetails,
+                )
 
-                DrawerSection.Crons -> when {
-                    crons == null -> DrawerCollectionState(stringResource(R.string.drawer_crons_unavailable))
-                    else -> CronsSection(
-                        crons = crons,
-                        onOpenCron = onOpenCron,
-                        onCreateCron = onCreateCron,
-                    )
-                }
-
-                DrawerSection.Apps -> AppsSection(
-                    appsCount = appsCount,
-                    onCreateApp = onCreateApp,
-                    onOpenApps = onOpenApps,
+                DrawerSection.Cron -> CronWorkspaceGroupsSection(
+                    groups = cronWorkspaceGroups,
+                    onOpenCron = onOpenCron,
+                    onCreateCron = onCreateCron,
                 )
             }
         }
@@ -427,10 +475,9 @@ private fun SectionTabs(
             .padding(horizontal = 14.dp)
             .padding(bottom = 8.dp),
     ) {
-        SectionTab(DrawerSection.Chats, LXIconName.Message, stringResource(R.string.drawer_tab_chats), chats, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Projects, LXIconName.Folder, stringResource(R.string.drawer_tab_projects), projects, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Crons, LXIconName.Clock, stringResource(R.string.drawer_tab_crons), crons, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Apps, LXIconName.Workflow, stringResource(R.string.drawer_tab_apps), apps, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Chat, LXIconName.Message, stringResource(R.string.drawer_tab_chats), chats, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Code, LXIconName.Folder, stringResource(R.string.drawer_tab_projects), projects, section, onSelect, Modifier.weight(1f))
+        SectionTab(DrawerSection.Cron, LXIconName.Clock, stringResource(R.string.drawer_tab_crons), crons, section, onSelect, Modifier.weight(1f))
     }
 }
 

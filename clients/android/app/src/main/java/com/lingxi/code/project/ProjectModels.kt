@@ -1,5 +1,6 @@
 package com.lingxi.code.project
 
+import com.lingxi.code.model.SessionMode
 import java.io.File
 
 enum class ProjectStorageKind(val wireName: String) {
@@ -55,6 +56,7 @@ data class ProjectSessionSummary(
     val messageCount: Int,
     val relativeTime: String,
     val updatedAtEpochMillis: Long,
+    val mode: SessionMode = SessionMode.Code,
 )
 
 data class ProjectSyncFile(

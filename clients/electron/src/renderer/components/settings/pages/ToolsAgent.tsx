@@ -184,6 +184,25 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
         </Row>
       </Card>
 
+      <Card title="运行时 Agent Catalog">
+        <Row title="刷新 Catalog" desc="展示当前引擎已加载的 agent 定义。" align="center">
+          <button type="button" onClick={() => void bridge.refreshAgents()} style={ghostButtonStyle(t)}>刷新</button>
+        </Row>
+        {bridge.agentCatalog.length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>当前 runtime 没有加载任何 agent。</div>
+        )}
+        {bridge.agentCatalog.map((agent) => (
+          <Row
+            key={agent.name}
+            title={agent.name}
+            desc={`${agent.description || '无描述'}${agent.tools_allowed.length ? ` · tools: ${agent.tools_allowed.join(', ')}` : ''}`}
+            align="center"
+          >
+            {null}
+          </Row>
+        ))}
+      </Card>
+
       {saveError && <div role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{saveError}</div>}
     </>
   );

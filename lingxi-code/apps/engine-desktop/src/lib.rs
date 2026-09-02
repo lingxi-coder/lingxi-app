@@ -65,10 +65,12 @@ use orchestrator::{
     QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK,
 };
 use permission::gate::PermissionGate;
-use platform_api::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
+use platform_api::{
+    AuthHandle, CredentialStoragePolicy, McpTransport, OrchestratorHandle, OutputStream,
+};
 use platform_posix::{
-    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixProcess,
-    PosixRuntime, PosixSandbox, PosixWorktreeManager,
+    PosixClock, PosixFileSystem, PosixHttp, PosixProcess, PosixRuntime, PosixSandbox,
+    PosixWorktreeManager,
 };
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
@@ -2933,6 +2935,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
+///     credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
 ///     api_key_helper: None,
 ///     managed_oauth_only: false,
 ///     anthropic_key_fd_present: false,
@@ -3034,6 +3037,10 @@ pub struct DesktopConfig {
     /// connected, which is what made `bridge-server`'s credential-required e2e
     /// assertions machine-dependent).
     pub isolated_credential_storage: bool,
+    /// Fallback policy for the shared credential store once native storage is
+    /// unavailable. Production CLI/TUI/Desktop keep the owner-only plaintext
+    /// sidecar; packaged bridge-server can switch to memory-only fallback.
+    pub credential_storage_policy: CredentialStoragePolicy,
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
@@ -3595,6 +3602,7 @@ impl std::fmt::Debug for DesktopConfig {
                 "api_key_helper",
                 &self.api_key_helper.as_ref().map(|_| "<redacted>"),
             )
+            .field("credential_storage_policy", &self.credential_storage_policy)
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
@@ -3712,6 +3720,7 @@ impl Default for DesktopConfig {
             api_key: String::new(),
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
+            credential_storage_policy: CredentialStoragePolicy::NativePreferred,
             api_key_helper: None,
             // (M13) Default: no managed OAuth forcing, no FD-inherited key —
             // hosts that resolve either fill them in.
@@ -6621,16 +6630,36 @@ pub async fn build_shared_credential_stack(
     lingxi_home: &std::path::Path,
     isolated_credential_storage: bool,
 ) -> Result<SharedCredentialStack, BuildError> {
+    build_shared_credential_stack_with_policy(
+        lingxi_home,
+        isolated_credential_storage,
+        CredentialStoragePolicy::NativePreferred,
+    )
+    .await
+}
+
+/// Build the shared desktop credential stack with an explicit fallback policy.
+///
+/// Production CLI/TUI use [`CredentialStoragePolicy::NativePreferred`];
+/// packaged bridge-server builds can request
+/// [`CredentialStoragePolicy::NativeOrMemory`] so a missing native vault never
+/// downgrades to plaintext on disk.
+pub async fn build_shared_credential_stack_with_policy(
+    lingxi_home: &std::path::Path,
+    isolated_credential_storage: bool,
+    credential_storage_policy: CredentialStoragePolicy,
+) -> Result<SharedCredentialStack, BuildError> {
     let http = Arc::new(PosixHttp::new());
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
     let storage = if isolated_credential_storage {
-        platform_posix::plaintext_secure_storage(credentials_path).await
+        build_platform_plaintext_secure_storage(credentials_path).await
     } else {
-        secure_storage_for_platform(
-            std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
+        build_platform_secure_storage(
+            current_credential_user(),
             lingxi_home.to_path_buf(),
             credentials_path,
+            credential_storage_policy,
         )
         .await
     }
@@ -6646,6 +6675,42 @@ pub async fn build_shared_credential_stack(
         storage,
         credentials,
     })
+}
+
+async fn build_platform_plaintext_secure_storage(
+    credentials_path: PathBuf,
+) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+    #[cfg(windows)]
+    {
+        platform_windows::plaintext_secure_storage(credentials_path).await
+    }
+    #[cfg(not(windows))]
+    {
+        platform_posix::plaintext_secure_storage(credentials_path).await
+    }
+}
+
+async fn build_platform_secure_storage(
+    user: String,
+    lingxi_home: PathBuf,
+    credentials_path: PathBuf,
+    policy: CredentialStoragePolicy,
+) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+    #[cfg(windows)]
+    {
+        platform_windows::secure_storage_for_policy(user, lingxi_home, credentials_path, policy)
+            .await
+    }
+    #[cfg(not(windows))]
+    {
+        platform_posix::secure_storage_for_policy(user, lingxi_home, credentials_path, policy).await
+    }
+}
+
+fn current_credential_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "default".to_string())
 }
 
 /// Resolve the LLM stack from a [`DesktopConfig`] alone.

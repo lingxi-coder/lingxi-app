@@ -920,6 +920,8 @@ final class ConversationModel: ObservableObject {
 protocol ConversationSource: AnyObject {
     /// The state ChatView observes.
     var model: ConversationModel { get }
+    /// Capability profile for this source instance.
+    var sessionMode: SessionMode { get }
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
     func startNewConversation()
     /// Submit a user prompt. Appends the user message, flips `streaming`, and
@@ -964,6 +966,8 @@ protocol ConversationSource: AnyObject {
     /// land its deltas / notice in the newly-shown session. A no-op when the id is
     /// already active.
     func openSession(_ session: SessionRef)
+    /// Continue an existing session in another capability profile.
+    func forkSession(_ sessionID: String, targetMode: SessionMode) async throws
     /// Lifecycle: the app moved to the background (`scenePhase == .background`).
     /// This hook may persist state, but MUST NOT cancel an active turn or change
     /// its streaming bookkeeping. UIKit owns suspension; backgrounding is not a
@@ -1052,6 +1056,8 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    var sessionMode: SessionMode { .code }
+
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
         send(text)
@@ -1063,6 +1069,7 @@ extension ConversationSource {
     func handleBackground() {}
     func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {}
     func handleForeground() {}
+    func forkSession(_ sessionID: String, targetMode: SessionMode) async throws {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
     func listSessions() {}
@@ -1143,6 +1150,7 @@ private func uiMessageImages(from images: [MessageImageDto]) -> [MessageImage] {
 enum ConversationSourceFactory {
     struct LaunchOptions {
         var projectCwd: String? = nil
+        var sessionMode: SessionMode = .code
         var providerConfigured: Bool = false
         var providerProfilesJson: String? = nil
         var providerRoutingJson: String? = nil
@@ -1153,6 +1161,7 @@ enum ConversationSourceFactory {
 
     static func make(
         projectCwd: String? = nil,
+        sessionMode: SessionMode = .code,
         providerConfigured: Bool = false,
         providerProfilesJson: String? = nil,
         providerRoutingJson: String? = nil,
@@ -1162,6 +1171,7 @@ enum ConversationSourceFactory {
     ) -> any ConversationSource {
         make(options: LaunchOptions(
             projectCwd: projectCwd,
+            sessionMode: sessionMode,
             providerConfigured: providerConfigured,
             providerProfilesJson: providerProfilesJson,
             providerRoutingJson: providerRoutingJson,
@@ -1174,6 +1184,7 @@ enum ConversationSourceFactory {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
                 let source = MockConversationSource.uiTestFixture(
+                    sessionMode: options.sessionMode,
                     cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",
                     multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1",
                     holdTurn: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_HOLD_TURN"] == "1",
@@ -1199,6 +1210,7 @@ enum ConversationSourceFactory {
                     appSandboxRoot: root,
                     model: storedModel,
                     projectCwd: options.projectCwd,
+                    sessionMode: options.sessionMode,
                     providerProfilesJson: options.providerProfilesJson,
                     providerRoutingJson: options.providerRoutingJson,
                     visionDelegationEnabled: options.visionDelegationEnabled,
@@ -1208,7 +1220,7 @@ enum ConversationSourceFactory {
                 return source
             }
         #endif
-        let source = MockConversationSource()
+        let source = MockConversationSource(sessionMode: options.sessionMode)
         source.model.providerConfigured = options.providerConfigured
         return source
     }
@@ -1244,6 +1256,7 @@ enum ConversationSourceFactory {
 @MainActor
 final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
+    let sessionMode: SessionMode
     private var cannedReplyDelay: TimeInterval = 1.1
     #if canImport(engine_mobileFFI)
         private var mockProviderCatalog: [ProviderCatalogEntry] = []
@@ -1257,14 +1270,19 @@ final class MockConversationSource: ConversationSource {
     private var activeTurnToken: ConversationTurnToken?
     private var turnSpeechSequence: UInt64 = 0
 
+    init(sessionMode: SessionMode = .code) {
+        self.sessionMode = sessionMode
+    }
+
     #if DEBUG
         static func uiTestFixture(
+            sessionMode: SessionMode = .code,
             cancelledRun: Bool = false,
             multiAgent: Bool = false,
             holdTurn: Bool = false,
             askQuestion: Bool = false
         ) -> MockConversationSource {
-            let source = MockConversationSource()
+            let source = MockConversationSource(sessionMode: sessionMode)
             source.cannedReplyDelay = holdTurn ? 30 : 1.1
             let terminalToolStatus: ConversationToolStatus = cancelledRun ? .cancelled : .completed
             let terminalShellStatus: ConversationShellStatus = cancelledRun ? .cancelled : .completed
@@ -1647,6 +1665,7 @@ final class MockConversationSource: ConversationSource {
         var model: String
         var appSandboxRoot: String
         var projectCwd: String?
+        var sessionMode: SessionMode
         var providerProfilesJson: String?
         var providerRoutingJson: String?
         var visionDelegationEnabled: Bool
@@ -1661,6 +1680,7 @@ final class MockConversationSource: ConversationSource {
         static func fromEnvironment(appSandboxRoot: String,
                                     model: String,
                                     projectCwd: String? = nil,
+                                    sessionMode: SessionMode = .code,
                                     providerProfilesJson: String? = nil,
                                     providerRoutingJson: String? = nil,
                                     visionDelegationEnabled: Bool = true,
@@ -1684,6 +1704,7 @@ final class MockConversationSource: ConversationSource {
                 model: nonEmpty(env["LINGXI_MODEL"]) ?? model,
                 appSandboxRoot: appSandboxRoot,
                 projectCwd: projectCwd,
+                sessionMode: sessionMode,
                 providerProfilesJson: providerProfilesJson,
                 providerRoutingJson: providerRoutingJson,
                 visionDelegationEnabled: visionDelegationEnabled,
@@ -1802,6 +1823,7 @@ final class MockConversationSource: ConversationSource {
         ) throws -> MobileEngineHandle
 
         let model: ConversationModel
+        let sessionMode: SessionMode
 
         private let config: EngineConfig
         private let handleBuilder: HandleBuilder
@@ -1930,6 +1952,7 @@ final class MockConversationSource: ConversationSource {
             permissionModeRepository: PermissionModeConfigurationRepository? = nil
         ) {
             self.config = config
+            sessionMode = config.sessionMode
             self.durableTurns = DurableConversationTurnClientStore(config: config)
             self.handleBuilder = handleBuilder
             self.permissionModeRepository = permissionModeRepository
@@ -3197,6 +3220,7 @@ final class MockConversationSource: ConversationSource {
                 apiBase: config.apiBase,
                 apiKey: config.apiKey,
                 model: config.model,
+                sessionMode: config.sessionMode.dto,
                 visionDelegationEnabled: config.visionDelegationEnabled,
                 appSandboxRoot: config.appSandboxRoot,
                 projectCwd: config.projectCwd,
@@ -5098,7 +5122,9 @@ final class MockConversationSource: ConversationSource {
                 model.engineSessions = sessions.map {
                     EngineSession(id: $0.uuid,
                                   title: $0.title,
+                                  mode: SessionMode(dto: $0.mode),
                                   messageCount: Int($0.messageCount),
+                                  modifiedAt: RelativeTime.parse($0.modifiedRfc3339),
                                   relativeTime: RelativeTime.format($0.modifiedRfc3339))
                 }
                 // Publish the authoritative rows before flipping the loaded
@@ -5140,7 +5166,8 @@ final class MockConversationSource: ConversationSource {
                     messageIndex: messageIndex
                 )
 
-            case let .sessionStarted(sessionId):
+            case let .sessionStarted(sessionId, mode):
+                guard SessionMode(dto: mode) == sessionMode else { return }
                 // A fresh session began on the connection (1:1 with a successful
                 // `NewSession`). Adopt it as active. Reset the transcript ONLY
                 // when this is genuinely a new id AND no turn is streaming — so an
@@ -5177,7 +5204,8 @@ final class MockConversationSource: ConversationSource {
                 }
                 refreshSessionAgentsAfterTransition()
 
-            case let .sessionResumed(sessionId, messages):
+            case let .sessionResumed(sessionId, mode, messages):
+                guard SessionMode(dto: mode) == sessionMode else { return }
                 // A prior session was resumed (1:1 with a successful
                 // `ResumeSession`). Adopt it as active AND surface the restored
                 // transcript the engine just hot-loaded into the running
@@ -6314,6 +6342,13 @@ final class MockConversationSource: ConversationSource {
             else { return }
             let turnIdToCancel = inFlightTurnForSessionSwitch()
             submitSessionCancellation(turnIdToCancel, isNew: false)
+        }
+
+        func forkSession(_ sessionID: String, targetMode: SessionMode) async throws {
+            guard !sessionID.isEmpty, targetMode != sessionMode else { return }
+            try await submitCommand(
+                .forkSession(sessionId: sessionID, targetMode: targetMode.dto)
+            )
         }
 
         /// Resume a prior engine session by UUID (the drawer-tap path for a REAL

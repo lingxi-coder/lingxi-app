@@ -66,6 +66,11 @@ pub struct ToolRegistry {
     /// Optional session-scoped built-in filter. `None` preserves historical
     /// behavior; restricted sessions install this before sharing the registry.
     builtin_filter: Option<BuiltinToolFilter>,
+    /// Optional complete session capability allowlist. Unlike
+    /// `builtin_filter`, this applies to every registry partition so a dynamic
+    /// MCP/LSP/plugin refresh cannot re-introduce a tool hidden by the session
+    /// profile.
+    session_allowlist: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +101,7 @@ impl ToolRegistry {
             deferral: Arc::new(DeferralState::disabled()),
             tool_search_view: Arc::new(SharedToolSearchView::new()),
             builtin_filter: None,
+            session_allowlist: None,
         }
     }
 
@@ -119,10 +125,39 @@ impl ToolRegistry {
         self.builtin_filter = Some(BuiltinToolFilter { explicit_allowlist });
     }
 
-    fn builtin_allowed(&self, name: &str) -> bool {
-        self.builtin_filter
+    /// Install a complete session capability allowlist for built-ins and hide
+    /// every dynamic MCP/LSP/plugin partition. Tool aliases never bypass this
+    /// gate: the canonical built-in name must be present in the allowlist.
+    pub fn set_session_tool_allowlist(&mut self, tools: &[String]) {
+        self.session_allowlist = Some(
+            tools
+                .iter()
+                .map(|value| permission::PermissionRuleValue::from_rule_string(value).tool_name)
+                .collect(),
+        );
+        // The ToolSearch tool holds a shared materialized view. Rebuild it at
+        // the same boundary so a policy installed after tool registration
+        // cannot leave previously-visible denied tools searchable until the
+        // next request assembly.
+        self.refresh_tool_search_view();
+    }
+
+    fn session_allows(&self, name: &str) -> bool {
+        self.session_allowlist
             .as_ref()
-            .is_none_or(|filter| filter.allows(name))
+            .is_none_or(|allowed| allowed.contains(name))
+    }
+
+    fn session_allows_dynamic(&self, name: &str) -> bool {
+        self.session_allowlist.is_none() && self.session_allows(name)
+    }
+
+    fn builtin_allowed(&self, name: &str) -> bool {
+        self.session_allows(name)
+            && self
+                .builtin_filter
+                .as_ref()
+                .is_none_or(|filter| filter.allows(name))
     }
 
     /// The shared Tool Search deferral state.
@@ -220,8 +255,8 @@ impl ToolRegistry {
     /// win on a name conflict (their entry is emitted; the later dynamic one is
     /// dropped), matching `uniqBy`'s built-in-precedence dedup.
     ///
-    /// MCP / LSP / plugin tools are passed through unconditionally (their
-    /// lifecycle is managed by their owning subsystem).
+    /// MCP / LSP / plugin tools follow the optional session capability
+    /// allowlist in addition to their owning subsystem's lifecycle policy.
     #[must_use]
     pub fn available_tools(&self, ctx: &ToolStaticContext) -> Vec<Arc<dyn Tool>> {
         // Builtin prefix: enabled builtins, locale-sorted by name.
@@ -240,11 +275,24 @@ impl ToolRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_id, ts) in mcp_tools.iter() {
-            dynamic.extend(ts.iter().cloned());
+            dynamic.extend(
+                ts.iter()
+                    .filter(|tool| self.session_allows_dynamic(tool.name()))
+                    .cloned(),
+            );
         }
-        dynamic.extend(self.lsp_tools.iter().cloned());
+        dynamic.extend(
+            self.lsp_tools
+                .iter()
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
+                .cloned(),
+        );
         for (_id, ts) in &self.plugin_tools {
-            dynamic.extend(ts.iter().cloned());
+            dynamic.extend(
+                ts.iter()
+                    .filter(|tool| self.session_allows_dynamic(tool.name()))
+                    .cloned(),
+            );
         }
         dynamic.sort_by(|a, b| locale_cmp(a.name(), b.name()));
 
@@ -278,7 +326,10 @@ impl ToolRegistry {
             if let Some(tool) = mcp_tools
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
-                .find(|t| t.name() == name || t.aliases().contains(&name))
+                .find(|t| {
+                    self.session_allows_dynamic(t.name())
+                        && (t.name() == name || t.aliases().contains(&name))
+                })
             {
                 return Some(tool.clone());
             }
@@ -286,7 +337,10 @@ impl ToolRegistry {
         self.lsp_tools
             .iter()
             .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
-            .find(|t| t.name() == name || t.aliases().contains(&name))
+            .find(|t| {
+                self.session_allows_dynamic(t.name())
+                    && (t.name() == name || t.aliases().contains(&name))
+            })
             .cloned()
     }
 
@@ -367,13 +421,20 @@ impl ToolRegistry {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
                 .map(|t| t.name().to_string()),
         );
-        names.extend(self.lsp_tools.iter().map(|t| t.name().to_string()));
+        names.extend(
+            self.lsp_tools
+                .iter()
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
+                .map(|t| t.name().to_string()),
+        );
         names.extend(
             self.plugin_tools
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
                 .map(|t| t.name().to_string()),
         );
         names
@@ -637,6 +698,29 @@ mod tests {
         assert_eq!(names, vec!["Bash", "Read", "WebFetch", "mcp__srv__run"]);
     }
 
+    #[test]
+    fn session_allowlist_filters_schema_lookup_names_and_dynamic_tools() {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(NamedTool("Read")));
+        r.register_builtin(Arc::new(NamedTool("Write")));
+        r.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(NamedTool("mcp__srv__mutate")) as Arc<dyn Tool>],
+        );
+        r.set_session_tool_allowlist(&["Read".to_string(), "mcp__srv__mutate".to_string()]);
+
+        let names = r
+            .available_tools(&ToolStaticContext::default())
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Read"]);
+        assert_eq!(r.all_names(), vec!["Read"]);
+        assert!(r.find_by_name("Read").is_some());
+        assert!(r.find_by_name("Write").is_none());
+        assert!(r.find_by_name("mcp__srv__mutate").is_none());
+    }
+
     /// A stub tool with a configurable name + `should_defer` + `search_hint`,
     /// for the Tool Search deferred-view tests.
     struct DeferNamedTool {
@@ -789,6 +873,48 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names, vec!["mcp__srv__do".to_string()]);
+    }
+
+    #[test]
+    fn session_allowlist_keeps_denied_tools_out_of_tool_search() {
+        let mut r = ToolRegistry::new();
+        r.set_deferral(Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        )));
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Read",
+            defer: true,
+            hint: None,
+        }));
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Write",
+            defer: true,
+            hint: None,
+        }));
+        r.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(DeferNamedTool {
+                name: "mcp__srv__mutate",
+                defer: true,
+                hint: None,
+            }) as Arc<dyn Tool>],
+        );
+        r.refresh_tool_search_view();
+        assert!(r
+            .tool_search_view()
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "Write"));
+        r.set_session_tool_allowlist(&["Read".to_string()]);
+
+        let names = r
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Read"]);
     }
 
     /// A tool loaded via `ToolSearch` remains searchable; Claude Code allows an

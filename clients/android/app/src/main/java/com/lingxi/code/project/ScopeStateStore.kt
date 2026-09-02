@@ -1,6 +1,7 @@
 package com.lingxi.code.project
 
 import android.content.Context
+import com.lingxi.code.model.SessionMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,10 +17,9 @@ import java.io.File
  * write-validate-rename discipline as [ProjectRepository] (shared
  * [ProjectAtomicWriter]).
  *
- * Project/global last-active-session persistence stays with [ProjectRepository]
- * (`ProjectRecord.lastActiveSessionId` / the global session index) — this store
- * is what gives LOCAL-APP scopes the same durability, and it is the authority
- * for "which scope was active" across process death.
+ * The legacy Project/global last-active fields stay with [ProjectRepository]
+ * for Code compatibility. This store is authoritative for mode-scoped active
+ * sessions and drafts across every workspace, and for the active workspace.
  *
  * All suspend entry points hop to [Dispatchers.IO] and serialize on one mutex,
  * so callers may invoke them from the main thread (e.g. per-keystroke draft
@@ -38,16 +38,33 @@ class ScopeStateStore internal constructor(
         val draft: String = "",
     )
 
+    data class WorkspacePresentationState(
+        val pinnedAtEpochMillis: Long? = null,
+        val collapsed: Boolean = false,
+    )
+
     suspend fun readActiveScopeKey(): String? = withContext(Dispatchers.IO) {
         mutex.withLock { load().activeScopeKey }
+    }
+
+    suspend fun readActiveMode(): SessionMode? = withContext(Dispatchers.IO) {
+        mutex.withLock { load().activeMode }
     }
 
     suspend fun read(scopeKey: String): ScopeState? = withContext(Dispatchers.IO) {
         mutex.withLock { load().scopes[scopeKey] }
     }
 
+    suspend fun readWorkspacePresentation(): Map<String, WorkspacePresentationState> = withContext(Dispatchers.IO) {
+        mutex.withLock { load().workspacePresentation }
+    }
+
     suspend fun persistActiveScope(scopeKey: String) {
         mutate { it.copy(activeScopeKey = scopeKey) }
+    }
+
+    suspend fun persistActiveMode(mode: SessionMode) {
+        mutate { it.copy(activeMode = mode) }
     }
 
     suspend fun persistLastActiveSession(scopeKey: String, sessionId: String?) {
@@ -66,9 +83,33 @@ class ScopeStateStore internal constructor(
         }
     }
 
+    suspend fun persistWorkspacePinned(workspaceKey: String, pinnedAtEpochMillis: Long?) {
+        mutate { snapshot ->
+            val current = snapshot.workspacePresentation[workspaceKey] ?: WorkspacePresentationState()
+            snapshot.copy(
+                workspacePresentation = snapshot.workspacePresentation + (
+                    workspaceKey to current.copy(pinnedAtEpochMillis = pinnedAtEpochMillis)
+                ),
+            )
+        }
+    }
+
+    suspend fun persistWorkspaceCollapsed(workspaceKey: String, collapsed: Boolean) {
+        mutate { snapshot ->
+            val current = snapshot.workspacePresentation[workspaceKey] ?: WorkspacePresentationState()
+            snapshot.copy(
+                workspacePresentation = snapshot.workspacePresentation + (
+                    workspaceKey to current.copy(collapsed = collapsed)
+                ),
+            )
+        }
+    }
+
     private data class Snapshot(
         val activeScopeKey: String? = null,
+        val activeMode: SessionMode = SessionMode.Code,
         val scopes: Map<String, ScopeState> = emptyMap(),
+        val workspacePresentation: Map<String, WorkspacePresentationState> = emptyMap(),
     )
 
     private suspend fun mutate(transform: (Snapshot) -> Snapshot) {
@@ -91,6 +132,7 @@ class ScopeStateStore internal constructor(
     private fun encode(snapshot: Snapshot): String = JSONObject()
         .put("version", 1)
         .put("activeScopeKey", snapshot.activeScopeKey)
+        .put("activeMode", snapshot.activeMode.wireKey)
         .put(
             "scopes",
             JSONObject().also { scopes ->
@@ -100,6 +142,19 @@ class ScopeStateStore internal constructor(
                         JSONObject()
                             .put("lastActiveSessionId", state.lastActiveSessionId)
                             .put("draft", state.draft),
+                    )
+                }
+            },
+        )
+        .put(
+            "workspacePresentation",
+            JSONObject().also { prefs ->
+                snapshot.workspacePresentation.forEach { (key, state) ->
+                    prefs.put(
+                        key,
+                        JSONObject()
+                            .put("pinnedAtEpochMillis", state.pinnedAtEpochMillis)
+                            .put("collapsed", state.collapsed),
                     )
                 }
             },
@@ -126,13 +181,35 @@ class ScopeStateStore internal constructor(
                 )
             }
         }
+        val workspacePresentationJson = json.optJSONObject("workspacePresentation") ?: JSONObject()
+        val workspacePresentation = buildMap {
+            workspacePresentationJson.keys().forEach { key ->
+                val entry = workspacePresentationJson.getJSONObject(key)
+                put(
+                    key,
+                    WorkspacePresentationState(
+                        pinnedAtEpochMillis = if (entry.isNull("pinnedAtEpochMillis")) {
+                            null
+                        } else {
+                            entry.optLong("pinnedAtEpochMillis").takeIf { it > 0L }
+                        },
+                        collapsed = entry.optBoolean("collapsed", false),
+                    ),
+                )
+            }
+        }
         return Snapshot(
             activeScopeKey = if (json.isNull("activeScopeKey")) {
                 null
             } else {
                 json.optString("activeScopeKey").takeIf { it.isNotBlank() }
             },
+            activeMode = when (json.optString("activeMode")) {
+                SessionMode.Chat.wireValue -> SessionMode.Chat
+                else -> SessionMode.Code
+            },
             scopes = scopes,
+            workspacePresentation = workspacePresentation,
         )
     }
 

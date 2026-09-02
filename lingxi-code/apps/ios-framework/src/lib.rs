@@ -71,9 +71,10 @@ use platform_api::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, ModelBillingModeDto,
-    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto,
-    PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
+    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileSessionMode,
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
+    SessionModeDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -170,6 +171,7 @@ pub struct IosEngineLaunchConfigFfi {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub session_mode: SessionModeDto,
     pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
     /// Optional managed Project workspace. When present it must resolve to
@@ -685,6 +687,10 @@ fn ios_mobile_config_from_launch_config(
     let mut cfg = MobileConfig {
         cwd,
         lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+        session_mode: match config.session_mode {
+            SessionModeDto::Chat => MobileSessionMode::Chat,
+            SessionModeDto::Code => MobileSessionMode::Code,
+        },
         local_apps_full_runtime: config.local_apps_full_runtime,
         local_apps_runtime_root: config
             .local_apps_runtime_root
@@ -2865,6 +2871,7 @@ pub fn build_ios_engine(
             api_base,
             api_key,
             model,
+            session_mode: SessionModeDto::Code,
             app_sandbox_root,
             project_cwd: None,
             provider_config: None,

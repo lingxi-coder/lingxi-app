@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  AgentDto,
   AskUserQuestionRequestDto,
+  AuthStateDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
+  HookDto,
   ImageRefDto,
   McpScopeDto,
   PermissionBehaviorDto,
@@ -94,6 +97,12 @@ export interface UseBridge {
   readonly connected: boolean;
   readonly conversation: ConversationState;
   readonly desktop: DesktopState;
+  readonly authState: AuthStateDto | null;
+  readonly hooksCatalog: readonly HookDto[];
+  readonly agentCatalog: readonly AgentDto[];
+  readonly cost: DesktopState['lastCost'];
+  readonly lastCompaction: DesktopState['lastCompaction'];
+  readonly retryState: DesktopState['lastApiRetry'];
   readonly runtimeCenter: RuntimeCenterState;
   readonly usage: UsageSnapshot | null;
   readonly running: boolean;
@@ -203,6 +212,7 @@ export interface UseBridge {
   restartBridge(sessionId?: string): Promise<void>;
   refreshDiagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
+  copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   refresh(): Promise<void>;
   newSession(projectPath?: string): Promise<void>;
@@ -211,7 +221,18 @@ export interface UseBridge {
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;
   setPermissionMode(mode: PermissionModeId): Promise<void>;
+  login(): Promise<void>;
+  logout(): Promise<void>;
+  forceCompact(): Promise<void>;
+  clearSession(): Promise<void>;
   refreshTasks(): Promise<void>;
+  refreshAuth(): Promise<void>;
+  refreshHooks(): Promise<void>;
+  refreshAgents(): Promise<void>;
+  refreshStatus(): Promise<void>;
+  refreshDoctor(): Promise<void>;
+  /** Re-pulls the live engine slash-command registry for completion and the command palette. */
+  refreshSlashCommands(): Promise<void>;
   refreshSessionAgents(): Promise<void>;
   loadSessionAgentTranscript(agentId: string): Promise<void>;
   openRuntimeItem(item: RuntimeCenterItemRef): void;
@@ -1109,7 +1130,11 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'get_conversation_controls' }),
       requestTaskList(activeSessionId),
       host.command(activeSessionId, { type: 'list_session_agents' }),
-      host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
+      host.command(activeSessionId, {
+        type: 'refresh_listings',
+        which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
+      }),
+      host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
@@ -1481,6 +1506,11 @@ export function useBridge(): UseBridge {
     try { await host.copyDiagnostics(); } catch (cause) { capture(cause); }
   }, [capture, host]);
 
+  const copyText = useCallback(async (text: string) => {
+    if (!host) return;
+    try { await host.copyText(text); } catch (cause) { capture(cause); }
+  }, [capture, host]);
+
   const exportDiagnostics = useCallback(async () => {
     if (!host) return null;
     try { return await host.exportDiagnostics(); } catch (cause) { return capture(cause); }
@@ -1499,7 +1529,11 @@ export function useBridge(): UseBridge {
       command({ type: 'get_conversation_controls' }),
       requestTaskList(),
       command({ type: 'list_session_agents' }),
-      command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
+      command({
+        type: 'refresh_listings',
+        which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
+      }),
+      command({ type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       refreshDiagnostics(),
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
@@ -1529,7 +1563,46 @@ export function useBridge(): UseBridge {
   const setReasoningSelection = useCallback((selection: ReasoningSelectionDto) => command({ type: 'set_reasoning_selection', selection }), [command]);
   const setFastMode = useCallback((enabled: boolean) => command({ type: 'set_fast_mode', enabled }), [command]);
   const setPermissionMode = useCallback((mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }), [command]);
+  const login = useCallback(() => command({ type: 'login' }), [command]);
+  const logout = useCallback(() => command({ type: 'logout' }), [command]);
+  const forceCompact = useCallback(() => command({ type: 'force_compact' }), [command]);
+  const clearSession = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId) return;
+    try {
+      await host.clearSession(sessionId);
+      const snapshot = await host.bootstrap();
+      applyBootstrap(snapshot);
+      setError(null);
+    } catch (cause) {
+      capture(cause);
+    }
+  }, [applyBootstrap, capture, host]);
   const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
+  const refreshAuth = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'auth' }] }),
+    [command],
+  );
+  const refreshHooks = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'hooks' }] }),
+    [command],
+  );
+  const refreshAgents = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'agents' }] }),
+    [command],
+  );
+  const refreshStatus = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'status' }] }),
+    [command],
+  );
+  const refreshDoctor = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'doctor' }] }),
+    [command],
+  );
+  const refreshSlashCommands = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'slash_commands' }] }),
+    [command],
+  );
   const refreshSessionAgents = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -1653,6 +1726,12 @@ export function useBridge(): UseBridge {
     connected: !sessionLoading && connection.status === 'connected',
     conversation,
     desktop,
+    authState: desktop.auth,
+    hooksCatalog: desktop.hooks,
+    agentCatalog: desktop.agents,
+    cost: desktop.lastCost,
+    lastCompaction: desktop.lastCompaction,
+    retryState: desktop.lastApiRetry,
     runtimeCenter,
     usage: conversation.usage,
     running: conversation.running,
@@ -1699,6 +1778,7 @@ export function useBridge(): UseBridge {
     restartBridge,
     refreshDiagnostics,
     copyDiagnostics,
+    copyText,
     exportDiagnostics,
     refresh,
     newSession,
@@ -1707,7 +1787,17 @@ export function useBridge(): UseBridge {
     setReasoningSelection,
     setFastMode,
     setPermissionMode,
+    login,
+    logout,
+    forceCompact,
+    clearSession,
     refreshTasks,
+    refreshAuth,
+    refreshHooks,
+    refreshAgents,
+    refreshStatus,
+    refreshDoctor,
+    refreshSlashCommands,
     refreshSessionAgents,
     loadSessionAgentTranscript,
     openRuntimeItem,

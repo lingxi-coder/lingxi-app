@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '10.0.0';
+export const CLIENT_PROTOCOL_VERSION = '11.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -236,6 +236,7 @@ export type ClientCommand =
   | { type: 'new_session'; cwd?: string; model?: string }
   | { type: 'resume_session'; session_id: string; cwd?: string }
   | { type: 'list_sessions'; limit?: number }
+  | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
   // ── Auth + session control ────────────────────────────────────────────────
   | { type: 'login' }
   | { type: 'logout' }
@@ -306,6 +307,11 @@ export type ClientCommand =
       app_id: string;
       approval_token: string;
       approved: boolean;
+    }
+  | {
+      type: 'resolve_app_runtime_profile_selection';
+      request_id: string;
+      selected_family: AppRuntimeProfileDto;
     }
   | { type: 'reset_app_permissions'; app_id: string }
   | { type: 'list_app_sessions'; app_id: string; offset?: number; limit?: number }
@@ -779,12 +785,16 @@ export interface ComputerAccessResponseDto {
 // listings.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Which capability profile a mobile session runs under (listings.rs `SessionModeDto`). */
+export type SessionModeDto = 'chat' | 'code';
+
 /** One resumable-session row (listings.rs `SessionRowDto`). */
 export interface SessionRowDto {
   uuid: string;
   title: string;
   modified_rfc3339: string;
   message_count: number;
+  mode: SessionModeDto;
   path: string;
 }
 
@@ -998,6 +1008,7 @@ export interface AppSessionRowDto {
   title: string;
   modified_rfc3339: string;
   message_count: number;
+  mode: SessionModeDto;
   kind: AppSessionKindDto;
 }
 
@@ -1516,6 +1527,25 @@ export type PluginCommandDto =
   | { type: 'resolve_create_confirmation'; request_id: string; approved: boolean }
   /** Resolve one MCP proposal diff/approval sheet. */
   | { type: 'resolve_mcp_proposal_approval'; request_id: string; approved: boolean }
+  /** Start the host-managed Local App MCP authoring flow for one app. */
+  | { type: 'start_local_app_mcp_authoring'; app_id: string; user_goal: string }
+  /** Enable or disable one Local App MCP service with CAS protection. */
+  | { type: 'set_local_app_mcp_enabled'; app_id: string; enabled: boolean; expected_revision: number }
+  /** Enable or disable one Local App MCP tool with CAS protection. */
+  | {
+      type: 'set_local_app_mcp_tool_enabled';
+      app_id: string;
+      tool_name: string;
+      enabled: boolean;
+      expected_revision: number;
+    }
+  /** Pin or unpin one Local App conversation in the MCP authoring surface. */
+  | {
+      type: 'set_local_app_mcp_conversation_pinned';
+      conversation_id: string;
+      app_id: string;
+      pinned: boolean;
+    }
   /** Read the managed Local App MCP inventory projection for native UI. */
   | { type: 'get_managed_mcp_inventory' };
 
@@ -1527,6 +1557,8 @@ export type LocalAppPluginErrorCodeDto =
   | 'proposal_invalid'
   | 'catalog_stale'
   | 'active_state_corrupt'
+  | 'revision_conflict'
+  | 'invalid_mcp_settings'
   | 'mcp_authoring_required'
   | 'repair_budget_exhausted'
   | 'exposure_capacity_reached';
@@ -1607,6 +1639,14 @@ export interface LocalAppReceiptStatusDto {
   superseded: boolean;
 }
 
+export type ManagedLocalAppMcpStatusDto =
+  | 'disabled'
+  | 'needs_setup'
+  | 'authoring'
+  | 'enabled'
+  | 'needs_revalidation'
+  | 'error';
+
 export interface LocalAppCreateConfirmationRequestDto {
   requestId: string;
   appId: string;
@@ -1658,10 +1698,21 @@ export interface LocalAppMcpProposalApprovalRequestDto {
   receipt?: LocalAppReceiptStatusDto;
 }
 
+export interface McpAppWidgetDto {
+  resourceUri: string;
+  mimeType: string;
+  resourceSha256: string;
+}
+
 export interface ManagedLocalAppMcpServerDto {
   serverName: string;
   appId: string;
   appName: string;
+  enabled: boolean;
+  status: ManagedLocalAppMcpStatusDto;
+  settingsRevision: number;
+  enabledTools?: string[];
+  pinnedToCurrentConversation: boolean;
   buildId: string;
   catalogSha256: string;
   toolSurfaceSha256: string;
@@ -1670,6 +1721,7 @@ export interface ManagedLocalAppMcpServerDto {
   publicationState: AppWorkflowStateDto;
   mcpVerification: LocalAppVerificationSummaryDto;
   uiVerification: LocalAppVerificationSummaryDto;
+  widget?: McpAppWidgetDto;
   tools?: LocalAppMcpToolSurfaceDto[];
 }
 
@@ -1875,9 +1927,10 @@ export type ClientEvent =
       bytes_saved: number;
     }
   // ── Session lifecycle ───────────────────────────────────────────────────────
-  | { type: 'session_started'; session_id: string }
+  | { type: 'session_started'; session_id: string; mode: SessionModeDto }
   | { type: 'session_ended' }
-  | { type: 'session_resumed'; session_id: string; messages: MessageDto[] }
+  | { type: 'session_resumed'; session_id: string; mode: SessionModeDto; messages: MessageDto[] }
+  | { type: 'session_forked'; source_session_id: string; session_id: string; mode: SessionModeDto }
   | { type: 'session_list'; sessions: SessionRowDto[] }
   | { type: 'session_agent_list'; session_id: string; agents: SessionAgentSummaryDto[] }
   | {

@@ -68,17 +68,24 @@ import com.lingxi.code.cron.CronRunStatus
 import com.lingxi.code.cron.CronSchedulingMode
 import com.lingxi.code.drawer.DrawerAppScope
 import com.lingxi.code.drawer.DrawerContent
+import com.lingxi.code.drawer.DrawerLocalAppWorkspace
 import com.lingxi.code.drawer.DrawerProductionData
+import com.lingxi.code.drawer.DrawerSection
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.conversationScopeFromKey
 import com.lingxi.code.model.persistenceKey
+import com.lingxi.code.model.persistedSessionTarget
+import com.lingxi.code.model.sessionStateKey
+import com.lingxi.code.model.toDto
+import com.lingxi.code.model.toUi
 import com.lingxi.code.model.withCachedRows
 import com.lingxi.code.project.ConflictResolution
 import com.lingxi.code.project.CreateProjectDialog
@@ -99,6 +106,7 @@ import com.lingxi.code.model.ManagedLocalAppMcpSource
 import com.lingxi.code.model.ManagedLocalAppToolSchema
 import com.lingxi.code.model.LocalAppPluginStatus
 import com.lingxi.code.bindings.AppEventDto
+import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.LocalAppPluginInventoryDto
 import com.lingxi.code.bindings.ManagedLocalAppMcpServerDto
@@ -114,9 +122,12 @@ import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.model.Role
 import com.lingxi.code.localapps.LocalAppsAction
 import com.lingxi.code.localapps.LocalAppApprovalSheetDialog
+import com.lingxi.code.localapps.LocalAppDetailsTab
 import com.lingxi.code.localapps.LocalAppsDestination
+import com.lingxi.code.localapps.LocalAppSessionPage
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
+import com.lingxi.code.localapps.LocalAppWorkflow
 import com.lingxi.code.localapps.localAppDisplayName
 import com.lingxi.code.localapps.localAppWorkspace
 import com.lingxi.code.localapps.localAppsStrings
@@ -134,6 +145,8 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -161,6 +174,44 @@ private const val SESSION_READY_TIMEOUT_MS = 20_000L
  */
 private const val CONVERSATION_LAUNCH_ATTEMPTS = 40
 private const val CONVERSATION_LAUNCH_RETRY_MS = 250L
+private const val FORK_SESSION_EVENT_TIMEOUT_MS = 15_000L
+
+private data class PendingForkRequest(
+    val scope: ConversationScope,
+    val sourceMode: SessionMode,
+    val targetMode: SessionMode,
+    val sourceSessionId: String,
+    val sourceSessionTitle: String,
+)
+
+internal enum class SessionCatalogLookupState {
+    Pending,
+    Ready,
+}
+
+internal data class SessionCatalogLookup<T>(
+    val state: SessionCatalogLookupState,
+    val value: T? = null,
+)
+
+internal fun isBoundToScopeMode(
+    boundScope: ConversationScope,
+    boundMode: SessionMode,
+    targetScope: ConversationScope,
+    targetMode: SessionMode,
+): Boolean = boundScope == targetScope && boundMode == targetMode
+
+internal fun <T> localAppSessionCatalogLookup(
+    appsLoading: Boolean,
+    appPresent: Boolean,
+    page: LocalAppSessionPage?,
+    value: T?,
+): SessionCatalogLookup<T> = when {
+    value != null -> SessionCatalogLookup(SessionCatalogLookupState.Ready, value)
+    appsLoading -> SessionCatalogLookup(SessionCatalogLookupState.Pending)
+    page?.loaded == true || !appPresent -> SessionCatalogLookup(SessionCatalogLookupState.Ready)
+    else -> SessionCatalogLookup(SessionCatalogLookupState.Pending)
+}
 
 /**
  * Root composable for the app shell.
@@ -240,6 +291,7 @@ fun RootScreen(
     // source inside that same ViewModel instead of accumulating keyed VMs.
     val appContext = context.applicationContext
     val lifecycleOwner = LocalLifecycleOwner.current
+    var activeSessionMode by rememberSaveable { mutableStateOf(SessionMode.Code) }
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
         key = "chat",
         factory = viewModelFactory {
@@ -248,6 +300,10 @@ fun RootScreen(
                     source = EngineConversationSource.create(
                         context = appContext,
                         projectWorkspace = projectState.activeProject?.workspace,
+                        workspaceKey = projectState.activeProject?.record?.id
+                            ?.let { "project.$it" }
+                            ?: "global",
+                        sessionMode = activeSessionMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
                             ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
                     ),
@@ -261,13 +317,17 @@ fun RootScreen(
     )
     LaunchedEffect(chatViewModel, reconnectToken) {
         if (viewModel == null) {
-            chatViewModel.ensureSource(reconnectToken) {
-                EngineConversationSource.create(
-                    context = appContext,
-                    projectWorkspace = projectState.activeProject?.workspace,
-                    linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
-                        ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
-                )
+                chatViewModel.ensureSource(reconnectToken) {
+                    EngineConversationSource.create(
+                        context = appContext,
+                        projectWorkspace = projectState.activeProject?.workspace,
+                        workspaceKey = projectState.activeProject?.record?.id
+                            ?.let { "project.$it" }
+                            ?: "global",
+                        sessionMode = activeSessionMode,
+                        linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
+                            ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
+                    )
             }
         }
         onConversationSourceChanged(chatViewModel.engineSource.value)
@@ -340,6 +400,100 @@ fun RootScreen(
         ),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
+    val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
+    val drawerUi = rememberDrawerUiState()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var drawerBootstrapComplete by rememberSaveable { mutableStateOf(false) }
+
+    fun drawerSectionFor(mode: SessionMode): DrawerSection = when (mode) {
+        SessionMode.Chat -> DrawerSection.Chat
+        SessionMode.Code -> DrawerSection.Code
+    }
+
+    fun conversationModeFor(section: DrawerSection): SessionMode? = when (section) {
+        DrawerSection.Chat -> SessionMode.Chat
+        DrawerSection.Code -> SessionMode.Code
+        DrawerSection.Cron -> null
+    }
+
+    fun setConversationMode(mode: SessionMode) {
+        activeSessionMode = mode
+        drawerUi.section = drawerSectionFor(mode)
+    }
+
+    fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
+        ConversationScope.Global -> null
+        is ConversationScope.Project -> projectState.projects.firstOrNull { it.record.id == scope.projectId }
+        is ConversationScope.LocalApp -> null
+    }
+
+    fun workspaceForScope(scope: ConversationScope) = when (scope) {
+        ConversationScope.Global -> null
+        is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
+        is ConversationScope.LocalApp -> localAppWorkspace(
+            appFilesRoot = appContext.filesDir,
+            appId = scope.appId,
+            workspaceRel = localAppsViewModel.uiState.value.apps
+                .firstOrNull { it.id == scope.appId }
+                ?.workspaceRel,
+        )
+    }
+
+    fun restorableSession(
+        scope: ConversationScope,
+        sessionId: String,
+        mode: SessionMode,
+    ): SessionRow? = when (scope) {
+        ConversationScope.Global -> projectState.globalSessions
+            .firstOrNull { it.sessionId == sessionId && it.mode == mode }
+            ?.let {
+                SessionRow(
+                    uuid = it.sessionId,
+                    title = it.title,
+                    messageCount = it.messageCount,
+                    relativeTime = it.relativeTime,
+                    mode = it.mode,
+                    modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
+                )
+            }
+        is ConversationScope.Project -> projectState.projects
+            .firstOrNull { it.record.id == scope.projectId }
+            ?.sessions
+            ?.firstOrNull { it.sessionId == sessionId && it.mode == mode }
+            ?.let {
+                SessionRow(
+                    uuid = it.sessionId,
+                    title = it.title,
+                    messageCount = it.messageCount,
+                    relativeTime = it.relativeTime,
+                    mode = it.mode,
+                    modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
+                )
+            }
+        is ConversationScope.LocalApp -> localAppsState.appSessions[scope.appId]
+            ?.rows
+            ?.firstOrNull { it.uuid == sessionId && it.mode == mode }
+            ?.let {
+                SessionRow(
+                    uuid = it.uuid,
+                    title = it.title,
+                    messageCount = it.messageCount,
+                    relativeTime = it.relativeTime,
+                    mode = it.mode,
+                    modifiedAtEpochSeconds = it.modifiedAtEpochSeconds,
+                )
+            }
+    }
+
+    fun localAppWorkspaceStatus(workflow: LocalAppWorkflow): String = when (workflow) {
+        LocalAppWorkflow.Draft -> context.getString(R.string.local_apps_workflow_draft)
+        LocalAppWorkflow.PublishedUnverified ->
+            context.getString(R.string.local_apps_verification_status_unverified)
+        LocalAppWorkflow.PublishedVerified ->
+            context.getString(R.string.local_apps_verification_status_passed)
+    }
+
     var showingApps by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(localAppsViewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -360,34 +514,10 @@ fun RootScreen(
         localAppsViewModel.openLibrary()
         onOpenLocalAppsHandled()
     }
-    LaunchedEffect(requestedConversationLaunch) {
-        val request = requestedConversationLaunch ?: return@LaunchedEffect
-        showingApps = false
-        // NOT `openSession`: every one of these notifications announces a
-        // PARKED durable turn, and `openSession` refuses exactly that state.
-        // The tap therefore did nothing, and `onConversationLaunchHandled()`
-        // below then threw the request away — no retry, no feedback. Route
-        // through the entry point that is allowed to cross the parked-turn
-        // guard, carry the announced `turnId` so the checkpoint the user was
-        // sent to look at is preserved, and retry the way the created-app
-        // landing below does (the engine source may not be bound yet on a cold
-        // start from the notification).
-        var routed = false
-        var attempt = 0
-        while (!routed && attempt < CONVERSATION_LAUNCH_ATTEMPTS) {
-            if (attempt > 0) delay(CONVERSATION_LAUNCH_RETRY_MS)
-            attempt += 1
-            routed = chatViewModel.openSessionFromNotification(
-                ref = SessionRef(request.sessionId, ""),
-                turnId = request.turnId,
-            )
-        }
-        if (!routed) chatViewModel.reportConversationLaunchFailed()
-        onConversationLaunchHandled()
-    }
     LaunchedEffect(requestedLocalAppLaunch, localAppsState.loading) {
         val request = requestedLocalAppLaunch ?: return@LaunchedEffect
         if (localAppsState.loading) return@LaunchedEffect
+        setConversationMode(SessionMode.Code)
         showingApps = true
         localAppsViewModel.openFromWidget(
             appId = request.appId,
@@ -485,22 +615,45 @@ fun RootScreen(
     // keyed `global` / `project.<id>` / `app.<id>`. Project/global last-active
     // stays with ProjectStore; this store carries the app scopes and records
     // which scope was active across process death.
-    val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
-    val drawerUi = rememberDrawerUiState()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(scopeStore) {
+        val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
+        activeSessionMode = restoredMode
+        drawerUi.section = drawerSectionFor(restoredMode)
+        val presentation = scopeStore.readWorkspacePresentation()
+        drawerUi.replaceWorkspacePresentation(
+            collapsed = presentation.filterValues { it.collapsed }.keys,
+            pinned = presentation.mapNotNull { (key, state) ->
+                state.pinnedAtEpochMillis?.let { key to it }
+            }.toMap(),
+        )
+        drawerBootstrapComplete = true
+    }
+
+    LaunchedEffect(drawerUi.section, drawerBootstrapComplete) {
+        if (!drawerBootstrapComplete) return@LaunchedEffect
+        conversationModeFor(drawerUi.section)?.let { nextMode ->
+            if (activeSessionMode != nextMode) activeSessionMode = nextMode
+            scopeStore.persistActiveMode(nextMode)
+        }
+    }
+
+    LaunchedEffect(sourceScope) {
+        drawerUi.selectWorkspace(sourceScope.persistenceKey())
+    }
 
     // Refresh the session catalog whenever the drawer transitions to open, so the
     // list is fresh each time the user reaches for it (the engine re-reports via
     // SessionList). `isOpen` flips on the open animation's start, so this fires
     // once per open, not per frame. An active app scope also refreshes its
-    // workspace catalog so the drawer's app section is current.
+    // workspace catalogs so every app group is complete, including apps that
+    // have never been opened in this process.
     LaunchedEffect(drawerState.isOpen) {
         if (drawerState.isOpen) {
             chatViewModel.refreshSessions()
             cronRepository.refresh()
-            (sourceScope as? ConversationScope.LocalApp)?.let {
-                localAppsViewModel.onAction(LocalAppsAction.LoadAppSessions(it.appId, null))
+            localAppsState.apps.forEach {
+                localAppsViewModel.onAction(LocalAppsAction.LoadAppSessions(it.id, null))
             }
         }
     }
@@ -553,6 +706,7 @@ fun RootScreen(
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
+    var pendingForkRequest by remember { mutableStateOf<PendingForkRequest?>(null) }
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
     val currentAppInForeground = rememberUpdatedState(appInForeground)
@@ -643,12 +797,20 @@ fun RootScreen(
         }
     }
 
+    fun currentEngineMode(): SessionMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+
+    fun sourceMatches(scope: ConversationScope, mode: SessionMode): Boolean = isBoundToScopeMode(
+        boundScope = sourceScope,
+        boundMode = currentEngineMode(),
+        targetScope = scope,
+        targetMode = mode,
+    )
+
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
-    // input the user is about to send. Seeded from the ViewModel's SavedStateHandle
-    // so an unsent draft survives process death; every edit mirrors back into the
-    // handle (see onDraftChange below) and `send` clears it. App scopes mirror
-    // into the per-scope store instead — see the scope-restore effect below.
+    // input the user is about to send. ScopeStateStore is authoritative for the
+    // `(workspace, mode)` draft; the legacy SavedStateHandle value is consulted
+    // only once for a Code-mode process restore.
     var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
     var voiceDraftBase by remember { mutableStateOf("") }
 
@@ -656,23 +818,24 @@ fun RootScreen(
     // restore effect below against unrelated recompositions.
     var draftScopeKey by remember { mutableStateOf<String?>(null) }
 
-    // Swap the visible draft when the SCOPE changes: an app scope's draft
-    // comes from the durable scope store; project/global keep today's
-    // SavedStateHandle slot. Keyed on the persistence key so rotation (same
-    // scope, new composition) never clobbers what the user is typing.
-    LaunchedEffect(sourceScope) {
-        val key = sourceScope.persistenceKey()
+    // Swap the visible draft whenever workspace OR mode changes. Keyed on the
+    // durable session-state key so Chat and Code can never overwrite each
+    // other, even inside the same workspace.
+    LaunchedEffect(sourceScope, activeSessionMode) {
+        val key = sourceScope.sessionStateKey(activeSessionMode)
         if (key == draftScopeKey) return@LaunchedEffect
         val firstBind = draftScopeKey == null
         draftScopeKey = key
-        val restored = when (sourceScope) {
-            is ConversationScope.LocalApp -> scopeStore.read(key)?.draft.orEmpty()
-            else -> chatViewModel.restoredDraft
-        }
+        val restored = scopeStore.read(key)?.draft
+            ?: if (firstBind && activeSessionMode == SessionMode.Code) {
+                chatViewModel.restoredDraft
+            } else {
+                ""
+            }
         // The very first bind after process start must not wipe a draft the
         // user already restored (remember { } above) — only apply when the
         // stored value differs and this is a REAL scope change.
-        if (!firstBind || sourceScope is ConversationScope.LocalApp) {
+        if (!firstBind || restored.isNotEmpty() || activeSessionMode != SessionMode.Code) {
             draft = restored
         }
     }
@@ -749,6 +912,8 @@ fun RootScreen(
         newSession: Boolean,
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
+        allowInactiveWaitingRecovery: Boolean = false,
+        sessionModeOverride: SessionMode = activeSessionMode,
     ): Boolean {
         val destination = target ?: SessionRef("new", context.getString(R.string.chat_new_conversation))
         var persisted: ProjectStoreState? = null
@@ -758,6 +923,7 @@ fun RootScreen(
             newSession = newSession,
             resumeEmpty = resumeEmpty,
             replacePendingTransition = replacePendingTransition,
+            allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
             scope = engineScope,
             createSource = {
                 EngineConversationSource.create(
@@ -765,14 +931,10 @@ fun RootScreen(
                     projectWorkspace = when (engineScope) {
                         ConversationScope.Global -> null
                         is ConversationScope.Project -> project?.workspace
-                        is ConversationScope.LocalApp -> localAppWorkspace(
-                            appFilesRoot = appContext.filesDir,
-                            appId = engineScope.appId,
-                            workspaceRel = localAppsViewModel.uiState.value.apps
-                                .firstOrNull { it.id == engineScope.appId }
-                            ?.workspaceRel,
-                        )
+                        is ConversationScope.LocalApp -> workspaceForScope(engineScope)
                     },
+                    workspaceKey = engineScope.persistenceKey(),
+                    sessionMode = sessionModeOverride,
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
                     reuseProcessSource = true,
                 )
@@ -780,6 +942,7 @@ fun RootScreen(
             persistSelection = {
                 persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId)
                 scopeStore.persistActiveScope(engineScope.persistenceKey())
+                scopeStore.persistActiveMode(sessionModeOverride)
             },
             onCommitted = {
                 projectStore.publishActive(checkNotNull(persisted))
@@ -795,6 +958,8 @@ fun RootScreen(
         newSession: Boolean,
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
+        allowInactiveWaitingRecovery: Boolean = false,
+        sessionModeOverride: SessionMode = activeSessionMode,
     ): Boolean = switchEngineScope(
         engineScope = project?.let { ConversationScope.Project(it.record.id) } ?: ConversationScope.Global,
         project = project,
@@ -802,7 +967,221 @@ fun RootScreen(
         newSession = newSession,
         resumeEmpty = resumeEmpty,
         replacePendingTransition = replacePendingTransition,
+        allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
+        sessionModeOverride = sessionModeOverride,
     )
+
+    LaunchedEffect(
+        requestedConversationLaunch,
+        projectState.loading,
+        localAppsState.loading,
+        sourceScope,
+        currentEngineSource,
+    ) {
+        val request = requestedConversationLaunch ?: return@LaunchedEffect
+        val targetScope = request.workspaceKey?.let(::conversationScopeFromKey) ?: sourceScope
+        if (request.workspaceKey != null && conversationScopeFromKey(request.workspaceKey) == null) {
+            chatViewModel.reportConversationLaunchFailed()
+            onConversationLaunchHandled()
+            return@LaunchedEffect
+        }
+        if (targetScope is ConversationScope.Project && projectState.loading) return@LaunchedEffect
+        if (targetScope is ConversationScope.LocalApp && localAppsState.loading) return@LaunchedEffect
+        if (targetScope is ConversationScope.Project && projectSnapshotForScope(targetScope) == null) {
+            chatViewModel.reportConversationLaunchFailed()
+            onConversationLaunchHandled()
+            return@LaunchedEffect
+        }
+
+        showingApps = false
+        val targetMode = request.sessionMode
+        val boundMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+        val alreadyBound = sourceScope == targetScope && boundMode == targetMode
+        var routed = false
+        var attempt = 0
+        while (!routed && attempt < CONVERSATION_LAUNCH_ATTEMPTS) {
+            if (attempt > 0) delay(CONVERSATION_LAUNCH_RETRY_MS)
+            attempt += 1
+            routed = if (alreadyBound) {
+                chatViewModel.openSessionFromNotification(
+                    ref = SessionRef(request.sessionId, ""),
+                    turnId = request.turnId,
+                )
+            } else {
+                switchEngineScope(
+                    engineScope = targetScope,
+                    project = projectSnapshotForScope(targetScope),
+                    target = SessionRef(request.sessionId, ""),
+                    newSession = false,
+                    replacePendingTransition = true,
+                    allowInactiveWaitingRecovery = true,
+                    sessionModeOverride = targetMode,
+                )
+            }
+        }
+        if (routed) {
+            setConversationMode(targetMode)
+        } else {
+            chatViewModel.reportConversationLaunchFailed()
+        }
+        onConversationLaunchHandled()
+    }
+
+    suspend fun completeForkTransition(
+        request: PendingForkRequest,
+        forkedSessionId: String,
+    ) {
+        pendingForkRequest = null
+        val switched = switchEngineScope(
+            engineScope = request.scope,
+            project = projectSnapshotForScope(request.scope),
+            target = SessionRef(forkedSessionId, request.sourceSessionTitle),
+            newSession = false,
+            replacePendingTransition = true,
+            sessionModeOverride = request.targetMode,
+        )
+        if (switched) {
+            setConversationMode(request.targetMode)
+            closeDrawer()
+        }
+    }
+
+    suspend fun continueSessionInMode(
+        sessionScope: ConversationScope,
+        row: SessionRow,
+        targetMode: SessionMode,
+    ) {
+        val request = PendingForkRequest(
+            scope = sessionScope,
+            sourceMode = row.mode,
+            targetMode = targetMode,
+            sourceSessionId = row.uuid,
+            sourceSessionTitle = row.title,
+        )
+        if (pendingForkRequest != null) {
+            chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_in_progress))
+            return
+        }
+        val activeSourceMatchesScope =
+            sourceScope == sessionScope &&
+                (currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code) == row.mode
+        if (activeSourceMatchesScope) {
+            pendingForkRequest = request
+            runCatching {
+                coroutineScope {
+                    val awaitEvent = async {
+                        withTimeoutOrNull(FORK_SESSION_EVENT_TIMEOUT_MS) {
+                            currentEngineSource.clientEvents.first { event ->
+                                event is ClientEvent.SessionForked &&
+                                    event.sourceSessionId == row.uuid &&
+                                    event.mode.toUi() == targetMode
+                            }
+                        } as? ClientEvent.SessionForked
+                    }
+                    currentEngineSource.submitClientCommand(
+                        ClientCommand.ForkSession(
+                            sessionId = row.uuid,
+                            targetMode = targetMode.toDto(),
+                        ),
+                    )
+                    val event = awaitEvent.await()
+                    if (event == null) {
+                        pendingForkRequest = null
+                        chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_timeout))
+                    } else {
+                        completeForkTransition(request, event.sessionId)
+                    }
+                }
+            }.onFailure {
+                pendingForkRequest = null
+                chatViewModel.reportHostError(it.message ?: it::class.simpleName.orEmpty())
+            }
+            return
+        }
+        pendingForkRequest = request
+        val forkSource = EngineConversationSource.create(
+            context = appContext,
+            projectWorkspace = workspaceForScope(sessionScope),
+            workspaceKey = sessionScope.persistenceKey(),
+            sessionMode = row.mode,
+            linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
+            reuseProcessSource = false,
+        )
+        if (forkSource is com.lingxi.code.conversation.UnavailableConversationSource) {
+            pendingForkRequest = null
+            forkSource.close()
+            chatViewModel.reportHostError(forkSource.reason)
+            return
+        }
+        try {
+            coroutineScope {
+                val awaitEvent = async {
+                    withTimeoutOrNull(FORK_SESSION_EVENT_TIMEOUT_MS) {
+                        forkSource.clientEvents.first { event ->
+                            event is ClientEvent.SessionForked &&
+                                event.sourceSessionId == row.uuid &&
+                                event.mode.toUi() == targetMode
+                        }
+                    } as? ClientEvent.SessionForked
+                }
+                forkSource.submitClientCommand(
+                    ClientCommand.ForkSession(
+                        sessionId = row.uuid,
+                        targetMode = targetMode.toDto(),
+                    ),
+                )
+                val event = awaitEvent.await()
+                if (event == null) {
+                    pendingForkRequest = null
+                    chatViewModel.reportHostError(context.getString(R.string.drawer_continue_session_timeout))
+                    return@coroutineScope
+                }
+                completeForkTransition(request, event.sessionId)
+            }
+        } catch (error: Throwable) {
+            pendingForkRequest = null
+            chatViewModel.reportHostError(error.message ?: error::class.simpleName.orEmpty())
+        } finally {
+            forkSource.close()
+        }
+    }
+
+    LaunchedEffect(
+        activeSessionMode,
+        sourceScope,
+        currentEngineSource,
+        drawerBootstrapComplete,
+        state.streaming,
+        state.sessionTransitioning,
+        state.session.id,
+        state.sessionReady,
+        projectState.loading,
+        projectState.projects,
+        projectState.globalSessions,
+        localAppsState.loading,
+        localAppsState.appSessions,
+    ) {
+        if (!drawerBootstrapComplete || state.streaming || state.sessionTransitioning) return@LaunchedEffect
+        val engineMode = currentEngineMode()
+        if (engineMode == activeSessionMode) return@LaunchedEffect
+        val savedSessionId = scopeStore.read(sourceScope.sessionStateKey(activeSessionMode))
+            ?.lastActiveSessionId
+        val target = persistedSessionTarget(
+            sessionId = savedSessionId,
+            catalogRow = savedSessionId?.let {
+                restorableSession(sourceScope, it, activeSessionMode)
+            },
+        )
+        switchEngineScope(
+            engineScope = sourceScope,
+            project = projectSnapshotForScope(sourceScope),
+            target = target?.ref,
+            newSession = target == null,
+            resumeEmpty = target?.resumeEmpty == true,
+            replacePendingTransition = true,
+            sessionModeOverride = activeSessionMode,
+        )
+    }
 
     // A freshly created app hands the conversation off into its OWN scope.
     //
@@ -819,6 +1198,7 @@ fun RootScreen(
     LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             localAppsViewModel.createdAppLandings.collect { landing ->
+                setConversationMode(SessionMode.Code)
                 showingApps = false
                 // The result is load-bearing, not decoration: `switchWorkspaceSource`
                 // REFUSES while a turn is streaming (or another switch is pending)
@@ -880,6 +1260,7 @@ fun RootScreen(
     LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             localAppsViewModel.draftSessionLandings.collect { landing ->
+                setConversationMode(SessionMode.Code)
                 showingApps = false
                 val target = landing.sessionId?.let { SessionRef(it, "") }
                 if (chatViewModel.sourceScope.value == ConversationScope.LocalApp(landing.appId)) {
@@ -914,6 +1295,7 @@ fun RootScreen(
         projectState.loading,
         projectState.activeProjectId,
         sourceProjectId,
+        activeSessionMode,
     ) {
         val project = projectState.activeProject
         if (
@@ -922,8 +1304,14 @@ fun RootScreen(
                 sourceProjectId == null &&
                 chatViewModel.sourceScope.value !is ConversationScope.LocalApp
         ) {
-            val lastSummary = project.record.lastActiveSessionId
+            val scopedLastActiveSessionId = scopeStore.read(
+                ConversationScope.Project(project.record.id).sessionStateKey(activeSessionMode),
+            )?.lastActiveSessionId
+            val legacyLastActiveSessionId = project.record.lastActiveSessionId
+                .takeIf { activeSessionMode == SessionMode.Code }
+            val lastSummary = (scopedLastActiveSessionId ?: legacyLastActiveSessionId)
                 ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
+                ?.takeIf { it.mode == activeSessionMode }
             val last = lastSummary?.let {
                 SessionRef(id = it.sessionId, title = it.title)
             }
@@ -943,13 +1331,15 @@ fun RootScreen(
     // most once per process; entering an app scope persists
     // activeProject = null, so the two restore effects never race each other.
     var appScopeRestoreAttempted by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(projectState.loading, sourceScope) {
+    LaunchedEffect(projectState.loading, sourceScope, activeSessionMode) {
         if (projectState.loading || appScopeRestoreAttempted) return@LaunchedEffect
         if (sourceScope != ConversationScope.Global) return@LaunchedEffect
         val persistedScope = conversationScopeFromKey(scopeStore.readActiveScopeKey())
         if (persistedScope is ConversationScope.LocalApp) {
             appScopeRestoreAttempted = true
-            val lastSessionId = scopeStore.read(persistedScope.persistenceKey())?.lastActiveSessionId
+            val lastSessionId = scopeStore.read(
+                persistedScope.sessionStateKey(activeSessionMode),
+            )?.lastActiveSessionId
             // A draft restores under its localized placeholder title, never
             // under the engine's `"untitled"` — same predicate as the library
             // card and the drawer header.
@@ -974,13 +1364,27 @@ fun RootScreen(
         }
     }
 
-    // Persist an app scope's last-active session once the engine confirms it —
-    // the durable half of "each app remembers where its conversation left
-    // off". Project/global equivalents already flow through ProjectStore.
-    LaunchedEffect(sourceScope, state.session.id, state.sessionReady) {
+    // Persist the mode-scoped last-active session once the engine confirms it.
+    LaunchedEffect(
+        sourceScope,
+        activeSessionMode,
+        currentEngineSource,
+        state.session.id,
+        state.sessionReady,
+    ) {
         val active = sourceScope
-        if (active is ConversationScope.LocalApp && state.sessionReady && state.session.id != "new") {
-            runCatching { scopeStore.persistLastActiveSession(active.persistenceKey(), state.session.id) }
+        val engineMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
+        if (
+            engineMode == activeSessionMode &&
+            state.sessionReady &&
+            state.session.id != "new"
+        ) {
+            runCatching {
+                scopeStore.persistLastActiveSession(
+                    active.sessionStateKey(activeSessionMode),
+                    state.session.id,
+                )
+            }
         }
     }
 
@@ -994,8 +1398,12 @@ fun RootScreen(
         state.session.id,
         state.sessionReady,
         state.isNew,
+        sourceScope,
     ) {
-        if (sessionState.phase == SessionCatalogPhase.Ready) {
+        if (
+            sessionState.phase == SessionCatalogPhase.Ready &&
+            sourceScope !is ConversationScope.LocalApp
+        ) {
             val provisionalSessionMayNotBeListed =
                 state.isNew &&
                     (
@@ -1017,17 +1425,23 @@ fun RootScreen(
         state.session.id,
         state.sessionReady,
         state.isNew,
+        sourceScope,
+        currentEngineSource,
     ) {
+        val engineMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
         if (
+            engineMode == activeSessionMode &&
             state.sessionReady &&
             state.isNew &&
-            state.session.id != "new"
+            state.session.id != "new" &&
+            sourceScope !is ConversationScope.LocalApp
         ) {
             runCatching {
                 projectStore.recordStartedSession(
                     projectId = sourceProjectId,
                     sessionId = state.session.id,
                     title = state.session.title,
+                    mode = activeSessionMode,
                 )
             }.onFailure {
                 chatViewModel.reportHostError(context.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
@@ -1073,16 +1487,128 @@ fun RootScreen(
             title = cached.title,
             messageCount = cached.messageCount,
             relativeTime = cached.relativeTime,
+            mode = cached.mode,
+            modifiedAtEpochSeconds = cached.updatedAtEpochMillis / 1000L,
         )
     }
-    val globalDrawerSessions = if (sourceProjectId == null) {
+    val globalDrawerSessions = if (sourceScope == ConversationScope.Global) {
         sessionState.withCachedRows(cachedGlobalRows)
     } else {
         EngineSessionState.ready(cachedGlobalRows)
     }
+    fun sessionRowLookup(
+        scope: ConversationScope,
+        sessionId: String,
+        mode: SessionMode,
+    ): SessionCatalogLookup<SessionRow> {
+        val row = when (scope) {
+            ConversationScope.Global -> globalDrawerSessions.rows
+                .firstOrNull { it.uuid == sessionId && it.mode == mode }
+            is ConversationScope.Project -> projectState.projects
+                .firstOrNull { it.record.id == scope.projectId }
+                ?.sessions
+                ?.firstOrNull { it.sessionId == sessionId && it.mode == mode }
+                ?.let {
+                    SessionRow(
+                        uuid = it.sessionId,
+                        title = it.title,
+                        messageCount = it.messageCount,
+                        relativeTime = it.relativeTime,
+                        mode = it.mode,
+                        modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
+                    )
+                }
+            is ConversationScope.LocalApp -> localAppsState.appSessions[scope.appId]
+                ?.rows
+                ?.firstOrNull { it.uuid == sessionId && it.mode == mode }
+                ?.let {
+                    SessionRow(
+                        uuid = it.uuid,
+                        title = it.title,
+                        messageCount = it.messageCount,
+                        relativeTime = it.relativeTime,
+                        mode = it.mode,
+                        modifiedAtEpochSeconds = it.modifiedAtEpochSeconds,
+                    )
+                }
+        }
+        return when (scope) {
+            ConversationScope.Global -> if (row != null || globalDrawerSessions.phase != SessionCatalogPhase.Loading) {
+                SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
+            } else {
+                SessionCatalogLookup(SessionCatalogLookupState.Pending)
+            }
+            is ConversationScope.Project -> if (row != null || !projectState.loading) {
+                SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
+            } else {
+                SessionCatalogLookup(SessionCatalogLookupState.Pending)
+            }
+            is ConversationScope.LocalApp -> localAppSessionCatalogLookup(
+                appsLoading = localAppsState.loading,
+                appPresent = localAppsState.apps.any { it.id == scope.appId },
+                page = localAppsState.appSessions[scope.appId],
+                value = row,
+            )
+        }
+    }
+    var restoredModeSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(
+        activeSessionMode,
+        sourceScope,
+        drawerBootstrapComplete,
+        state.streaming,
+        state.sessionTransitioning,
+        currentEngineSource,
+        globalDrawerSessions.phase,
+        globalDrawerSessions.rows,
+        projectState.loading,
+        projectState.projects,
+        localAppsState.loading,
+        localAppsState.appSessions,
+    ) {
+        if (!drawerBootstrapComplete || state.streaming || state.sessionTransitioning) return@LaunchedEffect
+        val engineMode = currentEngineMode()
+        if (engineMode != activeSessionMode) return@LaunchedEffect
+        val restoreKey = sourceScope.sessionStateKey(activeSessionMode)
+        if (restoreKey == restoredModeSessionKey) return@LaunchedEffect
+        val sessionId = scopeStore.read(restoreKey)?.lastActiveSessionId
+        if (sessionId == null) {
+            restoredModeSessionKey = restoreKey
+            return@LaunchedEffect
+        }
+        if (sessionId == state.session.id || sessionId == "new") {
+            restoredModeSessionKey = restoreKey
+            return@LaunchedEffect
+        }
+        val restoredRowLookup = sessionRowLookup(sourceScope, sessionId, activeSessionMode)
+        if (restoredRowLookup.state == SessionCatalogLookupState.Pending) return@LaunchedEffect
+        val restoredRow = restoredRowLookup.value ?: run {
+            restoredModeSessionKey = restoreKey
+            return@LaunchedEffect
+        }
+        drawerUi.selectSession(restoredRow.uuid)
+        chatViewModel.openSession(
+            SessionRef(restoredRow.uuid, restoredRow.title),
+            empty = restoredRow.messageCount == 0,
+        )
+        restoredModeSessionKey = restoreKey
+    }
     val drawerProductionData = DrawerProductionData(
         workspaces = listOf(LocalProjectWorkspace),
         projects = projectState.projects.map { it.toDrawerProject() },
+        localAppWorkspaces = localAppsState.apps.map { app ->
+            DrawerLocalAppWorkspace(
+                appId = app.id,
+                name = localAppDisplayName(
+                    app,
+                    draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                    fallback = app.id,
+                ),
+                status = localAppWorkspaceStatus(app.workflow),
+                updatedAtEpochSeconds = app.updatedAtMs / 1000L,
+                sessions = localAppsState.appSessions[app.id]?.rows.orEmpty(),
+            )
+        },
         crons = cronState.tasks.map { cron ->
             val status = cron.activeRun?.status ?: cron.lastRun?.status
             Cron(
@@ -1115,7 +1641,7 @@ fun RootScreen(
         projectStatusMessage = projectState.operation?.message,
     )
     LaunchedEffect(Unit) {
-        if (drawerUi.activeWs.isBlank()) drawerUi.selectWorkspace(LocalProjectWorkspace.id)
+        if (drawerUi.activeWs.isBlank()) drawerUi.selectWorkspace(ConversationScope.Global.persistenceKey())
     }
 
     var showCreateProject by remember { mutableStateOf(false) }
@@ -1196,9 +1722,32 @@ fun RootScreen(
                         ui = drawerUi,
                         onSelectSession = { ref ->
                             showingApps = false
-                            drawerUi.selectSession(ref.id)
-                            chatViewModel.openSession(ref)
-                            closeDrawer()
+                            val row = globalDrawerSessions.rows.firstOrNull { it.uuid == ref.id }
+                            val targetMode = row?.mode ?: activeSessionMode
+                            val targetScope = ConversationScope.Global
+                            val switched = if (sourceMatches(targetScope, targetMode)) {
+                                drawerUi.selectSession(ref.id)
+                                chatViewModel.openSession(ref, empty = row?.messageCount == 0)
+                                true
+                            } else {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            engineScope = targetScope,
+                                            project = null,
+                                            target = ref,
+                                            newSession = false,
+                                            resumeEmpty = row?.messageCount == 0,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = targetMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                                false
+                            }
+                            if (switched) closeDrawer()
                         },
                         onOpenSettings = {
                             closeDrawer()
@@ -1210,6 +1759,27 @@ fun RootScreen(
                         },
                         onClose = { closeDrawer() },
                         engineSessions = globalDrawerSessions,
+                        onNewGlobalSession = {
+                            showingApps = false
+                            if (sourceMatches(ConversationScope.Global, activeSessionMode)) {
+                                chatViewModel.startNewSession()
+                                closeDrawer()
+                            } else {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            project = null,
+                                            target = null,
+                                            newSession = true,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = activeSessionMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                            }
+                        },
                         onResumeSession = { uuid ->
                             showingApps = false
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
@@ -1217,7 +1787,7 @@ fun RootScreen(
                                 // the global scope — a Project OR LocalApp
                                 // scope must rebind first, or the session would
                                 // resume against the wrong cwd.
-                                if (sourceScope == ConversationScope.Global) {
+                                if (sourceMatches(ConversationScope.Global, row.mode)) {
                                     drawerUi.selectSession(uuid)
                                     chatViewModel.resumeSession(row)
                                     closeDrawer()
@@ -1229,6 +1799,8 @@ fun RootScreen(
                                                 SessionRef(row.uuid, row.title),
                                                 false,
                                                 resumeEmpty = row.messageCount == 0,
+                                                replacePendingTransition = true,
+                                                sessionModeOverride = row.mode,
                                             )
                                         ) {
                                             closeDrawer()
@@ -1251,6 +1823,8 @@ fun RootScreen(
                                         title = row.title,
                                         messageCount = row.messageCount,
                                         relativeTime = row.relativeTime,
+                                        mode = row.mode,
+                                        modifiedAtEpochSeconds = row.modifiedAtEpochSeconds,
                                     )
                                 },
                             )
@@ -1259,18 +1833,156 @@ fun RootScreen(
                             // Same engine scope (the section only renders for
                             // the ACTIVE app), so a plain in-place resume.
                             showingApps = false
-                            drawerUi.selectSession(ref.id)
                             val appId = (sourceScope as? ConversationScope.LocalApp)?.appId
                             val row = appId?.let { id ->
                                 localAppsState.appSessions[id]?.rows?.firstOrNull { it.uuid == ref.id }
                             }
-                            chatViewModel.openSession(ref, empty = row?.messageCount == 0)
-                            closeDrawer()
+                            val targetMode = row?.mode ?: activeSessionMode
+                            val targetScope = appId?.let(ConversationScope::LocalApp)
+                            val switched = if (targetScope != null && sourceMatches(targetScope, targetMode)) {
+                                drawerUi.selectSession(ref.id)
+                                chatViewModel.openSession(ref, empty = row?.messageCount == 0)
+                                true
+                            } else if (targetScope != null) {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            engineScope = targetScope,
+                                            project = null,
+                                            target = ref,
+                                            newSession = false,
+                                            resumeEmpty = row?.messageCount == 0,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = targetMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                                false
+                            } else {
+                                false
+                            }
+                            if (switched) closeDrawer()
                         },
                         onNewAppScopeSession = {
                             showingApps = false
-                            chatViewModel.startNewSession()
+                            val appId = (sourceScope as? ConversationScope.LocalApp)?.appId
+                            val targetScope = appId?.let(ConversationScope::LocalApp)
+                            val switched = if (
+                                targetScope != null &&
+                                    sourceMatches(targetScope, activeSessionMode)
+                            ) {
+                                chatViewModel.startNewSession()
+                                true
+                            } else if (targetScope != null) {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            engineScope = targetScope,
+                                            project = null,
+                                            target = null,
+                                            newSession = true,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = activeSessionMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                                false
+                            } else {
+                                false
+                            }
+                            if (switched) closeDrawer()
+                        },
+                        onSelectLocalAppSession = { appId, ref ->
+                            showingApps = false
+                            val row = localAppsState.appSessions[appId]?.rows?.firstOrNull { it.uuid == ref.id }
+                            val targetMode = row?.mode ?: activeSessionMode
+                            val targetScope = ConversationScope.LocalApp(appId)
+                            val switched = if (sourceMatches(targetScope, targetMode)) {
+                                drawerUi.selectSession(ref.id)
+                                chatViewModel.openSession(ref, empty = row?.messageCount == 0)
+                                true
+                            } else {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            engineScope = ConversationScope.LocalApp(appId),
+                                            project = null,
+                                            target = ref,
+                                            newSession = false,
+                                            resumeEmpty = row?.messageCount == 0,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = targetMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                                false
+                            }
+                            if (switched) closeDrawer()
+                        },
+                        onNewLocalAppSession = { appId ->
+                            showingApps = false
+                            val targetScope = ConversationScope.LocalApp(appId)
+                            val switched = if (sourceMatches(targetScope, activeSessionMode)) {
+                                chatViewModel.startNewSession()
+                                true
+                            } else {
+                                scope.launch {
+                                    if (
+                                        switchEngineScope(
+                                            engineScope = ConversationScope.LocalApp(appId),
+                                            project = null,
+                                            target = null,
+                                            newSession = true,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = activeSessionMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
+                                }
+                                false
+                            }
+                            if (switched) closeDrawer()
+                        },
+                        onContinueSession = { sessionScope, row, targetMode ->
+                            showingApps = false
+                            scope.launch { continueSessionInMode(sessionScope, row, targetMode) }
+                        },
+                        onOpenLocalAppDetails = { appId ->
+                            showingApps = true
                             closeDrawer()
+                            localAppsViewModel.onAction(LocalAppsAction.OpenApp(appId))
+                            localAppsViewModel.onAction(LocalAppsAction.SelectDetailsTab(LocalAppDetailsTab.Sessions))
+                        },
+                        onSelectSection = { section ->
+                            drawerUi.section = section
+                            conversationModeFor(section)?.let(::setConversationMode)
+                        },
+                        isWorkspaceCollapsed = { mode, workspaceKey -> drawerUi.isWorkspaceCollapsed(mode, workspaceKey) },
+                        onToggleWorkspaceCollapsed = { mode, workspaceKey ->
+                            drawerUi.toggleWorkspaceCollapsed(mode, workspaceKey)
+                            scope.launch {
+                                scopeStore.persistWorkspaceCollapsed(
+                                    "${mode.wireKey}:$workspaceKey",
+                                    drawerUi.isWorkspaceCollapsed(mode, workspaceKey),
+                                )
+                            }
+                        },
+                        pinnedAtEpochMillis = { mode, workspaceKey -> drawerUi.pinnedAt(mode, workspaceKey) },
+                        onToggleWorkspacePinned = { mode, workspaceKey ->
+                            drawerUi.toggleWorkspacePinned(mode, workspaceKey)
+                            scope.launch {
+                                scopeStore.persistWorkspacePinned(
+                                    workspaceKey,
+                                    drawerUi.pinnedAt(mode, workspaceKey),
+                                )
+                            }
                         },
                         productionData = drawerProductionData,
                         onCreateProject = { showCreateProject = true },
@@ -1283,7 +1995,8 @@ fun RootScreen(
                                 .firstOrNull { it.sessionId == ref.id }
                                 ?: return@DrawerContent
                             val resumeTarget = SessionRef(session.sessionId, session.title)
-                            val switched = if (sourceProjectId == projectId) {
+                            val targetScope = ConversationScope.Project(projectId)
+                            val switched = if (sourceMatches(targetScope, session.mode)) {
                                 drawerUi.selectSession(resumeTarget.id)
                                 chatViewModel.openSession(
                                     resumeTarget,
@@ -1298,6 +2011,8 @@ fun RootScreen(
                                             target = resumeTarget,
                                             newSession = false,
                                             resumeEmpty = session.messageCount == 0,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = session.mode,
                                         )
                                     ) {
                                         closeDrawer()
@@ -1312,12 +2027,23 @@ fun RootScreen(
                             val project = projectState.projects.firstOrNull {
                                 it.record.id == projectId
                             } ?: return@DrawerContent
-                            val switched = if (sourceProjectId == projectId) {
+                            val targetScope = ConversationScope.Project(projectId)
+                            val switched = if (sourceMatches(targetScope, activeSessionMode)) {
                                 chatViewModel.startNewSession()
                                 true
                             } else {
                                 scope.launch {
-                                    if (switchEngineScope(project, null, true)) closeDrawer()
+                                    if (
+                                        switchEngineScope(
+                                            project = project,
+                                            target = null,
+                                            newSession = true,
+                                            replacePendingTransition = true,
+                                            sessionModeOverride = activeSessionMode,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
                                 }
                                 false
                             }
@@ -1359,10 +2085,12 @@ fun RootScreen(
                         // false`, and why `LocalAppsErrorDialog` (at the bottom
                         // of this file) has to exist at all.
                         onCreateApp = {
+                            setConversationMode(SessionMode.Code)
                             closeDrawer()
                             localAppsViewModel.createAppFromDrawer()
                         },
                         onOpenApps = {
+                            setConversationMode(SessionMode.Code)
                             showingApps = true
                             closeDrawer()
                             localAppsViewModel.onAction(LocalAppsAction.Refresh)
@@ -1401,9 +2129,12 @@ fun RootScreen(
                             // into the app's scope: resume the tapped catalog
                             // row, or start fresh for 「新会话」. Already in
                             // this app's scope → plain in-place session switch.
+                            val targetMode = sessionRow?.mode ?: SessionMode.Code
+                            setConversationMode(targetMode)
                             showingApps = false
                             val target = sessionRow?.let { SessionRef(it.uuid, it.title) }
-                            if (sourceScope == ConversationScope.LocalApp(appId)) {
+                            val targetScope = ConversationScope.LocalApp(appId)
+                            if (sourceMatches(targetScope, targetMode)) {
                                 if (target == null) {
                                     chatViewModel.startNewSession()
                                 } else {
@@ -1413,11 +2144,13 @@ fun RootScreen(
                             } else {
                                 scope.launch {
                                     switchEngineScope(
-                                        engineScope = ConversationScope.LocalApp(appId),
+                                        engineScope = targetScope,
                                         project = null,
                                         target = target,
                                         newSession = target == null,
                                         resumeEmpty = sessionRow?.messageCount == 0,
+                                        replacePendingTransition = true,
+                                        sessionModeOverride = targetMode,
                                     )
                                 }
                             }
@@ -1502,14 +2235,18 @@ fun RootScreen(
                         draft = draft,
                         onDraftChange = {
                             draft = it
-                            when (val active = sourceScope) {
-                                // App scopes persist into the per-scope store
-                                // (IO-dispatched inside), NOT the SavedState
-                                // slot — the global/project draft must survive
-                                // an app-scope visit untouched.
-                                is ConversationScope.LocalApp ->
-                                    scope.launch { scopeStore.persistDraft(active.persistenceKey(), it) }
-                                else -> chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
+                            val active = sourceScope
+                            scope.launch {
+                                scopeStore.persistDraft(
+                                    active.sessionStateKey(activeSessionMode),
+                                    it,
+                                )
+                            }
+                            // Keep only the legacy Code slot mirrored for old
+                            // process-state restores; mode-scoped storage above
+                            // is authoritative for every workspace.
+                            if (activeSessionMode == SessionMode.Code) {
+                                chatViewModel.onDraftChanged(it)
                             }
                         },
                         onCameraClick = onCameraClick,

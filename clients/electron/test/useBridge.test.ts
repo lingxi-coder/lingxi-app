@@ -424,6 +424,29 @@ test('the runSlashCommand dispatch-failure catch resets cancellation runtime; th
   );
 });
 
+test('opening either Desktop command surface refreshes the live slash catalog', () => {
+  const bridgeSource = useBridgeSource();
+  assert.match(
+    bridgeSource,
+    /const refreshSlashCommands = useCallback\([\s\S]*?type: 'refresh_listings'[\s\S]*?type: 'slash_commands'/,
+    'UseBridge must expose a focused refresh for the live slash-command registry.',
+  );
+
+  const composerSource = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  assert.match(
+    composerSource,
+    /if \(!slashMenuOpen\) return;\s*void bridge\.refreshSlashCommands\(\)\.catch\(\(\) => undefined\)/,
+    'opening inline slash completion must recover a catalog missed during startup.',
+  );
+
+  const paletteSource = readFileSync(join(process.cwd(), 'src/renderer/components/DesktopCommandPalette.tsx'), 'utf8');
+  assert.match(
+    paletteSource,
+    /if \(!open\) return;[\s\S]*?void bridge\.refreshSlashCommands\(\)\.catch\(\(\) => undefined\)/,
+    'opening the command palette must refresh the same live engine catalog.',
+  );
+});
+
 test('a slash-turn claim is cleared on session reset events, not just turn_started (FINDING 2)', () => {
   // Regression under test: the reducer clears pendingSlashName on
   // session_started/session_ended/session_resumed (conversation.ts), but

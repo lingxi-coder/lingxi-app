@@ -12,7 +12,10 @@
 //! On any other OS, returns plaintext directly with the documented warning.
 
 use async_trait::async_trait;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use platform_api::{
+    CredentialStoragePolicy, InMemorySecureStorage, SecureStorage, SecureStorageBackend,
+    SecureStorageError,
+};
 use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -127,10 +130,12 @@ impl RuntimeFallbackStorage {
     fn activate_fallback(&self, error: &SecureStorageError) {
         self.fallback_active.store(true, Ordering::Release);
         if !self.warned.swap(true, Ordering::AcqRel) {
+            let fallback_label = self.fallback_label();
             tracing::warn!(
                 target: "lingxi::secure_storage",
                 %error,
-                "Warning: native credential storage is unavailable; storing credentials in the shared owner-only fallback."
+                fallback = fallback_label,
+                "Warning: native credential storage is unavailable; switching fallback backend."
             );
         }
     }
@@ -138,11 +143,20 @@ impl RuntimeFallbackStorage {
     fn mark_fallback_active(&self, error: &SecureStorageError, message: &'static str) {
         self.fallback_active.store(true, Ordering::Release);
         if !self.warned.swap(true, Ordering::AcqRel) {
+            let fallback_label = self.fallback_label();
             tracing::warn!(
                 target: "lingxi::secure_storage",
                 %error,
+                fallback = fallback_label,
                 "{message}"
             );
+        }
+    }
+
+    fn fallback_label(&self) -> &'static str {
+        match self.fallback.backend() {
+            SecureStorageBackend::MemorySession => "current-session-memory",
+            _ => "owner-only-plaintext",
         }
     }
 }
@@ -380,14 +394,22 @@ pub async fn plaintext_secure_storage(
 /// Fallback initialization is lazy: a healthy native store never requires the
 /// sidecar directory to be writable. Any later sidecar access failure is
 /// returned by the corresponding storage operation.
-pub async fn secure_storage_for_platform(
+pub async fn secure_storage_for_policy(
     user: String,
     config_dir: PathBuf,
     plaintext_path: PathBuf,
+    policy: CredentialStoragePolicy,
 ) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
-    let fallback: Arc<dyn SecureStorage> = Arc::new(DeferredPlainTextStorage::new(
-        fallback_directory(&plaintext_path),
-    ));
+    if policy == CredentialStoragePolicy::PlainTextFixture {
+        return plaintext_secure_storage(plaintext_path).await;
+    }
+    let fallback: Arc<dyn SecureStorage> = match policy {
+        CredentialStoragePolicy::NativePreferred => Arc::new(DeferredPlainTextStorage::new(
+            fallback_directory(&plaintext_path),
+        )),
+        CredentialStoragePolicy::NativeOrMemory => Arc::new(InMemorySecureStorage::new()),
+        CredentialStoragePolicy::PlainTextFixture => unreachable!("handled above"),
+    };
     #[cfg(target_os = "macos")]
     {
         let default_dir = default_lingxi_dir();
@@ -407,7 +429,8 @@ pub async fn secure_storage_for_platform(
                 tracing::warn!(
                     target: "lingxi::secure_storage",
                     error = %e,
-                    "Warning: Storing credentials in plaintext."
+                    policy = ?policy,
+                    "Warning: native credential storage unavailable during init."
                 );
             }
         }
@@ -435,7 +458,8 @@ pub async fn secure_storage_for_platform(
                 tracing::warn!(
                     target: "lingxi::secure_storage",
                     error = %e,
-                    "Warning: Storing credentials in plaintext."
+                    policy = ?policy,
+                    "Warning: native credential storage unavailable during init."
                 );
             }
         }
@@ -447,12 +471,29 @@ pub async fn secure_storage_for_platform(
         // only warn when their backend genuinely fails to initialise.)
         tracing::warn!(
             target: "lingxi::secure_storage",
-            "Warning: Storing credentials in plaintext."
+            policy = ?policy,
+            "Warning: no native credential storage backend available on this target."
         );
         let _ = &user;
         let _ = &config_dir;
     }
     Ok(fallback)
+}
+
+/// Build the shared POSIX credential store with the production
+/// `NativePreferred` fallback policy.
+pub async fn secure_storage_for_platform(
+    user: String,
+    config_dir: PathBuf,
+    plaintext_path: PathBuf,
+) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
+    secure_storage_for_policy(
+        user,
+        config_dir,
+        plaintext_path,
+        CredentialStoragePolicy::NativePreferred,
+    )
+    .await
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -831,5 +872,26 @@ mod tests {
             !fallback_dir.exists(),
             "native-only use must not initialize the fallback"
         );
+    }
+
+    #[tokio::test]
+    async fn native_or_memory_runtime_fallback_stays_in_process_memory() {
+        let fallback: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+        let storage = RuntimeFallbackStorage::new(Arc::new(UnavailableStorage), fallback.clone());
+        let expected = test_payload(b"packaged-bridge-session-only");
+
+        storage
+            .store("lingxi", "provider-key-openai", expected.clone())
+            .await
+            .expect("fallback store");
+        assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
+        assert!(!storage.is_encrypted());
+
+        let actual = fallback
+            .retrieve("lingxi", "provider-key-openai")
+            .await
+            .expect("fallback retrieve")
+            .expect("stored key");
+        assert_eq!(actual.expose_secret_bytes(), expected.expose_secret_bytes());
     }
 }

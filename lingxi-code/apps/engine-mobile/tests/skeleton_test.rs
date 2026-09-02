@@ -230,7 +230,7 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
                 .iter()
                 .rev()
                 .find_map(|event| match event {
-                    ClientEvent::SessionStarted { session_id } => Some(session_id.clone()),
+                    ClientEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 })
                 .expect("SessionStarted carries the durable id");

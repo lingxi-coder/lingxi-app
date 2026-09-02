@@ -6,6 +6,7 @@ import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';
 import { SETTINGS_NAV, searchNav, type NavPage } from './nav';
 import { About } from './pages/About';
+import { Account } from './pages/Account';
 import { Appearance } from './pages/Appearance';
 import { CustomProviders } from './pages/CustomProviders';
 import { Diagnostics } from './pages/Diagnostics';
@@ -55,12 +56,14 @@ export interface SettingsScreenProps {
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
   onClose(): void;
+  initialPageId?: string;
   initialProviderId?: string;
   pendingModelReference?: string;
 }
 
 /** Only `provider-credentials` has a documented deep link today; this stays a plain equality check rather than a lookup table so a future second deep-link target is an explicit decision, not a silent fallthrough. */
-export function resolveInitialPage(initialProviderId?: string): string {
+export function resolveInitialPage(initialPageId?: string, initialProviderId?: string): string {
+  if (initialPageId && SETTINGS_NAV.some((page) => page.id === initialPageId)) return initialPageId;
   if (initialProviderId) return 'provider-credentials';
   return SETTINGS_NAV[0]?.id ?? 'general';
 }
@@ -201,6 +204,7 @@ function messageFrom(cause: unknown): string {
 // `not-wired` placeholder quietly standing in for a page that should exist.
 export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
+  account: Account,
   appearance: Appearance,
   voice: Voice,
   projects: Projects,
@@ -385,10 +389,10 @@ function NavIcon({ name }: { name: string }) {
 }
 
 export function SettingsScreen({
-  bridge, theme, onTheme, onClose, initialProviderId, pendingModelReference,
+  bridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference,
 }: SettingsScreenProps) {
   const t = useT();
-  const [page, setPage] = useState<string>(() => resolveInitialPage(initialProviderId));
+  const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
   const [restartError, setRestartError] = useState<string | null>(null);

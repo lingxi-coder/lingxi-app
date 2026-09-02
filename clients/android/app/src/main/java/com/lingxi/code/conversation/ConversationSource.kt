@@ -21,6 +21,7 @@ import com.lingxi.code.bindings.MessageImageDto
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
+import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.bindings.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -29,8 +30,10 @@ import com.lingxi.code.model.Role
 import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionCatalogStrings
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionCatalogStrings
+import com.lingxi.code.model.toUi
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.project.ProjectWorkspace
@@ -69,9 +72,12 @@ internal data class DurableConversationTurnRecord(
 data class ConversationRecoverySpec(
     val projectId: String?,
     val hostPath: String?,
+    val sessionMode: SessionMode,
     val linuxRuntimeMode: LinuxRuntimeMode,
+    val workspaceKey: String? = null,
 ) {
-    val scopeKey: String get() = hostPath ?: "__global__"
+    val scopeKey: String
+        get() = "${workspaceKey ?: hostPath ?: "__global__"}#${sessionMode.wireValue}"
 
     fun projectWorkspace(): ProjectWorkspace? = hostPath?.let { path ->
         ProjectWorkspace(projectId = projectId ?: "recovered", hostPath = path)
@@ -699,6 +705,7 @@ fun reduceSessionEvent(
                     uuid = dto.uuid,
                     title = dto.title,
                     messageCount = dto.messageCount.toInt(),
+                    mode = dto.mode.toUi(),
                     modifiedRfc3339 = dto.modifiedRfc3339,
                     nowEpochSeconds = nowEpochSeconds,
                     strings = strings,
@@ -723,6 +730,7 @@ data class ActivatedSession(
     val sessionId: String,
     val transcript: List<Message>,
     val kind: SessionActivationKind,
+    val mode: SessionMode = SessionMode.Code,
 )
 
 /**
@@ -757,11 +765,13 @@ fun sessionActivationFrom(
 ): ActivatedSession? = when (event) {
     is ClientEvent.SessionStarted -> ActivatedSession(
         sessionId = canonicalSessionId(event.sessionId),
+        mode = event.mode.toUi(),
         transcript = emptyList(),
         kind = SessionActivationKind.Started,
     )
     is ClientEvent.SessionResumed -> ActivatedSession(
         sessionId = canonicalSessionId(event.sessionId),
+        mode = event.mode.toUi(),
         transcript = transcriptFromDtos(event.messages, strings),
         kind = SessionActivationKind.Resumed,
     )
@@ -1969,13 +1979,17 @@ class EngineConversationSource private constructor(
         fun create(
             context: Context,
             projectWorkspace: ProjectWorkspace? = null,
+            workspaceKey: String? = null,
+            sessionMode: SessionMode = SessionMode.Code,
             linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
             reuseProcessSource: Boolean = true,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
                 projectId = projectWorkspace?.projectId,
                 hostPath = projectWorkspace?.hostPath,
+                sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
+                workspaceKey = workspaceKey,
             )
             if (reuseProcessSource) {
                 when (
@@ -2001,7 +2015,7 @@ class EngineConversationSource private constructor(
             val strings = conversationStrings(context)
             val durableTurns = DurableConversationTurnClientStore(
                 context = context,
-                scope = projectWorkspace?.hostPath ?: "__global__",
+                scope = workspaceKey ?: projectWorkspace?.hostPath ?: "__global__",
             )
             val durableReplayGate = DurableTurnReplayGate()
             // The head parked permission request. The engine's outbound
@@ -2055,6 +2069,7 @@ class EngineConversationSource private constructor(
                 routingJson = providerLaunch.routingJson,
                 visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
                 projectWorkspace = projectWorkspace,
+                sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
                 onEvent = { event ->
                     // The OUT-OF-BAND state paths: fold model catalog + session

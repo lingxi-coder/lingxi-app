@@ -113,7 +113,6 @@ unicode-width = "=0.1.14"
 # client can forward input/control without leaving a blocking stdin thread
 # behind when the worker exits.
 crossterm = { workspace = true }
-
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 # `wrap_help` + `term_width = 80` reproduce the oracle's 80-column help
 # layout with hanging indents; without the feature `term_width` is inert.
@@ -147,6 +146,9 @@ filetime = "0.2"
 sha2 = "0.10"
 # `archive` marketplace-source download tests build a real plugin zip fixture.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { path = "../../platforms/windows" }
 
 [target.'cfg(unix)'.dependencies]
 # Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS

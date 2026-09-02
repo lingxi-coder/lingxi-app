@@ -31,6 +31,7 @@ use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{
     extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
 };
+use crate::jsonl::SessionMode;
 use platform_api::{FileSystem, FileSystemCacheIdentity};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -67,6 +68,8 @@ pub struct SessionMetadata {
     pub created: SystemTime,
     /// Number of user/assistant messages visible in the restored conversation.
     pub message_count: usize,
+    /// Capability profile this session was created or forked under.
+    pub mode: SessionMode,
     /// Absolute path to the `.jsonl` file (kept so callers can re-load without re-resolving).
     pub path: PathBuf,
     /// Pull-request number linked to this session, when a `pr-link` metadata
@@ -804,6 +807,11 @@ async fn enrich_candidate_uncached(
         .get(sid)
         .or_else(|| loaded.ai_titles.get(sid))
         .cloned();
+    let mode = loaded
+        .session_modes
+        .get(sid)
+        .and_then(|value| SessionMode::from_str(value))
+        .unwrap_or(SessionMode::Code);
 
     Ok(Some(SessionMetadata {
         uuid,
@@ -817,6 +825,7 @@ async fn enrich_candidate_uncached(
         // `.len()` over-counts tool_result-only user lines, tool_use-only
         // assistant lines, isMeta lines, and system/attachment lines.
         message_count: count_visible_messages(&loaded.messages_in_order),
+        mode,
         path,
         pr_number,
     }))
@@ -3105,6 +3114,7 @@ mod tests {
             modified: same_mtime,
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             message_count: 1,
+            mode: SessionMode::Code,
             path: PathBuf::from("z.jsonl"),
             pr_number: None,
             custom_or_ai_title: None,
@@ -3115,6 +3125,7 @@ mod tests {
             modified: same_mtime,
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
             message_count: 1,
+            mode: SessionMode::Code,
             path: PathBuf::from("a.jsonl"),
             pr_number: None,
             custom_or_ai_title: None,
@@ -3178,6 +3189,7 @@ mod tests {
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
             message_count: 1,
+            mode: SessionMode::Code,
             path: PathBuf::from(format!("{id}.jsonl")),
             pr_number: None,
             custom_or_ai_title: searchable.map(str::to_string),

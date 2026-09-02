@@ -29,11 +29,14 @@ import com.lingxi.code.bindings.AndroidShellConfigFfi
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
+import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.WorkflowProgressDto
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.toDto
 import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
 import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
@@ -198,6 +201,7 @@ fun buildVoiceEngine(
     routingJson: String? = null,
     visionDelegationEnabled: Boolean = true,
     projectWorkspace: ProjectWorkspace? = null,
+    sessionMode: SessionMode = SessionMode.Code,
     linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
     launchMode: AndroidLaunchModeFfi = AndroidLaunchModeFfi.INTERACTIVE,
     onEvent: suspend (ClientEvent) -> Unit = { event ->
@@ -291,6 +295,7 @@ fun buildVoiceEngine(
                 apiBase = apiBase,
                 apiKey = apiKey,
                 model = model,
+                sessionMode = sessionMode.toDto(),
                 visionDelegationEnabled = visionDelegationEnabled,
                 appFilesRoot = appContext.filesDir.absolutePath,
                 projectCwd = projectWorkspace?.hostPath,

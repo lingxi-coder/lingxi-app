@@ -65,6 +65,14 @@ function runtimeProfileFamily(value: unknown, name: string): AppRuntimeProfileDt
   return family as AppRuntimeProfileDto;
 }
 
+function sessionMode(value: unknown, name: string): 'chat' | 'code' {
+  const mode = string(value, name);
+  if (mode !== 'chat' && mode !== 'code') {
+    throw new Error(`invalid ${name}`);
+  }
+  return mode;
+}
+
 function validatePluginStatus(value: unknown): PluginStatusDto {
   const input = object(value, 'plugin status');
   exactKeys(input, ['plugin_id', 'state', 'manifest_default_enabled'], 'plugin status');
@@ -126,6 +134,24 @@ function validateToolSurface(value: unknown): LocalAppMcpToolSurfaceDto {
     ...(input['visibleMetaJson'] === undefined ? {} : { visibleMetaJson: string(input['visibleMetaJson'], 'visibleMetaJson') }),
     semanticFlowJson: string(input['semanticFlowJson'], 'semanticFlowJson'),
     permissionCeiling: string(input['permissionCeiling'], 'permissionCeiling'),
+  };
+}
+
+function validateManagedMcpStatus(value: unknown): ManagedLocalAppMcpServerDto['status'] {
+  const status = string(value, 'managed MCP status');
+  if (!['disabled', 'needs_setup', 'authoring', 'enabled', 'needs_revalidation', 'error'].includes(status)) {
+    throw new Error('invalid managed MCP status');
+  }
+  return status as ManagedLocalAppMcpServerDto['status'];
+}
+
+function validateMcpAppWidget(value: unknown): NonNullable<ManagedLocalAppMcpServerDto['widget']> {
+  const input = object(value, 'managed MCP widget');
+  exactKeys(input, ['resourceUri', 'mimeType', 'resourceSha256'], 'managed MCP widget');
+  return {
+    resourceUri: string(input['resourceUri'], 'resourceUri'),
+    mimeType: string(input['mimeType'], 'mimeType'),
+    resourceSha256: string(input['resourceSha256'], 'resourceSha256'),
   };
 }
 
@@ -265,13 +291,37 @@ function validateManagedMcpServer(value: unknown): ManagedLocalAppMcpServerDto {
   const input = object(value, 'managed MCP server');
   exactKeys(
     input,
-    ['serverName', 'appId', 'appName', 'buildId', 'catalogSha256', 'toolSurfaceSha256', 'toolCount', 'authoringRevision', 'publicationState', 'mcpVerification', 'uiVerification', 'tools'],
+    [
+      'serverName',
+      'appId',
+      'appName',
+      'enabled',
+      'status',
+      'settingsRevision',
+      'enabledTools',
+      'pinnedToCurrentConversation',
+      'buildId',
+      'catalogSha256',
+      'toolSurfaceSha256',
+      'toolCount',
+      'authoringRevision',
+      'publicationState',
+      'mcpVerification',
+      'uiVerification',
+      'widget',
+      'tools',
+    ],
     'managed MCP server',
   );
   return {
     serverName: string(input['serverName'], 'serverName'),
     appId: string(input['appId'], 'appId'),
     appName: string(input['appName'], 'appName'),
+    enabled: boolean(input['enabled'], 'enabled'),
+    status: validateManagedMcpStatus(input['status']),
+    settingsRevision: integer(input['settingsRevision'], 'settingsRevision'),
+    ...(input['enabledTools'] === undefined ? {} : { enabledTools: stringArray(input['enabledTools'], 'enabledTools') }),
+    pinnedToCurrentConversation: boolean(input['pinnedToCurrentConversation'], 'pinnedToCurrentConversation'),
     buildId: string(input['buildId'], 'buildId'),
     catalogSha256: string(input['catalogSha256'], 'catalogSha256'),
     toolSurfaceSha256: string(input['toolSurfaceSha256'], 'toolSurfaceSha256'),
@@ -280,6 +330,7 @@ function validateManagedMcpServer(value: unknown): ManagedLocalAppMcpServerDto {
     publicationState: string(input['publicationState'], 'publicationState') as ManagedLocalAppMcpServerDto['publicationState'],
     mcpVerification: validateVerificationSummary(input['mcpVerification'], 'mcpVerification'),
     uiVerification: validateVerificationSummary(input['uiVerification'], 'uiVerification'),
+    ...(input['widget'] === undefined ? {} : { widget: validateMcpAppWidget(input['widget']) }),
     ...(input['tools'] === undefined ? {} : { tools: (Array.isArray(input['tools']) ? input['tools'] : (() => { throw new Error('invalid tools'); })()).map(validateToolSurface) }),
   };
 }
@@ -382,7 +433,19 @@ function validateAppEvent(value: unknown): AppEventDto {
     case 'local_app_operation_failed': {
       exactKeys(input, ['type', 'app_id', 'code', 'message', 'request_id'], 'app event');
       const code = string(input['code'], 'code');
-      if (!['plugin_disabled', 'builtin_bundle_unavailable', 'template_unavailable', 'proposal_invalid', 'catalog_stale', 'active_state_corrupt', 'mcp_authoring_required', 'repair_budget_exhausted', 'exposure_capacity_reached'].includes(code)) {
+      if (![
+        'plugin_disabled',
+        'builtin_bundle_unavailable',
+        'template_unavailable',
+        'proposal_invalid',
+        'catalog_stale',
+        'active_state_corrupt',
+        'revision_conflict',
+        'invalid_mcp_settings',
+        'mcp_authoring_required',
+        'repair_budget_exhausted',
+        'exposure_capacity_reached',
+      ].includes(code)) {
         throw new Error('invalid local app operation error code');
       }
       return {
@@ -404,6 +467,62 @@ export function validateClientEvent(value: unknown): ClientEvent {
   if (type === 'app_event') {
     exactKeys(input, ['type', 'event'], 'client event');
     return { type, event: validateAppEvent(input['event']) } as ClientEvent;
+  }
+  switch (type) {
+    case 'session_started':
+      exactKeys(input, ['type', 'session_id', 'mode'], 'client event');
+      return {
+        type,
+        session_id: string(input['session_id'], 'session_id'),
+        mode: sessionMode(input['mode'], 'mode'),
+      } as ClientEvent;
+    case 'session_resumed':
+      exactKeys(input, ['type', 'session_id', 'mode', 'messages'], 'client event');
+      if (!Array.isArray(input['messages'])) throw new Error('invalid messages');
+      return {
+        type,
+        session_id: string(input['session_id'], 'session_id'),
+        mode: sessionMode(input['mode'], 'mode'),
+        messages: input['messages'] as ClientEvent & { messages: unknown[] }['messages'],
+      } as ClientEvent;
+    case 'session_forked':
+      exactKeys(input, ['type', 'source_session_id', 'session_id', 'mode'], 'client event');
+      return {
+        type,
+        source_session_id: string(input['source_session_id'], 'source_session_id'),
+        session_id: string(input['session_id'], 'session_id'),
+        mode: sessionMode(input['mode'], 'mode'),
+      } as ClientEvent;
+    case 'session_list':
+      exactKeys(input, ['type', 'sessions'], 'client event');
+      if (!Array.isArray(input['sessions'])) throw new Error('invalid sessions');
+      for (const row of input['sessions']) {
+        const item = object(row, 'session row');
+        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'path'], 'session row');
+        string(item['uuid'], 'session row uuid');
+        sessionMode(item['mode'], 'session row mode');
+        string(item['title'], 'session row title');
+        string(item['modified_rfc3339'], 'session row modified_rfc3339');
+        integer(item['message_count'], 'session row message_count');
+        string(item['path'], 'session row path');
+      }
+      return input as ClientEvent;
+    case 'app_sessions_changed':
+      exactKeys(input, ['type', 'app_id', 'sessions', 'next_offset'], 'client event');
+      string(input['app_id'], 'app_id');
+      if (!Array.isArray(input['sessions'])) throw new Error('invalid sessions');
+      for (const row of input['sessions']) {
+        const item = object(row, 'app session row');
+        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'kind'], 'app session row');
+        string(item['uuid'], 'app session row uuid');
+        sessionMode(item['mode'], 'app session row mode');
+        string(item['title'], 'app session row title');
+        string(item['modified_rfc3339'], 'app session row modified_rfc3339');
+        integer(item['message_count'], 'app session row message_count');
+        string(item['kind'], 'app session row kind');
+      }
+      if (input['next_offset'] !== undefined) integer(input['next_offset'], 'next_offset');
+      return input as ClientEvent;
   }
   return input as ClientEvent;
 }

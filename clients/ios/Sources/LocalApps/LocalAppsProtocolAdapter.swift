@@ -65,10 +65,19 @@ enum LocalAppsProtocolAdapter {
         LocalAppSessionRow(
             uuid: dto.uuid,
             title: dto.title,
+            mode: sessionMode(dto.mode),
+            modifiedAt: RelativeTime.parse(dto.modifiedRfc3339),
             relativeTime: RelativeTime.format(dto.modifiedRfc3339),
             messageCount: Int(dto.messageCount),
             isInit: dto.kind == .`init`
         )
+    }
+
+    static func sessionMode(_ dto: SessionModeDto) -> SessionMode {
+        switch dto {
+        case .chat: .chat
+        case .code: .code
+        }
     }
 
     static func runtime(

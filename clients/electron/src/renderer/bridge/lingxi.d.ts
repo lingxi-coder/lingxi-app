@@ -115,6 +115,7 @@ export interface LingxiApi {
   listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   newSession(projectPath: string, model?: string): Promise<BootstrapState>;
   openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  clearSession(sessionId: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;

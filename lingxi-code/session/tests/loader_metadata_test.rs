@@ -13,6 +13,7 @@ fn meta(uuid_byte: u8, secs: u64, created_secs: u64, name: &str) -> SessionMetad
         modified: UNIX_EPOCH + Duration::from_secs(secs),
         created: UNIX_EPOCH + Duration::from_secs(created_secs),
         message_count: 1,
+        mode: session::jsonl::SessionMode::Code,
         path: PathBuf::from(name),
         pr_number: None,
         custom_or_ai_title: Some(format!("title-{uuid_byte}")),

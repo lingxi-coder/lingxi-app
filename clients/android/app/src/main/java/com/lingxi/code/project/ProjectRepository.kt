@@ -2,6 +2,7 @@ package com.lingxi.code.project
 
 import android.content.Context
 import com.lingxi.code.R
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
 import org.json.JSONArray
 import org.json.JSONObject
@@ -232,6 +233,7 @@ internal class ProjectRepository(
         projectId: String?,
         sessionId: String,
         title: String,
+        mode: SessionMode = SessionMode.Code,
     ): ProjectStoreState {
         val canonicalId = canonicalSessionId(sessionId)
         require(canonicalId.isNotBlank()) { "session id cannot be blank" }
@@ -250,6 +252,7 @@ internal class ProjectRepository(
             messageCount = existing?.messageCount ?: 0,
             relativeTime = strings.resolve(R.string.project_relative_time_just_now, "刚刚"),
             updatedAtEpochMillis = timestamp,
+            mode = mode,
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
         if (projectId == null) {
@@ -429,7 +432,8 @@ internal class ProjectRepository(
                             .put("title", session.title)
                             .put("messageCount", session.messageCount)
                             .put("relativeTime", session.relativeTime)
-                            .put("updatedAtEpochMillis", session.updatedAtEpochMillis),
+                            .put("updatedAtEpochMillis", session.updatedAtEpochMillis)
+                            .put("mode", session.mode.wireValue),
                     )
                 }
             },
@@ -446,6 +450,10 @@ internal class ProjectRepository(
                 messageCount = row.getInt("messageCount"),
                 relativeTime = row.getString("relativeTime"),
                 updatedAtEpochMillis = row.getLong("updatedAtEpochMillis"),
+                mode = when (row.optString("mode")) {
+                    SessionMode.Chat.wireValue -> SessionMode.Chat
+                    else -> SessionMode.Code
+                },
             )
         }
     }

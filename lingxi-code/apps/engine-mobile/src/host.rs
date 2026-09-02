@@ -53,7 +53,9 @@ use client_protocol::controls::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
-use client_protocol::listings::{ModelDetailsDto, SessionAgentSummaryDto, SlashCommandDto};
+use client_protocol::listings::{
+    ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SlashCommandDto,
+};
 use client_protocol::local_apps::{
     AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
     LocalAppPluginInventoryDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
@@ -117,6 +119,7 @@ use crate::{
     mcp_transport::MobileMcpTransport,
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
+    skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
 };
 
@@ -219,6 +222,8 @@ pub struct MobileConfig {
     pub lingxi_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
+    /// Capability profile the mobile conversation runs under.
+    pub session_mode: session::jsonl::SessionMode,
     /// Whether the selected mobile workspace has passed the host trust flow.
     /// Defaults false so `/goal` and other hook-backed persistent behaviors fail
     /// closed until the Android/iOS host explicitly records trust.
@@ -288,6 +293,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
+            .field("session_mode", &self.session_mode.as_str())
             .field("workspace_trusted", &self.workspace_trusted)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
@@ -319,6 +325,7 @@ impl Default for MobileConfig {
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: crate::MobileEngineConfig::default().default_model,
+            session_mode: session::jsonl::SessionMode::Code,
             workspace_trusted: false,
             provider_profiles: None,
             routing: None,
@@ -508,6 +515,8 @@ pub struct MobileRuntime {
     pub permission_policy_gate: Arc<permission::PolicyPermissionGate>,
     /// User-requested permission mode before model/provider auto resolution.
     pub requested_permission_mode: Arc<StdMutex<String>>,
+    /// Capability profile attached to this source/session lane.
+    pub session_mode: session::jsonl::SessionMode,
     /// Mode assigned to a newly-created session when it has no transcript
     /// metadata of its own. Existing sessions always restore their own value.
     pub session_default_permission_mode: String,
@@ -2475,6 +2484,7 @@ fn apply_mobile_profile_allowlist(
 
 fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
+    session_mode: session::jsonl::SessionMode,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
@@ -2496,6 +2506,7 @@ fn mobile_skill_listing_provider(
                     })
                     // TS `cmd.source !== 'builtin'`.
                     .filter(|c| c.source != CommandSource::Builtin)
+                    .filter(|c| command_visible_in_session_mode(c, session_mode))
                     // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
                     //    hasUserSpecifiedDescription || whenToUse.
                     .filter(|c| {
@@ -4472,8 +4483,9 @@ async fn build_mobile_inner_with_ask(
     // slash dispatcher and listing provider use. The registry is filled below
     // once the orchestrator handle is available, and later `/reload-skills`
     // mutations stay visible to all three surfaces.
-    let live_skill_loader = Arc::new(crate::skill_loader::MobileDiskSkillLoader::new(
+    let live_skill_loader = Arc::new(crate::skill_loader::MobileDiskSkillLoader::for_mode(
         shared_command_registry.clone(),
+        cfg.session_mode,
     ));
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
     let agent_skill_loader: Arc<dyn platform_api::skill_loader::SkillLoader> = live_skill_loader;
@@ -4486,7 +4498,7 @@ async fn build_mobile_inner_with_ask(
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
     let wired_skill_listing_provider =
-        mobile_skill_listing_provider(shared_command_registry.clone());
+        mobile_skill_listing_provider(shared_command_registry.clone(), cfg.session_mode);
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
@@ -4578,12 +4590,15 @@ async fn build_mobile_inner_with_ask(
     for tool in crate::local_apps_tools::local_app_builtin_tools(&local_apps_mcp, &cwd) {
         tools.register_builtin(tool);
     }
+    crate::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let live_mcp_tool_ctx = tool_ctx.clone();
     let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
-    for (connection_id, mcp_tools) in
-        tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
-    {
-        tools.register_mcp_tools(connection_id, mcp_tools);
+    if cfg.session_mode == session::jsonl::SessionMode::Code {
+        for (connection_id, mcp_tools) in
+            tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
+        {
+            tools.register_mcp_tools(connection_id, mcp_tools);
+        }
     }
     let tools = Arc::new(tools);
 
@@ -4591,7 +4606,7 @@ async fn build_mobile_inner_with_ask(
     // mobile ToolRegistry in sync with the same generation-checked refresh path
     // used by desktop; otherwise settings changes and list_changed events only
     // update the MCP registry while the model continues seeing stale tools.
-    {
+    if cfg.session_mode == session::jsonl::SessionMode::Code {
         let mcp_registry_weak = Arc::downgrade(&mcp_registry);
         let live_tools = tools.clone();
         tokio::spawn(async move {
@@ -5056,28 +5071,35 @@ async fn build_mobile_inner_with_ask(
              commands/skills/agents it would have contributed are unavailable this boot"
         ),
     }
-    let background_command_handle = handle.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
-        .with_skill_usage_home(cfg.lingxi_home.clone())
-        .with_background_prompt_launcher(Arc::new(move |prompt| {
-            let handle = background_command_handle.clone();
-            Box::pin(async move {
-                handle
-                    .fork_conversation(&prompt)
-                    .await
-                    .map(|outcome| {
-                        let tail = &outcome.agent_id[outcome.agent_id.len().saturating_sub(4)..];
-                        format!(
-                            "\u{2442} started code-review in background as {} ({tail})",
-                            outcome.name
-                        )
-                    })
-                    .map_err(|error| error.to_string())
-            })
-        }))
-        // (#3) Real embedded-shell expansion for markdown/plugin + builtin
-        // `InjectMessage` prompts. Non-MCP only.
-        .with_shell_expansion(shell_expansion_provider);
+        .with_skill_usage_home(cfg.lingxi_home.clone());
+    let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
+        let background_command_handle = handle.clone();
+        dispatcher
+            .with_background_prompt_launcher(Arc::new(move |prompt| {
+                let handle = background_command_handle.clone();
+                Box::pin(async move {
+                    handle
+                        .fork_conversation(&prompt)
+                        .await
+                        .map(|outcome| {
+                            let tail =
+                                &outcome.agent_id[outcome.agent_id.len().saturating_sub(4)..];
+                            format!(
+                                "\u{2442} started code-review in background as {} ({tail})",
+                                outcome.name
+                            )
+                        })
+                        .map_err(|error| error.to_string())
+                })
+            }))
+            // (#3) Real embedded-shell expansion for markdown/plugin + builtin
+            // `InjectMessage` prompts. Non-MCP only. Chat deliberately leaves
+            // both execution providers unwired as a second enforcement layer.
+            .with_shell_expansion(shell_expansion_provider)
+    } else {
+        dispatcher
+    };
 
     // (9) Session lifecycle fires (P0.2 — mobile sibling of `engine_desktop::build`
     //     §7 / §7.1). Fire `SessionStart` then `InstructionsLoaded` now that the
@@ -5148,6 +5170,7 @@ async fn build_mobile_inner_with_ask(
         permission_gate: adapter_gate,
         permission_policy_gate,
         requested_permission_mode: Arc::new(StdMutex::new(requested_permission_mode)),
+        session_mode: cfg.session_mode,
         session_default_permission_mode: initial_permission_mode,
         listener,
         event_sink,
@@ -6545,6 +6568,22 @@ impl MobileEngineHandle {
             .cloned()
     }
 
+    async fn recorded_session_mode(
+        &self,
+        session_id: uuid::Uuid,
+        cwd: &str,
+    ) -> Option<session::jsonl::SessionMode> {
+        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
+        let routed = session::jsonl::JsonlReader::new(path, self.fs.clone())
+            .read_routed()
+            .await
+            .ok()?;
+        routed
+            .session_modes
+            .get(&session_id.to_string())
+            .and_then(|value| session::jsonl::SessionMode::from_str(value))
+    }
+
     async fn restore_session_permission_mode(&self, mode: &str) -> Result<String, ClientError> {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         let result = if mode == "bypassPermissions" {
@@ -6587,6 +6626,13 @@ impl MobileEngineHandle {
                 .await
                 .map_err(|error| ClientError::Internal {
                     message: format!("persist session permission anchor failed: {error}"),
+                })?;
+            self.inner
+                .session_writer
+                .append_session_mode(self.inner.session_mode.as_str())
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("persist session mode failed: {error}"),
                 })?;
         }
         self.inner
@@ -6638,6 +6684,12 @@ impl MobileEngineHandle {
             .await
             .map_err(|error| ClientError::Internal {
                 message: format!("persist empty session failed: {error}"),
+            })?;
+        writer
+            .append_session_mode(self.inner.session_mode.as_str())
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("persist empty session mode failed: {error}"),
             })
     }
 
@@ -6667,6 +6719,19 @@ impl MobileEngineHandle {
             None => self.session_cwd.clone(),
         };
         let recorded_permission_mode = self.recorded_permission_mode(uuid, &cwd).await;
+        let effective_session_mode = self
+            .recorded_session_mode(uuid, &cwd)
+            .await
+            .unwrap_or(session::jsonl::SessionMode::Code);
+        if effective_session_mode != self.inner.session_mode {
+            return Err(ClientError::Rejected {
+                message: format!(
+                    "resume: session {session_id} belongs to {} mode, but this source runs {} mode",
+                    effective_session_mode.as_str(),
+                    self.inner.session_mode.as_str()
+                ),
+            });
+        }
 
         match orchestrator::replay_session_state(&self.lingxi_home, &cwd, uuid, self.fs.clone())
             .await
@@ -6736,6 +6801,7 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
+                        mode: lower_session_mode(self.inner.session_mode),
                         messages,
                     })
                     .await;
@@ -6813,6 +6879,7 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
+                        mode: lower_session_mode(self.inner.session_mode),
                         messages: Vec::new(),
                     })
                     .await;
@@ -7801,6 +7868,7 @@ impl MobileEngineHandle {
                     title: lowered.title,
                     modified_rfc3339: lowered.modified_rfc3339,
                     message_count: lowered.message_count,
+                    mode: lowered.mode,
                     kind,
                 }
             })
@@ -8559,6 +8627,26 @@ impl MobileEngineHandle {
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
+                if self.inner.session_mode == session::jsonl::SessionMode::Chat {
+                    let allowed = if let Some(parsed) = command_api::parse_slash_command(&raw) {
+                        let registry = self.inner.slash_registry.read().await;
+                        registry.resolve(&parsed.name).is_some_and(|command| {
+                            command_visible_in_session_mode(command, self.inner.session_mode)
+                        })
+                    } else {
+                        true
+                    };
+                    if !allowed {
+                        self.event_sink
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: "command is unavailable in Chat mode".into(),
+                                is_error: true,
+                            })
+                            .await;
+                        return Ok(());
+                    }
+                }
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
                     platform_api::SlashDispatchResult::RunAsTurn { prompt } => {
@@ -8736,6 +8824,57 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            ClientCommand::ForkSession {
+                session_id,
+                target_mode,
+            } => {
+                if self.active_cancel.lock().await.is_some() {
+                    return Err(ClientError::Rejected {
+                        message: "cannot fork a session while a turn is in flight".into(),
+                    });
+                }
+                let canonical = session_id.strip_prefix("sess:").unwrap_or(&session_id);
+                let source_uuid =
+                    uuid::Uuid::parse_str(canonical).map_err(|error| ClientError::Rejected {
+                        message: format!("fork: malformed session id {session_id:?}: {error}"),
+                    })?;
+                let result = session::branch::create_branch(
+                    &self.lingxi_home,
+                    &self.session_cwd,
+                    source_uuid,
+                    None,
+                    self.fs.clone(),
+                )
+                .await
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("fork: could not duplicate session {session_id}: {error}"),
+                })?;
+                let fork_path = session::jsonl::session_path(
+                    &self.lingxi_home,
+                    &self.session_cwd,
+                    &result.new_session_id.to_string(),
+                );
+                let writer = session::jsonl::JsonlWriter::new(fork_path, self.fs.clone());
+                let target_mode = match target_mode {
+                    SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
+                    SessionModeDto::Code => session::jsonl::SessionMode::Code,
+                };
+                writer
+                    .append_session_mode(target_mode.as_str())
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("fork: persist session mode failed: {error}"),
+                    })?;
+                self.event_sink
+                    .emit(ClientEvent::SessionForked {
+                        source_session_id: source_uuid.to_string(),
+                        session_id: result.new_session_id.to_string(),
+                        mode: lower_session_mode(target_mode),
+                    })
+                    .await;
+                Ok(())
+            }
+
             // `NewSession` swaps the connection's orchestrator to a fresh session
             // (decision §0.5 — `session_id` is a connection attribute). The
             // orchestrator handle's `clear_session` mints a brand-new `SessionId`
@@ -8809,6 +8948,13 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Internal {
                         message: format!("new session anchor failed: {error}"),
                     })?;
+                self.inner
+                    .session_writer
+                    .append_session_mode(self.inner.session_mode.as_str())
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("new session mode persist failed: {error}"),
+                    })?;
                 self.persist_session_permission_mode(&new_session_permission_mode)
                     .await?;
                 if let Some((model_id, profile)) = requested_model {
@@ -8827,6 +8973,7 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionStarted {
                         session_id: session_id.clone(),
+                        mode: lower_session_mode(self.inner.session_mode),
                     })
                     .await;
                 self.emit_controls_snapshot().await;
@@ -10008,10 +10155,12 @@ impl MobileEngineHandle {
 
     fn slash_command_catalog_from_registry(
         reg: &command_api::CommandRegistry,
+        session_mode: session::jsonl::SessionMode,
     ) -> Vec<SlashCommandDto> {
         let mut commands: Vec<_> = reg
             .palette_commands()
             .into_iter()
+            .filter(|command| command_visible_in_session_mode(command, session_mode))
             .map(|command| SlashCommandDto {
                 hidden: command_api::builtin_support::names::is_palette_hidden(&command.name),
                 source: command_source_string(command.source).to_string(),
@@ -10028,7 +10177,7 @@ impl MobileEngineHandle {
 
     async fn slash_command_catalog_snapshot(&self) -> Vec<SlashCommandDto> {
         let reg = self.inner.slash_registry.read().await;
-        Self::slash_command_catalog_from_registry(&reg)
+        Self::slash_command_catalog_from_registry(&reg, self.inner.session_mode)
     }
 
     async fn capture_slash_authority(&self) -> SlashAuthoritySnapshot {
@@ -10150,6 +10299,14 @@ impl MobileEngineHandle {
                     .await;
             }
             ProtocolListingKind::Mcp => {
+                if self.inner.session_mode == session::jsonl::SessionMode::Chat {
+                    self.event_sink
+                        .emit(ClientEvent::McpServers {
+                            servers: Vec::new(),
+                        })
+                        .await;
+                    return;
+                }
                 self.reload_configured_mcp().await;
                 let servers = handle
                     .list_mcp_servers()
@@ -10222,6 +10379,9 @@ impl MobileEngineHandle {
     /// the registry changes and updates the model-facing tools asynchronously.
     /// The listing and the next turn therefore use the same live registry.
     async fn reload_configured_mcp(&self) {
+        if self.inner.session_mode == session::jsonl::SessionMode::Chat {
+            return;
+        }
         let cwd = std::path::PathBuf::from(&self.session_cwd);
         let configured = mobile_mcp_preflight(
             mcp::load_mcp_servers(
@@ -11528,7 +11688,19 @@ pub(crate) async fn mint_app_init_session(
             )
             .await
             {
-                Ok(result) => return Ok(result.new_session_id.to_string()),
+                Ok(result) => {
+                    let path = orchestrator::transcript_paths::main_transcript_path(
+                        lingxi_home,
+                        &workspace_cwd,
+                        &result.new_session_id.to_string(),
+                    );
+                    let writer = session::jsonl::writer::JsonlWriter::new(path, fs.clone());
+                    writer
+                        .append_session_mode(session::jsonl::SessionMode::Code.as_str())
+                        .await
+                        .map_err(|error| format!("persist app init session mode: {error}"))?;
+                    return Ok(result.new_session_id.to_string());
+                }
                 Err(error) => {
                     // Degrade to an empty anchor — a brand-new conversation
                     // has nothing to fork, and that must not fail the create.
@@ -11553,6 +11725,10 @@ pub(crate) async fn mint_app_init_session(
         .append_mobile_empty_session(&init_id, &record.name)
         .await
         .map_err(|error| format!("anchor app init session: {error}"))?;
+    writer
+        .append_session_mode(session::jsonl::SessionMode::Code.as_str())
+        .await
+        .map_err(|error| format!("persist app init session mode: {error}"))?;
     Ok(init_id)
 }
 
@@ -11711,6 +11887,15 @@ pub(crate) async fn run_app_boot_backfill_sweep(
                                 error = %error,
                                 "init-session re-anchor failed"
                             );
+                        } else if let Err(error) = writer
+                            .append_session_mode(session::jsonl::SessionMode::Code.as_str())
+                            .await
+                        {
+                            tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                "init-session mode re-anchor failed"
+                            );
                         } else {
                             tracing::info!(
                                 app_id = %record.id,
@@ -11815,6 +12000,13 @@ fn mobile_apps_data_root(cfg: &MobileConfig) -> std::path::PathBuf {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map_or_else(|| cfg.cwd.clone(), std::path::Path::to_path_buf)
+}
+
+fn lower_session_mode(mode: session::jsonl::SessionMode) -> SessionModeDto {
+    match mode {
+        session::jsonl::SessionMode::Chat => SessionModeDto::Chat,
+        session::jsonl::SessionMode::Code => SessionModeDto::Code,
+    }
 }
 
 #[doc(hidden)]
@@ -12126,10 +12318,11 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
+    use client_protocol::listings::SessionModeDto;
     use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
     use tokio::sync::Notify;
-    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
+    use tool_skill::skill::SkillCommandType;
 
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
@@ -12942,7 +13135,7 @@ mod tests {
             rt.orchestrator.has_skill_listing(),
             "mobile orchestrator must expose a skill-listing provider"
         );
-        let listed = mobile_skill_listing_provider(rt.slash_registry.clone())
+        let listed = mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode)
             .skill_entries()
             .await;
         let listed_names: std::collections::BTreeSet<_> =
@@ -17944,6 +18137,7 @@ mod tests {
                 sessions[0].uuid, seeded_uuid,
                 "the listed row must be the seeded session"
             );
+            assert_eq!(sessions[0].mode, SessionModeDto::Code);
         });
     }
 
@@ -18006,12 +18200,12 @@ mod tests {
 
             let events = drained(&listener).await;
             let started = events.iter().find_map(|e| match e {
-                Ev::SessionStarted { session_id } => Some(session_id.clone()),
+                Ev::SessionStarted { session_id, mode } => Some((session_id.clone(), *mode)),
                 _ => None,
             });
             assert_eq!(
                 started.expect("a SessionStarted event must be emitted"),
-                after_uuid,
+                (after_uuid.clone(), SessionModeDto::Code),
                 "SessionStarted must carry the bare resumable UUID"
             );
 
@@ -18034,6 +18228,11 @@ mod tests {
                     && record["sessionId"] == after_uuid
                     && record["permissionMode"] == expected_permission_mode
             }));
+            assert!(records.iter().any(|record| {
+                record["type"] == "session-mode"
+                    && record["sessionId"] == after_uuid
+                    && record["sessionMode"] == "code"
+            }));
 
             handle
                 .submit(ClientCommand::ListSessions { limit: None })
@@ -18048,6 +18247,7 @@ mod tests {
             });
             let row = row.expect("anchored empty session must be listed");
             assert_eq!(row.message_count, 0);
+            assert_eq!(row.mode, SessionModeDto::Code);
         });
     }
 
@@ -18097,8 +18297,9 @@ mod tests {
                 event,
                 Ev::SessionResumed {
                     session_id,
+                    mode,
                     messages,
-                } if session_id == &expected && messages.is_empty()
+                } if session_id == &expected && mode == &SessionModeDto::Code && messages.is_empty()
             )));
         });
     }
@@ -18139,6 +18340,190 @@ mod tests {
     }
 
     #[test]
+    fn submit_resume_session_rejects_a_session_from_another_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (session_id, _) = seed_replay_valid_session(tmp.path());
+        let cfg = test_config(tmp.path());
+        let path =
+            session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &session_id);
+        let mut transcript = std::fs::read_to_string(&path).expect("read seeded transcript");
+        transcript.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session-mode",
+                "sessionMode": "chat",
+                "sessionId": session_id,
+            })
+        ));
+        std::fs::write(&path, transcript).expect("append session mode");
+
+        let code_cfg = test_config(tmp.path());
+        let (handle, listener) = build_submit_handle_with_config(code_cfg, tmp.path());
+        handle.runtime().block_on(async {
+            let active_before = handle.inner().orchestrator.current_session_id().await;
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: session_id.clone(),
+                    cwd: None,
+                })
+                .await;
+            assert!(
+                matches!(result, Err(ClientError::Rejected { ref message })
+                    if message.contains("belongs to chat mode")
+                        && message.contains("runs code mode")),
+                "{result:?}"
+            );
+            let events = drained(&listener).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::SessionResumed { .. })),
+                "a rejected cross-mode resume must not emit SessionResumed"
+            );
+            assert_eq!(
+                handle.inner().orchestrator.current_session_id().await,
+                active_before,
+                "mode validation must happen before mutating the active session"
+            );
+        });
+    }
+
+    #[test]
+    fn submit_resume_session_rejects_legacy_mode_less_session_from_chat_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (session_id, _) = seed_replay_valid_session(tmp.path());
+        let mut chat_cfg = test_config(tmp.path());
+        chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
+        let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            let active_before = handle.inner().orchestrator.current_session_id().await;
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: session_id.clone(),
+                    cwd: None,
+                })
+                .await;
+            assert!(
+                matches!(result, Err(ClientError::Rejected { ref message })
+                    if message.contains("belongs to code mode")
+                        && message.contains("runs chat mode")),
+                "{result:?}"
+            );
+            let events = drained(&listener).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::SessionResumed { .. })),
+                "a rejected legacy code resume must not emit SessionResumed"
+            );
+            assert_eq!(
+                handle.inner().orchestrator.current_session_id().await,
+                active_before,
+                "legacy fallback validation must not disturb the active Chat session"
+            );
+        });
+    }
+
+    #[test]
+    fn submit_fork_session_copies_context_into_target_mode_without_mutating_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (source_session_id, visible_message_count) = seed_replay_valid_session(tmp.path());
+        let cfg = test_config(tmp.path());
+        let cwd = cfg.cwd.to_string_lossy().into_owned();
+        let source_path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &source_session_id);
+        let source_before = std::fs::read_to_string(&source_path).expect("read source transcript");
+        let (handle, listener) = build_submit_handle_with_config(cfg.clone(), tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ForkSession {
+                    session_id: source_session_id.clone(),
+                    target_mode: SessionModeDto::Chat,
+                })
+                .await
+                .expect("fork session into Chat");
+
+            let events = drained(&listener).await;
+            let fork_session_id = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::SessionForked {
+                        source_session_id: reported_source,
+                        session_id,
+                        mode,
+                    } if reported_source == &source_session_id && *mode == SessionModeDto::Chat => {
+                        Some(session_id.clone())
+                    }
+                    _ => None,
+                })
+                .expect("SessionForked event");
+
+            let source_after =
+                std::fs::read_to_string(&source_path).expect("read unchanged source transcript");
+            assert_eq!(
+                source_after, source_before,
+                "fork must not mutate its source"
+            );
+
+            let fork_path = session::jsonl::session_path(&cfg.lingxi_home, &cwd, &fork_session_id);
+            let fork_raw = std::fs::read_to_string(&fork_path).expect("read fork transcript");
+            assert!(fork_raw.contains("resume me from disk"));
+            assert!(fork_raw.contains("resumed!"));
+            assert!(fork_raw.contains("\"sessionMode\":\"chat\""));
+
+            let rows = session::jsonl::list_recent_sessions(
+                &cfg.lingxi_home,
+                &cwd,
+                usize::MAX,
+                handle.fs.clone(),
+            )
+            .await
+            .expect("list forked session");
+            let fork_row = rows
+                .iter()
+                .find(|row| row.uuid.to_string() == fork_session_id)
+                .expect("fork row");
+            assert_eq!(fork_row.mode, session::jsonl::SessionMode::Chat);
+            assert_eq!(fork_row.message_count, visible_message_count);
+        });
+    }
+
+    #[test]
+    fn chat_source_rejects_a_code_only_slash_command_before_dispatch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut chat_cfg = test_config(tmp.path());
+        chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
+        let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::RunSlashCommand {
+                    raw: "/loop every 5 minutes inspect the workspace".into(),
+                    turn_id: Some(42),
+                })
+                .await
+                .expect("Chat rejection is a handled command result");
+
+            let events = drained(&listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::SlashCommandResult {
+                    turn_id: Some(42),
+                    display,
+                    is_error: true,
+                } if display.contains("unavailable in Chat mode")
+            )));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::TurnStarted { .. })),
+                "a hidden Code-only command must never reach turn dispatch"
+            );
+        });
+    }
+
+    #[test]
     fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
@@ -18173,8 +18558,9 @@ mod tests {
                 event,
                 Ev::SessionResumed {
                     session_id,
+                    mode,
                     messages,
-                } if session_id == expected && messages.is_empty()
+                } if session_id == expected && mode == &SessionModeDto::Code && messages.is_empty()
             )));
         });
     }
@@ -18266,12 +18652,14 @@ mod tests {
                 .find_map(|e| match e {
                     Ev::SessionResumed {
                         session_id,
+                        mode,
                         messages,
                     } => {
                         assert_eq!(
                             session_id, &file_uuid,
                             "resumed id must be the named session"
                         );
+                        assert_eq!(*mode, SessionModeDto::Code);
                         Some(messages.clone())
                     }
                     _ => None,
@@ -18324,13 +18712,14 @@ mod tests {
             let resumed = events.iter().find_map(|event| match event {
                 Ev::SessionResumed {
                     session_id,
+                    mode,
                     messages,
-                } => Some((session_id.clone(), messages.len())),
+                } => Some((session_id.clone(), *mode, messages.len())),
                 _ => None,
             });
             assert_eq!(
                 resumed,
-                Some((file_uuid, seeded_count)),
+                Some((file_uuid, SessionModeDto::Code, seeded_count)),
                 "legacy input must be confirmed with a bare UUID"
             );
         });

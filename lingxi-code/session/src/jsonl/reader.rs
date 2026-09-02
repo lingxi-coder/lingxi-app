@@ -191,6 +191,10 @@ pub struct LoadedTranscript {
     /// `permission-mode` entries: keyed by `sessionId` → permission-mode string,
     /// last-write-wins. Binary `Yle`: `permissionModes.set(N.sessionId, N.permissionMode)`.
     pub permission_modes: HashMap<String, String>,
+    /// `session-mode` entries: keyed by `sessionId` → mobile session mode,
+    /// last-write-wins. LingXi-only metadata used to separate chat/code
+    /// capability profiles without colliding with Claude's generic `mode`.
+    pub session_modes: HashMap<String, String>,
     /// `worktree-state` entries: keyed by `sessionId` → the inner
     /// `worktreeSession` JSON value (an object for an active worktree, or `null`
     /// after `ExitWorktree` clears it). Binary (2.1.212 `Yle`):
@@ -539,6 +543,13 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 value.get("permissionMode").and_then(Value::as_str),
             ) {
                 out.permission_modes.insert(sid.to_string(), pm.to_string());
+            }
+        } else if ty == "session-mode" {
+            if let (Some(sid), Some(mode)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("sessionMode").and_then(Value::as_str),
+            ) {
+                out.session_modes.insert(sid.to_string(), mode.to_string());
             }
         } else if ty == "worktree-state" {
             // Binary (2.1.212 `Yle`): `x.set(J.sessionId, J.worktreeSession)` —

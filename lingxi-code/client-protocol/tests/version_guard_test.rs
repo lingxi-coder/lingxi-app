@@ -864,6 +864,18 @@ fn current_contract_index() -> ContractIndex {
         "String",
     );
     put("ClientCommand::ResolveAppProfileProposal.approved", "bool");
+    put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection",
+        "resolve_app_runtime_profile_selection",
+    );
+    put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection.request_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection.selected_family",
+        "AppRuntimeProfileDto",
+    );
 
     put(
         "ClientCommand::ResetAppPermissions",
@@ -3012,6 +3024,7 @@ fn contract_index_covers_every_dto() {
             title: String::new(),
             modified_rfc3339: String::new(),
             message_count: 0,
+            mode: client_protocol::listings::SessionModeDto::Code,
             path: String::new(),
         },
         McpServerDto {

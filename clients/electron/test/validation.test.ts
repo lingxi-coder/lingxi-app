@@ -27,6 +27,9 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.deepEqual(validateClientCommand({ type: 'list_sessions', limit: 25 }), { type: 'list_sessions', limit: 25 });
   assert.deepEqual(validateClientCommand({ type: 'task_output', task_id: 'task-1', offset: 0 }), { type: 'task_output', task_id: 'task-1', offset: 0 });
   assert.deepEqual(validateClientCommand({ type: 'list_session_agents' }), { type: 'list_session_agents' });
+  assert.deepEqual(validateClientCommand({ type: 'login' }), { type: 'login' });
+  assert.deepEqual(validateClientCommand({ type: 'logout' }), { type: 'logout' });
+  assert.deepEqual(validateClientCommand({ type: 'force_compact' }), { type: 'force_compact' });
   assert.deepEqual(
     validateClientCommand({ type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' }),
     { type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' },
@@ -41,11 +44,15 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
     validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
     { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] },
   );
+  assert.deepEqual(
+    validateClientCommand({ type: 'refresh_listings', which: [{ type: 'auth' }, { type: 'hooks' }, { type: 'agents' }] }),
+    { type: 'refresh_listings', which: [{ type: 'auth' }, { type: 'hooks' }, { type: 'agents' }] },
+  );
   assert.throws(() => validateClientCommand({ type: 'send_prompt', text: 'bypass' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'request_exit' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'list_sessions', limit: 201 }), /invalid limit/);
   assert.throws(() => validateClientCommand({ type: 'list_models', surprise: true }), /unsupported fields/);
-  assert.throws(() => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'hooks' }] }), /not allowed/);
+  assert.throws(() => validateClientCommand({ type: 'clear_session' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'set_permission_mode', mode: 'unsafe' }), /invalid permission mode/);
   assert.throws(() => validateClientCommand({ type: 'set_fast_mode', enabled: 'true' }), /invalid fast mode enabled flag/);
   assert.throws(() => validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'level', id: '' } }), /invalid reasoning level/);
@@ -56,7 +63,20 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.throws(() => validateClientCommand({ type: 'list_session_agents', extra: true }), /unsupported fields/);
   assert.throws(() => validateClientCommand({ type: 'load_session_agent_transcript', agent_id: '../outside' }), /invalid agent id/);
   assert.throws(
-    () => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'status' }] }),
+    () => validateClientCommand({
+      type: 'refresh_listings',
+      which: [
+        { type: 'auth' },
+        { type: 'status' },
+        { type: 'doctor' },
+        { type: 'slash_commands' },
+        { type: 'settings' },
+        { type: 'mcp' },
+        { type: 'skills' },
+        { type: 'hooks' },
+        { type: 'agents' },
+      ],
+    }),
     /invalid listing selection/,
   );
 });
@@ -154,10 +174,8 @@ test('the settings, permission, workspace, and MCP commands pass the runtime all
   );
 });
 
-test('an unlisted command that genuinely exists in the protocol is still rejected', () => {
-  // `login` is a real ClientCommand variant (auth is CLI/TUI-only on desktop);
-  // it must never be reachable through the desktop's bounded IPC surface.
-  assert.throws(() => validateClientCommand({ type: 'login' }), /command is not allowed/);
+test('a host-owned command that genuinely exists in the protocol is still rejected from the generic desktop command port', () => {
+  assert.throws(() => validateClientCommand({ type: 'clear_session' }), /command is not allowed/);
 });
 
 test('AskUserQuestion answers are bounded non-empty string maps', () => {
@@ -189,6 +207,9 @@ test('active turns reject model and session mutation but retain recovery command
     { type: 'set_permission_mode', mode: 'acceptEdits' },
     { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } },
     { type: 'set_fast_mode', enabled: true },
+    { type: 'login' },
+    { type: 'logout' },
+    { type: 'force_compact' },
     { type: 'run_slash_command', raw: '/clear' },
   ] as const) {
     assert.throws(

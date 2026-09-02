@@ -5,7 +5,12 @@ enum LingxiAppAction: Codable, Equatable, Sendable {
     case openApp
     case newConversation
     case ask(String)
-    case openConversation(sessionID: String, turnID: UInt64?)
+    case openConversation(
+        sessionID: String,
+        turnID: UInt64?,
+        workspaceKey: String?,
+        mode: SessionMode
+    )
     case openTerminal(sessionID: String, initialCommand: String?)
     case openLocalApp(appID: String, destination: String, autostart: Bool, source: String?)
 }
@@ -35,7 +40,16 @@ enum LingxiDeepLink {
                 .prefix(256)
             guard let sessionID, !sessionID.isEmpty else { return nil }
             let turnID = values["turnId"].flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            return .openConversation(sessionID: String(sessionID), turnID: turnID)
+            let workspaceKey = values["workspaceKey"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+            let mode = values["sessionMode"].flatMap(SessionMode.init(rawValue:)) ?? .code
+            return .openConversation(
+                sessionID: String(sessionID),
+                turnID: turnID,
+                workspaceKey: workspaceKey,
+                mode: mode
+            )
         case "open_terminal":
             let sessionID = values["sessionId"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -70,9 +84,23 @@ enum LingxiDeepLink {
         }
     }
 
-    static func conversationURL(sessionID: String, turnID: UInt64?) -> URL? {
-        ConversationDeepLink.makeURL(sessionID: sessionID, turnID: turnID)
+    static func conversationURL(
+        sessionID: String,
+        turnID: UInt64?,
+        workspaceKey: String? = nil,
+        mode: SessionMode = .code
+    ) -> URL? {
+        ConversationDeepLink.makeURL(
+            sessionID: sessionID,
+            turnID: turnID,
+            workspaceKey: workspaceKey,
+            sessionMode: mode.rawValue
+        )
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 extension Notification.Name {

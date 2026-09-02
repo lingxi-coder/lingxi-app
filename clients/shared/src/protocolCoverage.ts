@@ -31,8 +31,14 @@
  * share the `app_event` tag but are named after their inner `AppEventDto`
  * variant instead, e.g. `app_details_changed.json`.)
  */
-import type { ClientCommand } from './protocol.js';
-import type { ClientEvent } from './protocol.js';
+import type {
+  AppEventDto,
+  ClientCommand,
+  ClientEvent,
+  LocalAppPluginErrorCodeDto,
+  ManagedLocalAppMcpStatusDto,
+  PluginCommandDto,
+} from './protocol.js';
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   send_prompt: true,
@@ -63,6 +69,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   new_session: true,
   resume_session: true,
   list_sessions: true,
+  fork_session: true,
   login: true,
   logout: true,
   force_compact: true,
@@ -82,6 +89,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   resolve_app_capability_request: true,
   resolve_app_dependency_change_confirmation: true,
   resolve_app_profile_proposal: true,
+  resolve_app_runtime_profile_selection: true,
   plugin_command: true,
   reset_app_permissions: true,
   list_app_sessions: true,
@@ -119,6 +127,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   session_started: true,
   session_ended: true,
   session_resumed: true,
+  session_forked: true,
   session_list: true,
   session_agent_list: true,
   session_agent_transcript: true,
@@ -161,4 +170,63 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   usage_update: true,
   api_retry: true,
   audio_request: true,
+};
+
+export const ALL_PLUGIN_COMMAND_TYPES: Record<PluginCommandDto['type'], true> = {
+  set_enabled: true,
+  get_status: true,
+  get_inventory: true,
+  resolve_create_confirmation: true,
+  resolve_mcp_proposal_approval: true,
+  start_local_app_mcp_authoring: true,
+  set_local_app_mcp_enabled: true,
+  set_local_app_mcp_tool_enabled: true,
+  set_local_app_mcp_conversation_pinned: true,
+  get_managed_mcp_inventory: true,
+};
+
+export const ALL_APP_EVENT_TYPES: Record<AppEventDto['type'], true> = {
+  app_details_changed: true,
+  app_created: true,
+  app_record_changed: true,
+  app_profile_proposal: true,
+  app_bridge_response: true,
+  app_ui_request: true,
+  app_capability_requested: true,
+  app_dependency_change_confirmation_requested: true,
+  app_checkpoints_changed: true,
+  app_llm_activity_changed: true,
+  app_agent_event_posted: true,
+  app_background_task_changed: true,
+  app_bridge_stream_frame: true,
+  plugin_status_changed: true,
+  plugin_inventory_changed: true,
+  create_confirmation_requested: true,
+  mcp_proposal_approval_requested: true,
+  managed_mcp_inventory_changed: true,
+  verification_summary_changed: true,
+  local_app_operation_failed: true,
+};
+
+export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpStatusDto, true> = {
+  disabled: true,
+  needs_setup: true,
+  authoring: true,
+  enabled: true,
+  needs_revalidation: true,
+  error: true,
+};
+
+export const ALL_LOCAL_APP_PLUGIN_ERROR_CODES: Record<LocalAppPluginErrorCodeDto, true> = {
+  plugin_disabled: true,
+  builtin_bundle_unavailable: true,
+  template_unavailable: true,
+  proposal_invalid: true,
+  catalog_stale: true,
+  active_state_corrupt: true,
+  revision_conflict: true,
+  invalid_mcp_settings: true,
+  mcp_authoring_required: true,
+  repair_budget_exhausted: true,
+  exposure_capacity_reached: true,
 };

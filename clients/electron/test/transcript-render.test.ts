@@ -44,7 +44,13 @@ import { Disclosure } from '../src/renderer/components/Disclosure';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { Stage } from '../src/renderer/components/Stage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
-import { NARRATION_COLLAPSE_MAX_CHARS, type NarrationRunItem, type ToolRunItem } from '../src/renderer/model/runItem';
+import {
+  ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
+  NARRATION_COLLAPSE_MAX_CHARS,
+  type CommandRunItem,
+  type NarrationRunItem,
+  type ToolRunItem,
+} from '../src/renderer/model/runItem';
 
 function render(node: React.ReactElement): string {
   return renderToStaticMarkup(
@@ -82,14 +88,46 @@ const DIFF: StructuredDiffDto = {
 
 // ── Message collapse defaults and accessible markup ──────────────────────────
 
-const LONG_MESSAGE = 'x'.repeat(NARRATION_COLLAPSE_MAX_CHARS + 1);
+const LONG_ASSISTANT_MESSAGE = 'x'.repeat(ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS + 1);
+const LONG_USER_MESSAGE = 'x'.repeat(NARRATION_COLLAPSE_MAX_CHARS + 1);
 
 function renderStage(item: NarrationRunItem): string {
   return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
 }
 
+function renderCommand(item: CommandRunItem): string {
+  return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
+}
+
+test('slash command results render command-specific cards instead of one raw pre block', () => {
+  const help = renderCommand({
+    type: 'command', id: 'help-1', name: '/help', isError: false,
+    output: 'Commands:\n  /help     Show commands\n  /status   Show status',
+  });
+  assert.match(help, /data-command-kind="help"/);
+  assert.match(help, /Command directory/);
+  assert.match(help, /class="command-help-grid"/);
+  assert.match(help, /Available slash commands/);
+
+  const status = renderCommand({
+    type: 'command', id: 'status-1', name: '/status', isError: false,
+    output: 'Model: opus\nTokens: 1,024',
+  });
+  assert.match(status, /data-command-kind="metrics"/);
+  assert.match(status, /class="command-metric-grid"/);
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(css, /\.command-metric-entry dd\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s);
+
+  const error = renderCommand({
+    type: 'command', id: 'error-1', name: '/rewind', isError: true,
+    output: 'Not available in Desktop',
+  });
+  assert.match(error, /data-command-kind="error"/);
+  assert.match(error, /role="alert"/);
+});
+
 test('long historical messages render a clamped accessible preview', () => {
-  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_MESSAGE });
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_ASSISTANT_MESSAGE });
   assert.match(html, /Show more/);
   assert.match(html, /aria-expanded="false"/);
   assert.match(html, /aria-controls="narration-content-i1"/);
@@ -97,7 +135,7 @@ test('long historical messages render a clamped accessible preview', () => {
 });
 
 test('long live replies stay expanded after their stream seals', () => {
-  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_MESSAGE, streamed: true });
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_ASSISTANT_MESSAGE, streamed: true });
   assert.match(html, /Show less/);
   assert.match(html, /aria-expanded="true"/);
   assert.doesNotMatch(html, /max-height:13\.6em/);
@@ -105,12 +143,22 @@ test('long live replies stay expanded after their stream seals', () => {
 
 test('a long user message keeps its images visible while only its text folds', () => {
   const html = renderStage({
-    type: 'narration', id: 'i1', role: 'user', text: LONG_MESSAGE,
+    type: 'narration', id: 'i1', role: 'user', text: LONG_USER_MESSAGE,
     images: [{ media_type: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=' }],
   });
   assert.match(html, /aria-label="Attached images"/);
   assert.match(html, /<img/);
   assert.match(html, /Show more/);
+});
+
+test('ordinary historical assistant messages stay fully visible', () => {
+  const html = renderStage({
+    type: 'narration', id: 'i1', role: 'assistant',
+    text: 'A'.repeat(NARRATION_COLLAPSE_MAX_CHARS + 1),
+  });
+  assert.doesNotMatch(html, /aria-expanded=/);
+  assert.doesNotMatch(html, /Show more|Show less/);
+  assert.doesNotMatch(html, /max-height:13\.6em/);
 });
 
 test('short messages render no disclosure affordance', () => {
@@ -139,6 +187,34 @@ test('active agent thinking shimmers the text without a leading indicator', () =
   assert.match(html, /class="running-sweep"[^>]*>Thinking…</);
   assert.doesNotMatch(html, /width:10px;height:10px|border-radius:99px|box-shadow:0 0 0 4px/);
   assert.doesNotMatch(html, /cursor-blink[^>]*>Thinking…|<svg[^>]*>[^<]*Thinking…/);
+});
+
+test('tool rows use compact adjacency hooks and a Codex-like transcript type scale', () => {
+  const html = render(React.createElement(Stage, {
+    liveItems: [
+      { type: 'thinking', id: 'thinking-before', text: 'Looking it up', done: true },
+      READ,
+      { type: 'thinking', id: 'thinking-after', text: 'Summarizing it', done: true },
+    ],
+    sessionKey: 'session-a',
+  }));
+  const runTypes = [...html.matchAll(/data-run-type="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(runTypes, ['thinking', 'tool', 'thinking']);
+
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(css, /\.transcript-run-item \+ \.transcript-run-item\s*\{[^}]*margin-top:\s*18px;/s);
+  assert.match(css, /data-run-type='tool'[^}]*margin-top:\s*8px;/s);
+
+  const tool = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
+  assert.match(tool, /font-size:13px/);
+  assert.match(tool, /font-weight:500/);
+
+  const narration = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Readable body copy.' });
+  assert.match(narration, /font-size:14px/);
+  assert.match(narration, /line-height:1\.65/);
+
+  assert.match(css, /--font-sans-default:\s*-apple-system-body,\s*ui-sans-serif/);
+  assert.match(css, /--font-openai-sans:\s*"OpenAI Sans",\s*var\(--font-sans-default\)/);
 });
 
 test('code cards highlight known and auto-detected languages with copy semantics', () => {
@@ -227,6 +303,12 @@ test('Stage omits transcript cost footer and left gutter markers', () => {
 
   assert.doesNotMatch(html, /0m 5s|\$0\.01/);
   assert.doesNotMatch(html, /—/);
+});
+
+test('Stage uses compact responsive message gutters', () => {
+  const html = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Compact gutter.' });
+  assert.match(html, /max-width:1040px/);
+  assert.match(html, /padding:24px clamp\(18px, 2\.2vw, 24px\) 12px/);
 });
 
 // ── Tool defaults and icon vocabulary ────────────────────────────────────────

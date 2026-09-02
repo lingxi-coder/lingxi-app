@@ -24,7 +24,7 @@ test('ServerHello validation is exact and fail-closed', () => {
   } satisfies ServerHello;
 
   assert.deepEqual(validateServerHello(hello), hello);
-  assert.equal(hello.capabilities.client_protocol_version, '10.0.0');
+  assert.equal(hello.capabilities.client_protocol_version, '11.0.0');
   assert.throws(
     () => validateServerHello({ ...hello, capabilities: { ...hello.capabilities, extra: true } }),
     /unsupported fields/,
@@ -36,13 +36,21 @@ test('Phase8 Local App plugin commands stay nested and byte-stable', () => {
     { type: 'get_inventory', plugin_id: 'lingxi-local-app' },
     { type: 'resolve_create_confirmation', request_id: 'create-0001', approved: true },
     { type: 'resolve_mcp_proposal_approval', request_id: 'proposal-0001', approved: false },
+    { type: 'start_local_app_mcp_authoring', app_id: 'habits-1a2b', user_goal: 'Add CRUD tools' },
+    { type: 'set_local_app_mcp_enabled', app_id: 'habits-1a2b', enabled: true, expected_revision: 7 },
+    { type: 'set_local_app_mcp_tool_enabled', app_id: 'habits-1a2b', tool_name: 'list_habits', enabled: false, expected_revision: 8 },
+    { type: 'set_local_app_mcp_conversation_pinned', app_id: 'habits-1a2b', conversation_id: 'conv-1', pinned: true },
     { type: 'get_managed_mcp_inventory' },
   ] satisfies PluginCommandDto[];
 
   assert.equal(JSON.stringify(commands[0]), '{"type":"get_inventory","plugin_id":"lingxi-local-app"}');
   assert.equal(JSON.stringify(commands[1]), '{"type":"resolve_create_confirmation","request_id":"create-0001","approved":true}');
   assert.equal(JSON.stringify(commands[2]), '{"type":"resolve_mcp_proposal_approval","request_id":"proposal-0001","approved":false}');
-  assert.equal(JSON.stringify(commands[3]), '{"type":"get_managed_mcp_inventory"}');
+  assert.equal(JSON.stringify(commands[3]), '{"type":"start_local_app_mcp_authoring","app_id":"habits-1a2b","user_goal":"Add CRUD tools"}');
+  assert.equal(JSON.stringify(commands[4]), '{"type":"set_local_app_mcp_enabled","app_id":"habits-1a2b","enabled":true,"expected_revision":7}');
+  assert.equal(JSON.stringify(commands[5]), '{"type":"set_local_app_mcp_tool_enabled","app_id":"habits-1a2b","tool_name":"list_habits","enabled":false,"expected_revision":8}');
+  assert.equal(JSON.stringify(commands[6]), '{"type":"set_local_app_mcp_conversation_pinned","app_id":"habits-1a2b","conversation_id":"conv-1","pinned":true}');
+  assert.equal(JSON.stringify(commands[7]), '{"type":"get_managed_mcp_inventory"}');
 });
 
 test('Phase8 Local App app_event payloads validate and reject unknown or incomplete variants', () => {
@@ -114,6 +122,75 @@ test('Phase8 Local App app_event payloads validate and reject unknown or incompl
       },
     }),
     /invalid templates|unsupported fields/,
+  );
+});
+
+test('managed MCP inventory mirrors the current native DTO shape', () => {
+  const event = validateClientEvent({
+    type: 'app_event',
+    event: {
+      type: 'managed_mcp_inventory_changed',
+      servers: [{
+        serverName: 'lingxi-app-habits',
+        appId: 'habits-1a2b',
+        appName: 'Habits',
+        enabled: true,
+        status: 'enabled',
+        settingsRevision: 7,
+        enabledTools: ['track_habit'],
+        pinnedToCurrentConversation: false,
+        buildId: 'build-0001',
+        catalogSha256: 'a'.repeat(64),
+        toolSurfaceSha256: 'b'.repeat(64),
+        toolCount: 1,
+        authoringRevision: 3,
+        publicationState: 'published_verified',
+        mcpVerification: { status: 'passed', summary: 'MCP checks passed' },
+        uiVerification: { status: 'unavailable', summary: 'UI runner unavailable on this host' },
+        widget: {
+          resourceUri: 'app://habits/widget',
+          mimeType: 'text/html',
+          resourceSha256: 'c'.repeat(64),
+        },
+        tools: [{
+          name: 'track_habit',
+          inputSchemaJson: '{"type":"object"}',
+          semanticFlowJson: '{"flowId":"track-habit"}',
+          permissionCeiling: 'ask',
+        }],
+      }],
+    } satisfies AppEventDto,
+  }) as Extract<ClientEvent, { type: 'app_event' }>;
+
+  assert.equal(event.event.type, 'managed_mcp_inventory_changed');
+  assert.equal(event.event.servers[0]?.status, 'enabled');
+  assert.throws(
+    () => validateClientEvent({
+      type: 'app_event',
+      event: {
+        type: 'managed_mcp_inventory_changed',
+        servers: [{
+          serverName: 'lingxi-app-habits',
+          appId: 'habits-1a2b',
+          appName: 'Habits',
+          enabled: true,
+          status: 'enabled',
+          settingsRevision: 7,
+          enabledTools: ['track_habit'],
+          pinnedToCurrentConversation: false,
+          buildId: 'build-0001',
+          catalogSha256: 'a'.repeat(64),
+          toolSurfaceSha256: 'b'.repeat(64),
+          toolCount: 1,
+          authoringRevision: 3,
+          publicationState: 'published_verified',
+          mcpVerification: { status: 'passed', summary: 'ok' },
+          uiVerification: { status: 'passed', summary: 'ok' },
+          widget: { resourceUri: 'app://habits/widget', mimeType: 'text/html' },
+        }],
+      },
+    }),
+    /resourceSha256|unsupported fields/,
   );
 });
 

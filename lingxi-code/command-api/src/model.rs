@@ -195,6 +195,9 @@ pub struct CommandFrontmatter {
     pub disallowed_tools: Option<Vec<String>>,
     /// Optional pinned model name.
     pub model: Option<String>,
+    /// Session capability profiles this command may run under. Absent means the
+    /// command remains code-only in mobile Chat/Code mode filtering.
+    pub session_modes: Option<Vec<String>>,
     /// Free-form hints describing positional argument shape.
     pub argument_hints: Vec<String>,
     /// Declared positional argument names (frontmatter `arguments`). Used by the

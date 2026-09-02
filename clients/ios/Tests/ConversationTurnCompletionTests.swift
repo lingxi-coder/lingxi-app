@@ -67,6 +67,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 appSandboxRoot: FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString, isDirectory: true).path,
                 projectCwd: nil,
+                sessionMode: .code,
                 visionDelegationEnabled: true
             )
             let source = EngineConversationSource(config: config)
@@ -660,7 +661,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(updates.count, 1)
 
             source.expectSessionResumeForTesting("new-session")
-            source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
             source.applyForTesting(.textDelta(text: "late"))
             XCTAssertEqual(updates.count, 1)
             withExtendedLifetime(subscription) {}
@@ -723,7 +724,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             }
             source.applyForTesting(.textDelta(text: "stale answer"))
             source.expectSessionResumeForTesting("new-session")
-            source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost)
             )
@@ -770,7 +771,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertNotNil(source.send("old question"))
             await flushTasks()
             source.expectSessionResumeForTesting("new-session")
-            source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
             releaseSubmission?.resume()
             releaseSubmission = nil
             await flushTasks()

@@ -23,6 +23,7 @@ use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 use clap::{Args, Subcommand};
 use mcp::connection::ConfigScope;
 use mcp::oauth;
+use platform_api::CredentialStoragePolicy;
 use platform_posix::{self, PosixClock, PosixHttp};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1243,10 +1244,39 @@ fn extract_oauth_spec(
 /// Build a CLI-local secure-storage backend used for MCP OAuth token persistence.
 async fn mcp_token_storage() -> Result<Arc<dyn platform_api::SecureStorage>, String> {
     let home = crate::run::lingxi_home_dir();
-    let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
-    platform_posix::secure_storage_for_platform(user, home.clone(), home.join(".credentials.json"))
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "default".to_string());
+    credential_storage(user, home.clone(), home.join(".credentials.json"))
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn credential_storage(
+    user: String,
+    home: PathBuf,
+    credentials_path: PathBuf,
+) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+    #[cfg(windows)]
+    {
+        platform_windows::secure_storage_for_policy(
+            user,
+            home,
+            credentials_path,
+            CredentialStoragePolicy::NativePreferred,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        platform_posix::secure_storage_for_policy(
+            user,
+            home,
+            credentials_path,
+            CredentialStoragePolicy::NativePreferred,
+        )
+        .await
+    }
 }
 
 /// Convert a parsed MCP server config into the JSON object shape accepted by

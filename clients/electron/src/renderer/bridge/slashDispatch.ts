@@ -8,7 +8,7 @@
  * (`tui/src/command.rs:88`) and is deliberately free of React and `window`, so
  * the whole resolution path is unit-testable.
  */
-import type { PermissionModeId } from '@lingxi/bridge-client';
+import type { PermissionModeId, SlashCommandDto } from '@lingxi/bridge-client';
 
 export interface ParsedSlashLine {
   readonly name: string;
@@ -37,6 +37,18 @@ export interface DesktopCommandContext {
   openModelPicker(section: 'model' | 'effort'): void;
   openPermissionPicker(): void;
   openSettings(): void;
+  openSettingsPage(pageId: string): void;
+  addWorkspaceDirectory(path: string): Promise<void>;
+  chooseProject(): Promise<void>;
+  activateProject(path: string): Promise<void>;
+  clearSession(): Promise<void>;
+  forceCompact(): Promise<void>;
+  copyLastResponse(): Promise<boolean>;
+  login(): Promise<void>;
+  logout(): Promise<void>;
+  reloadPlugins(): Promise<void>;
+  openTasks(): Promise<void>;
+  showHelp(): void;
   /** Push a line of the command's own output into the transcript. */
   emit(output: string, isError?: boolean): void;
 }
@@ -45,6 +57,8 @@ export interface DesktopCommand {
   readonly name: string;
   readonly aliases?: readonly string[];
   readonly args: 'none' | 'optional' | 'required';
+  /** False keeps a directly-typed compatibility handler out of menus. */
+  readonly advertised?: boolean;
   run(args: string, ctx: DesktopCommandContext): Promise<void> | void;
 }
 
@@ -68,4 +82,21 @@ export function resolveDesktopCommand(
   // A `none`-args command still resolves when arguments were supplied, deliberately,
   // so its `run` can tell the user about the misuse.
   return { command, args: parsed.args };
+}
+
+/** Preserve registry shadowing: project/plugin/skill commands beat same-named Desktop builtins. */
+export function desktopCommandIsShadowed(
+  raw: string,
+  catalog: readonly SlashCommandDto[],
+): boolean {
+  const parsed = parseSlashLine(raw);
+  if (!parsed) return false;
+  const name = parsed.name.toLocaleLowerCase();
+  return catalog.some((command) => (
+    command.source !== 'builtin'
+    && (
+      command.name.toLocaleLowerCase() === name
+      || (command.aliases ?? []).some((alias) => alias.toLocaleLowerCase() === name)
+    )
+  ));
 }

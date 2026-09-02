@@ -5,6 +5,7 @@ import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.TurnRecoverySnapshotDto
 import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
@@ -14,6 +15,21 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ConversationSourceRecoveryTest {
+
+    @Test
+    fun recoveryScopeKeyUsesStableWorkspaceIdentityAndMode() {
+        val chat = ConversationRecoverySpec(
+            projectId = "weather",
+            hostPath = "/same/path",
+            sessionMode = SessionMode.Chat,
+            linuxRuntimeMode = LinuxRuntimeMode.Legacy,
+            workspaceKey = "app.weather",
+        )
+        val code = chat.copy(sessionMode = SessionMode.Code)
+
+        assertEquals("app.weather#chat", chat.scopeKey)
+        assertEquals("app.weather#code", code.scopeKey)
+    }
 
     @Test
     fun durableResumePolicyDistinguishesFreshUiRetainedTakeoverAndHeadless() {
@@ -37,6 +53,7 @@ class ConversationSourceRecoveryTest {
             ConversationRecoverySpec(
                 projectId = null,
                 hostPath = null,
+                sessionMode = SessionMode.Code,
                 linuxRuntimeMode = LinuxRuntimeMode.Legacy,
             ),
         )
@@ -52,7 +69,7 @@ class ConversationSourceRecoveryTest {
     @Test
     fun secondUiClaimCannotOverwriteFirstInFlightResumeDisposition() {
         val owner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
         )
 
         owner.claimForUi()
@@ -70,7 +87,7 @@ class ConversationSourceRecoveryTest {
     @Test
     fun retainedLiveAndColdWaitingUseDifferentUiResumeDisposition() {
         val retainedOwner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
         ).apply {
             // monitorExisting hands off a live parked question from the UI.
             headlessExecutorActive = true
@@ -79,7 +96,7 @@ class ConversationSourceRecoveryTest {
         assertFalse(retainedOwner.uiAttachResumeRequired)
 
         val coldOwner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
         )
         coldOwner.claimForUi()
         assertTrue(coldOwner.uiAttachResumeRequired)

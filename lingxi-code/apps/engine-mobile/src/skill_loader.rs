@@ -14,9 +14,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use command_api::{CommandRegistry, CommandSource, SlashCommand, SlashCommandKind};
+use command_api::{
+    CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
+};
 use platform_api::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
 use protocol::ContentBlock;
+use session::jsonl::SessionMode;
 use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader as ToolSkillLoader};
@@ -150,26 +153,140 @@ fn product_prompt_token(suffix: &str) -> String {
     )
 }
 
+fn command_frontmatter(cmd: &SlashCommand) -> Option<&CommandFrontmatter> {
+    match &cmd.kind {
+        SlashCommandKind::Markdown { frontmatter, .. }
+        | SlashCommandKind::Plugin { frontmatter, .. }
+        | SlashCommandKind::Bundled { frontmatter, .. } => Some(frontmatter),
+        SlashCommandKind::Builtin { .. } | SlashCommandKind::Mcp { .. } => None,
+    }
+}
+
+fn base_tool_name(value: &str) -> &str {
+    value.split('(').next().unwrap_or(value).trim()
+}
+
+fn chat_safe_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "AskUserQuestion"
+            | "Glob"
+            | "Grep"
+            | "Read"
+            | "Skill"
+            | "StructuredOutput"
+            | "WebFetch"
+            | "WebSearch"
+    )
+}
+
+fn chat_compatible(frontmatter: &CommandFrontmatter) -> bool {
+    if frontmatter.context.is_some()
+        || frontmatter.background.is_some()
+        || frontmatter.agent.is_some()
+        || frontmatter.shell.is_some()
+    {
+        return false;
+    }
+    frontmatter
+        .allowed_tools
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .all(|tool| chat_safe_tool_name(base_tool_name(tool)))
+}
+
+fn contains_embedded_shell(command: &SlashCommand) -> bool {
+    let body = match &command.kind {
+        SlashCommandKind::Markdown {
+            prompt_template, ..
+        }
+        | SlashCommandKind::Plugin {
+            prompt_template, ..
+        } => prompt_template.as_str(),
+        SlashCommandKind::Bundled { .. }
+        | SlashCommandKind::Builtin { .. }
+        | SlashCommandKind::Mcp { .. } => {
+            return false;
+        }
+    };
+    body.contains("```!") || body.contains("!`")
+}
+
+fn to_descriptor_for_mode(
+    command: &SlashCommand,
+    session_id: Option<&str>,
+    mode: SessionMode,
+) -> SkillDescriptor {
+    let mut descriptor = to_descriptor(command, session_id);
+    if mode == SessionMode::Chat {
+        // Defense in depth: a Chat-visible descriptor must never reach the
+        // Skill tool's host shell or subagent launcher, even if a future command
+        // kind bypasses the visibility predicate above.
+        descriptor.skip_shell_expansion = true;
+        descriptor.context = None;
+        descriptor.background = None;
+        descriptor.agent = None;
+    }
+    descriptor
+}
+
+pub fn command_visible_in_session_mode(command: &SlashCommand, mode: SessionMode) -> bool {
+    match mode {
+        SessionMode::Code => true,
+        SessionMode::Chat => {
+            let Some(frontmatter) = command_frontmatter(command) else {
+                return false;
+            };
+            let Some(session_modes) = frontmatter.session_modes.as_ref() else {
+                return false;
+            };
+            session_modes
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case("chat"))
+                && chat_compatible(frontmatter)
+                && !contains_embedded_shell(command)
+        }
+    }
+}
+
 /// [`SkillLoader`] backed by the shared live mobile [`CommandRegistry`].
 pub struct MobileDiskSkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
     session_id: Option<String>,
+    session_mode: SessionMode,
 }
 
 impl MobileDiskSkillLoader {
     #[must_use]
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
+        Self::for_mode(registry, SessionMode::Code)
+    }
+
+    #[must_use]
+    pub fn for_mode(registry: Arc<RwLock<CommandRegistry>>, session_mode: SessionMode) -> Self {
         Self {
             registry,
             session_id: None,
+            session_mode,
         }
     }
 
     #[must_use]
     pub fn with_session_id(registry: Arc<RwLock<CommandRegistry>>, session_id: String) -> Self {
+        Self::with_session_id_and_mode(registry, session_id, SessionMode::Code)
+    }
+
+    #[must_use]
+    pub fn with_session_id_and_mode(
+        registry: Arc<RwLock<CommandRegistry>>,
+        session_id: String,
+        session_mode: SessionMode,
+    ) -> Self {
         Self {
             session_id: Some(session_id),
-            ..Self::new(registry)
+            session_mode,
+            ..Self::for_mode(registry, session_mode)
         }
     }
 
@@ -180,6 +297,7 @@ impl MobileDiskSkillLoader {
         lingxi_home: &Path,
         home: &Path,
         session_id: Option<String>,
+        session_mode: SessionMode,
     ) -> Self {
         let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         {
@@ -189,6 +307,7 @@ impl MobileDiskSkillLoader {
         Self {
             registry,
             session_id,
+            session_mode,
         }
     }
 }
@@ -221,9 +340,10 @@ pub async fn load_mobile_disk_commands_into_registry(
 impl ToolSkillLoader for MobileDiskSkillLoader {
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
         let reg = self.registry.read().await;
-        Ok(reg
-            .resolve(name)
-            .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
+        Ok(reg.resolve(name).and_then(|cmd| {
+            command_visible_in_session_mode(cmd, self.session_mode)
+                .then(|| to_descriptor_for_mode(cmd, self.session_id.as_deref(), self.session_mode))
+        }))
     }
 }
 
@@ -258,8 +378,12 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         let resolved = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)?;
         let command = registry.resolve(&resolved)?.clone();
         drop(registry);
+        if !command_visible_in_session_mode(&command, self.session_mode) {
+            return None;
+        }
 
-        let descriptor = to_descriptor(&command, self.session_id.as_deref());
+        let descriptor =
+            to_descriptor_for_mode(&command, self.session_id.as_deref(), self.session_mode);
         if descriptor.command_type != SkillCommandType::Prompt {
             return None;
         }
@@ -389,5 +513,109 @@ mod tests {
                     && text.contains("IOS-PROFILE-ONLY-MARKER")
                     && text.contains("## Bundled resource: references/router.md")
         ));
+    }
+
+    #[tokio::test]
+    async fn chat_mode_hides_commands_without_explicit_session_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cmd_dir = root.join(".lingxi").join("commands");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("review-pr.md"),
+            "---\ndescription: Review a PR\n---\nReview $ARGUMENTS\n",
+        )
+        .await
+        .unwrap();
+
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, root, &root.join(".lingxi"), root)
+                .await;
+        }
+
+        let chat_loader = MobileDiskSkillLoader::for_mode(registry.clone(), SessionMode::Chat);
+        assert!(
+            chat_loader.load("review-pr").await.unwrap().is_none(),
+            "undeclared disk commands stay code-only in chat mode"
+        );
+
+        let code_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Code);
+        assert!(
+            code_loader.load("review-pr").await.unwrap().is_some(),
+            "code mode keeps the existing skill catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_requires_explicit_mode_and_chat_safe_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cmd_dir = root.join(".lingxi").join("commands");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("research.md"),
+            "---\ndescription: Research\nsession-modes: chat, code\nallowed-tools: Read, WebFetch\n---\nResearch $ARGUMENTS\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            cmd_dir.join("mutate.md"),
+            "---\ndescription: Mutate\nsession-modes: chat\nallowed-tools: Write\n---\nMutate $ARGUMENTS\n",
+        )
+        .await
+        .unwrap();
+
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, root, &root.join(".lingxi"), root)
+                .await;
+        }
+        let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
+        assert!(chat_loader.load("research").await.unwrap().is_some());
+        assert!(chat_loader.load("mutate").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_fork_and_shell_execution_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cmd_dir = root.join(".lingxi").join("commands");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("forked.md"),
+            "---\ndescription: Fork\nsession-modes: chat\ncontext: fork\nbackground: true\n---\nDelegate the answer\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            cmd_dir.join("shell-frontmatter.md"),
+            "---\ndescription: Shell\nsession-modes: chat\nshell: bash\n---\nExplain the workspace\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            cmd_dir.join("embedded-shell.md"),
+            "---\ndescription: Embedded shell\nsession-modes: chat\n---\nInspect !`git status`\n",
+        )
+        .await
+        .unwrap();
+
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, root, &root.join(".lingxi"), root)
+                .await;
+        }
+        let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
+
+        for denied in ["forked", "shell-frontmatter", "embedded-shell"] {
+            assert!(
+                chat_loader.load(denied).await.unwrap().is_none(),
+                "{denied} must not expose a forbidden Chat execution path"
+            );
+        }
     }
 }

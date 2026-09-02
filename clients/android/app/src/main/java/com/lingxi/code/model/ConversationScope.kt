@@ -16,6 +16,24 @@ sealed interface ConversationScope {
 }
 
 /**
+ * The conversation capability profile currently selected for a workspace.
+ *
+ * Kept as the Android UI/domain spelling and converted to the shared
+ * `SessionModeDto` only at the generated-binding boundary.
+ */
+enum class SessionMode(val wireValue: String) {
+    Chat("chat"),
+    Code("code"),
+    ;
+
+    /**
+     * Back-compat alias for persistence helpers that talk in terms of "key"
+     * rather than wire values.
+     */
+    val wireKey: String get() = wireValue
+}
+
+/**
  * The durable key a scope's state (last-active session, composer draft) is
  * stored under — `global` / `project.<id>` / `app.<id>`.
  */
@@ -24,6 +42,9 @@ fun ConversationScope.persistenceKey(): String = when (this) {
     is ConversationScope.Project -> "project.$projectId"
     is ConversationScope.LocalApp -> "app.$appId"
 }
+
+/** Durable key for state kept separately per workspace and session mode. */
+fun ConversationScope.sessionStateKey(mode: SessionMode): String = "${persistenceKey()}#${mode.wireKey}"
 
 /** Inverse of [persistenceKey]; null for an unrecognized key. */
 fun conversationScopeFromKey(key: String?): ConversationScope? = when {

@@ -86,8 +86,55 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
     var messageCount: Int
     var relativeTime: String
     var updatedAt: Date
+    var mode: SessionMode
+
+    init(
+        sessionId: String,
+        title: String,
+        messageCount: Int,
+        relativeTime: String,
+        updatedAt: Date,
+        mode: SessionMode = .code
+    ) {
+        self.sessionId = sessionId
+        self.title = title
+        self.messageCount = messageCount
+        self.relativeTime = relativeTime
+        self.updatedAt = updatedAt
+        self.mode = mode
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId
+        case title
+        case messageCount
+        case relativeTime
+        case updatedAt
+        case mode
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        title = try container.decode(String.self, forKey: .title)
+        messageCount = try container.decode(Int.self, forKey: .messageCount)
+        relativeTime = try container.decode(String.self, forKey: .relativeTime)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        mode = try container.decodeIfPresent(SessionMode.self, forKey: .mode) ?? .code
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionId, forKey: .sessionId)
+        try container.encode(title, forKey: .title)
+        try container.encode(messageCount, forKey: .messageCount)
+        try container.encode(relativeTime, forKey: .relativeTime)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(mode, forKey: .mode)
+    }
 
     var id: String { sessionId }
+    var modifiedAt: Date { updatedAt }
 }
 
 struct ProjectSyncFile: Codable, Equatable, Sendable {

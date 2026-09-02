@@ -953,6 +953,20 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Persist the mobile chat/code capability profile for this transcript.
+    pub async fn append_session_mode(&self, session_mode: &str) -> Result<(), WriterError> {
+        let Some(session_id) = self.session_id_from_path() else {
+            return Ok(());
+        };
+        self.metadata_state.lock().await.session_mode = Some(session_mode.to_string());
+        let value = serde_json::json!({
+            "type": "session-mode",
+            "sessionMode": session_mode,
+            "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
     /// Append an `agent-setting` metadata line for `session_id` — the persisted
     /// main-thread `--agent` selection (`agentSetting` = the agent's `agentType`)
     /// so a later `--resume` (with no `--agent`) can re-adopt it. 1:1 with
@@ -1916,6 +1930,32 @@ mod tests {
         assert_eq!(
             routed.permission_modes.get(session_id).map(String::as_str),
             Some("bypassPermissions")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn append_session_mode_round_trips_through_transcript_metadata() {
+        let tmp =
+            std::env::temp_dir().join(format!("lingxi-writer-session-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        writer
+            .append_session_mode("chat")
+            .await
+            .expect("append session mode");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let routed = crate::jsonl::route_lines(&raw);
+        assert_eq!(
+            routed.session_modes.get(session_id).map(String::as_str),
+            Some("chat")
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

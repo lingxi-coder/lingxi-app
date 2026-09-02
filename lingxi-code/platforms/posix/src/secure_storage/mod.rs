@@ -13,7 +13,9 @@ pub mod linux;
 pub mod macos;
 pub mod plaintext;
 
-pub use factory::{plaintext_secure_storage, secure_storage_for_platform};
+pub use factory::{
+    plaintext_secure_storage, secure_storage_for_platform, secure_storage_for_policy,
+};
 pub use helpers::{
     compute_dir_hash, full_service_name, CREDENTIALS_SERVICE_SUFFIX, KEYCHAIN_CACHE_TTL,
     SECURITY_STDIN_LINE_LIMIT,

@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.settings.LinuxRuntimeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -23,7 +24,9 @@ class ConversationNotificationRouteInstrumentedTest {
             recoverySpec = ConversationRecoverySpec(
                 projectId = null,
                 hostPath = null,
+                sessionMode = SessionMode.Code,
                 linuxRuntimeMode = LinuxRuntimeMode.Legacy,
+                workspaceKey = "global",
             ),
         )
 
@@ -31,6 +34,8 @@ class ConversationNotificationRouteInstrumentedTest {
         assertEquals(ConversationTurnService::class.java.name, intent.component?.className)
         assertEquals("session-a", intent.getStringExtra(ConversationTurnService.EXTRA_SESSION_ID))
         assertEquals(42L, intent.getLongExtra(ConversationTurnService.EXTRA_TURN_ID, -1L))
+        assertEquals("code", intent.getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE))
+        assertEquals("global", intent.getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY))
         assertNull(intent.data)
         assertEquals(
             ConversationTurnService.ACTION_CANCEL,

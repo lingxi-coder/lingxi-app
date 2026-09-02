@@ -35,8 +35,8 @@ use crate::computer_access::ComputerAccessResponseDto;
 use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppSurfaceDto,
-    PluginCommandDto,
+    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppRuntimeProfileDto,
+    AppSurfaceDto, PluginCommandDto,
 };
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -769,6 +769,25 @@ pub enum ClientCommand {
     // fixed by the engine; clients may choose only `auto`, `off`, or `on`.
     SetTypescriptLspMode {
         mode: String,
+    },
+
+    // Confirm the runtime profile family selected by native UI for one app.
+    // Appended to preserve every previously frozen UniFFI variant ordinal.
+    ResolveAppRuntimeProfileSelection {
+        // Pending runtime selector correlator.
+        request_id: String,
+        // The runtime profile family the user selected.
+        selected_family: AppRuntimeProfileDto,
+    },
+
+    // Fork the named session into a fresh session under `target_mode` while
+    // keeping the current session's workspace. Appended to preserve every
+    // previously frozen UniFFI variant ordinal.
+    ForkSession {
+        // The source session id (the named target to duplicate).
+        session_id: String,
+        // Capability profile the forked session should run under.
+        target_mode: crate::listings::SessionModeDto,
     },
 }
 

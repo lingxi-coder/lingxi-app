@@ -23,7 +23,7 @@ import XCTest
 #if canImport(engine_mobileFFI)
 
     @MainActor
-    final class SessionResumeTests: XCTestCase {
+final class SessionResumeTests: XCTestCase {
 
         /// A minimal `EngineConfig` for an `EngineConversationSource` under test —
         /// keyless and rooted at a throwaway temp dir. The source is NEVER asked to
@@ -35,7 +35,8 @@ import XCTest
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                visionDelegationEnabled: true)
+                                sessionMode: .code,
+visionDelegationEnabled: true)
             return EngineConversationSource(config: config)
         }
 
@@ -841,7 +842,7 @@ import XCTest
             XCTAssertNil(source.model.error)
             XCTAssertEqual(source.model.statusLine, "原会话已不存在，已创建新对话")
 
-            source.applyForTesting(.sessionStarted(sessionId: "replacement-session"))
+            source.applyForTesting(.sessionStarted(sessionId: "replacement-session", mode: .code))
             XCTAssertFalse(source.model.sessionTransitionPending)
             XCTAssertEqual(source.model.activeSessionId, "replacement-session")
             XCTAssertEqual(source.model.sessionRefreshRevision, 1)
@@ -908,7 +909,7 @@ import XCTest
             )
             XCTAssertTrue(source.model.sessionTransitionPending)
 
-            source.applyForTesting(.sessionResumed(sessionId: "empty-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "empty-session", mode: .code, messages: []))
             XCTAssertEqual(source.model.activeSessionId, "empty-session")
             XCTAssertFalse(source.model.sessionTransitionPending)
             XCTAssertEqual(source.model.sessionRefreshRevision, 1)
@@ -921,13 +922,13 @@ import XCTest
             source.resumeSession("saved-session")
             XCTAssertTrue(source.model.sessionTransitionPending)
 
-            source.applyForTesting(.sessionStarted(sessionId: "startup-session"))
+            source.applyForTesting(.sessionStarted(sessionId: "startup-session", mode: .code))
             XCTAssertTrue(
                 source.model.sessionTransitionPending,
                 "a delayed bootstrap SessionStarted is not ResumeSession confirmation"
             )
 
-            source.applyForTesting(.sessionResumed(sessionId: "saved-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "saved-session", mode: .code, messages: []))
             XCTAssertFalse(source.model.sessionTransitionPending)
             XCTAssertEqual(source.model.activeSessionId, "saved-session")
         }
@@ -940,7 +941,7 @@ import XCTest
             source.resumeSession("saved-session")
             XCTAssertTrue(source.model.sessionTransitionPending)
 
-            source.applyForTesting(.sessionStarted(sessionId: "saved-session"))
+            source.applyForTesting(.sessionStarted(sessionId: "saved-session", mode: .code))
 
             XCTAssertTrue(
                 source.model.sessionTransitionPending,
@@ -975,7 +976,7 @@ import XCTest
             ))
             source.selectAgent(agentID)
 
-            source.applyForTesting(.sessionStarted(sessionId: sessionID))
+            source.applyForTesting(.sessionStarted(sessionId: sessionID, mode: .code))
 
             XCTAssertEqual(source.model.selectedAgentID, agentID)
             XCTAssertEqual(source.model.agentSummaries.map(\.id), [
@@ -995,16 +996,19 @@ import XCTest
             source.resumeSession("session-b")
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
+                mode: .code,
                 messages: [MessageDto(role: "assistant", blocks: [.text(text: "B")])]
             ))
             source.resumeSession("session-c")
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-c",
+                mode: .code,
                 messages: [MessageDto(role: "assistant", blocks: [.text(text: "C")])]
             ))
 
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
+                mode: .code,
                 messages: [MessageDto(role: "assistant", blocks: [.text(text: "late B")])]
             ))
 
@@ -1019,7 +1023,7 @@ import XCTest
             source.model.messages = [visibleMessage]
             source.model.items = [.message(visibleMessage)]
 
-            source.applyForTesting(.sessionStarted(sessionId: "bootstrap-session"))
+            source.applyForTesting(.sessionStarted(sessionId: "bootstrap-session", mode: .code))
 
             XCTAssertEqual(source.model.messages, [visibleMessage])
             XCTAssertEqual(source.model.items, [.message(visibleMessage)])
@@ -1048,6 +1052,7 @@ import XCTest
                     title: "保留的会话",
                     modifiedRfc3339: "2026-08-02T08:00:00Z",
                     messageCount: 3,
+                    mode: .code,
                     path: "/tmp/retained.jsonl"
                 ),
             ]))
@@ -1072,7 +1077,7 @@ import XCTest
                 MessageDto(role: "assistant", blocks: [.text(text: "助手的回复")]),
             ]
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
 
             XCTAssertEqual(source.model.activeSessionId, uuid(),
                            "SessionResumed must adopt the resumed session id")
@@ -1106,7 +1111,7 @@ import XCTest
                             display: nil),
             ])
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [assistant]))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [assistant]))
 
             XCTAssertEqual(source.model.messages.count, 2)
             let text = source.model.messages.map(\.text).joined(separator: "\n")
@@ -1185,7 +1190,7 @@ import XCTest
             ]
 
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
 
             let kinds = source.model.items.map { item -> String in
                 switch item {
@@ -1223,7 +1228,7 @@ import XCTest
             ]
 
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
 
             let order = source.model.visibleTimelineGroups.flatMap(\.rows).map { row -> String in
                 switch row {
@@ -1269,7 +1274,7 @@ import XCTest
             ]
 
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
 
             let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
                 guard case let .run(run) = item else { return nil }
@@ -1303,7 +1308,7 @@ import XCTest
 
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(
-                .sessionResumed(sessionId: uuid(), messages: [assistant, toolTurn, followUp]))
+                .sessionResumed(sessionId: uuid(), mode: .code, messages: [assistant, toolTurn, followUp]))
 
             let userMessages = source.model.messages.filter { $0.role == .user }
             XCTAssertEqual(userMessages.count, 1,
@@ -1332,7 +1337,7 @@ import XCTest
             source.model.messages = [Message(role: .ai, text: "placeholder")]
 
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: []))
 
             XCTAssertEqual(source.model.activeSessionId, uuid())
             XCTAssertTrue(source.model.messages.isEmpty,
@@ -1348,7 +1353,7 @@ import XCTest
             let source = makeSource()
             let system = MessageDto(role: "system", blocks: [.text(text: "系统提示")])
             source.expectSessionResumeForTesting(uuid())
-            source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [system]))
+            source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [system]))
 
             XCTAssertEqual(source.model.messages.count, 1)
             XCTAssertEqual(source.model.messages[0].role, .ai)
@@ -1458,7 +1463,8 @@ import XCTest
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                visionDelegationEnabled: true)
+                                sessionMode: .code,
+visionDelegationEnabled: true)
             return EngineConversationSource(config: config, handleBuilder: handleBuilder)
         }
 

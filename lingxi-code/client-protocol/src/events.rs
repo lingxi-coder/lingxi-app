@@ -19,8 +19,8 @@ use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
-    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto,
+    SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -145,12 +145,14 @@ pub enum ClientEvent {
     // `Agents`.
     SessionStarted {
         session_id: String,
+        mode: SessionModeDto,
     },
 
     SessionEnded,
 
     SessionResumed {
         session_id: String,
+        mode: SessionModeDto,
         messages: Vec<MessageDto>,
     },
 
@@ -503,6 +505,14 @@ pub enum ClientEvent {
         requested: String,
         effective: String,
         available: bool,
+    },
+
+    /// A context-preserving copy created in another session capability mode.
+    /// Kept at the end so existing UniFFI event ordinals remain stable.
+    SessionForked {
+        source_session_id: String,
+        session_id: String,
+        mode: SessionModeDto,
     },
 }
 

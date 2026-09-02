@@ -44,6 +44,7 @@ import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
 import com.lingxi.code.bindings.ManagedLocalAppMcpStatusDto
 import com.lingxi.code.bindings.McpAppWidgetDto
 import com.lingxi.code.bindings.PluginCommandDto
+import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.conversation.ReplyEvent
@@ -870,6 +871,74 @@ class LocalAppsViewModelTest {
             val listRequest = source.commands.filterIsInstance<ClientCommand.ListAppSessions>().single()
             assertEquals(APP_ID, listRequest.appId)
             assertNull("the first page starts at the catalog head", listRequest.offset)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `apps snapshot eagerly requests every missing session catalog`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(APP_ID), appRecord(OTHER_APP_ID)),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                setOf(APP_ID, OTHER_APP_ID),
+                source.commands.filterIsInstance<ClientCommand.ListAppSessions>()
+                    .map { it.appId }
+                    .toSet(),
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `source rebind retries a session catalog left pending on the old source`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val first = RecordingSource()
+            val sources = MutableStateFlow<ConversationSource>(first)
+            LocalAppsViewModel(
+                sourceFlow = sources,
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            first.emit(ClientEvent.AppsChanged(listOf(appRecord(APP_ID))))
+            runCurrent()
+            assertEquals(
+                1,
+                first.commands.filterIsInstance<ClientCommand.ListAppSessions>()
+                    .count { it.appId == APP_ID },
+            )
+
+            // The first source never replies. Rebinding cancels its event
+            // collector, so its pending request cannot satisfy the new source.
+            val second = RecordingSource()
+            sources.value = second
+            runCurrent()
+            second.emit(ClientEvent.AppsChanged(listOf(appRecord(APP_ID))))
+            runCurrent()
+
+            assertEquals(
+                "the new source must own a fresh first-page request",
+                1,
+                second.commands.filterIsInstance<ClientCommand.ListAppSessions>()
+                    .count { it.appId == APP_ID },
+            )
         } finally {
             releaseMain()
         }
@@ -2393,8 +2462,10 @@ class LocalAppsViewModelTest {
         uuid: String,
         title: String,
         kind: AppSessionKindDto = AppSessionKindDto.CONVERSATION,
+        mode: SessionModeDto = SessionModeDto.CODE,
     ) = AppSessionRowDto(
         uuid = uuid,
+        mode = mode,
         title = title,
         modifiedRfc3339 = "2026-08-09T12:00:00Z",
         messageCount = 3u,

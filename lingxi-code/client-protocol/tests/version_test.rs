@@ -33,14 +33,12 @@ fn version_is_semver() {
     }
 }
 
-/// The Phase 9 Local App plugin cutover pins the contract at `10.0.0`.
-/// Removing the obsolete runtime-profile selection command/event/capability
-/// path is a deliberate breaking change because the generated native bindings
-/// are positional — see `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s
-/// doc comment.
+/// Mobile session-mode propagation pins the contract at `11.0.0`.
+/// The required Chat/Code mode now travels through session rows and lifecycle
+/// events, and the mobile launch configs version-lock on the added mode field.
 #[test]
-fn version_is_ten_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "10.0.0");
+fn version_is_eleven_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "11.0.0");
 }
 
 fn repository_root() -> PathBuf {
@@ -52,13 +50,10 @@ fn repository_root() -> PathBuf {
 }
 
 #[test]
-fn legacy_runtime_profile_selection_wire_variants_are_absent() {
+fn obsolete_runtime_profile_selection_event_path_is_absent() {
     let root = repository_root();
     let files = [
-        "lingxi-code/client-protocol/src/commands.rs",
         "lingxi-code/client-protocol/src/local_apps.rs",
-        "clients/shared/src/protocol.ts",
-        "clients/shared/src/validation.ts",
         "clients/ios/Sources/LocalApps/LocalAppsModels.swift",
         "clients/ios/Sources/LocalApps/LocalAppsProtocolAdapter.swift",
         "clients/ios/Sources/LocalApps/LocalAppsStore.swift",
@@ -66,10 +61,8 @@ fn legacy_runtime_profile_selection_wire_variants_are_absent() {
         "clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsViewModel.kt",
     ];
     let forbidden = [
-        "runtime_profile_selection",
         "RuntimeProfileSelection",
         "runtimeProfileSelection",
-        "resolve_app_runtime_profile_selection",
         "app_runtime_profile_selection_requested",
     ];
 

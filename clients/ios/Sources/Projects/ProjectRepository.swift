@@ -174,7 +174,12 @@ final class ProjectRepository: @unchecked Sendable {
         return load()
     }
 
-    func recordStartedSession(projectId: String?, sessionId: String, title: String) throws -> ProjectRepositoryState {
+    func recordStartedSession(
+        projectId: String?,
+        sessionId: String,
+        title: String,
+        mode: SessionMode = .code
+    ) throws -> ProjectRepositoryState {
         let canonicalID = canonicalSessionID(sessionId)
         guard !canonicalID.isEmpty else { throw ProjectRepositoryError.invalidSessionID }
         let snapshot = try projectId.map { try loadProject(id: $0) }
@@ -186,7 +191,8 @@ final class ProjectRepository: @unchecked Sendable {
             title: title.isEmpty ? (existing?.title ?? String(localized: "chat_new_conversation")) : title,
             messageCount: existing?.messageCount ?? 0,
             relativeTime: String(localized: "project_relative_time_just_now"),
-            updatedAt: timestamp
+            updatedAt: timestamp,
+            mode: existing?.mode ?? mode
         )
         let updated = ([started] + sessions.filter { $0.sessionId != canonicalID })
         if let projectId {

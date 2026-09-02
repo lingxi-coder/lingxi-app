@@ -2,7 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { beginLocalSlashCommand, beginSlashCommand, emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
-import { commandShouldCollapse } from '../src/renderer/model/runItem';
+import {
+  commandDefaultOpen,
+  commandDiagnosticTone,
+  commandPresentation,
+  commandShouldCollapse,
+  parseCommandHelp,
+  parseCommandMetrics,
+} from '../src/renderer/model/runItem';
 
 test('a slash command result becomes its own transcript row, not an assistant line', () => {
   const started = beginSlashCommand(emptyConversation(), '/status');
@@ -143,4 +150,46 @@ test('command output folds only once it is genuinely long', () => {
   assert.equal(commandShouldCollapse(short), false);
   assert.equal(commandShouldCollapse(tall), true);
   assert.equal(commandShouldCollapse(wide), true);
+});
+
+test('help output starts expanded so the command never looks inert', () => {
+  const help = { type: 'command', id: 'i1', name: '/help', output: 'Commands:\n  /help  Show help', isError: false } as const;
+  const status = { ...help, name: '/status', output: 'Status' };
+
+  assert.equal(commandDefaultOpen(help), true);
+  assert.equal(commandDefaultOpen(status), true);
+});
+
+test('slash results select distinct semantic presentations', () => {
+  const item = (name: string, output = 'ok', isError = false) => ({
+    type: 'command', id: name, name, output, isError,
+  } as const);
+
+  assert.equal(commandPresentation(item('/help')).kind, 'help');
+  assert.equal(commandPresentation(item('/usage')).kind, 'metrics');
+  assert.equal(commandPresentation(item('/doctor')).kind, 'diagnostics');
+  assert.equal(commandPresentation(item('/mcp')).kind, 'catalog');
+  assert.equal(commandPresentation(item('/mcp')).title, 'MCP servers');
+  assert.equal(commandPresentation(item('/compact')).kind, 'action');
+  assert.equal(commandPresentation(item('/custom')).kind, 'plain');
+  assert.equal(commandPresentation(item('/status', 'failed', true)).kind, 'error');
+  assert.equal(commandDefaultOpen(item('/doctor', 'x'.repeat(2000))), true);
+});
+
+test('diagnostic rows distinguish success, warning, and neutral detail', () => {
+  assert.equal(commandDiagnosticTone('[OK] git: ok'), 'ok');
+  assert.equal(commandDiagnosticTone('[!!] api-key: warning'), 'warning');
+  assert.equal(commandDiagnosticTone('ANTHROPIC_API_KEY not set'), 'warning');
+  assert.equal(commandDiagnosticTone('git version 2.44.0'), 'info');
+});
+
+test('help and metric parsers preserve content without depending on exact widths', () => {
+  assert.deepEqual(parseCommandHelp('Commands:\n  /help     Show help\n  /status   Show status'), [
+    { name: '/help', description: 'Show help' },
+    { name: '/status', description: 'Show status' },
+  ]);
+  assert.deepEqual(parseCommandMetrics('Model: opus\nTokens: 1,024\nnoise'), [
+    { label: 'Model', value: 'opus' },
+    { label: 'Tokens', value: '1,024' },
+  ]);
 });

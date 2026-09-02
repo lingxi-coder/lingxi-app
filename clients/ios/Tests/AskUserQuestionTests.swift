@@ -25,7 +25,8 @@ import XCTest
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                visionDelegationEnabled: true)
+                                sessionMode: .code,
+visionDelegationEnabled: true)
             return EngineConversationSource(config: config)
         }
 

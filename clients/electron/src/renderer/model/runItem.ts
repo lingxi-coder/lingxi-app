@@ -92,6 +92,34 @@ export interface CommandRunItem {
   readonly isError: boolean;
 }
 
+export type CommandPresentationKind =
+  | 'help'
+  | 'metrics'
+  | 'diagnostics'
+  | 'catalog'
+  | 'action'
+  | 'error'
+  | 'plain';
+
+export interface CommandPresentation {
+  readonly kind: CommandPresentationKind;
+  readonly title: string;
+  readonly icon: string;
+  readonly tone: 'neutral' | 'accent' | 'success' | 'warning' | 'danger';
+}
+
+export interface CommandHelpEntry {
+  readonly name: string;
+  readonly description: string;
+}
+
+export interface CommandMetricEntry {
+  readonly label: string;
+  readonly value: string;
+}
+
+export type CommandDiagnosticTone = 'ok' | 'warning' | 'info';
+
 /** A recorded voice message (composer prototype). */
 export interface AudioRunItem {
   readonly type: 'audio';
@@ -109,18 +137,25 @@ export type RunItem =
   | ThinkingRunItem
   | CommandRunItem;
 
-/** A narration may show at most this many Unicode code points before folding. */
+/** Compact transcript content may show at most this many code points before folding. */
 export const NARRATION_COLLAPSE_MAX_CHARS = 640;
 
-/** A narration may show at most this many normalized hard lines before folding. */
+/** Compact transcript content may show at most this many hard lines before folding. */
 export const NARRATION_COLLAPSE_MAX_LINES = 8;
+
+/** Assistant replies stay visible unless they are genuinely large. */
+export const ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS = 8_000;
+
+/** Large pasted/code-heavy assistant replies still get a bounded transcript preview. */
+export const ASSISTANT_NARRATION_COLLAPSE_MAX_LINES = 80;
 
 /**
  * Whether a user/assistant narration earns a disclosure affordance.
  *
  * Counting Unicode code points avoids treating one emoji as two characters.
- * The line budget is deliberately based on hard lines; the UI then clamps the
- * preview to roughly eight rendered body lines without measuring the DOM.
+ * Assistant replies use a much larger budget than user messages so ordinary
+ * answers remain readable without an extra click. The line budget is based on
+ * hard lines; the UI clamps only genuinely large content without measuring DOM.
  */
 export function narrationShouldCollapse(item: NarrationRunItem): boolean {
   if (item.role !== 'user' && item.role !== 'assistant') return false;
@@ -128,7 +163,13 @@ export function narrationShouldCollapse(item: NarrationRunItem): boolean {
   if (!text) return false;
   const characters = Array.from(text).length;
   const lines = text.replace(/\r\n?/g, '\n').split('\n').length;
-  return characters > NARRATION_COLLAPSE_MAX_CHARS || lines > NARRATION_COLLAPSE_MAX_LINES;
+  const maxCharacters = item.role === 'assistant'
+    ? ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS
+    : NARRATION_COLLAPSE_MAX_CHARS;
+  const maxLines = item.role === 'assistant'
+    ? ASSISTANT_NARRATION_COLLAPSE_MAX_LINES
+    : NARRATION_COLLAPSE_MAX_LINES;
+  return characters > maxCharacters || lines > maxLines;
 }
 
 /** Default disclosure state before the user's session-scoped choice wins. */
@@ -147,6 +188,70 @@ export function commandShouldCollapse(item: CommandRunItem): boolean {
   const characters = Array.from(text).length;
   const lines = text.replace(/\r\n?/g, '\n').split('\n').length;
   return characters > NARRATION_COLLAPSE_MAX_CHARS || lines > NARRATION_COLLAPSE_MAX_LINES;
+}
+
+const METRIC_COMMANDS = new Set(['status', 'context', 'usage', 'autocompact']);
+const DIAGNOSTIC_COMMANDS = new Set(['doctor', 'skill-doctor']);
+const CATALOG_COMMANDS = new Set([
+  'agents', 'files', 'hooks', 'mcp', 'resume', 'skills', 'tasks', 'workflows',
+]);
+const ACTION_COMMANDS = new Set([
+  'add-dir', 'brief', 'compact', 'config', 'copy', 'effort', 'fast', 'login',
+  'logout', 'model', 'permissions', 'reload-plugins', 'reload-skills', 'stop', 'theme',
+]);
+
+/** Normalized slash name without arguments or leading slashes. */
+export function commandName(item: CommandRunItem): string {
+  return item.name.trim().split(/\s/, 1)[0]?.replace(/^\/+/, '').toLocaleLowerCase() ?? '';
+}
+
+/** Semantic presentation owned by the renderer; the wire remains plain text. */
+export function commandPresentation(item: CommandRunItem): CommandPresentation {
+  const name = commandName(item);
+  if (item.isError) return { kind: 'error', title: 'Command failed', icon: 'shieldAlert', tone: 'danger' };
+  if (name === 'help') return { kind: 'help', title: 'Command directory', icon: 'terminal', tone: 'accent' };
+  if (METRIC_COMMANDS.has(name)) {
+    const title = name === 'usage' ? 'Usage' : name === 'context' ? 'Context' : name === 'autocompact' ? 'Auto compact' : 'Session status';
+    return { kind: 'metrics', title, icon: 'activity', tone: 'accent' };
+  }
+  if (DIAGNOSTIC_COMMANDS.has(name)) return { kind: 'diagnostics', title: name === 'doctor' ? 'Diagnostics' : 'Skill health', icon: 'shieldCheck', tone: 'warning' };
+  if (CATALOG_COMMANDS.has(name)) {
+    const titles: Record<string, string> = {
+      agents: 'Agents', files: 'Files', hooks: 'Hooks', mcp: 'MCP servers',
+      resume: 'Sessions', skills: 'Skills', tasks: 'Tasks', workflows: 'Workflows',
+    };
+    return { kind: 'catalog', title: titles[name] ?? 'Catalog', icon: 'braces', tone: 'neutral' };
+  }
+  if (ACTION_COMMANDS.has(name)) return { kind: 'action', title: 'Command completed', icon: 'check', tone: 'success' };
+  return { kind: 'plain', title: 'Command output', icon: 'terminal', tone: 'neutral' };
+}
+
+/** Parse the aligned `/help` output without depending on its exact column width. */
+export function parseCommandHelp(output: string): CommandHelpEntry[] {
+  return output.replace(/\r\n?/g, '\n').split('\n').flatMap((line) => {
+    const match = /^\s*(\/\S+)\s{2,}(.+?)\s*$/.exec(line);
+    return match ? [{ name: match[1]!, description: match[2]! }] : [];
+  });
+}
+
+/** Parse common `Label: value` status output into stable metric tiles. */
+export function parseCommandMetrics(output: string): CommandMetricEntry[] {
+  return output.replace(/\r\n?/g, '\n').split('\n').flatMap((line) => {
+    const match = /^\s*([^:]{1,32}):\s*(\S[\s\S]*?)\s*$/.exec(line);
+    return match ? [{ label: match[1]!.trim(), value: match[2]!.trim() }] : [];
+  });
+}
+
+/** Give Doctor rows honest status icons instead of treating every detail as success. */
+export function commandDiagnosticTone(line: string): CommandDiagnosticTone {
+  if (/\b(error|failed|missing|warning|unavailable|denied|not set)\b|\[!!\]/i.test(line)) return 'warning';
+  if (/^\s*\[OK\](?:\s|$)/i.test(line) || /\b0 failed\b/i.test(line)) return 'ok';
+  return 'info';
+}
+
+/** Structured command cards reveal their result immediately; only unknown long text folds. */
+export function commandDefaultOpen(item: CommandRunItem): boolean {
+  return commandPresentation(item).kind !== 'plain';
 }
 
 /**

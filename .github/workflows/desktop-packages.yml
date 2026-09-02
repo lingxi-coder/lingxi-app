@@ -1,0 +1,123 @@
+name: desktop-packages
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-packages.yml'
+      - 'clients/electron/**'
+      - 'clients/shared/**'
+      - 'lingxi-code/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/desktop-packages.yml'
+      - 'clients/electron/**'
+      - 'clients/shared/**'
+      - 'lingxi-code/**'
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+          - runner: ubuntu-22.04
+            platform: linux
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.82.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            clients/shared/package-lock.json
+            clients/electron/package-lock.json
+
+      - name: Remap build-machine paths
+        shell: bash
+        run: |
+          echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo" >> "$GITHUB_ENV"
+
+      - name: Install shared SDK
+        working-directory: clients/shared
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: clients/electron
+        run: npm ci
+
+      - name: Check and test native Rust host
+        shell: bash
+        working-directory: lingxi-code
+        run: |
+          cargo check --locked -p bridge-server
+          cargo test --locked -p client-protocol
+          cargo build --locked --release -p bridge-server --bin bridge-server
+
+      - name: Test POSIX secure storage
+        if: matrix.platform != 'win32'
+        working-directory: lingxi-code
+        run: cargo test --locked -p platform-posix secure_storage --lib
+
+      - name: Test Windows Credential Manager storage
+        if: matrix.platform == 'win32'
+        working-directory: lingxi-code
+        run: cargo test --locked -p platform-windows --lib
+
+      - name: Build and test shared SDK
+        working-directory: clients/shared
+        run: |
+          npm run build
+          npm test
+
+      - name: Typecheck, test, and build Desktop
+        working-directory: clients/electron
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Package native Desktop target
+        shell: bash
+        working-directory: clients/electron
+        run: node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+
+      - name: Static audit and packaged runtime smoke
+        shell: bash
+        working-directory: clients/electron
+        run: node scripts/verify-desktop-package.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+
+      - name: Keyless packaged sidecar and cleanup smoke
+        shell: bash
+        working-directory: clients/electron
+        run: node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lingxi-code-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.*
+            clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.build-metadata.json

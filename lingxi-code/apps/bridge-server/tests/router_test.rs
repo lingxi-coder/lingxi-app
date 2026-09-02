@@ -43,6 +43,7 @@ use client_protocol::commands::{
     SettingsDestinationDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
+use client_protocol::listings::SessionModeDto;
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
 use orchestrator::test_support::MockOrchestratorHandle;
@@ -1240,6 +1241,64 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     }
 }
 
+#[tokio::test]
+async fn desktop_plan_enables_plan_state_and_runs_the_argument_as_a_turn() {
+    let handle = Arc::new(ResumingHandle::new());
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    );
+
+    let outcome = router
+        .dispatch_slash("/plan design the migration")
+        .await
+        .expect("Desktop /plan must not require the TUI dispatcher");
+
+    assert_eq!(
+        outcome.result,
+        SlashDispatchResult::RunAsTurn {
+            prompt: "design the migration".to_string(),
+        }
+    );
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("plan")
+    );
+    assert!(handle.current_plan_mode().await);
+    assert_eq!(
+        handle.operation_log().await,
+        vec!["set_permission_mode:plan", "set_plan_mode:true"]
+    );
+}
+
+#[tokio::test]
+async fn desktop_diff_runs_as_a_read_only_turn_instead_of_returning_tui_only() {
+    let router = EngineCommandRouter::new(
+        Arc::new(MockOrchestratorHandle::new()) as Arc<dyn OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    );
+
+    let outcome = router
+        .dispatch_slash("/diff renderer")
+        .await
+        .expect("Desktop /diff must not require the TUI dispatcher");
+
+    match outcome.result {
+        SlashDispatchResult::RunAsTurn { prompt } => {
+            assert!(prompt.contains("uncommitted diff"));
+            assert!(prompt.contains("renderer"));
+            assert!(prompt.contains("Do not modify any files"));
+        }
+        other => panic!("expected /diff to start a read-only turn, got {other:?}"),
+    }
+}
+
 struct MutatingDispatcher {
     registry: Arc<tokio::sync::RwLock<command_api::registry::CommandRegistry>>,
 }
@@ -1632,7 +1691,8 @@ async fn new_session_clears_applies_model_and_emits_started() {
     assert_eq!(
         sink.events().await,
         vec![ClientEvent::SessionStarted {
-            session_id: expected_id
+            session_id: expected_id,
+            mode: SessionModeDto::Code,
         }]
     );
 }
@@ -1909,12 +1969,14 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     let events = sink.events().await;
     let [ClientEvent::SessionResumed {
         session_id: emitted_id,
+        mode,
         messages,
     }, ClientEvent::ModelChanged { model }] = events.as_slice()
     else {
         panic!("expected SessionResumed followed by its model, got {events:?}");
     };
     assert_eq!(emitted_id, &session_id);
+    assert_eq!(mode, &SessionModeDto::Code);
     assert_eq!(model, "claude-opus-4-1");
     assert_eq!(
         messages.len(),

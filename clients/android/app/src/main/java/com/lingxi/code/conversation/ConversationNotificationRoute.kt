@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import com.lingxi.code.MainActivity
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.sessionModeFromWireValue
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -11,6 +13,8 @@ import java.nio.charset.StandardCharsets
 data class ConversationLaunchRequest(
     val sessionId: String,
     val turnId: Long?,
+    val workspaceKey: String? = null,
+    val sessionMode: SessionMode = SessionMode.Code,
 )
 
 internal data class ConversationCancelRouteSpec(
@@ -47,10 +51,19 @@ object ConversationNotificationRoute {
             .orEmpty()
         val sessionId = params["sessionId"]?.takeUnless(String::isEmpty) ?: return null
         val turnId = params["turnId"]?.takeUnless(String::isEmpty)?.toLongOrNull()
-        return ConversationLaunchRequest(sessionId = sessionId, turnId = turnId)
+        return ConversationLaunchRequest(
+            sessionId = sessionId,
+            turnId = turnId,
+            workspaceKey = params["workspaceKey"]?.takeUnless(String::isEmpty),
+            sessionMode = sessionModeFromWireValue(params["sessionMode"]),
+        )
     }
 
-    fun uri(sessionId: String, turnId: Long? = null): Uri =
+    fun uri(
+        sessionId: String,
+        turnId: Long? = null,
+        recoverySpec: ConversationRecoverySpec? = null,
+    ): Uri =
         Uri.Builder()
             .scheme("lingxi")
             .authority("open_conversation")
@@ -59,11 +72,23 @@ object ConversationNotificationRoute {
                 if (turnId != null) {
                     appendQueryParameter("turnId", turnId.toString())
                 }
+                recoverySpec?.workspaceKey?.let { appendQueryParameter("workspaceKey", it) }
+                recoverySpec?.sessionMode?.let { appendQueryParameter("sessionMode", it.wireValue) }
             }
             .build()
 
-    fun openIntent(context: Context, sessionId: String, turnId: Long? = null): Intent =
-        Intent(Intent.ACTION_VIEW, uri(sessionId = sessionId, turnId = turnId), context, MainActivity::class.java)
+    fun openIntent(
+        context: Context,
+        sessionId: String,
+        turnId: Long? = null,
+        recoverySpec: ConversationRecoverySpec? = null,
+    ): Intent =
+        Intent(
+            Intent.ACTION_VIEW,
+            uri(sessionId = sessionId, turnId = turnId, recoverySpec = recoverySpec),
+            context,
+            MainActivity::class.java,
+        )
             .addCategory(Intent.CATEGORY_BROWSABLE)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
@@ -87,7 +112,9 @@ object ConversationNotificationRoute {
                 recoverySpec?.let { spec ->
                     putExtra(ConversationTurnService.EXTRA_PROJECT_ID, spec.projectId)
                     putExtra(ConversationTurnService.EXTRA_HOST_PATH, spec.hostPath)
+                    putExtra(ConversationTurnService.EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
                     putExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
+                    putExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY, spec.workspaceKey)
                 }
             }
     }

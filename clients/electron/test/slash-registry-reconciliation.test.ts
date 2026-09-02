@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { DESKTOP_COMMANDS } from '../src/renderer/bridge/desktopCommands';
+import {
+  ALL_DESKTOP_COMMANDS,
+  DESKTOP_COMMANDS,
+  DESKTOP_ENGINE_BUILTIN_COMMANDS,
+  DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS,
+} from '../src/renderer/bridge/desktopCommands';
 
 const REGISTER_RS = new URL('../../../lingxi-code/commands/core/src/register.rs', import.meta.url);
 const NAMES_RS = new URL('../../../lingxi-code/command-api/src/builtin_support/names.rs', import.meta.url);
@@ -50,32 +55,6 @@ function builtinCommandNames(): string[] {
     .flatMap((line) => [...line.matchAll(/"([a-z0-9-]+)"/g)].map((match) => match[1]!));
 }
 
-/**
- * Interactive-only names this sub-project deliberately does NOT handle, each
- * with where it goes. Deleting an entry without adding a desktop command turns
- * the gate red, which is the point.
- */
-const DEFERRED: Record<string, string> = {
-  background: 'not applicable to a GUI client (terminal detach)',
-  branch: 'sub-project 4',
-  'add-dir': 'sub-project 4',
-  cd: 'sub-project 4',
-  color: 'not applicable to a GUI client (terminal palette)',
-  copy: 'sub-project 4',
-  diff: 'sub-project 3',
-  focus: 'not applicable to a GUI client (terminal renderer)',
-  plan: 'sub-project 2',
-  plugin: 'sub-project 4',
-  'privacy-settings': 'sub-project 3',
-  rename: 'sub-project 2',
-  rewind: 'sub-project 2',
-  tasks: 'sub-project 3',
-  'terminal-setup': 'not applicable to a GUI client (terminal setup)',
-  tui: 'not applicable to a GUI client (terminal renderer)',
-  usage: 'sub-project 3',
-  'usage-credits': 'sub-project 3',
-};
-
 test('the extraction actually reads the engine registry', () => {
   // interactiveOnlyNames() carries its own red-proof assertions now (length
   // + anchors), so calling it here still catches a broken extraction; this
@@ -85,16 +64,35 @@ test('the extraction actually reads the engine registry', () => {
   assert.equal(builtins.length, 86, `expected the 86-name builtin table, got ${builtins.length}`);
 });
 
-test('every interactive-only engine command is handled by the desktop or explicitly deferred', () => {
-  const handled = new Set(DESKTOP_COMMANDS.map((command) => command.name));
+test('every interactive-only engine command has a Desktop execution disposition', () => {
+  const handled = new Set(ALL_DESKTOP_COMMANDS.map((command) => command.name));
+  const engine = new Set<string>(DESKTOP_ENGINE_BUILTIN_COMMANDS);
   const unaccounted = interactiveOnlyNames()
-    .filter((name) => !handled.has(name) && !(name in DEFERRED));
+    .filter((name) => !handled.has(name) && !engine.has(name));
 
   assert.deepEqual(
     unaccounted,
     [],
-    `these engine commands answer "interactive TUI mode only" on a desktop that could handle them: ${unaccounted.join(', ')}. Add a desktop command or an entry in DEFERRED.`,
+    `these engine commands still fall through to the TUI-only handler: ${unaccounted.join(', ')}.`,
   );
+});
+
+test('every locked builtin is exactly engine-backed, Desktop-backed, or unavailable', () => {
+  const local = new Set(DESKTOP_COMMANDS.map((command) => command.name));
+  const engine = new Set<string>(DESKTOP_ENGINE_BUILTIN_COMMANDS);
+  const unavailable = new Set(Object.keys(DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS));
+
+  for (const name of builtinCommandNames()) {
+    const count = Number(local.has(name)) + Number(engine.has(name)) + Number(unavailable.has(name));
+    assert.equal(count, 1, `/${name} must have exactly one Desktop disposition, got ${count}`);
+  }
+});
+
+test('unavailable compatibility handlers are directly resolvable but never advertised', () => {
+  const byName = new Map(ALL_DESKTOP_COMMANDS.map((command) => [command.name, command]));
+  for (const name of Object.keys(DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS)) {
+    assert.equal(byName.get(name)?.advertised, false, `/${name} must stay out of Desktop menus`);
+  }
 });
 
 test('no desktop command targets a name the engine does not have', () => {

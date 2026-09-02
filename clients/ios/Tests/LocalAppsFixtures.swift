@@ -47,10 +47,12 @@ func dataField(id: String) -> LocalAppDataField {
         title: String = "会话",
         modified: String = "2026-08-09T10:00:00Z",
         messageCount: UInt32 = 3,
-        kind: AppSessionKindDto = .conversation
+        kind: AppSessionKindDto = .conversation,
+        mode: SessionModeDto = .code
     ) -> AppSessionRowDto {
         AppSessionRowDto(
             uuid: uuid,
+            mode: mode,
             title: title,
             modifiedRfc3339: modified,
             messageCount: messageCount,

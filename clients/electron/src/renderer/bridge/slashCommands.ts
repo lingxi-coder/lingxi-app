@@ -1,5 +1,7 @@
 import type { SlashCommandDto } from '@lingxi/bridge-client';
 
+import { DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS } from './desktopCommands';
+
 export interface ActiveSlashCommand {
   start: number;
   end: number;
@@ -19,6 +21,10 @@ export function activeSlashCommand(text: string, cursor: number): ActiveSlashCom
 }
 
 function commandScore(command: SlashCommandDto, query: string): number | undefined {
+  if (
+    command.source === 'builtin'
+    && command.name in DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS
+  ) return undefined;
   const name = command.name.toLocaleLowerCase();
   const normalized = query.toLocaleLowerCase();
   const aliases = (command.aliases ?? []).map((alias) => alias.toLocaleLowerCase());
@@ -35,6 +41,16 @@ function commandScore(command: SlashCommandDto, query: string): number | undefin
   if (command.description.toLocaleLowerCase().includes(normalized)) return 30;
   if (command.source.toLocaleLowerCase().includes(normalized)) return 40;
   return undefined;
+}
+
+export function renderDesktopSlashHelp(commands: readonly SlashCommandDto[]): string {
+  const visible = filterSlashCommands(commands, '', 100);
+  if (visible.length === 0) return 'No Desktop commands are currently available.';
+  const width = Math.max(...visible.map((command) => command.name.length));
+  return [
+    'Commands:',
+    ...visible.map((command) => `  /${command.name.padEnd(width)}  ${slashMenuLabel(command)}`),
+  ].join('\n');
 }
 
 /** The compact menu label: `menu_description` when the engine supplied one. */

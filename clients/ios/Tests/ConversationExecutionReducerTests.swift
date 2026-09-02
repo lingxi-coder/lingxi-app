@@ -30,6 +30,7 @@ import SwiftUI
                 model: "",
                 appSandboxRoot: appSandboxRoot,
                 projectCwd: nil,
+                sessionMode: .code,
                 visionDelegationEnabled: true)
             return EngineConversationSource(
                 config: config,
@@ -497,7 +498,7 @@ import SwiftUI
                     header: nil
                 ))
             source.expectSessionResumeForTesting("new-session")
-            source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
             source.applyForTesting(
                 .toolUseResult(
                     id: "task-2",
@@ -794,7 +795,7 @@ import SwiftUI
             XCTAssertEqual(resumedSource.model.items, [.message(resumedMessage)])
             XCTAssertEqual(resumedSource.model.pendingPermissions, [permission])
             XCTAssertFalse(resumedSource.model.isNew)
-            resumedSource.applyForTesting(.sessionResumed(sessionId: "session-b", messages: []))
+            resumedSource.applyForTesting(.sessionResumed(sessionId: "session-b", mode: .code, messages: []))
             XCTAssertTrue(resumedSource.model.messages.isEmpty)
             XCTAssertTrue(resumedSource.model.items.isEmpty)
             XCTAssertEqual(resumedSource.model.pendingPermissions, [permission])
@@ -891,6 +892,7 @@ import SwiftUI
             source.expectSessionResumeForTesting("session-a")
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-a",
+                mode: .code,
                 messages: [
                     MessageDto(role: "user", blocks: [.text(text: "run")]),
                     MessageDto(role: "assistant", blocks: [
@@ -1591,7 +1593,7 @@ import SwiftUI
             source.model.expandedToolCalls = ["edit-1"]
 
             source.expectSessionResumeForTesting("session-z")
-            source.applyForTesting(.sessionResumed(sessionId: "session-z", messages: []))
+            source.applyForTesting(.sessionResumed(sessionId: "session-z", mode: .code, messages: []))
 
             XCTAssertTrue(source.model.planTasks.isEmpty,
                           "the plan belonged to the transcript we just replaced")

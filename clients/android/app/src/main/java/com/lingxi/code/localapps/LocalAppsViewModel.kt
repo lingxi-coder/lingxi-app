@@ -49,6 +49,8 @@ import com.lingxi.code.localapps.widget.NoopLocalAppWidgetSnapshotSync
 import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionCatalogStrings
+import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.toUi
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -283,6 +285,11 @@ class LocalAppsViewModel(
         viewModelScope.launch {
             sourceFlow.collectLatest { bound ->
                 source = bound
+                // Requests submitted to the previous source can never resolve:
+                // collectLatest cancels its event collector and RootScreen then
+                // closes that engine. Do not let their offsets suppress the new
+                // source's first-page requests.
+                sessionRequestOffsets.clear()
                 // The create claim does NOT survive a scope switch or a
                 // reconnect. `AppCreated` is a one-shot event on the source
                 // `collectLatest` just cancelled, so a create still in flight
@@ -713,8 +720,12 @@ class LocalAppsViewModel(
     }
 
     private fun requestSessions(appId: String, offset: ULong?) {
+        if (sessionRequestOffsets.containsKey(appId) && sessionRequestOffsets[appId] == offset) return
         sessionRequestOffsets[appId] = offset
-        submit(ClientCommand.ListAppSessions(appId = appId, offset = offset, limit = null))
+        submit(
+            ClientCommand.ListAppSessions(appId = appId, offset = offset, limit = null),
+            onFailure = { sessionRequestOffsets.remove(appId) },
+        )
     }
 
     private fun startManagedMcpAuthoring(appId: String) {
@@ -1585,6 +1596,7 @@ class LocalAppsViewModel(
             uuid = uuid,
             title = title,
             messageCount = messageCount.toInt(),
+            mode = mode.toUi(),
             modifiedRfc3339 = modifiedRfc3339,
             nowEpochSeconds = nowEpochSeconds,
             strings = sessionStrings,
@@ -1592,6 +1604,8 @@ class LocalAppsViewModel(
         return LocalAppSessionRow(
             uuid = base.uuid,
             title = base.title,
+            mode = base.mode,
+            modifiedAtEpochSeconds = base.modifiedAtEpochSeconds,
             relativeTime = base.relativeTime,
             messageCount = base.messageCount,
             isInit = kind == AppSessionKindDto.INIT,
@@ -1638,6 +1652,12 @@ class LocalAppsViewModel(
                 loading = false,
             )
         }
+        apps.asSequence()
+            .map { it.id }
+            .filter { appId ->
+                appId !in _uiState.value.appSessions && !sessionRequestOffsets.containsKey(appId)
+            }
+            .forEach { appId -> requestSessions(appId, offset = null) }
         publishWidgetSnapshot()
 
         // No claim here any more.

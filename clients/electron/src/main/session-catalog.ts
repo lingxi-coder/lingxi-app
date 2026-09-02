@@ -48,6 +48,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     title: row['title'],
     modified_rfc3339: row['modified_rfc3339'],
     message_count: messageCount,
+    mode: row['mode'] === 'chat' ? 'chat' : 'code',
     path: row['path'],
     empty_session: row['empty_session'],
   };

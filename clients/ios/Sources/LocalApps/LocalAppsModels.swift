@@ -708,6 +708,8 @@ struct LocalAppSessionRow: Identifiable, Hashable, Sendable {
     /// Bare session uuid — also the resume key.
     let uuid: String
     let title: String
+    let mode: SessionMode
+    let modifiedAt: Date?
     /// Relative display form of the wire's RFC 3339 `modified` stamp.
     let relativeTime: String
     let messageCount: Int

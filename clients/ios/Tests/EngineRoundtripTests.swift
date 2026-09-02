@@ -188,6 +188,7 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: snapshot.defaultModelID ?? "",
+                sessionMode: .code,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,

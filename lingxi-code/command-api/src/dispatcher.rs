@@ -165,6 +165,10 @@ pub struct RegistrySlashDispatcher {
     mcp_prompt_resolver: Option<McpPromptResolver>,
     /// Best-effort observer for successful prompt-skill dispatches.
     skill_invocation_observer: Option<SkillInvocationObserver>,
+    /// Whether builtin `InjectMessage` results become model turns. Thin clients
+    /// enable this because they have no TUI loop to consume injected prompts;
+    /// the default stays display-only for existing embedded/mobile callers.
+    injected_messages_as_turns: bool,
 }
 
 impl RegistrySlashDispatcher {
@@ -179,7 +183,15 @@ impl RegistrySlashDispatcher {
             background_prompt_launcher: None,
             mcp_prompt_resolver: None,
             skill_invocation_observer: None,
+            injected_messages_as_turns: false,
         }
+    }
+
+    /// Make builtin prompt-injection commands run through the host turn driver.
+    #[must_use]
+    pub fn with_injected_messages_as_turns(mut self) -> Self {
+        self.injected_messages_as_turns = true;
+        self
     }
 
     /// Wire the embedded-shell-expansion provider (#3). After this, expanding a
@@ -326,6 +338,15 @@ impl RegistrySlashDispatcher {
             background_prompt_launcher: self.background_prompt_launcher.clone(),
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
             skill_invocation_observer: self.skill_invocation_observer.clone(),
+            injected_messages_as_turns: self.injected_messages_as_turns,
+        }
+    }
+
+    fn injected_message_result(&self, content: String) -> SlashDispatchResult {
+        if self.injected_messages_as_turns {
+            SlashDispatchResult::RunAsTurn { prompt: content }
+        } else {
+            SlashDispatchResult::Handled { display: content }
         }
     }
 
@@ -658,13 +679,13 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         )
                         .await
                         {
-                            Ok(expanded) => SlashDispatchResult::Handled { display: expanded },
+                            Ok(expanded) => self.injected_message_result(expanded),
                             Err(e) => SlashDispatchResult::Handled {
                                 display: format!("{} expansion failed: {e}", command.name),
                             },
                         }
                     }
-                    _ => SlashDispatchResult::Handled { display: content },
+                    _ => self.injected_message_result(content),
                 }
             }
             CommandResult::RequestConfirmation { prompt, .. } => {
@@ -1822,6 +1843,21 @@ mod tests {
                 assert_eq!(display, "commit: !`git status` now");
             }
             other => panic!("expected verbatim InjectMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn thin_client_builtin_injectmessage_runs_as_a_turn() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_injected_messages_as_turns();
+
+        match dispatcher.dispatch("/commit").await {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt, "commit: !`git status` now");
+            }
+            other => panic!("expected thin-client InjectMessage turn, got {other:?}"),
         }
     }
 

@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
-test('the nav declares all fifteen pages across four groups', () => {
-  assert.equal(SETTINGS_NAV.length, 15);
+test('the nav declares all sixteen pages across four groups', () => {
+  assert.equal(SETTINGS_NAV.length, 16);
   assert.deepEqual(
     [...new Set(SETTINGS_NAV.map((p) => p.group))],
     ['个人', '模型与服务', '编码', '高级'],
@@ -33,7 +33,7 @@ test('layered is a data property, not a group property — three pages break the
 });
 
 test('client-owned pages do not need the engine', () => {
-  for (const id of ['appearance', 'projects', 'diagnostics', 'about', 'voice']) {
+  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice']) {
     assert.equal(
       SETTINGS_NAV.find((p) => p.id === id)?.needsEngine, false,
       `${id} lives in the client and must stay usable with no engine`,
@@ -65,7 +65,7 @@ test('search finds nothing for a key no page declares', () => {
 // `implemented: false` page left to demonstrate — see
 // `settings-screen.test.mjs`'s `page-content` scenario, which now checks
 // `voice` renders real content the same way it already checks the other
-// fourteen pages.
+// fifteen pages.
 test('every declared settings page is implemented', () => {
   for (const page of SETTINGS_NAV) {
     assert.equal(page.implemented, true, `${page.id}.implemented must be true`);

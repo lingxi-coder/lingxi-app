@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = join(import.meta.dirname, '../../..');
@@ -30,11 +30,22 @@ test('the mock settings pages are gone', () => {
   assert.deepEqual(hits('SettingsPrivacyPage'), []);
   assert.deepEqual(hits('SettingsCodePage'), []);
   assert.deepEqual(hits('SettingsGeneralPage'), []);
-  assert.deepEqual(hits('SettingsPage'), []);
 });
 
 test('BetaSettings is gone', () => {
   assert.deepEqual(hits('BetaSettings'), []);
+});
+
+test('the legacy mock shell and static demo data are gone', () => {
+  for (const path of [
+    'clients/electron/src/renderer/components/Sidebar.tsx',
+    'clients/electron/src/renderer/components/TopBar.tsx',
+    'clients/electron/src/renderer/components/RightPanel.tsx',
+    'clients/electron/src/renderer/components/Composer.tsx',
+    'clients/electron/src/renderer/components/BackgroundTasks.tsx',
+    'clients/electron/src/renderer/components/pickers.tsx',
+    'clients/electron/src/renderer/data/index.ts',
+  ]) assert.equal(existsSync(join(root, path)), false, `${path} must not be reintroduced`);
 });
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::listings::SessionModeDto;
+
 fn default_git_version_control() -> bool {
     true
 }
@@ -175,6 +177,8 @@ pub enum AppSessionKindDto {
 pub struct AppSessionRowDto {
     /// Bare session uuid (the resume key).
     pub uuid: String,
+    /// Session capability mode (Chat vs Code) restored from transcript metadata.
+    pub mode: SessionModeDto,
     /// Display title (custom > ai > summary > first-prompt derivation).
     pub title: String,
     /// Last-modified time, RFC 3339 seconds.

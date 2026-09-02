@@ -176,6 +176,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
             apiKey: Keychain.get(.apiKey) ?? "",
             model: snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
+            sessionMode: .code,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             appSandboxRoot: appSandboxRoot,
             projectCwd: scope.projectCwd,

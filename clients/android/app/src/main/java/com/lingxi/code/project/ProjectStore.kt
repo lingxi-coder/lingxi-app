@@ -102,18 +102,27 @@ class ProjectStore private constructor(
                             title = row.title,
                             messageCount = row.messageCount,
                             relativeTime = row.relativeTime,
-                            updatedAtEpochMillis = timestamp - index,
+                            updatedAtEpochMillis = row.modifiedAtEpochSeconds
+                                ?.takeIf { it > 0L }
+                                ?.times(1000L)
+                                ?: (timestamp - index),
+                            mode = row.mode,
                         )
                     },
                 ).also(::publishRepositoryState)
             }
         }
 
-    suspend fun recordStartedSession(projectId: String?, sessionId: String, title: String) {
+    suspend fun recordStartedSession(
+        projectId: String?,
+        sessionId: String,
+        title: String,
+        mode: com.lingxi.code.model.SessionMode = com.lingxi.code.model.SessionMode.Code,
+    ) {
         withContext(Dispatchers.IO) {
             repositoryMutex.withLock {
                 publishRepositoryState(
-                    repository.recordStartedSession(projectId, sessionId, title),
+                    repository.recordStartedSession(projectId, sessionId, title, mode),
                 )
             }
         }

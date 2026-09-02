@@ -43,13 +43,23 @@ fn mobile_tool_list_snapshot() {
             "mobile tool set must not include `{forbidden}`"
         );
     }
-    // Mobile-exclusive tools and the mobile-safe LSP surface must be present.
-    for required in ["LSP", "camera", "voice", "share"] {
+    // Mobile-exclusive tools must always be present. LSP is part of the
+    // production UniFFI profile; the default host-only test build intentionally
+    // omits its optional runtime dependency.
+    for required in ["camera", "voice", "share"] {
         assert!(
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"
         );
     }
+    #[cfg(feature = "uniffi")]
+    assert!(
+        names.iter().any(|name| name == "LSP"),
+        "the production mobile tool set must include `LSP`"
+    );
 
+    #[cfg(feature = "uniffi")]
     insta::assert_yaml_snapshot!("mobile_tool_list", names);
+    #[cfg(not(feature = "uniffi"))]
+    insta::assert_yaml_snapshot!("mobile_tool_list_host_only", names);
 }

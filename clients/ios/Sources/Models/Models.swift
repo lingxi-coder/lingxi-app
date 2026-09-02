@@ -515,8 +515,12 @@ struct EngineSession: Identifiable, Equatable {
     /// The shared catalog title (≤ 200 Unicode characters); the drawer may
     /// truncate it visually without changing the UUID-backed identity.
     let title: String
+    /// Session capability profile used for Chat/Code workspace filtering.
+    let mode: SessionMode
     /// Number of visible user/assistant messages (`SessionRowDto.message_count`).
     let messageCount: Int
+    /// Absolute modified time used for deterministic workspace/session sorting.
+    let modifiedAt: Date?
     /// A short, relative "time ago" string derived from `modified_rfc3339`.
     let relativeTime: String
 
@@ -543,7 +547,7 @@ enum RelativeTime {
     /// `rfc3339` → a short relative label. Unparseable input returns the raw
     /// string (trimmed) so the row degrades gracefully rather than going blank.
     static func format(_ rfc3339: String, now: Date = Date()) -> String {
-        let date = parser.date(from: rfc3339) ?? parserNoFraction.date(from: rfc3339)
+        let date = parse(rfc3339)
         guard let date else {
             return rfc3339.isEmpty ? "—" : rfc3339
         }
@@ -558,6 +562,10 @@ enum RelativeTime {
         fmt.locale = Locale(identifier: "zh_CN")
         fmt.dateFormat = "M月d日"
         return fmt.string(from: date)
+    }
+
+    static func parse(_ rfc3339: String) -> Date? {
+        parser.date(from: rfc3339) ?? parserNoFraction.date(from: rfc3339)
     }
 }
 

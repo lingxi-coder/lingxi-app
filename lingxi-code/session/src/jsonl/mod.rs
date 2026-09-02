@@ -13,6 +13,36 @@
 //! - `title` — M5-08 first-user-message title extraction.
 //! - `transcript_compact` — SC-08 transcript-file rewrite (`performCompactTranscript`).
 
+/// Persisted capability profile for one immutable session transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionMode {
+    /// Read-only conversational profile.
+    Chat,
+    /// Full development profile and legacy fallback.
+    Code,
+}
+
+impl SessionMode {
+    /// Stable JSONL wire value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Code => "code",
+        }
+    }
+
+    /// Parse a stable JSONL wire value.
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "chat" => Some(Self::Chat),
+            "code" => Some(Self::Code),
+            _ => None,
+        }
+    }
+}
+
 pub mod djb2;
 pub mod loader;
 pub mod path;

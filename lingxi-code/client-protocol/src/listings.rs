@@ -50,6 +50,17 @@ use serde::{Deserialize, Serialize};
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
+/// Which capability profile a mobile session runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum SessionModeDto {
+    /// Read-only conversational profile.
+    Chat,
+    /// Full development profile.
+    Code,
+}
+
 /// One resumable-session row — the lowered `SessionMetadata`
 /// (`session/src/jsonl/loader.rs:23`). Carried by [`crate::events::ClientEvent::SessionList`].
 ///
@@ -68,6 +79,8 @@ pub struct SessionRowDto {
     pub modified_rfc3339: String,
     /// Number of user/assistant messages visible in the restored conversation.
     pub message_count: u32,
+    /// Capability profile this session persists under.
+    pub mode: SessionModeDto,
     /// Absolute path to the `.jsonl` file — mapped directly from
     /// `SessionMetadata.path` so a client can request a re-load.
     pub path: String,

@@ -1154,6 +1154,7 @@ private final class ControllerConversationSource: ConversationSource {
     }
 
     let model = ConversationModel()
+    let sessionMode: SessionMode = .code
     private(set) var sentTexts: [String] = []
     private(set) var lastToken: ConversationTurnToken?
     private(set) var cancelCalls = 0

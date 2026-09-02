@@ -60,8 +60,8 @@ use client_protocol::events::{
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto,
-    TaskRowDto, TaskStatusDto,
+    SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
+    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
@@ -357,6 +357,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/session_started.json",
             ClientEvent::SessionStarted {
                 session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                mode: SessionModeDto::Code,
             },
         ),
         ("event/session_ended.json", ClientEvent::SessionEnded),
@@ -364,6 +365,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/session_resumed.json",
             ClientEvent::SessionResumed {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                mode: SessionModeDto::Code,
                 // The restored transcript, OLDEST-FIRST. The canonical golden
                 // carries a two-message conversation (a user turn + the
                 // assistant block set) so the wire shape pins the lowered
@@ -378,6 +380,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     },
                     canonical_message(),
                 ],
+            },
+        ),
+        (
+            "event/session_forked.json",
+            ClientEvent::SessionForked {
+                source_session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                session_id: "33333333-3333-4333-8333-333333333333".to_string(),
+                mode: SessionModeDto::Chat,
             },
         ),
         (
@@ -439,6 +449,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     title: "Implement the parser".to_string(),
                     modified_rfc3339: "2026-06-02T12:00:00Z".to_string(),
                     message_count: 17,
+                    mode: SessionModeDto::Code,
                     path: "/home/dev/.lingxi/sessions/33333333.jsonl".to_string(),
                 }],
             },
@@ -786,6 +797,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         title: "初始化".to_string(),
                         modified_rfc3339: "2026-08-09T12:00:00Z".to_string(),
                         message_count: 12,
+                        mode: SessionModeDto::Code,
                         kind: AppSessionKindDto::Init,
                     },
                     AppSessionRowDto {
@@ -793,6 +805,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         title: "加一个统计页".to_string(),
                         modified_rfc3339: "2026-08-09T13:30:00Z".to_string(),
                         message_count: 7,
+                        mode: SessionModeDto::Chat,
                         kind: AppSessionKindDto::Conversation,
                     },
                 ],
@@ -1287,6 +1300,13 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/list_sessions.json",
             ClientCommand::ListSessions { limit: Some(20) },
         ),
+        (
+            "command/fork_session.json",
+            ClientCommand::ForkSession {
+                session_id: "44444444-4444-4444-8444-444444444444".to_string(),
+                target_mode: SessionModeDto::Chat,
+            },
+        ),
         ("command/login.json", ClientCommand::Login),
         ("command/logout.json", ClientCommand::Logout),
         ("command/force_compact.json", ClientCommand::ForceCompact),
@@ -1400,6 +1420,13 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 app_id: "habits-1a2b".to_string(),
                 approval_token: "approval-00000001".to_string(),
                 approved: true,
+            },
+        ),
+        (
+            "command/resolve_app_runtime_profile_selection.json",
+            ClientCommand::ResolveAppRuntimeProfileSelection {
+                request_id: "runtime-00000001".to_string(),
+                selected_family: AppRuntimeProfileDto::ReactDom,
             },
         ),
         (

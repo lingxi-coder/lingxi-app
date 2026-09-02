@@ -355,9 +355,12 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
     ))
 }
 
-fn parse_workflow_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, FusionError> {
+fn parse_workflow_fusion_preset(
+    raw: Option<&str>,
+    default_preset: FusionPreset,
+) -> Result<FusionPreset, FusionError> {
     match raw {
-        None => Ok(FusionPreset::Quality),
+        None => Ok(default_preset),
         Some("quality") => Ok(FusionPreset::Quality),
         Some("fast") => Ok(FusionPreset::Fast),
         Some(other) => Err(FusionError::InvalidRequest(format!(
@@ -391,20 +394,20 @@ fn parse_workflow_fusion_request(
     if !executor.agent_surface().enabled {
         return Err(FusionError::Disabled);
     }
-    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json)
-        .map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
-    let preset = parse_workflow_fusion_preset(opts.preset.as_deref())?;
+    let opts: WorkflowFusionOpts =
+        serde_json::from_str(opts_json).map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
+    let surface = executor.agent_surface();
+    let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .ok_or_else(|| FusionError::InvalidRequest("workflow parent model is unavailable".into()))?;
+    let parent_profile = executor
+        .resolve_parent_profile(parent_model, parent_model_profile)
         .ok_or_else(|| {
-            FusionError::InvalidRequest("workflow parent model is unavailable".into())
-        })?;
-    let parent_profile = parent_model_profile
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            FusionError::InvalidRequest("workflow parent model profile is unavailable".into())
+            FusionError::InvalidRequest(format!(
+                "workflow parent model profile is unavailable for `{parent_model}`"
+            ))
         })?;
     Ok(platform_api::FusionRequest {
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
@@ -413,12 +416,10 @@ fn parse_workflow_fusion_request(
         preset,
         models: opts.models,
         dimensions: opts.dimensions.unwrap_or_default(),
-        partial_ok: opts
-            .partial_ok
-            .unwrap_or(executor.agent_surface().default_partial_ok),
+        partial_ok: opts.partial_ok.unwrap_or(surface.default_partial_ok),
         max_panel: opts.max_panel,
         cross_provider: opts.cross_provider.unwrap_or(false),
-        parent_profile: parent_profile.to_string(),
+        parent_profile,
         parent_model: parent_model.to_string(),
         conversation_id: None,
         workflow_run_id: Some(run_id.to_string()),

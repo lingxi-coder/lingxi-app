@@ -6,10 +6,9 @@
 //! composition root into that orchestrator, not onto this trait.
 //!
 //! Fusion panels are ordinary hidden subagents: they inherit the parent
-//! session's tool invoker, budget, cancellation, and permission surface. In
-//! particular, panel `Bash` calls are governed by the same live session
-//! permission mode/rules as any other subagent, not by a Fusion-specific
-//! read-only downgrade.
+//! session's budget and cancellation handles. Their built-in definition uses
+//! an explicit read-only tool allow-list, so deliberation cannot mutate the
+//! parent workspace even when the parent session permits writes.
 
 use crate::budget::BudgetEnforcerHandle;
 use crate::subagent_spawn::SubagentInheritance;
@@ -668,6 +667,22 @@ pub trait FusionExecutor: Send + Sync {
     /// Agent listing / intercept gate. Default is disabled (inert).
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()
+    }
+
+    /// Resolve the provider profile for a parent model.
+    ///
+    /// The default accepts only an explicit non-empty profile. Production
+    /// executors may fall back to their live model catalog for resumed sessions
+    /// whose persisted selection contains only a bare model id.
+    fn resolve_parent_profile(
+        &self,
+        _parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        explicit_profile
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .map(str::to_string)
     }
 
     /// Workflow-global `fusion()` call cap for one workflow run.

@@ -684,7 +684,13 @@ fn fusion_request_from_agent(
     parsed: &AgentToolInput,
     ctx: &ToolUseContext,
     surface: FusionAgentSurface,
+    executor: &dyn FusionExecutor,
 ) -> Result<FusionRequest, ToolError> {
+    if parsed.cross_provider == Some(true) && !surface.allow_cross_provider {
+        return Err(ToolError::InvalidInput(
+            platform_api::FusionError::CrossProviderDenied.to_string(),
+        ));
+    }
     let preset = match parsed.preset.as_deref() {
         None => surface.default_preset,
         Some(raw) => parse_fusion_preset(Some(raw))?,
@@ -697,11 +703,18 @@ fn fusion_request_from_agent(
     let dimensions = parsed.dimensions.clone().unwrap_or_default();
     let parent_model =
         main_loop_model_parent(ctx).unwrap_or_else(|| ctx.options.main_loop_model.clone());
-    let parent_profile = ctx
+    let routed_profile = ctx
         .options
         .model_profile
         .clone()
         .or_else(|| fallback_profile.and_then(|resolve| resolve(&ctx.options.main_loop_model)));
+    let parent_profile = executor
+        .resolve_parent_profile(&parent_model, routed_profile.as_deref())
+        .ok_or_else(|| {
+            ToolError::InvalidInput(format!(
+                "fusion parent model profile is unavailable for `{parent_model}`"
+            ))
+        })?;
     Ok(FusionRequest {
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Agent,
@@ -711,8 +724,8 @@ fn fusion_request_from_agent(
         dimensions,
         partial_ok: parsed.partial_ok.unwrap_or(surface.default_partial_ok),
         max_panel: parsed.max_panel,
-        cross_provider: parsed.cross_provider == Some(true) && surface.allow_cross_provider,
-        parent_profile: parent_profile.unwrap_or_default(),
+        cross_provider: parsed.cross_provider.unwrap_or(false),
+        parent_profile,
         parent_model,
         conversation_id: None,
         workflow_run_id: None,
@@ -919,7 +932,7 @@ impl AgentTool {
         agents.push(SubagentListingEntry {
             agent_type: FUSION_AGENT_TYPE.to_string(),
             when_to_use: FUSION_WHEN_TO_USE.to_string(),
-            tools_description: "Fusion deliberation (read-mostly panel)".to_string(),
+            tools_description: "Fusion deliberation (read-only panel)".to_string(),
         });
     }
 
@@ -994,6 +1007,7 @@ impl AgentTool {
             &parsed,
             &ctx,
             surface,
+            executor.as_ref(),
         )?;
         let panel_n = u64::from(fusion_panel_count(&parsed, surface));
         let cap = max_subagents_per_session();

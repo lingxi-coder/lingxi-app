@@ -3,6 +3,7 @@
 use super::*;
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::CatalogModel;
+use crate::model_resolver::ResolvedPanel;
 use async_trait::async_trait;
 use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
@@ -14,7 +15,8 @@ use platform_api::{
     EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision, FusionError, FusionExecutor,
     FusionInheritance, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
     FusionPreset, FusionRecommendation, FusionRequest, FusionStatus, PanelClaim, PanelEvidence,
-    PanelPosition, PanelReport, PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
+    PanelPosition, PanelReport, PanelRunStatus, RiskSeverity, WorkflowQueryWatchdog,
+    DEFAULT_FUSION_DIMENSIONS,
 };
 use protocol::AgentId;
 use serde_json::{json, Value};
@@ -483,6 +485,39 @@ fn orch_scripted(spawner: Arc<FakeSpawner>, side: Arc<ScriptedAnalyst>) -> Fusio
     FusionOrchestrator::new(spawner, side, test_config(), Arc::new(catalog()))
 }
 
+#[test]
+fn parent_profile_resolution_prefers_session_identity_then_catalog_fallback() {
+    let orchestrator = orch_scripted(
+        FakeSpawner::new(HashMap::new()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    );
+
+    assert_eq!(
+        orchestrator.resolve_parent_profile("gpt-5.6-terra", Some("session-profile")),
+        Some("session-profile".into())
+    );
+    assert_eq!(
+        orchestrator.resolve_parent_profile("gpt-5.6-terra", None),
+        Some("openai".into())
+    );
+    assert_eq!(orchestrator.resolve_parent_profile("unknown", None), None);
+
+    let mut ambiguous_catalog = catalog();
+    ambiguous_catalog.push(CatalogModel {
+        profile: "copilot".into(),
+        model: "gpt-5.6-terra".into(),
+        hints: FusionModelHints::default(),
+        structured_output: true,
+    });
+    let ambiguous = FusionOrchestrator::new(
+        FakeSpawner::new(HashMap::new()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        test_config(),
+        Arc::new(ambiguous_catalog),
+    );
+    assert_eq!(ambiguous.resolve_parent_profile("gpt-5.6-terra", None), None);
+}
+
 async fn orch_with_telemetry(
     spawner: Arc<FakeSpawner>,
     side: Arc<dyn SideQueryClient>,
@@ -800,6 +835,133 @@ async fn cancel_joins_all_panel_tasks() {
             .collect::<Vec<_>>(),
         vec![telemetry::tengu::fusion::CANCELLED]
     );
+}
+
+struct WatchdogSpawner {
+    timeout: bool,
+    seen: Mutex<Vec<WorkflowQueryWatchdog>>,
+}
+
+impl WatchdogSpawner {
+    fn new(timeout: bool) -> Arc<Self> {
+        Arc::new(Self {
+            timeout,
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for WatchdogSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        unreachable!("run_panels must use the provider-stream watchdog path")
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        _observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.seen.lock().unwrap().push(watchdog);
+        if self.timeout {
+            return Ok(SubagentResult::Failed {
+                agent_id: AgentId::new(),
+                reason: format!(
+                    "{} workflow model query stalled while waiting for the next response event for {}ms",
+                    platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
+                    watchdog.stall_timeout_ms
+                ),
+            });
+        }
+        // The production watchdog resets on every provider stream event. A
+        // healthy response may therefore outlive one idle interval in total.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        Ok(SubagentResult::Completed {
+            agent_id: AgentId::new(),
+            content: serde_json::to_value(report("heartbeat")).unwrap(),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 60,
+            total_tokens: 0,
+            assistant_message_count: 1,
+            response_char_count: 1,
+            last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
+        })
+    }
+}
+
+fn two_resolved_panels() -> Vec<ResolvedPanel> {
+    vec![
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "model-a".into(),
+        },
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "model-b".into(),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn panel_idle_timeout_stops_spawns_that_make_no_progress() {
+    let mut config = test_config();
+    config.panel_idle_timeout_ms = 25;
+    config.panel_total_timeout_ms = 500;
+
+    let spawner = WatchdogSpawner::new(true);
+    let panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        "task",
+        &two_resolved_panels(),
+        "fu_idle",
+    )
+    .await
+    .expect("panel collection");
+
+    assert!(panels.iter().all(|panel| {
+        panel.status == PanelRunStatus::TimedOut
+            && panel.error_category.as_deref() == Some("idle_timeout")
+    }));
+    assert!(spawner.seen.lock().unwrap().iter().all(|watchdog| {
+        watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0
+    }));
+}
+
+#[tokio::test]
+async fn provider_stream_progress_can_outlive_one_idle_interval_in_total() {
+    let mut config = test_config();
+    config.panel_idle_timeout_ms = 25;
+    config.panel_total_timeout_ms = 250;
+
+    let spawner = WatchdogSpawner::new(false);
+    let panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        "task",
+        &two_resolved_panels(),
+        "fu_heartbeat",
+    )
+    .await
+    .expect("panel collection");
+
+    assert!(panels
+        .iter()
+        .all(|panel| panel.status == PanelRunStatus::Completed));
+    assert!(spawner.seen.lock().unwrap().iter().all(|watchdog| {
+        watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0
+    }));
 }
 
 #[tokio::test]

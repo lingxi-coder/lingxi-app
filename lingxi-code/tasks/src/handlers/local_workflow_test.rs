@@ -309,6 +309,16 @@ impl FusionExecutor for ImmediateFusionExecutor {
     fn workflow_fusion_call_cap(&self) -> u32 {
         self.cap
     }
+
+    fn resolve_parent_profile(
+        &self,
+        parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        explicit_profile
+            .map(str::to_string)
+            .or_else(|| (parent_model == "gpt-5.4").then(|| "openai".into()))
+    }
 }
 
 struct BlockingFusionExecutor {
@@ -384,6 +394,32 @@ fn workflow_fusion_result() -> FusionResult {
         timing: FusionTiming::default(),
         egress_profiles: vec!["openai".into()],
     }
+}
+
+#[test]
+fn workflow_fusion_uses_runtime_preset_and_resolves_a_missing_parent_profile() {
+    let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            default_preset: platform_api::FusionPreset::Fast,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+
+    let request = parse_workflow_fusion_request(
+        Some(&executor),
+        "review this",
+        "{}",
+        "wf_fusion",
+        Some("gpt-5.4"),
+        None,
+    )
+    .expect("runtime defaults and provider fallback");
+
+    assert_eq!(request.preset, platform_api::FusionPreset::Fast);
+    assert_eq!(request.parent_profile, "openai");
 }
 
 #[async_trait]

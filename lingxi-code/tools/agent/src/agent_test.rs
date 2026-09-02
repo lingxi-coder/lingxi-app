@@ -653,6 +653,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..platform_api::FusionAgentSurface::default()
             }
         }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
     }
 
     struct CapturingFusion {
@@ -846,6 +856,69 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].parent_model, "gpt-5.6-sol");
         assert_eq!(seen[0].parent_profile, "openai");
+    }
+
+    #[tokio::test]
+    async fn fusion_agent_rejects_disallowed_cross_provider_before_executor_runs() {
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ))
+        .with_fusion(fusion.clone());
+
+        let error = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion",
+                    "cross_provider": true
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("disallowed egress must reject");
+
+        assert!(error
+            .to_string()
+            .contains("cross-provider fusion is not allowed"));
+        assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fusion_agent_resolves_a_missing_parent_profile_from_the_executor() {
+        let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
+            "description": "deliberate",
+            "prompt": "review this",
+            "subagent_type": "fusion"
+        }))
+        .unwrap();
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let fusion = ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let request = fusion_request_from_agent(
+            None,
+            &parsed,
+            &ctx,
+            fusion.agent_surface(),
+            &fusion,
+        )
+        .expect("profile fallback");
+
+        assert_eq!(request.parent_model, "test");
+        assert_eq!(request.parent_profile, "resolved-profile");
     }
 
     #[test]

@@ -698,6 +698,10 @@ pub fn should_inject_agent_list_in_messages() -> bool {
 /// this key, so the two payload kinds never collide.
 pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message__";
 
+/// Stable prefix used when the provider-stream idle watchdog terminates a
+/// subagent. Callers use this category without exposing provider error text.
+pub const SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX: &str = "subagent workflow query timeout:";
+
 /// Claude Code 2.1.217's default number of concurrently-running subagents.
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 20;
 
@@ -807,11 +811,12 @@ pub trait SubagentSpawner: Send + Sync {
         self.spawn_with_progress(request, inherit, progress).await
     }
 
-    /// Workflow-only spawn path with a bounded idle watchdog around model
-    /// stream establishment and each response event. The default delegates to
-    /// [`Self::spawn_with_observer`], preserving compatibility for mock and
-    /// non-pool spawners; the production pool implementation applies `watchdog`
-    /// to this child only.
+    /// Spawn path with a bounded idle watchdog around model stream
+    /// establishment and each response event. Workflow and Fusion use this
+    /// path; the watchdog deliberately excludes tool execution. The default
+    /// delegates to [`Self::spawn_with_observer`], preserving compatibility for
+    /// mock and non-pool spawners; the production pool implementation applies
+    /// `watchdog` to this child only.
     async fn spawn_workflow_with_observer(
         &self,
         request: SubagentSpawnRequest,

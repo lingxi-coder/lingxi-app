@@ -16,8 +16,8 @@ pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-
 /// Parsed `/fusion` flags plus the remaining prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionSlashArgs {
-    /// Panel preset. Defaults to quality when omitted.
-    pub preset: FusionPreset,
+    /// Explicit panel preset. `None` = use the runtime Fusion default.
+    pub preset: Option<FusionPreset>,
     /// `None` = use `slashCrossProviderDefault`.
     pub cross_provider: Option<bool>,
     /// Explicit panel models.
@@ -136,7 +136,7 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
         return Err(FUSION_SLASH_USAGE.to_string());
     }
     Ok(FusionSlashArgs {
-        preset: preset.unwrap_or(FusionPreset::Quality),
+        preset,
         cross_provider,
         models,
         dimensions,
@@ -154,6 +154,7 @@ pub fn fusion_request_from_slash(
     parent_model: String,
     conversation_id: String,
     slash_cross_provider_default: bool,
+    default_preset: FusionPreset,
     default_partial_ok: bool,
 ) -> FusionRequest {
     let dimensions = parsed.dimensions.unwrap_or_else(|| {
@@ -166,7 +167,7 @@ pub fn fusion_request_from_slash(
         schema_version: FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,
         prompt: parsed.prompt,
-        preset: parsed.preset,
+        preset: parsed.preset.unwrap_or(default_preset),
         models: parsed.models,
         dimensions,
         partial_ok: parsed.partial_ok.unwrap_or(default_partial_ok),
@@ -295,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_quality_and_cross_deferred() {
+    fn omitted_preset_and_cross_provider_are_deferred_to_runtime_settings() {
         let args = parse("/fusion review the plan").unwrap();
-        assert_eq!(args.preset, FusionPreset::Quality);
+        assert_eq!(args.preset, None);
         assert_eq!(args.cross_provider, None);
         assert_eq!(args.prompt, "review the plan");
     }
@@ -305,7 +306,7 @@ mod tests {
     #[test]
     fn same_provider_and_fast() {
         let args = parse("/fusion --fast --same-provider check locking").unwrap();
-        assert_eq!(args.preset, FusionPreset::Fast);
+        assert_eq!(args.preset, Some(FusionPreset::Fast));
         assert_eq!(args.cross_provider, Some(false));
         assert_eq!(args.prompt, "check locking");
     }
@@ -338,9 +339,11 @@ mod tests {
             "claude-sonnet-5".into(),
             "conv".into(),
             true,
+            FusionPreset::Fast,
             true,
         );
         assert!(req.cross_provider);
+        assert_eq!(req.preset, FusionPreset::Fast);
         assert_eq!(req.origin, FusionOrigin::Slash);
         assert_eq!(req.conversation_id.as_deref(), Some("conv"));
     }
@@ -403,6 +406,7 @@ mod tests {
             "claude-sonnet-5".into(),
             "conv".into(),
             true,
+            FusionPreset::Quality,
             false,
         );
         assert!(!req.partial_ok);

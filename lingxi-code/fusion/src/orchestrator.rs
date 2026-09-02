@@ -652,13 +652,36 @@ impl FusionExecutor for FusionOrchestrator {
         FusionAgentSurface {
             enabled: self.config.enabled,
             allow_cross_provider: self.config.allow_cross_provider_for_agent,
-            default_preset: platform_api::FusionPreset::Quality,
+            default_preset: self.config.default_preset,
             default_partial_ok: self.config.partial_ok,
             quality_panel_count: self.config.quality_panel_count,
             fast_panel_count: self.config.fast_panel_count,
             max_panel: self.config.max_panel,
             slash_cross_provider_default: self.config.slash_cross_provider_default,
         }
+    }
+
+    fn resolve_parent_profile(
+        &self,
+        parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        explicit_profile
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let mut profiles = self
+                    .catalog
+                    .list()
+                    .into_iter()
+                    .filter(|row| row.model == parent_model)
+                    .map(|row| row.profile)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter();
+                let profile = profiles.next()?;
+                profiles.next().is_none().then_some(profile)
+            })
     }
 
     fn workflow_fusion_call_cap(&self) -> u32 {

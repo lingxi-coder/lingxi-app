@@ -1513,7 +1513,10 @@ async fn run_subagent_loop(
                             &history,
                             &mut transcript_written,
                             agent_id,
-                            format!("subagent workflow query timeout: {e}"),
+                            format!(
+                                "{} {e}",
+                                platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
+                            ),
                         )
                         .await;
                         return;

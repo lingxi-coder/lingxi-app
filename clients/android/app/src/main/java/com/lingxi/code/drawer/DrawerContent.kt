@@ -239,7 +239,6 @@ fun DrawerContent(
             chats = chatWorkspaceGroups.sumOf { it.sessions.size },
             projects = codeWorkspaceGroups.sumOf { it.sessions.size },
             crons = cronWorkspaceGroups.sumOf { it.crons.size },
-            apps = appsCount,
             onSelect = onSelectSection,
         )
 
@@ -253,47 +252,53 @@ fun DrawerContent(
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
             when (ui.section) {
-                DrawerSection.Chat -> WorkspaceGroupsSection(
-                    groups = chatWorkspaceGroups,
-                    mode = SessionMode.Chat,
-                    activeWs = ui.activeWs,
-                    activeSession = ui.activeSession,
-                    onSelectWorkspace = ui::selectWorkspace,
-                    isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Chat, it) },
-                    onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Chat, it) },
-                    isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Chat, it) != null },
-                    onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Chat, it) },
-                    onSelectGlobalSession = { onResumeSession(it.uuid) },
-                    onSelectProjectSession = onSelectProjectSession,
-                    onSelectLocalAppSession = onSelectLocalAppSession,
-                    onNewGlobalSession = onNewGlobalSession,
-                    onNewProjectSession = onNewProjectSession,
-                    onNewLocalAppSession = onNewLocalAppSession,
-                    onContinueSession = onContinueSession,
-                    onOpenLocalAppLibrary = { onOpenApps() },
-                    onOpenLocalAppDetails = onOpenLocalAppDetails,
-                )
+                DrawerSection.Chat -> {
+                    DrawerAppQuickActions(onCreateApp = onCreateApp, onOpenApps = onOpenApps)
+                    WorkspaceGroupsSection(
+                        groups = chatWorkspaceGroups,
+                        mode = SessionMode.Chat,
+                        activeWs = ui.activeWs,
+                        activeSession = ui.activeSession,
+                        onSelectWorkspace = ui::selectWorkspace,
+                        isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Chat, it) },
+                        onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Chat, it) },
+                        isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Chat, it) != null },
+                        onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Chat, it) },
+                        onSelectGlobalSession = { onResumeSession(it.uuid) },
+                        onSelectProjectSession = onSelectProjectSession,
+                        onSelectLocalAppSession = onSelectLocalAppSession,
+                        onNewGlobalSession = onNewGlobalSession,
+                        onNewProjectSession = onNewProjectSession,
+                        onNewLocalAppSession = onNewLocalAppSession,
+                        onContinueSession = onContinueSession,
+                        onOpenLocalAppLibrary = { onOpenApps() },
+                        onOpenLocalAppDetails = onOpenLocalAppDetails,
+                    )
+                }
 
-                DrawerSection.Code -> WorkspaceGroupsSection(
-                    groups = codeWorkspaceGroups,
-                    mode = SessionMode.Code,
-                    activeWs = ui.activeWs,
-                    activeSession = ui.activeSession,
-                    onSelectWorkspace = ui::selectWorkspace,
-                    isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Code, it) },
-                    onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Code, it) },
-                    isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Code, it) != null },
-                    onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Code, it) },
-                    onSelectGlobalSession = { onResumeSession(it.uuid) },
-                    onSelectProjectSession = onSelectProjectSession,
-                    onSelectLocalAppSession = onSelectLocalAppSession,
-                    onNewGlobalSession = onNewGlobalSession,
-                    onNewProjectSession = onNewProjectSession,
-                    onNewLocalAppSession = onNewLocalAppSession,
-                    onContinueSession = onContinueSession,
-                    onOpenLocalAppLibrary = { onOpenApps() },
-                    onOpenLocalAppDetails = onOpenLocalAppDetails,
-                )
+                DrawerSection.Code -> {
+                    DrawerAppQuickActions(onCreateApp = onCreateApp, onOpenApps = onOpenApps)
+                    WorkspaceGroupsSection(
+                        groups = codeWorkspaceGroups,
+                        mode = SessionMode.Code,
+                        activeWs = ui.activeWs,
+                        activeSession = ui.activeSession,
+                        onSelectWorkspace = ui::selectWorkspace,
+                        isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Code, it) },
+                        onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Code, it) },
+                        isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Code, it) != null },
+                        onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Code, it) },
+                        onSelectGlobalSession = { onResumeSession(it.uuid) },
+                        onSelectProjectSession = onSelectProjectSession,
+                        onSelectLocalAppSession = onSelectLocalAppSession,
+                        onNewGlobalSession = onNewGlobalSession,
+                        onNewProjectSession = onNewProjectSession,
+                        onNewLocalAppSession = onNewLocalAppSession,
+                        onContinueSession = onContinueSession,
+                        onOpenLocalAppLibrary = { onOpenApps() },
+                        onOpenLocalAppDetails = onOpenLocalAppDetails,
+                    )
+                }
 
                 DrawerSection.Cron -> CronWorkspaceGroupsSection(
                     groups = cronWorkspaceGroups,
@@ -465,7 +470,6 @@ private fun SectionTabs(
     chats: Int,
     projects: Int,
     crons: Int,
-    apps: Int,
     onSelect: (DrawerSection) -> Unit,
 ) {
     Row(
@@ -494,48 +498,35 @@ private fun SectionTabs(
 private val DrawerRowTapTarget = 48.dp
 
 /**
- * The 应用 tab.
+ * The create-app quick actions rendered above the workspace list in the
+ * Chat/Code drawer tabs — the Android analog of iOS's `conversationActions`
+ * (`Drawer.swift:637-655`), which renders for every section except cron.
+ *
+ * Before this, the only in-app create/browse entry lived inside the orphaned
+ * `DrawerSection.Apps` tab, whose enum case `47d92dc28` deleted, leaving these
+ * two rows with zero call sites — a first-time user with no local apps yet had
+ * no in-app way to create one. Reusing them here (rather than resurrecting the
+ * dedicated tab) mirrors iOS, which never had a standalone Apps tab either.
  *
  * Two affordances, deliberately unequal — the same split iOS's drawer makes
- * (`Drawer.swift`, `dashedButton(drawer_create_app)` beside
- * `LocalAppsDrawerSection.onOpenLibrary`):
+ * (`Drawer.swift`, `dashedButton(drawer_create_app)` beside the library button):
  *
  * - [onCreateApp] is PRIMARY and keeps the filled, accented row. Creating an app
  *   is what a user opens this tab to do, and the create now finishes in the
  *   app's own conversation rather than on a library page.
- * - [onOpenApps] is the browse affordance and stays wired to the library. Its
- *   label 「打开应用库」 already described that action correctly, so it is not
- *   relabelled — only its 「+」 moved to the row that now creates, since a plus
- *   on a browse row reads as a second create button.
+ * - [onOpenApps] is the browse affordance and stays wired to the library.
  *
  * Both rows are held to [DrawerRowTapTarget]; neither reaches it on its own.
  */
 @Composable
-private fun AppsSection(appsCount: Int, onCreateApp: () -> Unit, onOpenApps: () -> Unit) {
+private fun DrawerAppQuickActions(onCreateApp: () -> Unit, onOpenApps: () -> Unit) {
     val t = LingXiTheme.palette
     Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 24.dp),
+            .padding(bottom = 10.dp),
     ) {
-        LXIcon(name = LXIconName.Workflow, size = 34.dp, color = t.accent, stroke = 1.7f)
-        Text(
-            if (appsCount == 0) {
-                stringResource(R.string.drawer_empty_apps)
-            } else {
-                stringResource(R.string.drawer_apps_count, appsCount)
-            },
-            color = t.text,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            stringResource(R.string.drawer_apps_empty_detail),
-            color = t.text3,
-            fontSize = 12.sp,
-        )
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -552,6 +543,7 @@ private fun AppsSection(appsCount: Int, onCreateApp: () -> Unit, onOpenApps: () 
                 .background(t.surfaceActive)
                 .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
                 .clickable(onClick = onCreateApp)
+                .testTag("tag.drawerCreateApp")
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
@@ -571,6 +563,7 @@ private fun AppsSection(appsCount: Int, onCreateApp: () -> Unit, onOpenApps: () 
                 .heightIn(min = DrawerRowTapTarget)
                 .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onOpenApps)
+                .testTag("tag.drawerOpenAppsLibrary")
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         ) {
             LXIcon(name = LXIconName.Book, size = 13.dp, color = t.text3, stroke = 1.8f)

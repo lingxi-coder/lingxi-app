@@ -12,11 +12,11 @@ use platform_api::subagent_spawn::{
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use platform_api::{
     budget::{BudgetEnforcerHandle, BudgetError},
-    EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
-    FusionPreset, FusionRecommendation, FusionRequest, FusionStatus, PanelClaim, PanelEvidence,
-    PanelPosition, PanelReport, PanelRunStatus, RiskSeverity, WorkflowQueryWatchdog,
-    DEFAULT_FUSION_DIMENSIONS,
+    BudgetReservationId, EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision,
+    FusionError, FusionExecutor, FusionInheritance, FusionModelHints, FusionModelRef,
+    FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionRecommendation, FusionRequest,
+    FusionStatus, PanelClaim, PanelEvidence, PanelPosition, PanelReport, PanelRunStatus,
+    RiskSeverity, WorkflowQueryWatchdog, DEFAULT_FUSION_DIMENSIONS,
 };
 use protocol::AgentId;
 use serde_json::{json, Value};
@@ -25,7 +25,7 @@ use sidequery::{
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
 use tokio::sync::Notify;
@@ -69,6 +69,11 @@ impl BudgetEnforcerHandle for DenyReserveBudget {
     }
     fn max_session_nano_usd(&self) -> Option<u64> {
         Some(1)
+    }
+    async fn reserve_nano_usd(&self, _: u64) -> Result<BudgetReservationId, BudgetError> {
+        Err(BudgetError::Exceeded {
+            current_nano_usd: 1,
+        })
     }
 }
 
@@ -192,6 +197,12 @@ struct FakeSpawner {
 
 enum FakePanel {
     Report(PanelReport),
+    /// Provider call succeeds (real usage is spent and reported), but the
+    /// response body does not decode as a `PanelReport` — mirrors
+    /// `finish_panel`'s `Err(category)` arm for `parse_and_sanitize`, which
+    /// still records `internal.usage` before the terminal status lands on
+    /// `Failed`.
+    MalformedReport,
     Fail,
     Hang,
 }
@@ -248,6 +259,30 @@ impl SubagentSpawner for FakeSpawner {
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
+                usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 12,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            }),
+            Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
+                agent_id: AgentId::new(),
+                content: json!({"not": "a valid panel report"}),
                 usage: SubagentUsage {
                     total_tokens: 12,
                     input_tokens: 8,
@@ -472,7 +507,17 @@ impl SideQueryClient for ScriptedAnalyst {
         };
         Ok(StrictStructuredQueryResponse {
             value,
-            usage: cost::Usage::default(),
+            // Fixed, non-zero usage so `price_realized_usage`'s analyst term
+            // is pinned by the budget-reservation tests below (G001), not
+            // silently zero regardless of whether that term is priced at all.
+            usage: cost::Usage {
+                tokens: cost::TokenUsage {
+                    input: 5,
+                    output: 3,
+                    ..cost::TokenUsage::default()
+                },
+                ..cost::Usage::default()
+            },
             model: request.model,
             profile: request.profile,
             request_id: None,
@@ -1191,25 +1236,415 @@ fn inherit_capped() -> FusionInheritance {
     )
 }
 
+/// Unit price book covering exactly `catalog()`'s three models (also the
+/// `request()`/`resolved.analyst` and `parent_profile`/`parent_model` values,
+/// since the parent is one of the three). A real (non-`()`) price book is
+/// what makes `budget::acquire` actually reach `reserve_nano_usd` under a
+/// session cap instead of dying at `quote()` with `InvalidConfiguration`.
+struct MapPrices(HashMap<(String, String), ModelRates>);
+impl FusionPriceBook for MapPrices {
+    fn rates_for(&self, profile: &str, model: &str) -> Option<ModelRates> {
+        self.0
+            .get(&(profile.to_string(), model.to_string()))
+            .copied()
+    }
+}
+fn priced_book() -> MapPrices {
+    let rate = ModelRates {
+        input_nano_usd_per_token: 1,
+        output_nano_usd_per_token: 1,
+        per_request_nano_usd: 0,
+    };
+    let mut map = HashMap::new();
+    for (p, m) in [
+        ("anthropic", "claude-sonnet-5"),
+        ("openai", "gpt-5.6-terra"),
+        ("deepseek", "deepseek-v4-pro"),
+    ] {
+        map.insert((p.into(), m.into()), rate);
+    }
+    MapPrices(map)
+}
+
 #[tokio::test]
 async fn reserve_failure_makes_zero_panel_spawns() {
+    // With a REAL price book, quote() succeeds (session_has_max no longer
+    // rejects every token-billed model at the preflight stage) and the run
+    // reaches `reserve_nano_usd`, which `DenyReserveBudget` always fails —
+    // so the outcome is exactly `BudgetExceeded`, never the quote-stage
+    // `InvalidConfiguration` the old three-way `matches!` was hiding behind.
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
-    let err = orch_scripted(spawner.clone(), side)
+    let orch = orch_scripted(spawner.clone(), side).with_price_book(Arc::new(priced_book()));
+    let err = orch
         .run(request("task"), inherit_capped(), None)
         .await
         .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            platform_api::FusionError::InvalidConfiguration(_)
-                | platform_api::FusionError::BudgetExceeded
-                | platform_api::FusionError::BudgetReservationUnavailable
-        ),
-        "preflight must fail before panels, got {err:?}"
+    assert_eq!(
+        err,
+        platform_api::FusionError::BudgetExceeded,
+        "a priced quote must reach reserve_nano_usd, not fail earlier at quote()"
     );
     assert!(
         spawner.prompts().is_empty(),
         "no provider/panel calls after a failed reservation"
     );
+}
+
+/// Records every `reserve_nano_usd` / `commit_reservation` / `release_reservation`
+/// call so the six-terminal-state tests below can assert the reservation
+/// lifecycle happened exactly once per run, with nothing left held.
+struct RecordingBudget {
+    max: Option<u64>,
+    held: AtomicU64,
+    reserve_calls: AtomicUsize,
+    commit_calls: AtomicUsize,
+    release_calls: AtomicUsize,
+    /// `actual_nano_usd` argument recorded by every `commit_reservation`
+    /// call, in order — lets a test assert the EXACT priced amount reached
+    /// the budget, not merely that `commit_reservation` was called.
+    committed: Mutex<Vec<u64>>,
+    /// Grows by a fixed amount on every call, independent of anything
+    /// Fusion prices — used to prove `realized_nano_usd` does not track this
+    /// fake budget's own snapshot delta (the G001 heuristic this replaced
+    /// read a session-wide total that a concurrent parent turn, or a
+    /// sibling Fusion run, could move for reasons that have nothing to do
+    /// with this run).
+    snapshot_calls: AtomicU64,
+}
+
+impl RecordingBudget {
+    fn new() -> Arc<Self> {
+        Self::with_max(Some(u64::MAX))
+    }
+
+    /// No session cap — the `!session_has_max` branch of `budget::acquire`.
+    fn uncapped() -> Arc<Self> {
+        Self::with_max(None)
+    }
+
+    fn with_max(max: Option<u64>) -> Arc<Self> {
+        Arc::new(Self {
+            max,
+            held: AtomicU64::new(0),
+            reserve_calls: AtomicUsize::new(0),
+            commit_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+            committed: Mutex::new(Vec::new()),
+            snapshot_calls: AtomicU64::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for RecordingBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        (self.snapshot_calls.fetch_add(1, Ordering::SeqCst) + 1).saturating_mul(1_000_000)
+    }
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        self.max
+    }
+    async fn active_reservation_nano_usd(&self) -> u64 {
+        self.held.load(Ordering::SeqCst)
+    }
+    async fn reserve_nano_usd(&self, nano_usd: u64) -> Result<BudgetReservationId, BudgetError> {
+        self.reserve_calls.fetch_add(1, Ordering::SeqCst);
+        let new = self.held.fetch_add(nano_usd, Ordering::SeqCst) + nano_usd;
+        Ok(BudgetReservationId::from_raw(new.max(1)))
+    }
+    async fn commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        self.committed.lock().unwrap().push(actual_nano_usd);
+        self.held.store(0, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn release_reservation(&self, _id: BudgetReservationId) {
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
+        self.held.store(0, Ordering::SeqCst);
+    }
+}
+
+fn inherit_recording(budget: Arc<RecordingBudget>) -> FusionInheritance {
+    FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget,
+        },
+        CancellationToken::new(),
+    )
+}
+
+fn inherit_recording_cancel(
+    budget: Arc<RecordingBudget>,
+    cancel: CancellationToken,
+) -> FusionInheritance {
+    FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget,
+        },
+        cancel,
+    )
+}
+
+/// Give `Drop`'s spawned release task a chance to run — the same pattern
+/// `budget::tests::drop_releases_hold` uses, since `ReservationLease::drop`
+/// only SPAWNS the release rather than awaiting it inline.
+async fn settle_spawned_drops() {
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+}
+
+fn assert_reservation_settled_exactly_once(budget: &RecordingBudget) {
+    assert_eq!(
+        budget.reserve_calls.load(Ordering::SeqCst),
+        1,
+        "exactly one reserve_nano_usd call for the whole run"
+    );
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst) + budget.release_calls.load(Ordering::SeqCst),
+        1,
+        "the hold is settled by exactly one of commit or release"
+    );
+    assert_eq!(
+        budget.held.load(Ordering::SeqCst),
+        0,
+        "nothing left held after the run terminates"
+    );
+}
+
+/// Exact priced sum for a `three_ok()` run under `priced_book()`'s $1/token
+/// unit rate: 3 panels * (8 input + 4 output) = 36, plus the analyst's fixed
+/// `ScriptedAnalyst` usage (5 input + 3 output) = 8. `per_request_nano_usd`
+/// is 0 in `priced_book()`, so call counts don't move this total.
+const THREE_PANEL_PICK_PRICED_NANO_USD: u64 = 36 + 8;
+
+#[tokio::test]
+async fn budget_reservation_settles_on_pick() {
+    let budget = RecordingBudget::new();
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    // Bracket the run with our own snapshot reads so we know what a
+    // (removed) delta-based implementation would have produced from this
+    // fake budget's ever-growing, Fusion-independent snapshot.
+    let snapshot_before = budget.snapshot_total_nano_usd().await;
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap();
+    let snapshot_after = budget.snapshot_total_nano_usd().await;
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert_reservation_settled_exactly_once(&budget);
+    // G001: `price_realized_usage` prices this run's OWN usage through the
+    // price book — assert the exact amount, and the exact amount that
+    // reached `commit_reservation`, not merely that some Ok/non-zero value
+    // showed up.
+    assert_eq!(
+        result.usage.realized_nano_usd, THREE_PANEL_PICK_PRICED_NANO_USD,
+        "realized_nano_usd must equal the priced sum of this run's own usage"
+    );
+    assert!(
+        !result.usage.estimated,
+        "every priced component (3 panels + analyst) has a rate in priced_book()"
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![THREE_PANEL_PICK_PRICED_NANO_USD],
+        "commit_reservation must receive the exact priced sum"
+    );
+    let snapshot_delta = snapshot_after - snapshot_before;
+    assert_ne!(
+        result.usage.realized_nano_usd, snapshot_delta,
+        "realized_nano_usd must not track this budget's own (Fusion-independent) \
+         snapshot delta — the removed G001 heuristic read exactly that"
+    );
+}
+
+#[tokio::test]
+async fn budget_reservation_settles_on_pick_uncapped_session_still_commits() {
+    // Fix round 1, finding #1: an uncapped session (no `--max-budget`)
+    // takes the `!session_has_max` branch of `budget::acquire`, which used
+    // to return a lease backed by a throwaway `NoopBudget` whose `commit`
+    // discarded the amount — Fusion spend on an uncapped session never
+    // reached the session's CostTracker / `/cost`. `commit_reservation`
+    // must still reach the REAL budget handle on this path.
+    let budget = RecordingBudget::uncapped();
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap();
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
+    assert_eq!(
+        budget.reserve_calls.load(Ordering::SeqCst),
+        0,
+        "an uncapped session never calls reserve_nano_usd"
+    );
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst),
+        1,
+        "commit must still reach the real budget handle on the noop-lease path"
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![THREE_PANEL_PICK_PRICED_NANO_USD],
+        "the real budget must record the actual realized spend, not discard it"
+    );
+}
+
+#[tokio::test]
+async fn realized_usage_prices_a_completed_panel_with_a_malformed_report() {
+    // Fix round 1, finding #2: `price_realized_usage`'s old
+    // `status != Completed` guard skipped a panel whose provider call
+    // succeeded (tokens spent, `internal.usage` populated by
+    // `finish_panel`) but whose report then failed `parse_and_sanitize`
+    // (status stays `Failed`). `aggregate_panel_usage` DID count its
+    // tokens, so `FusionUsage` was internally inconsistent (tokens said X,
+    // dollars said less) without even setting `estimated = true`.
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Report(report("B"))),
+        ("deepseek-v4-pro".into(), FakePanel::MalformedReport),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap();
+    assert_eq!(result.panels.len(), 3, "the malformed panel is still reported");
+    let malformed = result
+        .panels
+        .iter()
+        .find(|p| p.status == PanelRunStatus::Failed)
+        .expect("exactly one panel failed to parse");
+    assert!(
+        malformed.usage.is_some(),
+        "the malformed panel's spend was still recorded by finish_panel"
+    );
+    // All three panels' tokens must be priced (36) plus the analyst (8) —
+    // not just the two that parsed (24 + 8 = 32), which is what the old
+    // `status != Completed` guard silently produced.
+    assert_eq!(result.usage.realized_nano_usd, THREE_PANEL_PICK_PRICED_NANO_USD);
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![THREE_PANEL_PICK_PRICED_NANO_USD]
+    );
+}
+
+#[tokio::test]
+async fn budget_reservation_settles_on_merge() {
+    let budget = RecordingBudget::new();
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok("MERGED".into())]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap();
+    assert!(matches!(result.decision, FusionDecision::Merged));
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+#[tokio::test]
+async fn budget_reservation_settles_on_needs_parent() {
+    let budget = RecordingBudget::new();
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::MergeCritical, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap();
+    assert!(matches!(result.decision, FusionDecision::NeedsParent { .. }));
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+#[tokio::test]
+async fn budget_reservation_releases_on_min_panels_not_met() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Fail),
+        ("deepseek-v4-pro".into(), FakePanel::Fail),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let err = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, platform_api::FusionError::MinPanelsNotMet);
+    settle_spawned_drops().await;
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+#[tokio::test]
+async fn budget_reservation_releases_on_cancel() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Hang),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner.clone(), side).with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    cancel.cancel();
+    let err = handle.await.unwrap().unwrap_err();
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+#[tokio::test]
+async fn budget_reservation_releases_on_total_timeout() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Hang),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let mut config = test_config();
+    config.total_timeout_ms = 25;
+    let orch = FusionOrchestrator::new(spawner, side, config, Arc::new(catalog()))
+        .with_price_book(Arc::new(priced_book()));
+    let err = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err, platform_api::FusionError::TimedOutEmpty);
+    settle_spawned_drops().await;
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    assert_reservation_settled_exactly_once(&budget);
 }

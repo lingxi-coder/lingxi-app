@@ -2618,6 +2618,83 @@ fn desktop_fusion_catalog_row(
     }
 }
 
+/// `fusion::FusionPriceBook` over the session's `cost::PricingCatalog` — the
+/// SAME catalog `CostTracker` bills from (see the WP1/F001/G003 comment at
+/// its construction site). Before this adapter existed, `FusionOrchestrator`
+/// was always built with the `()` price book (`rates_for` always `None`), so
+/// `budget::quote`'s `model_peak` hard-rejected every token-billed model
+/// under a session `--max-budget` (`InvalidConfiguration("... has no
+/// price")`) and, without a cap, every reservation quoted $0 — Fusion's
+/// hard-budget invariant (design §4) was wired to nothing.
+///
+/// `orchestrator::cost_wiring::model_ref_from_string` is the SAME
+/// profile+bare-model → `ModelRef` resolution the main turn loop uses for its
+/// own `record_api_response_v2` calls, so a Fusion panel/analyst/synth model
+/// prices exactly like the corresponding main-loop call would.
+struct DesktopFusionPriceBook {
+    catalog: Arc<cost::PricingCatalog>,
+}
+
+impl fusion::FusionPriceBook for DesktopFusionPriceBook {
+    fn rates_for(&self, profile: &str, model: &str) -> Option<fusion::ModelRates> {
+        let model_ref = orchestrator::cost_wiring::model_ref_from_string(model, Some(profile));
+        let (pricing, _resolution) = self.catalog.resolve(&model_ref).ok()?;
+        let input = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::Input)?
+            .nano_usd_per_token;
+        let output = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::Output)?
+            .nano_usd_per_token;
+        Some(fusion::ModelRates {
+            input_nano_usd_per_token: input,
+            output_nano_usd_per_token: output,
+            // The pricing catalog has no flat per-request rate today (only
+            // per-token + the separate web-search non-token unit); Fusion's
+            // quote/settlement formulas treat a zero per-request rate as "no
+            // flat fee", not "unpriced" — token rates alone still gate the
+            // hard-budget preflight correctly.
+            per_request_nano_usd: 0,
+        })
+    }
+}
+
+#[cfg(test)]
+mod desktop_fusion_price_book_test {
+    use super::*;
+
+    #[test]
+    fn rates_for_prices_a_known_model_through_the_shared_catalog() {
+        // Before this adapter was wired in (F001/G003), `FusionOrchestrator`
+        // always ran with the `()` price book, so this call would have
+        // returned `None` for every model and made `budget::quote` reject
+        // any token-billed panel under a session `--max-budget`.
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook { catalog };
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        assert_eq!(rates.input_nano_usd_per_token, 5_000);
+        assert_eq!(rates.output_nano_usd_per_token, 25_000);
+    }
+
+    #[test]
+    fn rates_for_is_none_for_an_explicitly_unpriced_model() {
+        // A component the catalog genuinely cannot price must surface as
+        // `None` (the caller then marks the run `estimated = true`, or —
+        // under a session cap at `quote()` time — rejects the run per
+        // design §4) rather than the adapter guessing a rate.
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().mark_unpriced(
+            cost::ModelRef {
+                provider: cost::pricing::ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+        ));
+        let book = DesktopFusionPriceBook { catalog };
+        assert!(fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6").is_none());
+    }
+}
+
 fn desktop_fusion_runtime_config(
     project_dir: &Path,
 ) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
@@ -2657,6 +2734,7 @@ fn desktop_fusion_executor(
     project_dir: &Path,
     catalog: Vec<fusion::CatalogModel>,
     bus: Arc<telemetry::AnalyticsBus>,
+    pricing: Arc<cost::PricingCatalog>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
     let config = match desktop_fusion_runtime_config(project_dir) {
         Ok(config) => config,
@@ -2664,7 +2742,8 @@ fn desktop_fusion_executor(
     };
     Arc::new(
         fusion::FusionOrchestrator::new(spawner, side_query, config, Arc::new(catalog))
-            .with_bus(bus),
+            .with_bus(bus)
+            .with_price_book(Arc::new(DesktopFusionPriceBook { catalog: pricing })),
     )
 }
 
@@ -8101,10 +8180,14 @@ pub async fn build(
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
-    // cost accounting matches per-response cost estimation.
+    // cost accounting matches per-response cost estimation. WP1 (F001/G003):
+    // the SAME `Arc` also backs `desktop_fusion_executor`'s `FusionPriceBook`
+    // adapter below, so Fusion's hard-budget quote/settlement prices against
+    // the identical catalog the rest of the session bills from.
+    let pricing = Arc::new(pricing);
     let cost_tracker = Arc::new(cost::CostTracker::new(
         protocol::SessionId::new(),
-        Arc::new(pricing),
+        pricing.clone(),
         cost_persist_tx,
     ));
 
@@ -9698,6 +9781,7 @@ pub async fn build(
         &cwd,
         fusion_catalog.clone(),
         analytics_bus.clone(),
+        pricing.clone(),
     );
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,

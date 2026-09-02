@@ -1,16 +1,17 @@
 //! Fusion hard-budget reservation.
 //!
 //! Peak dollars are quoted from token *rates* and
-//! `panelReservedInputTokensPerTurn` — never 1 byte = 1 token. Missing usage
-//! at settlement may fall back to that conservative byte heuristic, marked
-//! `estimated`.
+//! `panelReservedInputTokensPerTurn` — never 1 byte = 1 token. Settlement
+//! (`orchestrator::price_realized_usage`) prices each component's own actual
+//! usage through the same [`FusionPriceBook`]; a component with no rate marks
+//! the run `estimated = true` rather than guessing a dollar figure — §4
+//! forbids a conservative fallback estimate.
 
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{ModelSource, ResolvedPanel, ResolvedSet};
-use crate::panel::PanelInternal;
 use platform_api::{
     BudgetEnforcerHandle, BudgetError, BudgetReservationId, FusionCostClass, FusionError,
-    FusionRequest, FusionUsage, PanelRunStatus,
+    FusionRequest,
 };
 use std::sync::Arc;
 
@@ -143,6 +144,37 @@ pub fn quote(
     })
 }
 
+/// Price one component (a panel, the analyst, or the synthesizer/parent) from
+/// its own token usage. `None` means the model has no price in `prices` and
+/// is not a `Subscription`-class hint — the caller decides whether that is a
+/// hard failure (reservation quote, when the session has a max budget) or an
+/// `estimated = true` component (settlement).
+#[must_use]
+pub(crate) fn price_component(
+    profile: &str,
+    model: &str,
+    catalog: &dyn ModelSource,
+    prices: &dyn FusionPriceBook,
+    input_tokens: u64,
+    output_tokens: u64,
+    calls: u64,
+) -> Option<u64> {
+    let hints = catalog
+        .list()
+        .into_iter()
+        .find(|row| row.profile == profile && row.model == model)
+        .map(|row| row.hints);
+    if hints.is_some_and(|h| h.cost_class == FusionCostClass::Subscription) {
+        return Some(0);
+    }
+    prices.rates_for(profile, model).map(|rates| {
+        input_tokens
+            .saturating_mul(rates.input_nano_usd_per_token)
+            .saturating_add(output_tokens.saturating_mul(rates.output_nano_usd_per_token))
+            .saturating_add(calls.saturating_mul(rates.per_request_nano_usd))
+    })
+}
+
 fn model_peak(
     model: &ResolvedPanel,
     catalog: &dyn ModelSource,
@@ -152,19 +184,16 @@ fn model_peak(
     output_tokens: u64,
     calls: u64,
 ) -> Result<u64, FusionError> {
-    let hints = catalog
-        .list()
-        .into_iter()
-        .find(|row| row.profile == model.profile && row.model == model.model)
-        .map(|row| row.hints);
-    if hints.is_some_and(|h| h.cost_class == FusionCostClass::Subscription) {
-        return Ok(0);
-    }
-    match prices.rates_for(&model.profile, &model.model) {
-        Some(rates) => Ok(input_tokens
-            .saturating_mul(rates.input_nano_usd_per_token)
-            .saturating_add(output_tokens.saturating_mul(rates.output_nano_usd_per_token))
-            .saturating_add(calls.saturating_mul(rates.per_request_nano_usd))),
+    match price_component(
+        &model.profile,
+        &model.model,
+        catalog,
+        prices,
+        input_tokens,
+        output_tokens,
+        calls,
+    ) {
+        Some(v) => Ok(v),
         None if !session_has_max => Ok(0),
         None => Err(FusionError::InvalidConfiguration(format!(
             "token-billed model `{}/{}` has no price",
@@ -182,35 +211,26 @@ pub struct ReservationLease {
 }
 
 impl ReservationLease {
-    /// No session cap / zero quote.
-    #[must_use]
-    pub(crate) fn noop() -> Self {
-        Self {
-            budget: Arc::new(NoopBudget),
-            id: BudgetReservationId::NOOP,
-            quote: FusionQuote {
-                reserved_nano_usd: 0,
-                reserved_input_tokens: 0,
-                reserved_output_tokens: 0,
-                max_calls: 0,
-            },
-            disarmed: true,
-        }
-    }
-
     /// Quoted peak this lease holds.
     #[must_use]
     pub fn quote(&self) -> &FusionQuote {
         &self.quote
     }
 
-    /// Release the hold after actual spend (already in the cost tracker).
+    /// Release the hold after actual spend and record it into the cost
+    /// tracker. `disarmed` is set only AFTER `commit_reservation` succeeds —
+    /// a cancel/timeout/abort parked on this await must not make `Drop` treat
+    /// the hold as already settled (it would spawn a second release racing
+    /// this call, or worse, leak the hold if this future is dropped between
+    /// the two statements). On error the hold is still armed, so `Drop`'s
+    /// spawned release is the fallback that reclaims capacity.
     pub async fn commit(mut self, actual_nano_usd: u64) -> Result<(), FusionError> {
-        self.disarmed = true;
         self.budget
             .commit_reservation(self.id, actual_nano_usd)
             .await
-            .map_err(map_budget_err)
+            .map_err(map_budget_err)?;
+        self.disarmed = true;
+        Ok(())
     }
 }
 
@@ -225,18 +245,6 @@ impl Drop for ReservationLease {
         tokio::spawn(async move {
             budget.release_reservation(id).await;
         });
-    }
-}
-
-struct NoopBudget;
-
-#[async_trait::async_trait]
-impl BudgetEnforcerHandle for NoopBudget {
-    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
-        Ok(())
-    }
-    async fn snapshot_total_nano_usd(&self) -> u64 {
-        0
     }
 }
 
@@ -256,10 +264,19 @@ pub async fn acquire(
     let session_has_max = budget.max_session_nano_usd().is_some();
     let quote = quote(config, resolved, request, catalog, prices, session_has_max)?;
     if !session_has_max || quote.reserved_nano_usd == 0 {
-        let _ = budget;
-        let mut lease = ReservationLease::noop();
-        lease.quote = quote;
-        return Ok(lease);
+        // Nothing to hold (uncapped session, or a $0 quote), but `commit`
+        // must still reach the REAL budget handle: settlement
+        // (`commit_reservation`) is the only place Fusion's priced spend
+        // reaches the session's CostTracker, so an uncapped session must not
+        // make that spend invisible to `/cost` by routing commit through a
+        // throwaway `NoopBudget`. `disarmed: true` because nothing was
+        // reserved — `Drop` must not spawn a release for a hold never taken.
+        return Ok(ReservationLease {
+            budget,
+            id: BudgetReservationId::NOOP,
+            quote,
+            disarmed: true,
+        });
     }
     match budget.reserve_nano_usd(quote.reserved_nano_usd).await {
         Ok(id) => Ok(ReservationLease {
@@ -277,53 +294,6 @@ fn map_budget_err(err: BudgetError) -> FusionError {
         BudgetError::Exceeded { .. } => FusionError::BudgetExceeded,
         BudgetError::Internal(_) => FusionError::BudgetReservationUnavailable,
     }
-}
-
-/// Settlement: use billed nano-USD when present, otherwise a conservative
-/// per-panel share of the reservation, flagged estimated.
-#[must_use]
-pub fn settle_usage(panels: &[PanelInternal], quote: &FusionQuote, billed: u64) -> FusionUsage {
-    let mut usage = FusionUsage {
-        reserved_max_nano_usd: quote.reserved_nano_usd,
-        realized_nano_usd: billed,
-        ..FusionUsage::default()
-    };
-    let n = panels
-        .iter()
-        .filter(|p| p.status == PanelRunStatus::Completed)
-        .count()
-        .max(1) as u64;
-    let share = quote.reserved_nano_usd / n;
-    for panel in panels {
-        if let Some(panel_usage) = &panel.usage {
-            usage.input_tokens = usage.input_tokens.saturating_add(panel_usage.input_tokens);
-            usage.output_tokens = usage
-                .output_tokens
-                .saturating_add(panel_usage.output_tokens);
-            usage.provider_requests = usage
-                .provider_requests
-                .saturating_add(panel_usage.provider_requests);
-            usage.estimated = usage.estimated || panel_usage.estimated;
-        } else if panel.status == PanelRunStatus::Completed {
-            usage.estimated = true;
-            usage.realized_nano_usd = usage.realized_nano_usd.saturating_add(share);
-        }
-    }
-    if billed == 0 && usage.realized_nano_usd == 0 {
-        let no_tokens = panels
-            .iter()
-            .filter(|p| p.status == PanelRunStatus::Completed)
-            .all(|p| {
-                p.usage.as_ref().is_none_or(|u| {
-                    u.input_tokens == 0 && u.output_tokens == 0 && u.realized_nano_usd == 0
-                })
-            });
-        if no_tokens {
-            usage.estimated = true;
-            usage.realized_nano_usd = share;
-        }
-    }
-    usage
 }
 
 #[cfg(test)]
@@ -492,6 +462,14 @@ mod tests {
         calls: AtomicU64,
         reserves: Mutex<Vec<u64>>,
         fail: bool,
+        /// `commit_reservation` call count — 0 in tests below unless noted.
+        commit_calls: AtomicU64,
+        /// `actual_nano_usd` argument recorded by every `commit_reservation` call.
+        committed: Mutex<Vec<u64>>,
+        /// When `Some`, `commit_reservation` returns this error instead of
+        /// recording — used to prove `ReservationLease::commit` leaves the hold
+        /// ARMED (so `Drop` still releases it) when the commit itself fails.
+        fail_commit: Option<BudgetError>,
     }
 
     impl RecordingBudget {
@@ -502,6 +480,22 @@ mod tests {
                 calls: AtomicU64::new(0),
                 reserves: Mutex::new(Vec::new()),
                 fail: false,
+                commit_calls: AtomicU64::new(0),
+                committed: Mutex::new(Vec::new()),
+                fail_commit: None,
+            })
+        }
+
+        fn uncapped() -> Arc<Self> {
+            Arc::new(Self {
+                max: None,
+                held: AtomicU64::new(0),
+                calls: AtomicU64::new(0),
+                reserves: Mutex::new(Vec::new()),
+                fail: false,
+                commit_calls: AtomicU64::new(0),
+                committed: Mutex::new(Vec::new()),
+                fail_commit: None,
             })
         }
     }
@@ -542,6 +536,24 @@ mod tests {
             self.held.store(new, Ordering::SeqCst);
             Ok(BudgetReservationId::from_raw(new.max(1)))
         }
+        async fn commit_reservation(
+            &self,
+            id: BudgetReservationId,
+            actual_nano_usd: u64,
+        ) -> Result<(), BudgetError> {
+            self.commit_calls.fetch_add(1, Ordering::SeqCst);
+            self.committed.lock().await.push(actual_nano_usd);
+            if let Some(err) = &self.fail_commit {
+                return Err(match err {
+                    BudgetError::Exceeded { current_nano_usd } => BudgetError::Exceeded {
+                        current_nano_usd: *current_nano_usd,
+                    },
+                    BudgetError::Internal(s) => BudgetError::Internal(s.clone()),
+                });
+            }
+            self.release_reservation(id).await;
+            Ok(())
+        }
         async fn release_reservation(&self, _id: BudgetReservationId) {
             self.held.store(0, Ordering::SeqCst);
         }
@@ -555,6 +567,9 @@ mod tests {
             calls: AtomicU64::new(0),
             reserves: Mutex::new(Vec::new()),
             fail: true,
+            commit_calls: AtomicU64::new(0),
+            committed: Mutex::new(Vec::new()),
+            fail_commit: None,
         };
         let catalog = vec![
             hinted("anthropic", "sonnet", false),
@@ -641,5 +656,133 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(budget.held.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn acquire_succeeds_when_session_has_max_and_price_book_has_rates() {
+        // The composition root's failure mode before the price book was wired:
+        // `--max-budget` made every token-billed panel hit `InvalidConfiguration`
+        // at quote() because `prices` was the `()` book (`rates_for` always
+        // `None`). With a real price book present, a capped session must reach
+        // `reserve_nano_usd` and succeed.
+        let budget = RecordingBudget::capped(u64::MAX);
+        let catalog = vec![
+            hinted("anthropic", "sonnet", false),
+            hinted("openai", "terra", false),
+            hinted("deepseek", "pro", false),
+        ];
+        let lease = acquire(
+            &FusionRuntimeConfig::defaults(),
+            &resolved_three(),
+            &request(),
+            &catalog,
+            &unit_prices(),
+            budget.clone(),
+        )
+        .await
+        .expect("priced catalog under a capped session must reserve, not reject");
+        assert!(lease.quote().reserved_nano_usd > 0, "unit-priced quote is non-zero");
+        assert_eq!(budget.calls.load(Ordering::SeqCst), 1, "exactly one reserve call");
+    }
+
+    #[tokio::test]
+    async fn acquire_with_uncapped_session_still_commits_to_the_real_budget() {
+        // F001 fix round 1, finding #1: an uncapped session (no
+        // `--max-budget`, `max_session_nano_usd() == None`) took the early
+        // `!session_has_max` return in `acquire`, which used to hand back a
+        // lease backed by a throwaway `NoopBudget` — `commit` on that lease
+        // never reached the real budget's `commit_reservation`, so Fusion
+        // spend on an uncapped session never reached the session's
+        // CostTracker / `/cost`. Prove `commit` reaches the REAL handle: no
+        // reservation is taken (uncapped ⇒ `reserve_nano_usd` is never
+        // called) but `commit_reservation` still records the actual amount.
+        let budget = RecordingBudget::uncapped();
+        let catalog = vec![
+            hinted("anthropic", "sonnet", false),
+            hinted("openai", "terra", false),
+            hinted("deepseek", "pro", false),
+        ];
+        let lease = acquire(
+            &FusionRuntimeConfig::defaults(),
+            &resolved_three(),
+            &request(),
+            &catalog,
+            &unit_prices(),
+            budget.clone(),
+        )
+        .await
+        .expect("an uncapped session must not reject at quote/reserve");
+        assert_eq!(
+            budget.calls.load(Ordering::SeqCst),
+            0,
+            "an uncapped session never calls reserve_nano_usd"
+        );
+        lease.commit(777).await.expect("commit reaches the real budget handle");
+        assert_eq!(
+            budget.commit_calls.load(Ordering::SeqCst),
+            1,
+            "commit_reservation must be called exactly once even on the noop-lease path"
+        );
+        assert_eq!(
+            budget.committed.lock().await.clone(),
+            vec![777],
+            "the real budget must record the actual realized spend, not discard it"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_stays_armed_on_reservation_error_so_drop_still_releases() {
+        // `ReservationLease::commit` must await `commit_reservation` BEFORE
+        // setting `disarmed = true`. Prove it from the failure side: when the
+        // budget's `commit_reservation` itself errors, the lease must still be
+        // armed when it is dropped, so `Drop`'s spawned release is the
+        // fallback that reclaims the hold instead of leaking it for the rest
+        // of the session.
+        let budget = Arc::new(RecordingBudget {
+            max: Some(u64::MAX),
+            held: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+            reserves: Mutex::new(Vec::new()),
+            fail: false,
+            commit_calls: AtomicU64::new(0),
+            committed: Mutex::new(Vec::new()),
+            fail_commit: Some(BudgetError::Internal("commit backend down".into())),
+        });
+        let catalog = vec![
+            hinted("anthropic", "sonnet", false),
+            hinted("openai", "terra", false),
+            hinted("deepseek", "pro", false),
+        ];
+        let lease = acquire(
+            &FusionRuntimeConfig::defaults(),
+            &resolved_three(),
+            &request(),
+            &catalog,
+            &unit_prices(),
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(budget.held.load(Ordering::SeqCst) > 0, "hold in place before commit");
+        let err = lease.commit(999).await.unwrap_err();
+        assert!(
+            matches!(err, FusionError::BudgetReservationUnavailable),
+            "commit surfaces the mapped error, got {err:?}"
+        );
+        assert_eq!(
+            budget.commit_calls.load(Ordering::SeqCst),
+            1,
+            "commit_reservation was attempted exactly once"
+        );
+        // The lease (moved into `commit`, which took `self`) is dropped here —
+        // if `commit` had disarmed before the `?`, this held amount would
+        // never clear because Drop only spawns a release when armed.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            budget.held.load(Ordering::SeqCst),
+            0,
+            "Drop released the hold because commit left it armed on failure"
+        );
     }
 }

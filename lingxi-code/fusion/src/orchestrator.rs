@@ -4,7 +4,7 @@ use crate::analyst::{analyze, AnalystError};
 use crate::budget::{self, FusionPriceBook};
 use crate::config::FusionRuntimeConfig;
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
-use crate::model_resolver::{self, ModelSource};
+use crate::model_resolver::{self, ModelSource, ResolvedPanel};
 use crate::panel::{self, PanelInternal};
 use crate::progress;
 use crate::synthesizer::{synthesize, SynthError};
@@ -131,7 +131,6 @@ impl FusionOrchestrator {
             "fusion budget preflight",
         )
         .await;
-        let billed_before = inherit.budget().snapshot_total_nano_usd().await;
         let lease = match budget::acquire(
             &self.config,
             &resolved,
@@ -290,6 +289,12 @@ impl FusionOrchestrator {
         let analyst_ms = millis_since(analyst_started);
 
         let mut usage = aggregate_panel_usage(&panels);
+        // Captured inside the match arms below so `price_realized_usage` (run
+        // after the decision is known) can price the analyst/synth calls
+        // against their OWN model/profile — a session-wide CostTracker delta
+        // cannot tell Fusion's spend apart from a concurrent parent turn's.
+        let mut priced_analyst: Option<(cost::Usage, u32)> = None;
+        let mut priced_synth: Option<cost::Usage> = None;
         let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
             Err(AnalystError::ParseFailed) => {
                 let mut md = fusion_event_metadata(&request);
@@ -352,6 +357,7 @@ impl FusionOrchestrator {
             }
             Ok((analysis, analyst_usage, analyst_calls)) => {
                 add_cost_usage(&mut usage, &analyst_usage, analyst_calls);
+                priced_analyst = Some((analyst_usage, analyst_calls));
                 let mut md = fusion_event_metadata(&request);
                 md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
                 add_panel_counts(&mut md, &panels);
@@ -407,6 +413,7 @@ impl FusionOrchestrator {
                         match synth {
                             Ok((text, synth_usage)) => {
                                 add_cost_usage(&mut usage, &synth_usage, 1);
+                                priced_synth = Some(synth_usage);
                                 let mut md = fusion_event_metadata(&request);
                                 md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
                                 add_panel_counts(&mut md, &panels);
@@ -496,19 +503,19 @@ impl FusionOrchestrator {
         egress.sort();
         egress.dedup();
 
-        let billed = inherit
-            .budget()
-            .snapshot_total_nano_usd()
-            .await
-            .saturating_sub(billed_before);
         usage.reserved_max_nano_usd = lease.quote().reserved_nano_usd;
-        if billed > 0 {
-            usage.realized_nano_usd = billed;
-        } else {
-            let settled = budget::settle_usage(&panels, lease.quote(), 0);
-            usage.estimated = settled.estimated;
-            usage.realized_nano_usd = settled.realized_nano_usd;
-        }
+        let (priced_nano_usd, priced_estimated) = price_realized_usage(
+            self.catalog.as_ref(),
+            self.prices.as_ref(),
+            &panels,
+            &resolved.analyst,
+            priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
+            &request.parent_profile,
+            &request.parent_model,
+            priced_synth.as_ref(),
+        );
+        usage.realized_nano_usd = priced_nano_usd;
+        usage.estimated = usage.estimated || priced_estimated;
         if let Err(error) = lease.commit(usage.realized_nano_usd).await {
             let mut md = fusion_event_metadata(&request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
@@ -761,6 +768,85 @@ fn aggregate_panel_usage(panels: &[PanelInternal]) -> FusionUsage {
         }
     }
     acc
+}
+
+/// Price this run's OWN usage through `prices`, one component at a time,
+/// instead of reading a session-wide `CostTracker` delta (which misattributes
+/// a concurrent parent turn's — or a sibling Fusion run's — spend to this
+/// run; see finding G001). A component with no price (and not a
+/// `Subscription`-class hint) marks the whole result `estimated = true`
+/// rather than guessing a dollar figure for it — §4 forbids a conservative
+/// fallback estimate on the money path.
+#[allow(clippy::too_many_arguments)]
+fn price_realized_usage(
+    catalog: &dyn ModelSource,
+    prices: &dyn FusionPriceBook,
+    panels: &[PanelInternal],
+    analyst: &ResolvedPanel,
+    analyst_usage: Option<(&cost::Usage, u32)>,
+    parent_profile: &str,
+    parent_model: &str,
+    synth_usage: Option<&cost::Usage>,
+) -> (u64, bool) {
+    let mut total_nano_usd = 0_u64;
+    let mut estimated = false;
+    for panel in panels {
+        // Price every panel that produced usage, regardless of `status`.
+        // `finish_panel` sets `internal.usage` for every
+        // `SubagentResult::Completed`, including one whose report then
+        // fails `parse_and_sanitize` (status stays `Failed`) — that panel
+        // still spent real tokens, and `aggregate_panel_usage` (above)
+        // already counts them, so skipping it here would silently
+        // understate `realized_nano_usd` while `FusionUsage.input_tokens` /
+        // `output_tokens` kept the full count. A panel with genuinely no
+        // usage (spawn-time failure, before any provider call) still marks
+        // the run `estimated = true` via the `None` arm below.
+        let Some(usage) = &panel.usage else {
+            estimated = true;
+            continue;
+        };
+        match budget::price_component(
+            &panel.profile,
+            &panel.model,
+            catalog,
+            prices,
+            usage.input_tokens,
+            usage.output_tokens,
+            u64::from(usage.provider_requests),
+        ) {
+            Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
+            None => estimated = true,
+        }
+    }
+    if let Some((usage, calls)) = analyst_usage {
+        match budget::price_component(
+            &analyst.profile,
+            &analyst.model,
+            catalog,
+            prices,
+            usage.tokens.input,
+            usage.tokens.output,
+            u64::from(calls),
+        ) {
+            Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
+            None => estimated = true,
+        }
+    }
+    if let Some(usage) = synth_usage {
+        match budget::price_component(
+            parent_profile,
+            parent_model,
+            catalog,
+            prices,
+            usage.tokens.input,
+            usage.tokens.output,
+            1,
+        ) {
+            Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
+            None => estimated = true,
+        }
+    }
+    (total_nano_usd, estimated)
 }
 
 fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {

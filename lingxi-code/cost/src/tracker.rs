@@ -279,6 +279,32 @@ impl CostTracker {
         self.state.write().await.total_nano_usd = nano_usd;
     }
 
+    /// Add externally-priced spend directly onto the cumulative total.
+    ///
+    /// Used by [`crate::budget::BudgetEnforcer::commit_reservation`] for
+    /// Fusion: panel/analyst/synth spend is priced by the fusion crate's own
+    /// `FusionPriceBook` from usage the provider adapters never funnel through
+    /// [`Self::record_api_response_v2`] (there is no single per-call
+    /// `ModelRef`/`Usage` at that seam — a Fusion run prices several models'
+    /// worth of usage into one already-computed `actual_nano_usd`). The
+    /// addition happens under the SAME write lock `record_api_response_v2`
+    /// uses so two concurrent commits cannot lose an update the way a
+    /// read-then-[`Self::restore_total_nano_usd`] pair could.
+    ///
+    /// Emits on the persist channel like a real charge (unlike
+    /// `restore_total_nano_usd`, which is a resume hydrate). No-op for `0`.
+    pub async fn record_external_cost(&self, nano_usd: u64) {
+        if nano_usd == 0 {
+            return;
+        }
+        let snap = {
+            let mut state = self.state.write().await;
+            state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
+            state.clone()
+        };
+        let _ = self.persist_tx.send(snap).await;
+    }
+
     /// Reset every cumulative counter to zero — the parity twin of claude-code
     /// `resetCostState` (`yJe`), which `clearConversation` invokes so `/clear`
     /// starts a fresh session with a zeroed cost footer/status line instead of
@@ -397,6 +423,41 @@ mod tests {
         // restored 17_500_000 + this turn's 17_500_000 = 35_000_000 nano-USD.
         assert_eq!(snap.total_nano_usd, 35_000_000);
         assert_eq!(tracker.total_nano_usd().await, 35_000_000);
+    }
+
+    #[tokio::test]
+    async fn record_external_cost_adds_onto_existing_total_and_persists() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.restore_total_nano_usd(1_000).await;
+        tracker.record_external_cost(2_500).await;
+        assert_eq!(
+            tracker.total_nano_usd().await,
+            3_500,
+            "external cost adds onto the existing total, never replaces it"
+        );
+        let snap = rx.recv().await.unwrap();
+        assert_eq!(snap.total_nano_usd, 3_500, "the addition is persisted");
+    }
+
+    #[tokio::test]
+    async fn record_external_cost_zero_is_a_true_noop() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.record_external_cost(0).await;
+        assert_eq!(tracker.total_nano_usd().await, 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "a zero-cost commit must not emit a persist snapshot"
+        );
     }
 
     #[tokio::test]

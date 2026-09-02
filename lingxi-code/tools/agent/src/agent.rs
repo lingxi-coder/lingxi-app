@@ -784,13 +784,70 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
     }
 }
 
+/// Map a terminal [`platform_api::FusionError`] to the [`ToolError`] surfaced
+/// to the model (F008). Explicit arms for the load-bearing distinctions the
+/// generic `InvalidInput(other.to_string())` fallback erased:
+///
+/// - `Cancelled` (a user Ctrl-C / cancellation) → [`ToolError::Aborted`], not
+///   `InvalidInput` — the old mapping read as "invalid input: fusion
+///   cancelled", inviting the model to "fix" its arguments and retry a
+///   cancelled 4-5x-cost run.
+/// - The runtime-exhaustion family (`Internal`, `AllPanelsFailed`,
+///   `MinPanelsNotMet`, `PanelSetIncomplete`, `TimedOutEmpty`) →
+///   [`ToolError::Internal`] — these are host/provider-side outcomes, not a
+///   malformed tool call the model could correct by rewriting its input.
+///
+/// Everything else — including `InvalidRequest`/`InvalidConfiguration`/
+/// `InvalidCustomModels` — falls through to the generic
+/// `InvalidInput(other.to_string())` arm, which is [`platform_api::FusionError`]'s
+/// own `Display` (e.g. "invalid fusion configuration: fusion.maxPanel must be
+/// between 1 and 12") — NOT the bare inner message, so the model sees which
+/// category of misconfiguration it hit, matching §3's promise that an invalid
+/// config surfaces as `InvalidConfiguration`.
+///
+/// `BudgetExceeded` is intentionally NOT special-cased here: the caller
+/// (`call_fusion`) maps it separately with the live budget numbers (this free
+/// function has no budget handle), reusing the same
+/// [`budget_limit_reached_error`] format as the pre-spawn budget check a few
+/// lines above it.
 fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
+    use platform_api::FusionError;
     match err {
-        platform_api::FusionError::InvalidRequest(msg)
-        | platform_api::FusionError::InvalidConfiguration(msg)
-        | platform_api::FusionError::InvalidCustomModels(msg) => ToolError::InvalidInput(msg),
+        FusionError::Cancelled => ToolError::Aborted,
+        FusionError::Internal
+        | FusionError::AllPanelsFailed
+        | FusionError::MinPanelsNotMet
+        | FusionError::PanelSetIncomplete
+        | FusionError::TimedOutEmpty => ToolError::Internal(err.to_string()),
         other => ToolError::InvalidInput(other.to_string()),
     }
+}
+
+/// Whether a [`platform_api::FusionError`] is guaranteed to have made ZERO
+/// provider calls (F008 spawn accounting) — the doc comment on
+/// [`platform_api::FusionError`] itself: "Preflight variants guarantee zero
+/// provider calls." `call_fusion` releases the FULL `panel_n` reservation
+/// only for these; every other variant means panels genuinely spawned (or the
+/// error carries no data to say how many), so the reservation stays charged —
+/// mirroring how `Ok` releases only the trimmed surplus
+/// (`panel_n - result.panels.len()`), never the whole amount.
+fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
+    use platform_api::FusionError;
+    matches!(
+        err,
+        FusionError::Disabled
+            | FusionError::UnavailableOnPlatform
+            | FusionError::InvalidConfiguration(_)
+            | FusionError::InvalidRequest(_)
+            | FusionError::TooFewModels { .. }
+            | FusionError::InvalidCustomModels(_)
+            | FusionError::CrossProviderDenied
+            | FusionError::NoJudgeModel { .. }
+            | FusionError::StructuredOutputUnsupported
+            | FusionError::BudgetReservationUnavailable
+            | FusionError::BudgetExceeded
+            | FusionError::SpawnLimitExceeded
+    )
 }
 
 /// Default per-session subagent spawn cap (claude 2.1.212 `ofg = 200`).
@@ -963,10 +1020,58 @@ impl AgentTool {
         started: Instant,
         is_coordinator: bool,
     ) -> Result<ToolCallResult, ToolError> {
-        let surface = self.fusion_surface();
-        let executor = match (self.fusion.as_ref(), surface.enabled) {
-            (Some(ex), true) => Arc::clone(ex),
-            _ => {
+        // F008: `call`'s catalog-lookup dispatch (a few lines above the
+        // `call_fusion` call site) intercepts `subagent_type: "fusion"`
+        // BEFORE the `Agent(<type>)` deny-rule and tools-denied checks that
+        // every OTHER subagent type passes through — so a user's
+        // `Agent(fusion)` permission rule silently had no effect. Duplicated
+        // here (byte-identical denial text to the catalog path) rather than
+        // moving the intercept, since the catalog path's own `explicit_type`
+        // resolution (ambiguity matching, `general-purpose` fallback,
+        // fork routing) has no notion of the synthetic `fusion` entry to
+        // begin with.
+        if let Some(gate) = &self.ctx.permission_gate {
+            if let Some(source) = gate.agent_type_deny(FUSION_AGENT_TYPE).await {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "agent_type_denied",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Agent type '{FUSION_AGENT_TYPE}' has been denied by permission rule 'Agent({FUSION_AGENT_TYPE})' from {source}."
+                )));
+            }
+        }
+        if let Some(spawner) = &self.ctx.subagent_spawner {
+            let tools_denied = spawner.tools_denied_agent_types().await;
+            if tools_denied.iter().any(|t| t == FUSION_AGENT_TYPE) {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "agent_type_tools_denied",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(agent_type_tools_denied_error(
+                    FUSION_AGENT_TYPE,
+                )));
+            }
+        }
+        // F008: an explicit `run_in_background: true` is silently ignored by
+        // a synchronous, in-tool Fusion run (§1 fixes Agent-origin Fusion to
+        // "只写 tool_result" — no background LocalFusion route exists here);
+        // reject it explicitly instead of pretending to honor it.
+        if parsed.run_in_background == Some(true) {
+            return Err(ToolError::InvalidInput(
+                "fusion runs inline; use /fusion for a background run".into(),
+            ));
+        }
+
+        let executor = match self.fusion.as_ref() {
+            Some(ex) => Arc::clone(ex),
+            None => {
                 let available = self.fusion_available_agents_display(is_coordinator).await;
                 Self::emit_failed(
                     bus,
@@ -980,6 +1085,36 @@ impl AgentTool {
                 )));
             }
         };
+        // F008: a boot-pinned rejection (an invalid `fusion.*` setting at
+        // composition-root time — see `RejectedFusionExecutor`) is surfaced
+        // AS ITSELF, before the `enabled` gate below — otherwise it always
+        // masqueraded as the generic "not found"/`Disabled` message and §3's
+        // "invalid config → InvalidConfiguration" promise held only for
+        // `/fusion`.
+        if let Some(error) = executor.preflight_error() {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "fusion_invalid_configuration",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(fusion_tool_error(error));
+        }
+        let surface = executor.agent_surface();
+        if !surface.enabled {
+            let available = self.fusion_available_agents_display(is_coordinator).await;
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "agent_type_not_found",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(format!(
+                "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
+            )));
+        }
 
         let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
             ToolError::Internal(
@@ -1041,7 +1176,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let inherit = FusionInheritance::new(
             SubagentInheritance {
                 tool_invoker: Arc::new(invoker_impl),
-                budget,
+                budget: budget.clone(),
             },
             ctx.cancel.clone().unwrap_or_default(),
         );
@@ -1054,6 +1189,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: protocol::ToolUseId::new(),
                         data: serde_json::json!({
+                            // F005: `subagent_activity` is the key
+                            // `turn_loop.rs::forward_tool_progress` actually
+                            // recognizes and renders — `fusion_stage` (kept
+                            // below as an additive field for any consumer
+                            // that wants the raw enum tag) was never read by
+                            // that chokepoint, so every Fusion progress event
+                            // was silently dropped end to end.
+                            "subagent_activity": event.stage.label(),
                             "fusion_stage": fusion_stage_name(&event.stage),
                             "message": event.message,
                             "panel_id": event.panel_id,
@@ -1067,6 +1210,18 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let _ = forwarder.await;
         match outcome {
             Ok(result) => {
+                // F008: `panel_n` reserved the WANTED panel count before
+                // model resolution ran; a successful run may have actually
+                // spawned fewer (over-reservation is not trimmed at
+                // resolution time — see F011). Release only the surplus that
+                // never spawned, not the whole reservation.
+                if let Some(registry) = &self.ctx.task_registry {
+                    let spawned = u64::try_from(result.panels.len()).unwrap_or(panel_n);
+                    let surplus = panel_n.saturating_sub(spawned);
+                    if surplus > 0 {
+                        registry.release_total_agent_spawn_reservations(surplus);
+                    }
+                }
                 Self::emit_completed(
                     bus,
                     invocation_id,
@@ -1077,8 +1232,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 Ok(fusion_tool_result(result))
             }
             Err(err) => {
-                if let Some(registry) = &self.ctx.task_registry {
-                    registry.release_total_agent_spawn_reservations(panel_n);
+                // F008: only a PREFLIGHT error guarantees zero provider
+                // calls — release the full `panel_n` reservation for those.
+                // Every other variant means panels genuinely ran (the error
+                // itself carries no panel count to trim by), so the
+                // reservation stays charged; a repeated failing Fusion run
+                // still advances `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+                // instead of being free to retry forever.
+                if fusion_error_is_preflight(&err) {
+                    if let Some(registry) = &self.ctx.task_registry {
+                        registry.release_total_agent_spawn_reservations(panel_n);
+                    }
                 }
                 Self::emit_failed(
                     bus,
@@ -1087,6 +1251,19 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
+                // BudgetExceeded carries no data of its own — format it with
+                // the SAME live numbers (current/limit nano-USD) the
+                // pre-spawn budget check above already uses, rather than
+                // `fusion_tool_error`'s generic `other.to_string()` fallback.
+                if matches!(err, platform_api::FusionError::BudgetExceeded) {
+                    let current_nano_usd = budget.snapshot_total_nano_usd().await;
+                    return Err(match budget.max_session_nano_usd() {
+                        Some(limit_nano_usd) => ToolError::InvalidInput(
+                            budget_limit_reached_error(current_nano_usd, limit_nano_usd),
+                        ),
+                        None => ToolError::InvalidInput(err.to_string()),
+                    });
+                }
                 Err(fusion_tool_error(err))
             }
         }

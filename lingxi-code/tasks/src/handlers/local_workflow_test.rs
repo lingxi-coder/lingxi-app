@@ -433,6 +433,57 @@ fn workflow_fusion_uses_runtime_preset_and_resolves_a_missing_parent_profile() {
     assert_eq!(request.parent_profile, "openai");
 }
 
+/// Mirrors `RejectedFusionExecutor` (apps/engine-desktop) — a
+/// composition-root-pinned rejection surfaced through `preflight_error()`
+/// while `agent_surface().enabled` stays `false`.
+struct PreflightRejectedFusionExecutor {
+    error: FusionError,
+}
+
+#[async_trait]
+impl FusionExecutor for PreflightRejectedFusionExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        Err(self.error.clone())
+    }
+
+    fn preflight_error(&self) -> Option<FusionError> {
+        Some(self.error.clone())
+    }
+}
+
+/// F008: `parse_workflow_fusion_request` must surface a composition-root-
+/// pinned `preflight_error()` AS ITSELF, before the `agent_surface().enabled`
+/// gate — otherwise a workflow's `fusion()` call would see the generic
+/// `FusionError::Disabled` (every OTHER disabled-executor path) instead of
+/// the real `InvalidConfiguration` a boot-time invalid `fusion.*` setting
+/// produced.
+#[test]
+fn workflow_fusion_preflight_error_surfaces_before_the_disabled_gate() {
+    let executor: Arc<dyn FusionExecutor> = Arc::new(PreflightRejectedFusionExecutor {
+        error: FusionError::InvalidConfiguration("fusion.maxPanel must be between 1 and 12".into()),
+    });
+
+    let err = parse_workflow_fusion_request(
+        Some(&executor),
+        "review this",
+        "{}",
+        "wf_fusion",
+        Some("gpt-5.4"),
+        None,
+    )
+    .expect_err("a preflight-rejected executor must fail");
+
+    assert!(
+        matches!(&err, FusionError::InvalidConfiguration(msg) if msg == "fusion.maxPanel must be between 1 and 12"),
+        "expected the preflight InvalidConfiguration to pass through unchanged, got {err:?}"
+    );
+}
+
 #[async_trait]
 impl SubagentSpawner for BlockingWorkflowObserverSpawner {
     async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {

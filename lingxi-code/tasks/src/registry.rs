@@ -1531,6 +1531,19 @@ impl TaskRegistry {
         }
     }
 
+    /// Record a Fusion run's current progress-stage label (F005) — e.g.
+    /// "Running panels 2/3" — surfaced on the `local_fusion` task DTO so a
+    /// UI polling task state sees the same progress the Agent-tool path
+    /// forwards as `subagent_activity`. Best-effort: a since-evicted task is
+    /// a benign no-op.
+    pub async fn set_fusion_stage(&self, task_id: &str, stage: String) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.stage = Some(stage);
+        }
+    }
+
     /// Record a Fusion run's egress profiles and usage summary alongside its
     /// terminal payload, before the terminal status opens it to the
     /// notification drain.
@@ -2324,6 +2337,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             error: None,
             egress_profiles: Vec::new(),
             usage: None,
+            stage: None,
         }),
     }
 }

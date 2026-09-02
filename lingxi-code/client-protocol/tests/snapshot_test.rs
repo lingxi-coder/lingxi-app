@@ -2086,6 +2086,7 @@ fn canonical_task_row() -> TaskRowDto {
         description: "run the test suite".to_string(),
         can_resume: false,
         started_at_ms: None,
+        stage: None,
     }
 }
 

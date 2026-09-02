@@ -726,6 +726,42 @@ impl SideQueryClient for BlockingSideQuery {
     }
 }
 
+/// F005: three panels must fan out exactly FOUR `RunningPanels` progress
+/// events — the initial `0/3` emitted before the panel stage starts, plus one
+/// per panel completion — ending at `3/3`. Before `run_panels` accepted a
+/// progress channel, only the initial `0/3` event was ever sent, so the
+/// longest stage of a run (up to `panel_total_timeout_ms` per panel) reported
+/// zero progress for its whole duration.
+#[tokio::test]
+async fn three_panels_emit_exactly_four_running_panels_events_ending_at_three_of_three() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let result = orch_scripted(spawner, side)
+        .run(request("review the lock"), inherit(), Some(tx))
+        .await
+        .unwrap();
+    assert_eq!(result.panels.len(), 3);
+
+    let mut running_panels: Vec<(u8, u8)> = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let platform_api::FusionStage::RunningPanels { completed, total } = event.stage {
+            running_panels.push((completed, total));
+        }
+    }
+    assert_eq!(
+        running_panels.len(),
+        4,
+        "expected exactly 4 RunningPanels events (1 initial + 3 completions), got {running_panels:?}"
+    );
+    assert_eq!(running_panels[0], (0, 3), "{running_panels:?}");
+    assert_eq!(
+        *running_panels.last().unwrap(),
+        (3, 3),
+        "the final RunningPanels event must land at 3/3: {running_panels:?}"
+    );
+}
+
 #[tokio::test]
 async fn three_panels_concurrent_and_mutually_invisible() {
     let spawner = FakeSpawner::new(three_ok());
@@ -1069,6 +1105,7 @@ async fn panel_idle_timeout_stops_spawns_that_make_no_progress() {
         &two_resolved_panels(),
         "fu_idle",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");
@@ -1097,6 +1134,7 @@ async fn provider_stream_progress_can_outlive_one_idle_interval_in_total() {
         &two_resolved_panels(),
         "fu_heartbeat",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");
@@ -2221,6 +2259,7 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
         ],
         "fu_named",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");
@@ -2290,6 +2329,7 @@ async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one(
         }],
         "fu_count",
         std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");
@@ -2329,6 +2369,7 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
         ],
         "fu_early_abort",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");
@@ -2414,6 +2455,7 @@ async fn a_panicking_panel_task_still_yields_a_slot_instead_of_vanishing() {
         &resolved,
         "fu_panic",
         std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
+        &None,
     )
     .await
     .expect("panel collection");

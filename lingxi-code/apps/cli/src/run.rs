@@ -6765,6 +6765,7 @@ mod tests {
             error: error.map(str::to_string),
             egress_profiles: Vec::new(),
             usage: None,
+            stage: None,
         })
     }
 

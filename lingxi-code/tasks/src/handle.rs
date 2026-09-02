@@ -131,6 +131,14 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None, None),
         _ => (None, None, None, None, None, None),
     };
+    // F005: `local_fusion` carries its current progress-stage label (the same
+    // text the Agent-tool path forwards as `subagent_activity`) so a
+    // `/fusion` task's DTO/list entry can render live progress. Every other
+    // task type has no such field, so this stays `None`.
+    let stage = match s {
+        TaskState::LocalFusion(f) => f.stage.clone(),
+        _ => None,
+    };
     TaskRecord {
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),
@@ -144,6 +152,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         name,
         forked_skill_name,
         is_backgrounded,
+        stage,
     }
 }
 
@@ -1270,6 +1279,74 @@ mod tests {
         let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h.get(&task_id).await.unwrap().expect("record present");
         assert_eq!(rec.command, None, "non-bash record has no command");
+    }
+
+    /// F005 (reviewer round-1 blocking issue): a `local_fusion` task's
+    /// progress-stage label reaches `TaskRecord.stage` through
+    /// `state_to_record`, so `TaskRegistryHandle::get`/`list` — the DTO/list
+    /// chain every client, TUI, Electron RuntimeCenter and notification
+    /// surface reads — can actually observe it. Before this fix, `LocalFusion`
+    /// hit the extras match's `_ => (None, ...)` arm and `TaskRecord` had no
+    /// `stage` field at all, so `LocalFusionTaskState.stage` (set by
+    /// `TaskStatusSink::set_fusion_stage`) had zero production readers.
+    #[tokio::test]
+    async fn get_local_fusion_record_carries_progress_stage() {
+        let (_d, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalFusion);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let base = crate::state::TaskStateBase {
+            id: task_id.clone(),
+            task_type: crate::id::TaskType::LocalFusion,
+            status: TaskStatus::Running,
+            description: "compare two approaches".into(),
+            tool_use_id: None,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: spool,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        };
+        let state = TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+            base,
+            conversation_id: "conv1".into(),
+            prompt: "compare two approaches".into(),
+            run_id: None,
+            preset: "quality".into(),
+            cross_provider: false,
+            final_text: None,
+            error: None,
+            egress_profiles: Vec::new(),
+            usage: None,
+            stage: None,
+        });
+        registry.insert_state_for_test(state).await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let before = h.get(&task_id).await.unwrap().expect("record present");
+        assert_eq!(
+            before.stage, None,
+            "no progress event has landed yet on the fresh record"
+        );
+
+        // Drive the same producer chain the running orchestrator uses:
+        // `TaskStatusSink::set_fusion_stage` → `RegistryStatusSink` →
+        // `TaskRegistry::set_fusion_stage`.
+        use crate::handlers::TaskStatusSink as _;
+        let sink = crate::registry_status_sink::RegistryStatusSink::new();
+        sink.bind(registry.clone());
+        sink.set_fusion_stage(&task_id, "Running panels 2/3".to_string())
+            .await;
+
+        let after = h.get(&task_id).await.unwrap().expect("record present");
+        assert_eq!(
+            after.stage.as_deref(),
+            Some("Running panels 2/3"),
+            "the DTO/list record — not just LocalFusionTaskState — must carry the label"
+        );
     }
 
     #[tokio::test]

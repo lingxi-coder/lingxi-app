@@ -2763,6 +2763,16 @@ impl platform_api::FusionExecutor for RejectedFusionExecutor {
     ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
         Err(self.error.clone())
     }
+
+    // F008: surface the REAL boot-time rejection through Agent(fusion) and
+    // the workflow bridge too — both consult `preflight_error()` before
+    // their `enabled` gate. Without this override the default `None` let
+    // both fall back to the generic "not found"/`Disabled` message, and
+    // §3's "invalid config → InvalidConfiguration" promise held only for
+    // `/fusion` (which calls `run()` directly and hits the `Err` above).
+    fn preflight_error(&self) -> Option<platform_api::FusionError> {
+        Some(self.error.clone())
+    }
 }
 
 /// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves

@@ -203,6 +203,14 @@ pub trait TaskStatusSink: Send + Sync {
     ) {
     }
 
+    /// Record a Fusion run's current progress-stage label (F005), e.g.
+    /// "Running panels 2/3" — the SAME text `FusionStage::label()` produces
+    /// for the Agent-tool progress path. Registry-backed sinks override this
+    /// to write `LocalFusionTaskState.stage`; standalone sinks stay no-ops.
+    /// Additive — call sites that never forward Fusion progress need not
+    /// change.
+    async fn set_fusion_stage(&self, _task_id: &str, _stage: String) {}
+
     /// Atomically publish a Fusion run's terminal payload together with its
     /// terminal task status. Registry-backed sinks override this to close the
     /// outcome/status race; the default preserves legacy standalone behavior.

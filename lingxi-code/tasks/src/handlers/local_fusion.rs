@@ -241,7 +241,25 @@ impl Task for LocalFusionHandler {
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
 
-            let outcome = executor.run(request, inherit, None).await;
+            // F005: forward progress into `LocalFusionTaskState.stage` so a
+            // client polling the task DTO sees the same `FusionStage::label()`
+            // text the Agent-tool path forwards as `subagent_activity` —
+            // before this the task carried NO progress at all between
+            // `Running` and its terminal status.
+            let (prog_tx, mut prog_rx) =
+                tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
+            let forward_status_sink = status_sink.clone();
+            let forward_task_id = worker_task_id.clone();
+            let forwarder = tokio::spawn(async move {
+                while let Some(event) = prog_rx.recv().await {
+                    forward_status_sink
+                        .set_fusion_stage(&forward_task_id, event.stage.label())
+                        .await;
+                }
+            });
+
+            let outcome = executor.run(request, inherit, Some(prog_tx)).await;
+            let _ = forwarder.await;
             // Natural completion and TaskStop race on this same worker-map
             // lock. Whichever removes/marks the record first owns the terminal
             // transition. Once finalizing wins, kill must not abort the

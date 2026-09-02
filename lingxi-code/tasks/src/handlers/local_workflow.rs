@@ -392,6 +392,14 @@ fn parse_workflow_fusion_request(
     let Some(executor) = executor else {
         return Err(FusionError::UnavailableOnPlatform);
     };
+    // F008: a composition-root-pinned rejection (an invalid `fusion.*`
+    // setting at boot — see `RejectedFusionExecutor`) is surfaced AS ITSELF,
+    // before the `enabled` gate below, so a workflow's `fusion()` call sees
+    // the real `InvalidConfiguration` instead of the generic `Disabled`
+    // every OTHER disabled-executor path produces.
+    if let Some(error) = executor.preflight_error() {
+        return Err(error);
+    }
     if !executor.agent_surface().enabled {
         return Err(FusionError::Disabled);
     }
@@ -2576,7 +2584,27 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             // threaded through both. Left unwrapped here
                             // rather than shipping an override that never
                             // takes effect.
-                            let run_result = executor.run(request, inherit, None).await;
+                            // F005: forward Fusion progress into the SAME
+                            // `worker_progress_tx` string-line channel
+                            // `emit_workflow_agent_snapshot` uses for agent()
+                            // batches, so a workflow's `fusion()` call is no
+                            // longer completely silent between dispatch and
+                            // its (up to 15-minute) result.
+                            let (fusion_prog_tx, mut fusion_prog_rx) = tokio::sync::mpsc::channel::<
+                                platform_api::FusionProgress,
+                            >(32);
+                            let forward_progress_tx = worker_progress_tx.clone();
+                            let progress_forwarder = tokio::spawn(async move {
+                                while let Some(event) = fusion_prog_rx.recv().await {
+                                    if let Some(tx) = &forward_progress_tx {
+                                        let _ = tx
+                                            .send(format!("[workflow_fusion] {}", event.stage.label()));
+                                    }
+                                }
+                            });
+                            let run_result =
+                                executor.run(request, inherit, Some(fusion_prog_tx)).await;
+                            let _ = progress_forwarder.await;
                             match run_result {
                                 Ok(result) => {
                                     spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);

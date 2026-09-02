@@ -133,7 +133,7 @@ impl FusionOrchestrator {
             &progress,
             FusionStage::ResolvingModels,
             None,
-            "resolving fusion panel models",
+            FusionStage::ResolvingModels.label(),
         )
         .await;
         let resolved = match model_resolver::resolve(&request, config, self.catalog.as_ref())
@@ -183,7 +183,7 @@ impl FusionOrchestrator {
             &progress,
             FusionStage::ReservingBudget,
             None,
-            "fusion budget preflight",
+            FusionStage::ReservingBudget.label(),
         )
         .await;
         let lease = match budget::acquire(
@@ -226,14 +226,16 @@ impl FusionOrchestrator {
         }
 
         let panel_started = Instant::now();
+        let panel_total = u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX);
+        let initial_running_stage = FusionStage::RunningPanels {
+            completed: 0,
+            total: panel_total,
+        };
         progress::emit(
             &progress,
-            FusionStage::RunningPanels {
-                completed: 0,
-                total: u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX),
-            },
+            initial_running_stage.clone(),
             None,
-            "running fusion panels",
+            initial_running_stage.label(),
         )
         .await;
         for (index, _) in resolved.panels.iter().enumerate() {
@@ -244,6 +246,11 @@ impl FusionOrchestrator {
                 .log_event(telemetry::tengu::fusion::PANEL_STARTED, md)
                 .await;
         }
+        // F005: `run_panels` emits `RunningPanels{completed:k,total}` (with the
+        // finishing panel's anonymous id) after EVERY `join_next`, so the
+        // longest stage of a run — up to `panel_total_timeout_ms` per panel —
+        // is no longer a single stalled "0/N" progress event for its whole
+        // duration.
         let mut panels = match panel::run_panels(
             Arc::clone(&self.spawner),
             &inherit,
@@ -252,6 +259,7 @@ impl FusionOrchestrator {
             &resolved.panels,
             &run_id,
             Self::remaining(config, started),
+            &progress,
         )
         .await
         {
@@ -332,7 +340,13 @@ impl FusionOrchestrator {
             return Err(error);
         }
 
-        progress::emit(&progress, FusionStage::Analyzing, None, "analyzing panels").await;
+        progress::emit(
+            &progress,
+            FusionStage::Analyzing,
+            None,
+            FusionStage::Analyzing.label(),
+        )
+        .await;
         let analyst_started = Instant::now();
         // F004: bound the analyst stage by what actually remains of the
         // end-to-end deadline, not just its own `analystTimeoutMs` budget —
@@ -467,7 +481,7 @@ impl FusionOrchestrator {
                             &progress,
                             FusionStage::Selecting,
                             Some(panel_id.clone()),
-                            "picking a panel answer",
+                            FusionStage::Selecting.label(),
                         )
                         .await;
                         let text = panel_by_id(&panels, &panel_id)
@@ -497,7 +511,7 @@ impl FusionOrchestrator {
                             &progress,
                             FusionStage::Synthesizing,
                             None,
-                            "merging panel answers",
+                            FusionStage::Synthesizing.label(),
                         )
                         .await;
                         let synth_started = Instant::now();
@@ -607,7 +621,7 @@ impl FusionOrchestrator {
             FusionStatus::Completed => FusionStage::Completed,
             FusionStatus::NeedsParent => FusionStage::NeedsParent,
         };
-        progress::emit(&progress, stage, None, "fusion finished").await;
+        progress::emit(&progress, stage.clone(), None, stage.label()).await;
 
         let mut egress: Vec<String> = resolved
             .panels
@@ -731,7 +745,13 @@ impl FusionExecutor for FusionOrchestrator {
                 self.bus
                     .log_event(telemetry::tengu::fusion::FAILED, md)
                     .await;
-                progress::emit(&progress, FusionStage::Failed, None, "fusion failed").await;
+                progress::emit(
+                    &progress,
+                    FusionStage::Failed,
+                    None,
+                    FusionStage::Failed.label(),
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -787,12 +807,12 @@ impl FusionExecutor for FusionOrchestrator {
             }
         };
         if let Err(error) = &outcome {
-            let (stage, message) = if matches!(error, FusionError::Cancelled) {
-                (FusionStage::Cancelled, "fusion cancelled")
+            let stage = if matches!(error, FusionError::Cancelled) {
+                FusionStage::Cancelled
             } else {
-                (FusionStage::Failed, "fusion failed")
+                FusionStage::Failed
             };
-            progress::emit(&progress, stage, None, message).await;
+            progress::emit(&progress, stage.clone(), None, stage.label()).await;
         }
         outcome
     }

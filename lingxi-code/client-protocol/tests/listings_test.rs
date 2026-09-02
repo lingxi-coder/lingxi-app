@@ -729,6 +729,7 @@ fn task_row_round_trips() {
             description: "Build the docs".to_string(),
             can_resume: false,
             started_at_ms: None,
+            stage: None,
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskRow");

@@ -204,6 +204,51 @@ impl FusionExecutor for ImmediateExecutor {
     }
 }
 
+/// F005: sends two scripted `FusionProgress` events through whatever channel
+/// `spawn` hands it before completing — the fixture under test is the
+/// HANDLER's forwarding wire, not the orchestrator.
+struct ProgressEmittingExecutor {
+    runs: AtomicUsize,
+}
+
+impl ProgressEmittingExecutor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            runs: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for ProgressEmittingExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = progress {
+            for stage in [
+                platform_api::FusionStage::ResolvingModels,
+                platform_api::FusionStage::RunningPanels {
+                    completed: 2,
+                    total: 3,
+                },
+            ] {
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: None,
+                    })
+                    .await;
+            }
+        }
+        Ok(dummy_result())
+    }
+}
+
 /// Blocks in `run()` until the fusion inheritance's cancel token fires (the
 /// same pattern `local_workflow_test::BlockingFusionExecutor` uses), then
 /// returns `Err(Cancelled)`. Signals `started` once it has actually entered
@@ -317,6 +362,8 @@ impl ActivationSink {
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
     calls: StdMutex<Vec<&'static str>>,
+    /// F005: every `set_fusion_stage` label, in call order.
+    stages: StdMutex<Vec<String>>,
 }
 
 impl RecordingSink {
@@ -340,6 +387,10 @@ impl RecordingSink {
             .filter(|(_, s)| *s == status)
             .count()
     }
+
+    fn stages(&self) -> Vec<String> {
+        self.stages.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -350,6 +401,10 @@ impl TaskStatusSink for RecordingSink {
             .lock()
             .unwrap()
             .push((task_id.to_string(), status));
+    }
+
+    async fn set_fusion_stage(&self, _task_id: &str, stage: String) {
+        self.stages.lock().unwrap().push(stage);
     }
 
     async fn is_terminal(&self, task_id: &str) -> bool {
@@ -636,6 +691,53 @@ async fn handler_waits_for_activation_before_running_executor() {
     );
     assert_eq!(executor.runs.load(Ordering::SeqCst), 1);
     assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+}
+
+/// F005: `LocalFusionHandler::spawn` must forward every `FusionProgress` the
+/// executor emits into `TaskStatusSink::set_fusion_stage`, in order — before
+/// this fix `spawn` always passed `None` for the progress channel, so a
+/// `/fusion` task's stage never updated between `Running` and its terminal
+/// status.
+#[tokio::test]
+async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = ProgressEmittingExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(executor.runs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        status_sink.stages(),
+        vec!["Resolving models".to_string(), "Running panels 2/3".to_string()],
+        "expected the 2 scripted FusionProgress events forwarded in order"
+    );
 }
 
 #[tokio::test]

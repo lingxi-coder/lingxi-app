@@ -1808,6 +1808,7 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         error: None,
         egress_profiles: Vec::new(),
         usage: None,
+        stage: None,
     })
 }
 
@@ -1906,6 +1907,52 @@ async fn take_pending_drains_local_fusion_egress_and_usage_through_status_sink()
         n.usage,
         Some(usage),
         "set_fusion_egress_and_usage's usage reaches <usage> when no local_agent outcome exists"
+    );
+}
+
+/// F005: `LocalFusionTaskState.stage` updates in place, once per progress
+/// event, through `RegistryStatusSink::set_fusion_stage` — the wire a
+/// `/fusion` task's DTO/list entry uses to surface `FusionStage::label()`
+/// text as the run progresses (mirroring `subagent_activity` on the
+/// Agent-tool path).
+#[tokio::test]
+async fn set_fusion_stage_updates_the_local_fusion_task_state_in_place() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+
+    let (dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = "fu_stage01";
+    registry
+        .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
+        .await;
+
+    let stage_of = |state: &TaskState| match state {
+        TaskState::LocalFusion(fusion) => fusion.stage.clone(),
+        other => panic!("expected LocalFusion, got {other:?}"),
+    };
+
+    assert_eq!(
+        stage_of(&registry.get(id).await.expect("task exists")),
+        None,
+        "no progress event has landed yet"
+    );
+
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    sink.set_fusion_stage(id, "Resolving models".to_string())
+        .await;
+    assert_eq!(
+        stage_of(&registry.get(id).await.expect("task exists")),
+        Some("Resolving models".to_string())
+    );
+
+    sink.set_fusion_stage(id, "Running panels 2/3".to_string())
+        .await;
+    assert_eq!(
+        stage_of(&registry.get(id).await.expect("task exists")),
+        Some("Running panels 2/3".to_string()),
+        "a later progress event overwrites the previous stage in place"
     );
 }
 

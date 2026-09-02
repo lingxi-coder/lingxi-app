@@ -588,6 +588,30 @@ pub enum FusionStage {
     Cancelled,
 }
 
+impl FusionStage {
+    /// Fixed, human-readable label shared by every progress surface (Agent
+    /// tool forwarder, `/fusion` task DTO, workflow bridge) per design §7's
+    /// copy — the ONE place that copy is spelled, so every entrypoint that
+    /// renders `FusionStage` renders the SAME words (F005).
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::ResolvingModels => "Resolving models".to_string(),
+            Self::ReservingBudget => "Reserving budget".to_string(),
+            Self::RunningPanels { completed, total } => {
+                format!("Running panels {completed}/{total}")
+            }
+            Self::Analyzing => "Analyzing reports".to_string(),
+            Self::Selecting => "Selecting answer".to_string(),
+            Self::Synthesizing => "Synthesizing answer".to_string(),
+            Self::Completed => "Completed".to_string(),
+            Self::NeedsParent => "Needs parent".to_string(),
+            Self::Failed => "Failed".to_string(),
+            Self::Cancelled => "Cancelled".to_string(),
+        }
+    }
+}
+
 /// One progress event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FusionProgress {
@@ -826,6 +850,18 @@ pub trait FusionExecutor: Send + Sync {
     /// Agent listing / intercept gate. Default is disabled (inert).
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()
+    }
+
+    /// A boot-time (or otherwise pinned) failure that makes every `run()`
+    /// call fail identically, checked BEFORE the `agent_surface().enabled`
+    /// gate (F008). Lets a composition root that rejected an invalid
+    /// `fusion.*` value (see `RejectedFusionExecutor`) surface the real
+    /// [`FusionError::InvalidConfiguration`] through the Agent tool and the
+    /// workflow bridge, instead of both falling back to `enabled: false`'s
+    /// generic "not found"/`Disabled` message. Default `None` — an executor
+    /// that never pins a rejection is unaffected.
+    fn preflight_error(&self) -> Option<FusionError> {
+        None
     }
 
     /// Resolve the provider profile for a parent model.
@@ -1261,5 +1297,71 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn FusionExecutor>> = None;
+    }
+
+    /// F005: every progress surface renders `FusionStage` through this ONE
+    /// method, so pin the exact §7 copy here — a stray rewording at any
+    /// call site cannot silently diverge from what this test locks in.
+    #[test]
+    fn fusion_stage_label_matches_design_doc_7_copy() {
+        assert_eq!(FusionStage::ResolvingModels.label(), "Resolving models");
+        assert_eq!(FusionStage::ReservingBudget.label(), "Reserving budget");
+        assert_eq!(
+            FusionStage::RunningPanels {
+                completed: 2,
+                total: 3
+            }
+            .label(),
+            "Running panels 2/3"
+        );
+        assert_eq!(FusionStage::Analyzing.label(), "Analyzing reports");
+        assert_eq!(FusionStage::Selecting.label(), "Selecting answer");
+        assert_eq!(FusionStage::Synthesizing.label(), "Synthesizing answer");
+        assert_eq!(FusionStage::Completed.label(), "Completed");
+        assert_eq!(FusionStage::NeedsParent.label(), "Needs parent");
+        assert_eq!(FusionStage::Failed.label(), "Failed");
+        assert_eq!(FusionStage::Cancelled.label(), "Cancelled");
+    }
+
+    struct PinnedFusionExecutor;
+
+    #[async_trait]
+    impl FusionExecutor for PinnedFusionExecutor {
+        async fn run(
+            &self,
+            _request: FusionRequest,
+            _inherit: FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
+        ) -> Result<FusionResult, FusionError> {
+            unreachable!("not exercised by this test")
+        }
+
+        fn preflight_error(&self) -> Option<FusionError> {
+            Some(FusionError::InvalidConfiguration("pinned".into()))
+        }
+    }
+
+    /// F008: the default `preflight_error()` is inert (`None`); an executor
+    /// that overrides it (mirroring `RejectedFusionExecutor`) surfaces its
+    /// pinned failure without needing to override `run()`/`agent_surface()`.
+    #[test]
+    fn preflight_error_defaults_to_none_and_is_overridable() {
+        struct DefaultExecutor;
+        #[async_trait]
+        impl FusionExecutor for DefaultExecutor {
+            async fn run(
+                &self,
+                _request: FusionRequest,
+                _inherit: FusionInheritance,
+                _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
+            ) -> Result<FusionResult, FusionError> {
+                unreachable!("not exercised by this test")
+            }
+        }
+        assert!(DefaultExecutor.preflight_error().is_none());
+        assert!(matches!(
+            PinnedFusionExecutor.preflight_error(),
+            Some(FusionError::InvalidConfiguration(msg)) if msg == "pinned"
+        ));
     }
 }

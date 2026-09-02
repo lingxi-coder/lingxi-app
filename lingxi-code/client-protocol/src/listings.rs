@@ -609,6 +609,11 @@ pub struct TaskRowDto {
     /// Wall-clock start time, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// `local_fusion` only (F005): the run's current progress-stage label
+    /// (e.g. "Running panels 2/3"), lowered from `TaskRecord.stage`. `None`
+    /// for every other task type, and before the first progress event lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the

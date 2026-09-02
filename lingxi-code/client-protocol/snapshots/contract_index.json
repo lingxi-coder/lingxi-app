@@ -1143,6 +1143,7 @@
   "SyntaxClassDto::Variable": "variable",
   "TaskRowDto.can_resume": "bool",
   "TaskRowDto.description": "String",
+  "TaskRowDto.stage": "Option<String>",
   "TaskRowDto.started_at_ms": "Option<u64>",
   "TaskRowDto.status": "TaskStatusDto",
   "TaskRowDto.task_id": "String",

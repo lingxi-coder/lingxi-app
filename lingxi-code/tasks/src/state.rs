@@ -480,6 +480,12 @@ pub struct LocalFusionTaskState {
     /// Aggregate run usage summary for the `<usage>` notification section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<platform_api::task_registry::AgentRunUsage>,
+    /// Current progress-stage label (F005), e.g. "Running panels 2/3" — the
+    /// SAME text `FusionStage::label()` produces for the Agent-tool path, so
+    /// the `/fusion` task DTO's progress reads identically. Additive; `None`
+    /// until the first `FusionProgress` event lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// Tripwire for the residual documented on

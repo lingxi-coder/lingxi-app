@@ -619,7 +619,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             decision,
             final_text: "FUSION_FINAL".into(),
             analysis: None,
-            panels: vec![],
+            // 3 panels (the quality preset count every fixture in this file
+            // wires) — F008's spawn-quota release compares `panel_n` against
+            // `result.panels.len()`, so a fixture with an EMPTY panel vec
+            // would make a successful run look like it spawned zero panels
+            // and release the whole reservation.
+            panels: (1..=3)
+                .map(|n| platform_api::PanelOutcome {
+                    panel_id: format!("P{n}"),
+                    status: platform_api::PanelRunStatus::Completed,
+                    duration_ms: 100,
+                    error_category: None,
+                    error_detail: None,
+                    usage: None,
+                })
+                .collect(),
             usage: platform_api::FusionUsage::default(),
             timing: platform_api::FusionTiming::default(),
             egress_profiles: vec!["anthropic".into()],
@@ -698,6 +712,78 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    /// Enabled Fusion whose `run()` always returns a scripted [`FusionError`]
+    /// — for F008's error-mapping and spawn-quota-on-Err tests.
+    struct ErroringFusion {
+        error: platform_api::FusionError,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for ErroringFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            Err(self.error.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// Mirrors `RejectedFusionExecutor` (apps/engine-desktop) — a
+    /// composition-root-pinned rejection surfaced through `preflight_error()`
+    /// while `agent_surface().enabled` stays `false` (F008): the not-found
+    /// gate must never win the race against the real stored error.
+    struct PreflightRejectedFusion {
+        error: platform_api::FusionError,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for PreflightRejectedFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            Err(self.error.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            // `enabled: true` so the test proves `preflight_error()` wins
+            // the race against the ENABLED gate too, not merely against the
+            // disabled default.
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn preflight_error(&self) -> Option<platform_api::FusionError> {
+            Some(self.error.clone())
+        }
+    }
+
     struct CapturingFusion {
         requests: std::sync::Mutex<Vec<platform_api::FusionRequest>>,
     }
@@ -726,6 +812,127 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..platform_api::FusionAgentSurface::default()
             }
         }
+    }
+
+    /// F005: sends three scripted `FusionProgress` events through the
+    /// channel `call_fusion` hands it, mimicking what the real orchestrator
+    /// does — the fixture under test is the FORWARDER, not the orchestrator.
+    struct ProgressEmittingFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for ProgressEmittingFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                for stage in [
+                    platform_api::FusionStage::ResolvingModels,
+                    platform_api::FusionStage::RunningPanels {
+                        completed: 1,
+                        total: 3,
+                    },
+                    platform_api::FusionStage::Completed,
+                ] {
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            message: stage.label(),
+                            stage,
+                            panel_id: None,
+                        })
+                        .await;
+                }
+            }
+            Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// F005: the Agent-tool forwarder must key its `ToolProgress` payload
+    /// `subagent_activity` — the ONLY key `turn_loop.rs::forward_tool_progress`
+    /// recognizes and renders — with the value equal to `FusionStage::label()`.
+    /// Before this fix the forwarder keyed the payload `fusion_stage` (the raw
+    /// enum tag), which that chokepoint does not recognize, so every Fusion
+    /// progress event reached the pipe and was silently dropped there.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn fusion_progress_forwards_as_subagent_activity_with_label_text() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ProgressEmittingFusion));
+        let (progress_tx, mut progress_rx) = tool_api::progress::progress_channel();
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            progress_tx,
+        )
+        .await
+        .expect("fusion call succeeds");
+        drop(tool);
+
+        let mut activity_events: Vec<(String, Option<String>)> = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            if let Some(activity) = event.data.get("subagent_activity").and_then(Value::as_str) {
+                activity_events.push((
+                    activity.to_string(),
+                    event
+                        .data
+                        .get("fusion_stage")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                ));
+            }
+        }
+        assert_eq!(
+            activity_events.len(),
+            3,
+            "expected 3 forwarded subagent_activity events, got {activity_events:?}"
+        );
+        assert_eq!(
+            activity_events[0],
+            ("Resolving models".to_string(), Some("resolving_models".to_string()))
+        );
+        assert_eq!(
+            activity_events[1],
+            (
+                "Running panels 1/3".to_string(),
+                Some("running_panels".to_string())
+            )
+        );
+        assert_eq!(
+            activity_events[2],
+            ("Completed".to_string(), Some("completed".to_string()))
+        );
     }
 
     #[test]
@@ -757,11 +964,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+        // Kept as its own binding (not dropped into `.with_fusion(Arc::new(..))`
+        // inline) so `runs` can be read back AFTER the call below — the prior
+        // version of this test built-and-dropped the `Arc`, which meant a
+        // regression that made the disabled gate a no-op (and actually ran
+        // the executor) could never be caught here.
+        let fusion = Arc::new(ScriptedFusion {
             enabled: false,
             result: sample_fusion_result(platform_api::FusionStatus::Completed),
             runs: std::sync::atomic::AtomicUsize::new(0),
-        }));
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
         let prompt = tool
             .prompt(&tool_api::tool_trait::PromptOptions {
                 include_examples: false,
@@ -792,6 +1005,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             }
             other => panic!("expected not found, got {other:?}"),
         }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disabled fusion must never reach the executor"
+        );
     }
 
     #[tokio::test]
@@ -848,6 +1066,235 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "one fusion call reserves 3 panel slots, not a wrapper slot"
         );
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// F008: `call`'s catalog-lookup dispatch intercepts `subagent_type:
+    /// "fusion"` before it ever reaches the `agent_type_deny`/`tools_denied`
+    /// checks every other subagent type passes through, so a user's
+    /// `Agent(fusion)` permission rule was silently ignored. The denial text
+    /// must be byte-identical to the ordinary catalog path's (see
+    /// `call_rejects_denied_agent_type_with_byte_exact_message`), and the
+    /// executor must never be reached.
+    #[tokio::test]
+    async fn fusion_agent_type_deny_rule_blocks_the_call_with_byte_exact_message_and_zero_runs() {
+        struct DenyFusionGate;
+        #[async_trait::async_trait]
+        impl platform_api::permission_gate::PermissionGate for DenyFusionGate {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> platform_api::permission_gate::PermissionDecision {
+                platform_api::permission_gate::PermissionDecision::Allow
+            }
+            async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+                (agent_type == FUSION_AGENT_TYPE).then(|| "localSettings".to_string())
+            }
+        }
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyFusionGate));
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'fusion' has been denied by permission rule 'Agent(fusion)' from localSettings."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a denied Agent(fusion) rule must never reach the executor"
+        );
+    }
+
+    /// F008: a composition-root-pinned rejection (`preflight_error()`, which
+    /// `RejectedFusionExecutor` overrides for a boot-time invalid
+    /// `fusion.*` setting) must be surfaced AS ITSELF — before the `enabled`
+    /// gate — instead of masquerading as the generic "Agent type 'fusion'
+    /// not found" message every other disabled-executor path produces.
+    #[tokio::test]
+    async fn fusion_preflight_error_surfaces_invalid_configuration_before_the_not_found_gate() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreflightRejectedFusion {
+            error: platform_api::FusionError::InvalidConfiguration(
+                "fusion.maxPanel must be between 1 and 12".into(),
+            ),
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("invalid fusion configuration"),
+                    "expected the preflight InvalidConfiguration's Display text, not the \
+                     generic not-found message: {msg}"
+                );
+                assert!(
+                    msg.contains("fusion.maxPanel must be between 1 and 12"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("not found"), "{msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// F008: only a PREFLIGHT [`platform_api::FusionError`] guarantees zero
+    /// provider calls. `MinPanelsNotMet` happens AFTER every panel actually
+    /// ran, so the full `panel_n` reservation must stay charged (not
+    /// released) — otherwise a repeated failing Fusion run is free to retry
+    /// forever against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    #[tokio::test]
+    async fn fusion_min_panels_not_met_keeps_all_reserved_spawns() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::MinPanelsNotMet,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Internal(_)),
+            "MinPanelsNotMet must map to Internal, not InvalidInput: {err:?}"
+        );
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "3 panels genuinely ran before MinPanelsNotMet; none of the reservation may be released"
+        );
+    }
+
+    /// F008: `Cancelled` (a user Ctrl-C) must map to [`ToolError::Aborted`],
+    /// not `InvalidInput` — the old mapping read as "invalid input: fusion
+    /// cancelled", inviting the model to "fix" its arguments and retry a
+    /// cancelled 4-5x-cost run.
+    #[tokio::test]
+    async fn fusion_cancelled_maps_to_aborted_not_invalid_input() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::Cancelled,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "Cancelled must map to Aborted: {err:?}"
+        );
+    }
+
+    /// F008: an explicit `run_in_background: true` must be rejected rather
+    /// than silently ignored — Fusion has no background LocalFusion route
+    /// from the Agent tool (§1: Agent-origin Fusion "只写 tool_result").
+    #[tokio::test]
+    async fn fusion_explicit_run_in_background_true_is_rejected() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion",
+                    "run_in_background": true
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert!(msg.contains("fusion runs inline"), "{msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "run_in_background: true must be rejected before reaching the executor"
+        );
     }
 
     #[test]

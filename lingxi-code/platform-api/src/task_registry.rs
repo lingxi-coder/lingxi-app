@@ -137,6 +137,14 @@ pub struct TaskRecord {
     /// dropped by that filter clause). Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_backgrounded: Option<bool>,
+    /// `local_fusion` only (F005): the run's current progress-stage label —
+    /// e.g. "Running panels 2/3" — the SAME text `FusionStage::label()`
+    /// produces for the Agent-tool path's `subagent_activity` forwarding, so
+    /// a `/fusion` task's DTO/list entry can render identical progress.
+    /// `None` for every other task type, and for a `local_fusion` task before
+    /// its first `FusionProgress` event lands. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// A `local_workflow` run projected for the interactive `/workflows` picker

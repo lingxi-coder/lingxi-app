@@ -2,19 +2,22 @@
 
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::ResolvedPanel;
+use crate::progress;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
     StructuredOutputMode, SubagentResult, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
     SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
-    validate_panel_report, FusionError, FusionInheritance, FusionUsage, PanelReport,
-    PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
+    validate_panel_report, FusionError, FusionInheritance, FusionProgress, FusionStage,
+    FusionUsage, PanelReport, PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL,
+    FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -142,6 +145,7 @@ pub fn panel_report_json_schema() -> Value {
 /// being cut off by the outer `run()` wrapper, which drops `run_inner` (and every
 /// panel result gathered so far) wholesale and degrades to `TimedOutEmpty` even
 /// when panels had already produced enough successful material for `NeedsParent`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_panels(
     spawner: Arc<dyn SubagentSpawner>,
     inherit: &FusionInheritance,
@@ -150,6 +154,7 @@ pub async fn run_panels(
     panels: &[ResolvedPanel],
     run_id: &str,
     overall_deadline: Duration,
+    progress: &Option<Sender<FusionProgress>>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
     let total = panels.len();
@@ -250,6 +255,12 @@ pub async fn run_panels(
                             failed += 1;
                         }
                         collected.push((index, internal));
+                        // F005: fan out ONE `RunningPanels{completed,total}`
+                        // event per finished panel (not just once at 0/total
+                        // before the stage starts) so the longest stage of a
+                        // run — up to `panel_total_timeout_ms` per panel — has
+                        // visible progress instead of a single stalled event.
+                        emit_running_panels(progress, index, collected.len(), total).await;
                     }
                     Some(Err(join_err)) => {
                         // A panicked or (post-abort) cancelled task loses its
@@ -272,6 +283,7 @@ pub async fn run_panels(
                             );
                             failed += 1;
                             collected.push((index, internal));
+                            emit_running_panels(progress, index, collected.len(), total).await;
                         }
                     }
                     None => break,
@@ -291,6 +303,30 @@ pub async fn run_panels(
 
     collected.sort_by_key(|(index, _)| *index);
     Ok(collected.into_iter().map(|(_, internal)| internal).collect())
+}
+
+/// Emit `RunningPanels{completed,total}` for one finished panel (F005). Panels
+/// are not yet anonymized inside `run_panels` (anonymization runs on the
+/// caller's side after this returns), so `panel_id` is the pre-shuffle spawn
+/// slot (`p{index+1}`) — an identifier for progress purposes only, never
+/// exposed as the panel's real anonymous id.
+async fn emit_running_panels(
+    progress: &Option<Sender<FusionProgress>>,
+    finished_index: usize,
+    completed: usize,
+    total: usize,
+) {
+    let stage = FusionStage::RunningPanels {
+        completed: u8::try_from(completed).unwrap_or(u8::MAX),
+        total: u8::try_from(total).unwrap_or(u8::MAX),
+    };
+    progress::emit(
+        progress,
+        stage.clone(),
+        Some(format!("p{}", finished_index + 1)),
+        stage.label(),
+    )
+    .await;
 }
 
 enum PanelFinish {

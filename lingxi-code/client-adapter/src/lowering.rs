@@ -439,6 +439,7 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         // validation before launching; this flag is only an affordance hint.
         can_resume: rec.task_type == "local_workflow" && rec.status == "paused",
         started_at_ms: rec.started_at_ms,
+        stage: rec.stage.clone(),
     }
 }
 
@@ -927,6 +928,37 @@ mod tests {
         // "killed" wire status → Cancelled DTO variant.
         assert_eq!(dto.status, TaskStatusDto::Cancelled);
         assert_eq!(dto.description, "build");
+    }
+
+    /// F005: `TaskRecord.stage` (the `/fusion` task's live progress-stage
+    /// label) survives the lowering to `TaskRowDto.stage` unchanged, so a
+    /// polling client sees the same "Running panels 2/3" text the Agent-tool
+    /// path forwards as `subagent_activity`.
+    #[test]
+    fn task_record_stage_lowers_onto_task_row_stage() {
+        let with_stage = TaskRecord {
+            task_id: "fu3f9zk2x".to_string(),
+            task_type: "local_fusion".to_string(),
+            status: "running".to_string(),
+            description: "deliberate".to_string(),
+            stage: Some("Running panels 2/3".to_string()),
+            ..Default::default()
+        };
+        let dto = lower_task_record(&with_stage);
+        assert_eq!(dto.stage.as_deref(), Some("Running panels 2/3"));
+
+        let without_stage = TaskRecord {
+            task_id: "b3f9zk2xq".to_string(),
+            task_type: "local_bash".to_string(),
+            status: "running".to_string(),
+            description: "build".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            lower_task_record(&without_stage).stage,
+            None,
+            "non-fusion task rows carry no stage"
+        );
     }
 
     #[test]

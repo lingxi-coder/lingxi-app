@@ -4,7 +4,6 @@ import { useBridge } from './bridge/useBridge';
 import {
   BetaComposer,
   BetaSidebar,
-  BetaTasks,
   BetaTopBar,
   ErrorBanner,
 } from './components/BetaDesktop';
@@ -16,10 +15,10 @@ import { SettingsScreen } from './components/settings/SettingsScreen';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
+import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 
 export function App() {
   const [theme, setTheme] = useState<ThemeMode>('dark');
-  const [tasksOpen, setTasksOpen] = useState(false);
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
@@ -79,11 +78,12 @@ export function App() {
           <main style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <BetaTopBar
             bridge={bridge}
-            tasksOpen={tasksOpen}
-            onToggleTasks={() => setTasksOpen((value) => !value)}
+            runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
+            onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
             theme={theme}
             onTheme={changeTheme}
           />
+          {!bridge.sessionLoading && <RuntimeCenterOverview bridge={bridge} />}
           <ErrorBanner bridge={bridge} />
           {bridge.loading ? (
             <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
@@ -141,8 +141,7 @@ export function App() {
             onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
           />
           </main>
-
-          {tasksOpen && !bridge.sessionLoading && <BetaTasks bridge={bridge} onClose={() => setTasksOpen(false)} />}
+          {!bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
         </SettingsBackground>
 
         {settingsRoute && (

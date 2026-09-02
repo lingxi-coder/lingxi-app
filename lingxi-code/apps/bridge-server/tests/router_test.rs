@@ -55,7 +55,7 @@ use platform_api::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
+use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -1678,6 +1678,169 @@ async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
         events.as_slice(),
         [ClientEvent::Error { message, .. }] if message.contains("malformed session id")
     ));
+}
+
+fn seed_session_agent_transcript(
+    root: &std::path::Path,
+    session_id: protocol::SessionId,
+    nested: bool,
+) -> (protocol::AgentId, std::path::PathBuf) {
+    let cwd = root.to_string_lossy().into_owned();
+    let base = orchestrator::transcript_paths::subagents_dir(
+        &root.join(".lingxi"),
+        &cwd,
+        &session_id.as_uuid().to_string(),
+    );
+    let dir = if nested {
+        base.join("workflows").join("wf_test")
+    } else {
+        base
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let agent_id = protocol::AgentId::new();
+    let message = protocol::ConversationMessage::user(
+        protocol::MessageId::new(),
+        "inspect the runtime".to_string(),
+    );
+    let path = dir.join(format!("agent-{agent_id}.jsonl"));
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "message": message,
+                "status": "idle",
+                "agent_name": "Runtime reviewer",
+                "agent_type": "reviewer",
+                "model": "test-model",
+            })
+        ),
+    )
+    .unwrap();
+    (agent_id, path)
+}
+
+#[tokio::test]
+async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let (agent_id, _) = seed_session_agent_transcript(root.path(), session_id, true);
+    let router = router_with_store(handle, root.path());
+
+    let list_sink = CapturingSink::arc();
+    router
+        .route(ClientCommand::ListSessionAgents, list_sink.clone())
+        .await;
+    let list_events = list_sink.events().await;
+    let [ClientEvent::SessionAgentList {
+        session_id: emitted_session,
+        agents,
+    }] = list_events.as_slice()
+    else {
+        panic!("expected one session-agent list, got {list_events:?}");
+    };
+    assert_eq!(emitted_session, &session_id.as_uuid().to_string());
+    assert_eq!(agents[0].agent_id, "main");
+    assert!(agents.iter().any(|agent| {
+        agent.agent_id == agent_id.to_string()
+            && agent.name == "Runtime reviewer"
+            && agent.status == "idle"
+    }));
+
+    let transcript_sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: agent_id.to_string(),
+            },
+            transcript_sink.clone(),
+        )
+        .await;
+    assert!(matches!(
+        transcript_sink.events().await.as_slice(),
+        [ClientEvent::SessionAgentTranscript {
+            session_id: emitted_session,
+            agent_id: emitted_agent,
+            messages,
+            next_message_index: 1,
+            revision: 1,
+        }] if emitted_session == &session_id.as_uuid().to_string()
+            && emitted_agent == &agent_id.to_string()
+            && messages.len() == 1
+    ));
+}
+
+#[tokio::test]
+async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let router = router_with_store(handle, root.path());
+    let missing_id = protocol::AgentId::new();
+    let missing_sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: missing_id.to_string(),
+            },
+            missing_sink.clone(),
+        )
+        .await;
+    assert!(matches!(
+        missing_sink.events().await.as_slice(),
+        [ClientEvent::Error { kind: ErrorKindDto::Rejected, message }]
+            if message.contains("not found")
+    ));
+
+    let (corrupt_id, corrupt_path) = seed_session_agent_transcript(root.path(), session_id, false);
+    std::fs::write(corrupt_path, "not-json\n").unwrap();
+    let corrupt_sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: corrupt_id.to_string(),
+            },
+            corrupt_sink.clone(),
+        )
+        .await;
+    assert!(matches!(
+        corrupt_sink.events().await.as_slice(),
+        [ClientEvent::Error { kind: ErrorKindDto::Internal, message }]
+            if message.contains("corrupt")
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_agent_route_never_follows_a_symlinked_transcript_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let cwd = root.path().to_string_lossy().into_owned();
+    let subagents = orchestrator::transcript_paths::subagents_dir(
+        &root.path().join(".lingxi"),
+        &cwd,
+        &session_id.as_uuid().to_string(),
+    );
+    std::fs::create_dir_all(subagents.parent().unwrap()).unwrap();
+    symlink(outside.path(), &subagents).unwrap();
+    let router = router_with_store(handle, root.path());
+    let sink = CapturingSink::arc();
+
+    router
+        .route(ClientCommand::ListSessionAgents, sink.clone())
+        .await;
+    let events = sink.events().await;
+    assert!(
+        matches!(events.first(), Some(ClientEvent::SessionAgentList { agents, .. }) if agents.len() == 1 && agents[0].agent_id == "main")
+    );
+    assert!(
+        matches!(events.get(1), Some(ClientEvent::Error { message, .. }) if message.contains("skipped"))
+    );
 }
 
 #[tokio::test]

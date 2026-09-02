@@ -4328,6 +4328,7 @@ mod workspace_lease_forwarding_tests {
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             parent_model: None,

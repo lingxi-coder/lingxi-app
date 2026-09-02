@@ -418,11 +418,29 @@ impl LiveSessionDir {
             .ok()
             .and_then(|v| v.into_iter().find(|r| r.sid() == session_id))
         {
-            let _ = fs::remove_file(self.record_path(rec.pid));
-            let _ = self.release_session_id(session_id, rec.pid);
+            if self.remove_record_if_session_matches(rec.pid, session_id)? {
+                let _ = self.release_session_id(session_id, rec.pid);
+            }
         }
         let _ = fs::remove_file(self.inbox_path(session_id));
         Ok(())
+    }
+
+    fn remove_record_if_session_matches(&self, pid: u32, session_id: &str) -> io::Result<bool> {
+        let _record_lock = self.lock_record(pid)?;
+        let path = self.record_path(pid);
+        // `list_live` selected this PID before the lock was acquired. A same-PID
+        // remount can retarget the record while unregister waits, so delete only
+        // after confirming the locked record still belongs to the requested
+        // session. An unreadable/replaced record is deliberately preserved.
+        let matches = fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<LiveSessionRecord>(&body).ok())
+            .is_some_and(|record| record.sid() == session_id);
+        if matches {
+            let _ = fs::remove_file(path);
+        }
+        Ok(matches)
     }
 
     /// Live records whose pid is still running (when liveness is on).
@@ -661,10 +679,28 @@ impl LiveSessionDir {
                 .as_ref()
                 .map_or_else(|| !pid_alive(pid), |record| !self.record_is_live(record));
             if stale {
-                if let Some(record) = record {
-                    let _ = fs::remove_file(self.inbox_path(record.sid()));
+                let Ok(_record_lock) = self.lock_record(pid) else {
+                    continue;
+                };
+                // Re-check under the same lock used by record mutators so a
+                // writer that was in flight during the initial scan cannot be
+                // removed after it finishes its atomic rename.
+                let record = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<LiveSessionRecord>(&body).ok())
+                    .map(|mut record| {
+                        record.pid = pid;
+                        record
+                    });
+                let stale = record
+                    .as_ref()
+                    .map_or_else(|| !pid_alive(pid), |record| !self.record_is_live(record));
+                if stale {
+                    if let Some(record) = record {
+                        let _ = fs::remove_file(self.inbox_path(record.sid()));
+                    }
+                    let _ = fs::remove_file(&path);
                 }
-                let _ = fs::remove_file(&path);
             }
         }
         Ok(())
@@ -679,6 +715,7 @@ impl LiveSessionDir {
         previous: Option<&str>,
     ) -> io::Result<()> {
         self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
         let path = self.record_path(pid);
         let mut obj: Value = match fs::read_to_string(&path) {
             Ok(body) => serde_json::from_str(&body).unwrap_or_else(|_| json!({})),
@@ -697,10 +734,19 @@ impl LiveSessionDir {
                 map.insert("procStart".into(), json!(identity));
             }
         }
+        // Prefer the name read under the record lock. `previous` was selected
+        // before locking and can be stale when two rename requests overlap.
+        let previous = map
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| previous.map(str::to_string));
         map.insert("name".into(), json!(name));
         map.insert("nameSource".into(), json!(name_source));
         map.insert("nameSince".into(), json!(now_ms()));
-        if let Some(prev) = previous.filter(|p| *p != name) {
+        if let Some(prev) = previous.as_deref().filter(|p| *p != name) {
             let mut former = map
                 .get("formerNames")
                 .and_then(Value::as_array)
@@ -720,6 +766,17 @@ impl LiveSessionDir {
 
     fn record_path(&self, pid: u32) -> PathBuf {
         self.root.join(format!("{pid}.json"))
+    }
+
+    fn lock_record(&self, pid: u32) -> io::Result<fs::File> {
+        let lock_path = self.root.join(format!(".{pid}.json.lock"));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        Ok(lock)
     }
 
     fn session_claim_path(&self, session_id: &str) -> PathBuf {
@@ -788,6 +845,7 @@ impl LiveSessionDir {
         permission_class: Option<&str>,
     ) -> io::Result<()> {
         self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
         let path = self.record_path(pid);
         let mut obj: Value = match fs::read_to_string(&path) {
             Ok(body) => serde_json::from_str(&body).unwrap_or_else(|_| json!({})),
@@ -842,6 +900,7 @@ impl LiveSessionDir {
     /// Merge-write attested `permissionClass`.
     pub fn set_permission_class(&self, pid: u32, class: &str) -> io::Result<()> {
         self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
         let path = self.record_path(pid);
         let mut obj: Value = match fs::read_to_string(&path) {
             Ok(body) => serde_json::from_str(&body).unwrap_or_else(|_| json!({})),
@@ -863,6 +922,7 @@ impl LiveSessionDir {
     /// Merge-write the process status observed by cross-session listings.
     pub fn set_status(&self, pid: u32, status: &str, waiting_for: Option<&str>) -> io::Result<()> {
         self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
         let path = self.record_path(pid);
         if !path.exists() {
             return Ok(());
@@ -1831,6 +1891,7 @@ pub fn subagent_steer_is_default() -> bool {
 mod tests {
     use super::*;
     use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -2442,5 +2503,140 @@ mod tests {
         assert_eq!(hit.sid(), "deadbeef-2222");
         assert_eq!(hit.permission_class.as_deref(), Some("bypass"));
         assert_eq!(hit.display_name(), "alpha");
+    }
+
+    #[test]
+    fn unregister_rechecks_session_before_deleting_selected_pid() {
+        let (_tmp, d) = dir();
+        let pid = 7;
+        d.upsert_identity(pid, "session-old", Some("alpha"), Some("user"), None, None)
+            .unwrap();
+
+        // Model the window between unregister's unlocked `list_live` selection
+        // and its record-lock acquisition: the same PID is retargeted first.
+        d.upsert_identity(pid, "session-new", None, None, None, None)
+            .unwrap();
+        assert!(!d
+            .remove_record_if_session_matches(pid, "session-old")
+            .unwrap());
+
+        let record = d
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("retargeted record must survive stale unregister selection");
+        assert_eq!(record.sid(), "session-new");
+    }
+
+    #[test]
+    fn patch_pid_uses_locked_current_name_for_former_names() {
+        let (_tmp, d) = dir();
+        let pid = 7;
+        d.upsert_identity(pid, "session", Some("alpha"), Some("user"), None, None)
+            .unwrap();
+        d.patch_pid(pid, "session", "bravo", "user", Some("alpha"))
+            .unwrap();
+        // A concurrent caller may still carry the pre-lock `alpha` snapshot.
+        // The locked record now says `bravo`, which is the name being replaced.
+        d.patch_pid(pid, "session", "charlie", "user", Some("alpha"))
+            .unwrap();
+
+        let record = d
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("renamed record");
+        assert_eq!(record.display_name(), "charlie");
+        assert_eq!(
+            record.former_names.as_deref(),
+            Some(&["alpha".to_string(), "bravo".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn concurrent_record_mutations_are_serialized_and_merged() {
+        let (_tmp, d) = dir();
+        let pid = 7;
+        d.upsert_identity(
+            pid,
+            "session-initial",
+            Some("alpha"),
+            Some("user"),
+            Some(Path::new("/tmp/session.sock")),
+            Some("prompting"),
+        )
+        .unwrap();
+
+        // Hold the record lock while all mutators are released together. This
+        // deterministically exercises the old shared `.json.tmp` collision:
+        // without per-record locking, at least one writer can rename another
+        // writer's temporary file or lose its fields.
+        let record_lock = d.lock_record(pid).unwrap();
+        let shared = Arc::new(d.clone());
+        let gate = Arc::new(Barrier::new(5));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let operations: [fn(&LiveSessionDir, u32) -> io::Result<()>; 4] = [
+            |dir, pid| dir.set_status(pid, "waiting", Some("permission prompt")),
+            |dir, pid| dir.set_permission_class(pid, "bypass"),
+            |dir, pid| dir.upsert_identity(pid, "", None, None, None, None),
+            |dir, pid| dir.patch_pid(pid, "session-updated", "bravo", "collision", Some("alpha")),
+        ];
+
+        let mut workers = Vec::new();
+        for operation in operations.iter().copied() {
+            let shared = Arc::clone(&shared);
+            let gate = Arc::clone(&gate);
+            let started_tx = started_tx.clone();
+            let done_tx = done_tx.clone();
+            workers.push(thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                gate.wait();
+                done_tx.send(operation(&shared, pid)).unwrap();
+            }));
+        }
+        drop(started_tx);
+        for _ in 0..operations.len() {
+            started_rx.recv().unwrap();
+        }
+        gate.wait();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        drop(record_lock);
+
+        for _ in 0..operations.len() {
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("record mutation should finish after lock release")
+                .unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let record = d
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("record should remain present");
+        assert_eq!(record.sid(), "session-updated");
+        assert_eq!(record.display_name(), "bravo");
+        assert_eq!(record.name_source.as_deref(), Some("collision"));
+        assert_eq!(
+            record.former_names.as_deref(),
+            Some(&["alpha".to_string()][..])
+        );
+        assert_eq!(record.status.as_deref(), Some("waiting"));
+        assert_eq!(record.waiting_for.as_deref(), Some("permission prompt"));
+        assert_eq!(record.permission_class.as_deref(), Some("bypass"));
+        assert_eq!(
+            record.messaging_socket_path.as_deref(),
+            Some("/tmp/session.sock")
+        );
     }
 }

@@ -26,6 +26,8 @@ use crossterm::event::KeyEvent;
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use telemetry::pii::Verified;
+use telemetry::tengu::mcp::{CommandInlinePayload, COMMAND_INLINE};
 use tokio_util::sync::CancellationToken;
 use tool_workflow::{UltracodeGate, WorkflowSizeGuideline};
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
@@ -2619,6 +2621,7 @@ impl ChatWidget {
                 true,
             );
         }
+        emit_mcp_command_inline(action.as_str());
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/mcp is unavailable (no engine handle wired)", true);
         };
@@ -5591,6 +5594,51 @@ fn mcp_toggle_success_message(
     )
 }
 
+fn emit_mcp_command_inline(action: &str) {
+    let payload = CommandInlinePayload {
+        action: Verified::assert_safe(action.to_string()),
+    };
+    telemetry::emit_mcp_command_inline(&payload);
+    #[cfg(test)]
+    record_test_mcp_command_inline_event(
+        COMMAND_INLINE,
+        serde_json::to_value(&payload).expect("serialize mcp command inline payload"),
+    );
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedMcpCommandInlineEvent {
+    name: &'static str,
+    payload: serde_json::Value,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_MCP_COMMAND_INLINE_EVENTS:
+        std::cell::RefCell<Vec<CapturedMcpCommandInlineEvent>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(test)]
+fn clear_test_mcp_command_inline_events() {
+    TEST_MCP_COMMAND_INLINE_EVENTS.with(|events| events.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn take_test_mcp_command_inline_events() -> Vec<CapturedMcpCommandInlineEvent> {
+    TEST_MCP_COMMAND_INLINE_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+#[cfg(test)]
+fn record_test_mcp_command_inline_event(name: &'static str, payload: serde_json::Value) {
+    TEST_MCP_COMMAND_INLINE_EVENTS.with(|events| {
+        events
+            .borrow_mut()
+            .push(CapturedMcpCommandInlineEvent { name, payload });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -7198,6 +7246,43 @@ mod tests {
     }
 
     #[test]
+    fn cmd_mcp_inline_telemetry_emits_once_per_real_action_only() {
+        for (cmd, expected_action) in [
+            ("reconnect", "reconnect"),
+            ("enable all", "enable"),
+            ("disable foo", "disable"),
+        ] {
+            clear_test_mcp_command_inline_events();
+            let mut w = widget();
+            assert!(matches!(w.cmd_mcp(cmd), ChatOutcome::Continue));
+            assert_eq!(
+                take_test_mcp_command_inline_events(),
+                vec![CapturedMcpCommandInlineEvent {
+                    name: COMMAND_INLINE,
+                    payload: serde_json::to_value(CommandInlinePayload {
+                        action: Verified::assert_safe(expected_action.to_string()),
+                    })
+                    .unwrap(),
+                }],
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn cmd_mcp_inline_telemetry_does_not_fabricate_unknown_or_menu_actions() {
+        for cmd in ["", "status", "--help", "frobnicate"] {
+            clear_test_mcp_command_inline_events();
+            let mut w = widget();
+            assert!(matches!(w.cmd_mcp(cmd), ChatOutcome::Continue));
+            assert!(
+                take_test_mcp_command_inline_events().is_empty(),
+                "{cmd:?} must not emit tengu_mcp_command_inline"
+            );
+        }
+    }
+
+    #[test]
     fn apply_startup_prefs_applies_persisted_vim_and_is_a_noop_on_none() {
         let mut w = widget();
         assert!(!w.bottom_pane().vim_enabled());
@@ -8080,6 +8165,16 @@ mod tests {
                 resp_tx,
                 worker: None,
                 suppress_always_allow_rule: false,
+                permission_persistence:
+                    permission::allow_suggestion::permission_persistence_suggestion(
+                        "Bash",
+                        &serde_json::json!([{
+                            "type": "addRules",
+                            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+                            "behavior": "allow",
+                            "destination": "session"
+                        }]),
+                    ),
                 auto_mode_prompt: None,
             },
             resp_rx,
@@ -9065,6 +9160,7 @@ mod tests {
             resp_tx: plan_tx,
             worker: None,
             suppress_always_allow_rule: false,
+            permission_persistence: None,
             auto_mode_prompt: None,
         };
         widget.open_permission(first);

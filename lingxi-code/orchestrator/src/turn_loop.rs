@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
+use tool_api::tool_trait::tool_result_turn_end;
 use tool_api::ContextModifier;
 
 async fn forward_tool_progress(
@@ -284,10 +285,15 @@ impl RecoveryState {
 pub(crate) enum TurnStepOutcome {
     /// Continue the loop (e.g. model returned `tool_use`).
     Continue,
-    /// Loop should terminate — model returned `end_turn`.
+    /// Loop should terminate.
     Ended {
         final_message_id: MessageId,
         stop_reason: String,
+        allow_budget_continuation: bool,
+        /// True only when a successful tool result requested this end. Stop
+        /// hooks still run, but their block/prevent dispositions are advisory
+        /// and cannot re-enter the model loop.
+        tool_requested_end: bool,
     },
 }
 
@@ -663,6 +669,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
                         stop_reason: "prompt_too_long".to_string(),
+                        allow_budget_continuation: false,
+                        tool_requested_end: false,
                     },
                     0,
                 ));
@@ -682,6 +690,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
                         stop_reason: "blocking_limit".to_string(),
+                        allow_budget_continuation: false,
+                        tool_requested_end: false,
                     },
                     0,
                 ));
@@ -701,6 +711,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
                         stop_reason: "rapid_refill_breaker".to_string(),
+                        allow_budget_continuation: false,
+                        tool_requested_end: false,
                     },
                     0,
                 ));
@@ -761,6 +773,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
                     stop_reason: "model_error".to_string(),
+                    allow_budget_continuation: false,
+                    tool_requested_end: false,
                 },
                 0,
             ));
@@ -975,73 +989,133 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // executes and its results are still appended below, exactly like TS (where
     // the tool runs and `hook_stopped_continuation` is yielded after success).
     let mut hook_prevent_continuation = false;
+    let mut post_tool_batch_calls = Vec::new();
+    let pre_batch_mcp_tool_count = if tool_uses.is_empty() {
+        None
+    } else {
+        Some(orch.filtered_mcp_tool_count().await)
+    };
     if !tool_uses.is_empty() {
-        let (tool_results, prevent, injected_messages, context_modifiers) =
-            dispatch_tool_uses_tracked(orch, &tool_uses, None).await?;
-        hook_prevent_continuation = prevent;
-        // Append a fresh user message carrying the tool results.
-        let user_id = MessageId::new();
-        let tool_results_msg = ConversationMessage::User {
-            id: user_id,
-            content: tool_results,
-            is_meta: false,
-            is_compact_summary: false,
-            is_visible_in_transcript_only: false,
-        };
-        {
-            let mut s = orch.session.lock().await;
-            s.history.push(tool_results_msg.clone());
-            // SKILLEXEC.3 (Part A): a tool may inject follow-up conversation
-            // messages (TS `ToolResult.newMessages` — e.g. the Skill tool's
-            // expanded skill prompt). They enter history IMMEDIATELY AFTER this
-            // turn's tool_result user message, in tool-dispatch order, so the
-            // model processes them on the next API call. `injected_messages` is
-            // empty for every existing tool, so this loop is a strict no-op and
-            // the locked turn-loop parity fixtures stay byte-identical.
-            //
-            // Also record each injected message's id → originating tool_use_id
-            // into the in-memory `injected_message_sources` side-table (faithful
-            // port of TS `sourceToolUseID`; `#[serde(skip)]` so it never reaches
-            // the JSONL wire). No-op when `injected_messages` is empty.
-            for (m, tool_use_id) in &injected_messages {
-                s.history.push(m.clone());
-                s.injected_message_sources
-                    .insert(m.id(), tool_use_id.clone());
+        let dispatched =
+            dispatch_tool_uses_tracked_deferred(orch, &tool_uses, None, Some(assistant_id)).await?;
+        let DeferredToolDispatch {
+            results: tool_results,
+            prevent_continuation,
+            injected_messages,
+            context_modifiers,
+            post_tool_batch_calls: deferred_batch_calls,
+        } = dispatched;
+        hook_prevent_continuation = prevent_continuation;
+        post_tool_batch_calls = deferred_batch_calls;
+        // Claude's tool executor yields one user message per resolved tool,
+        // even for a concurrent batch. Keep that topology here (the streaming
+        // driver already does): message-level `mcpMeta`, `toolEndsTurn`, and
+        // `sourceToolAssistantUUID` can then belong to the exact result that
+        // produced them. Combining parallel results into one user message
+        // loses those fields behind the serializer's exactly-one-result guard.
+        let mut remaining_injected = injected_messages;
+        // `results` is flat because a denied tool may append non-result blocks
+        // (for example an image supplied by an ask rejection) immediately after
+        // its `tool_result`. Claude keeps those blocks in that result's user
+        // message. Split only at the next `tool_result`, not at every block.
+        let mut result_messages: Vec<Vec<ContentBlock>> = Vec::new();
+        for block in tool_results {
+            if matches!(&block, ContentBlock::ToolResult { .. }) || result_messages.is_empty() {
+                result_messages.push(vec![block]);
+            } else if let Some(message) = result_messages.last_mut() {
+                message.push(block);
             }
         }
-        // M5-07 T13: persist the tool_result user message. Best-effort.
-        orch.persist_message_to_jsonl(&tool_results_msg).await;
-        // O3: flush this batch's hook `attachment` lines, in tool-dispatch
-        // order, right after the tool_result they follow — where claude's own
-        // stream order puts them (`insertMessageChain` writes the yielded
-        // attachment message immediately after the yielded tool_result).
-        for (tool_use_id, _, _, _) in &tool_uses {
-            orch.flush_hook_attachments(tool_use_id).await;
-        }
-        // Persist the injected skill messages too (best-effort), mirroring the
-        // tool_result persist above. No-op when empty. NOTE: the originating
-        // tool_use_id is deliberately NOT persisted — TS does not write
-        // `sourceToolUseID` to the transcript, so the JSONL bytes stay
-        // byte-identical to before this change.
-        //
-        // O3: an `is_meta` injected message is the EPHEMERAL RENDERING of an
-        // attachment (claude builds it from the attachment at
-        // API-normalization time, renderer BIN off 238107100) — the attachment
-        // line flushed above IS its on-disk record, so persisting it too would
-        // duplicate it. Every non-hook injected message (the Skill tool's
-        // expanded prompt) is non-meta and still persists.
-        for (m, _tool_use_id) in &injected_messages {
-            if m.is_meta() {
-                continue;
+        for result_content in result_messages {
+            let result_tool_use_id = result_content.iter().find_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            });
+            let (result_injected, rest) = match &result_tool_use_id {
+                Some(id) => remaining_injected
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|(_, source_id)| source_id == id),
+                None => (Vec::new(), remaining_injected),
+            };
+            remaining_injected = rest;
+
+            let tool_result_msg = ConversationMessage::User {
+                id: MessageId::new(),
+                content: result_content,
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            };
+            {
+                let mut s = orch.session.lock().await;
+                s.history.push(tool_result_msg.clone());
+                for (message, source_id) in &result_injected {
+                    s.history.push(message.clone());
+                    s.injected_message_sources
+                        .insert(message.id(), source_id.clone());
+                }
             }
-            orch.persist_message_to_jsonl(m).await;
+            let parent_uuid = match &result_tool_use_id {
+                Some(id) => orch.source_tool_assistant_uuid(id).await,
+                None => None,
+            };
+            orch.persist_message_to_jsonl_with_parent(&tool_result_msg, parent_uuid)
+                .await;
+            if let Some(id) = &result_tool_use_id {
+                orch.flush_hook_attachments(id).await;
+            }
+            for (message, _) in &result_injected {
+                if !message.is_meta() {
+                    orch.persist_message_to_jsonl(message).await;
+                }
+            }
         }
+        // Defensive only: every injected message should name a result in this
+        // dispatch. Preserve rather than drop one if a future synthetic source
+        // uses a distinct id.
+        append_tool_injected_messages(orch, remaining_injected).await;
         // SKILLEXEC.3 (model scope): fold this batch's `context_modifier`s and
         // switch `session.model` if a skill declared a `model:` override. Applied
         // AFTER `injected_messages` so it mirrors the streaming twin's ordering.
         // Empty for every existing tool + non-`model:` skills → strict no-op
         // (session.model untouched → byte-identical turn-loop fixtures).
         apply_model_context_modifiers(orch, context_modifiers).await;
+    }
+    let tool_result_turn_end = orch
+        .take_pending_tool_result_turn_ends(
+            &tool_uses
+                .iter()
+                .map(|(tool_use_id, _, _, _)| tool_use_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    let tool_requested_end_turn = tool_result_turn_end.is_some() && !hook_prevent_continuation;
+    if !hook_prevent_continuation {
+        if let Some(turn_end) = tool_result_turn_end {
+            // Oracle order: results first, then the single end-turn telemetry
+            // event, then PostToolBatch, then forced Stop hooks.
+            emit_tool_result_ended_turn_telemetry(orch, turn_end).await;
+        }
+        let (batch_prevent, batch_messages) = if tool_requested_end_turn {
+            (
+                false,
+                run_post_tool_batch_hooks_after_turn_end(orch, post_tool_batch_calls).await,
+            )
+        } else {
+            run_post_tool_batch_hooks(orch, post_tool_batch_calls).await
+        };
+        append_tool_injected_messages(orch, batch_messages).await;
+        // A tool-requested end wins over PostToolBatch stop/block. The batch
+        // hook still runs and its records are kept, but cannot re-enter the
+        // model or change the terminal disposition.
+        if !tool_requested_end_turn {
+            hook_prevent_continuation |= batch_prevent;
+            if !batch_prevent {
+                if let Some(old_mcp_count) = pre_batch_mcp_tool_count {
+                    emit_tools_refreshed_mid_turn_telemetry(orch, old_mcp_count).await;
+                }
+            }
+        }
     }
 
     // Finding #73 (batched twin): advance the per-turn todo/task reminder
@@ -1091,6 +1165,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         TurnStepOutcome::Ended {
             final_message_id: assistant_id,
             stop_reason: "end_conversation".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: false,
         }
     } else if hook_prevent_continuation {
         // HOOK.2: honor the PreToolUse `continue:false` request — end the turn
@@ -1100,6 +1176,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         TurnStepOutcome::Ended {
             final_message_id: assistant_id,
             stop_reason: "hook_stopped".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: false,
+        }
+    } else if tool_requested_end_turn {
+        TurnStepOutcome::Ended {
+            final_message_id: assistant_id,
+            stop_reason: "end_turn".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: true,
         }
     } else {
         match response.stop_reason.as_deref() {
@@ -1148,6 +1233,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             Some("end_turn") => TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
                 stop_reason: "end_turn".to_string(),
+                allow_budget_continuation: true,
+                tool_requested_end: false,
             },
             // A1: max_output_tokens recovery (TS `query.ts:1223-1255`). Only the
             // recovery-aware drivers (`Some(state)`) participate; the legacy shim
@@ -1184,6 +1271,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 TurnStepOutcome::Ended {
                     final_message_id: surfaced_id.unwrap_or(assistant_id),
                     stop_reason: other.to_string(),
+                    allow_budget_continuation: false,
+                    tool_requested_end: false,
                 }
             }
             _ => TurnStepOutcome::Continue,
@@ -2385,43 +2474,16 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
     )
 }
 
-/// SC-02 — fire the rate-limit resume checkpoint on a rate-limited turn end.
-///
-/// Mirrors the oracle's call shape exactly: fire-and-forget, errors swallowed
-/// (`…then(({performRateLimitCheckpoint:Yr})=>Yr({todos,trigger:"rate_limited"}))
-/// .catch(()=>{})`). The checkpoint runs several `git` subprocesses, so it goes
-/// on a detached OS thread rather than blocking the turn's teardown.
-///
-/// `session::perform_rate_limit_checkpoint` latches its result process-wide
-/// (`getLastCheckpointResult`), so re-firing on every subsequent rate-limited
-/// turn is free; the early `last_checkpoint_result()` read here just avoids
-/// spawning a thread to discover that.
-///
-/// # Still missing: the `near_limit` twin
-///
-/// Upstream has a SECOND trigger (@292220726) inside the query loop's
-/// usage-limit grace/wrap-up block — `usage_limit_near_wrapup`, which fires
-/// with `trigger:"near_limit"` BEFORE the limit is hit. That block has no port
-/// analogue (the port has no `usage_limit_near_wrapup` / grace-wrapup arm at
-/// all), so `CheckpointTrigger::NearLimit` currently has no caller. Adding one
-/// belongs with that wrap-up feature, in `conversation.rs`.
-async fn maybe_checkpoint_on_rate_limit(
+async fn maybe_checkpoint_for_trigger(
     orch: &ConversationOrchestrator,
-    error: &OrchestratorError,
+    trigger: session::CheckpointTrigger,
 ) {
-    if !matches!(
-        error,
-        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
-            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
-    ) {
-        return;
-    }
-    if session::last_checkpoint_result().is_some() {
-        return;
-    }
     let (session_id, todos) = {
         let s = orch.session.lock().await;
-        (s.session_id.as_uuid().to_string(), s.todos.clone())
+        (
+            session::checkpoint_session_key(s.session_id),
+            s.todos.clone(),
+        )
     };
     let cwd = orch.session_cwd.cwd();
     let gates = session::CheckpointGates {
@@ -2440,15 +2502,37 @@ async fn maybe_checkpoint_on_rate_limit(
         // `true` matches upstream exactly.
         policy_allows: session::local_checkpoint_commit_allowed(),
     };
-    std::thread::spawn(move || {
-        session::perform_rate_limit_checkpoint(&session::CheckpointRequest {
-            session_id: &session_id,
-            trigger: session::CheckpointTrigger::RateLimited,
-            todos: &todos,
-            cwd: &cwd,
-            gates,
-        });
+    let _ = session::dispatch_rate_limit_checkpoint(session::OwnedCheckpointRequest {
+        session_id,
+        trigger,
+        todos,
+        cwd,
+        gates,
     });
+}
+
+/// SC-02 — fire the rate-limit resume checkpoint on a rate-limited turn end.
+///
+/// Mirrors the oracle's call shape exactly: fire-and-forget, errors swallowed
+/// (`…then(({performRateLimitCheckpoint:Yr})=>Yr({todos,trigger:"rate_limited"}))
+/// .catch(()=>{})`). The checkpoint runs several `git` subprocesses, so it goes
+/// on a detached OS thread rather than blocking the turn's teardown.
+///
+/// The session crate installs a session-keyed `Running` latch synchronously
+/// before the detached worker starts, so a near-limit trigger and a later 429
+/// cannot race into duplicate checkpoint work.
+async fn maybe_checkpoint_on_rate_limit(
+    orch: &ConversationOrchestrator,
+    error: &OrchestratorError,
+) {
+    if !matches!(
+        error,
+        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
+    ) {
+        return;
+    }
+    maybe_checkpoint_for_trigger(orch, session::CheckpointTrigger::RateLimited).await;
 }
 
 /// Surface a `model_error` turn-end (port of `query.ts:955-997`'s top-level
@@ -2474,6 +2558,68 @@ pub(crate) async fn surface_model_error(
         bus.log_event("tengu_query_error", metadata).await;
     }
     surface_api_error_notice(orch, error_text, env).await
+}
+
+pub(crate) async fn emit_tool_result_ended_turn_telemetry(
+    orch: &ConversationOrchestrator,
+    turn_end: tool_api::tool_trait::ToolResultTurnEnd,
+) {
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let payload = telemetry::tengu::mcp::ToolResultEndedTurnPayload {
+        query_chain_id: telemetry::Verified::assert_safe(orch.query_chain_id.clone()),
+        query_depth: 0,
+        source: telemetry::Verified::assert_safe(turn_end.source.as_str().to_string()),
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "queryChainId".into(),
+        telemetry::AnalyticsValue::String(payload.query_chain_id.as_str().to_string()),
+    );
+    metadata.insert(
+        "queryDepth".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.query_depth)),
+    );
+    metadata.insert(
+        "source".into(),
+        telemetry::AnalyticsValue::String(payload.source.as_str().to_string()),
+    );
+    bus.log_event(telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN, metadata)
+        .await;
+}
+
+pub(crate) async fn emit_tools_refreshed_mid_turn_telemetry(
+    orch: &ConversationOrchestrator,
+    old_mcp_count: usize,
+) {
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let new_mcp_count = orch.filtered_mcp_tool_count().await;
+    if new_mcp_count == old_mcp_count {
+        return;
+    }
+    let payload = telemetry::tengu::mcp::ToolsRefreshedMidTurnPayload {
+        old_mcp_count: u32::try_from(old_mcp_count).unwrap_or(u32::MAX),
+        new_mcp_count: u32::try_from(new_mcp_count).unwrap_or(u32::MAX),
+        recovered: old_mcp_count == 0 && new_mcp_count > 0,
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "oldMcpCount".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.old_mcp_count)),
+    );
+    metadata.insert(
+        "newMcpCount".into(),
+        telemetry::AnalyticsValue::Int(i64::from(payload.new_mcp_count)),
+    );
+    metadata.insert(
+        "recovered".into(),
+        telemetry::AnalyticsValue::Bool(payload.recovered),
+    );
+    bus.log_event(telemetry::tengu::mcp::TOOLS_REFRESHED_MID_TURN, metadata)
+        .await;
 }
 
 /// Persist + emit an api-error assistant message (the `createAssistantAPIErrorMessage`
@@ -2577,6 +2723,8 @@ async fn handle_max_output_tokens(
     Ok(TurnStepOutcome::Ended {
         final_message_id: surfaced_id.unwrap_or(assistant_id),
         stop_reason: "max_tokens".to_string(),
+        allow_budget_continuation: false,
+        tool_requested_end: false,
     })
 }
 
@@ -2681,6 +2829,8 @@ async fn handle_malformed_tool_use(
         return Ok(TurnStepOutcome::Ended {
             final_message_id: failed_msg.id(),
             stop_reason: "end_turn".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: false,
         });
     }
     let nudge_msg = ConversationMessage::user_meta(
@@ -3392,7 +3542,25 @@ async fn apply_tool_result_persistence(
     }
 }
 
-pub(crate) async fn dispatch_tool_uses_tracked(
+/// Results from dispatching a tool batch before the once-per-batch hook runs.
+///
+/// The two conversation drivers persist the tool results first, then run the
+/// deferred `PostToolBatch` event. This split is load-bearing: claude-code
+/// observes end-turn metadata only after yielding the results and emits its
+/// end-turn telemetry before `PostToolBatch`; the streaming executor also
+/// dispatches tools one at a time, so firing the hook inside this function
+/// would incorrectly produce one batch event per tool.
+pub(crate) struct DeferredToolDispatch {
+    pub(crate) results: Vec<ContentBlock>,
+    /// Stop requested by a per-tool Pre/PostToolUse hook. This has precedence
+    /// over a tool result's end-turn marker and suppresses `PostToolBatch`.
+    pub(crate) prevent_continuation: bool,
+    pub(crate) injected_messages: Vec<(ConversationMessage, ToolUseId)>,
+    pub(crate) context_modifiers: Vec<ContextModifier>,
+    pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+}
+
+pub(crate) async fn dispatch_tool_uses_tracked_deferred(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
     // PHASE-2 + DEFERRED-3: per-tool `CancellationToken` (a child of the streaming
@@ -3405,15 +3573,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // then substitutes the synthetic result. `None` for every non-streaming caller
     // (batched turn loop + tests) → no cancellation ever fires.
     cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Result<
-    (
-        Vec<ContentBlock>,
-        bool,
-        Vec<(ConversationMessage, ToolUseId)>,
-        Vec<ContextModifier>,
-    ),
-    OrchestratorError,
-> {
+    assistant_message_id: Option<MessageId>,
+) -> Result<DeferredToolDispatch, OrchestratorError> {
     let mut results = Vec::with_capacity(tool_uses.len());
     // HOOK.2: OR-fold each tool's PreToolUse `prevent_continuation` signal.
     let mut prevent_continuation = false;
@@ -3439,14 +3600,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // `context_modifier: None` (every existing tool + skills WITHOUT a `model:`
     // frontmatter) → the caller does NOTHING → byte-identical.
     let mut context_modifiers: Vec<ContextModifier> = Vec::new();
-    // #39 PostToolBatch: accumulate one entry per RESOLVED tool call (claude-code
-    // fires PostToolBatch ONCE after every tool in the batch resolves, before the
-    // next model request — `tool_calls` = the full batch). A tool that is blocked
-    // / deferred / denied before execution `continue`s and does not reach the
-    // result push, so it is not part of the resolved batch (matching claude-code,
-    // where only executed tools have a `tool_response`). Empty when no tool ran →
-    // the PostToolBatch fire below is a strict no-op.
-    let mut post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall> = Vec::new();
+    // #39 PostToolBatch is assembled after dispatch from the complete assistant
+    // tool-use batch. Calls without a yielded result retain
+    // `tool_response: None`, matching the oracle's `toolUseBlocks.map(...)` +
+    // response-map lookup.
     // FORK (codex #5 follow-up): the rendered system prompt this turn handed the
     // model, recorded by the turn driver after the successful API call. Threaded
     // onto each tool's `ToolUseContext::fork_parent_system_prompt` so a
@@ -3547,6 +3704,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         if let Err(detail) =
             crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
         {
+            tool_handle
+                .on_input_schema_rejected(
+                    input,
+                    Some(tool_use_id.as_str()),
+                    assistant_message_id.as_ref(),
+                )
+                .await;
             let model_text =
                 format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>");
             let result_block = ContentBlock::ToolResult {
@@ -3618,6 +3782,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             },
             messages,
             tool_use_id: Some(tool_use_id.clone()),
+            assistant_message_id,
             agent_id: None,
             // Main / leader thread: no teammate identity (TS getAgentName() /
             // getTeammateContext() are undefined here).
@@ -5050,6 +5215,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
 
         let (content, is_error, emit_payload, is_abort) = match tool_outcome {
             Ok(result) => {
+                let turn_end = tool_result_turn_end(
+                    tool_handle.result_ends_turn(&result),
+                    result.is_error,
+                    result.mcp_meta.as_ref(),
+                );
                 let text = result
                     .model_content
                     .clone()
@@ -5093,6 +5263,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // which is the only chain this orchestrator serves.
                 if let Some(meta) = result.mcp_meta.clone() {
                     orch.record_tool_use_mcp_meta(tool_use_id, meta).await;
+                }
+                if let Some(turn_end) = turn_end {
+                    orch.record_pending_tool_result_turn_end(tool_use_id, turn_end)
+                        .await;
                 }
                 // `is_error` rides on the result (set by MCP tools from the
                 // server's `isError`; `false` for every native success). A native
@@ -5316,6 +5490,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         }
 
         if post_agg.prevent_continuation {
+            prevent_continuation = true;
             let reason = post_agg
                 .reason
                 .clone()
@@ -5704,18 +5879,6 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             content_blocks,
         });
 
-        // #39 PostToolBatch: record this resolved tool's call for the once-per-
-        // batch fire after the loop. `tool_response` is the structured tool
-        // output (the same `emit_payload` the PostToolUse hook saw). A failure
-        // result still resolves the call, so it is included with its error
-        // payload (claude-code's batch includes every resolved tool_use).
-        post_tool_batch_calls.push(hooks::events::PostToolBatchCall {
-            tool_name: name.clone(),
-            tool_input: effective_input.clone(),
-            tool_use_id: tool_use_id.clone(),
-            tool_response: Some(emit_payload.clone()),
-        });
-
         // HOOK.1: queue this tool's PreToolUse `additionalContext` as its OWN
         // message on the `injected` channel, tagged with this tool's
         // `tool_use_id` (TS `toolUseID`). Both drivers append `injected` AFTER
@@ -5744,119 +5907,203 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         }
     }
 
-    // #39 PostToolBatch: fire ONCE after the whole batch resolved (claude-code
-    // `G4t`, BIN off 205710327: fired after every tool call in a batch resolves,
-    // before the next model request — distinct from per-tool `PostToolUse`).
-    // Strict no-op when no tool ran (empty batch). Best-effort: a
-    // failing/absent PostToolBatch hook never breaks the turn (the executor is a
-    // no-op when no PostToolBatch hook is registered, mirroring the per-tool
-    // PostToolUse fire).
-    //
-    // CORRECTED: this used to bind `let _batch_agg = …` under a comment saying
-    // "the aggregate decision/output are not consumed — this is an
-    // observational, post-batch event". It is not observational. The oracle
-    // (@233161375) ends the turn on it — see
-    // [`post_tool_batch_stop_reason`].
-    if !post_tool_batch_calls.is_empty() {
-        // FIX 2: populate `transcript_path` + `permission_mode` here too (the
-        // batch firer builds its own context). Same sources as the PreToolUse
-        // context above: the live JSONL writer path (FIX A: ELSE the computed
-        // `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, non-empty in
-        // production where no writer is wired) + the plan/default mode.
-        let (session_id, plan_mode) = {
-            let s = orch.session.lock().await;
-            (s.session_id, s.plan_mode)
-        };
-        let transcript_path = orch
-            .transcript
-            .jsonl_writer
-            .as_ref()
-            .map(|w| w.path().to_path_buf())
-            .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
-        let batch_ctx = HookContext {
-            session_id,
-            cwd: orch.current_cwd(),
-            transcript_path,
-            permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
-            ..Default::default()
-        };
-        let batch_event = HookEvent::PostToolBatch {
-            tool_calls: post_tool_batch_calls,
-        };
-        let batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
-
-        // `additionalContext` FIRST: the oracle yields it inside the per-hook
-        // loop, while the stop record is only reached after that loop ends, so a
-        // hook doing both produces the context ahead of the stop. Independent of
-        // `preventContinuation` — a batch hook may contribute context without
-        // stopping anything.
-        //
-        // FIDELITY: the oracle emits one attachment PER HOOK RESULT, each
-        // carrying that hook's own `additionalContexts` array. This port's
-        // aggregate flattens contexts across hooks, so it emits ONE attachment
-        // with the combined array — identical for a single batch hook (every
-        // observed case) and the same compromise the PostToolUse site already
-        // makes.
-        if !batch_agg.additional_contexts.is_empty() {
-            let identity = post_tool_batch_identity();
-            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
-            orch.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
-                &identity.hook_name,
-                &identity.tool_use_id,
-                &identity.hook_event,
-                &batch_agg.additional_contexts,
-            ))
-            .await;
-            for ctx in &batch_agg.additional_contexts {
-                injected_messages.push((
-                    // `user_meta`: the rendering is ephemeral (`zr({isMeta:true})`);
-                    // the attachment above is the on-disk record.
-                    ConversationMessage::user_meta(
-                        MessageId::new(),
-                        format!(
-                            "<system-reminder>\nPostToolBatch hook additional context: {ctx}\n</system-reminder>"
-                        ),
-                    ),
-                    batch_id.clone(),
-                ));
+    // The oracle builds PostToolBatch from every assistant `tool_use` block,
+    // then looks up each final yielded `tool_result.content` by id. Therefore
+    // original (pre-hook) input is retained, error/synthetic results are
+    // included, and a call that yielded no result has no `tool_response`.
+    let post_tool_batch_calls = tool_uses
+        .iter()
+        .map(|(id, name, input, _)| {
+            let tool_response = results.iter().find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    content_blocks,
+                    ..
+                } if tool_use_id == id => Some(content_blocks.as_ref().map_or_else(
+                    || serde_json::Value::String(content.clone()),
+                    |blocks| {
+                        serde_json::to_value(blocks)
+                            .unwrap_or_else(|_| serde_json::Value::String(content.clone()))
+                    },
+                )),
+                _ => None,
+            });
+            hooks::events::PostToolBatchCall {
+                tool_name: name.clone(),
+                tool_input: input.clone(),
+                tool_use_id: id.clone(),
+                tool_response,
             }
-        }
+        })
+        .collect();
 
-        if let Some(reason) = post_tool_batch_stop_reason(&batch_agg) {
-            // ONE identity for both records, so the persisted attachment and the
-            // model-facing prose describe the same event and cannot drift.
-            let identity = post_tool_batch_identity();
-            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
-            // The oracle yields the record and returns `{reason:"hook_stopped"}`
-            // in one expression, so the attachment is persisted BEFORE the flag
-            // propagates — a stop must never reach the transcript unexplained.
-            orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
-                &identity, &reason,
-            ))
-            .await;
-            // The oracle derives this prose from the attachment at
-            // `normalizeAttachmentForAPI` time (@238107808). This port has no
-            // such layer — `Stop`, `PreToolUse` and `PostToolUse` each build it
-            // explicitly — so without this the model would never learn why the
-            // turn ended.
-            injected_messages.push((
-                ConversationMessage::user(
-                    MessageId::new(),
-                    format!(
-                        "<system-reminder>\nPostToolBatch hook stopped continuation: {reason}\n</system-reminder>"
-                    ),
-                ),
-                batch_id,
-            ));
-            prevent_continuation = true;
-        }
-    }
-
-    Ok((
+    Ok(DeferredToolDispatch {
         results,
         prevent_continuation,
         injected_messages,
         context_modifiers,
+        post_tool_batch_calls,
+    })
+}
+
+/// Fire the once-per-model-response `PostToolBatch` event after all tool
+/// results have been appended and persisted.
+///
+/// The returned boolean is the hook's stop disposition. Callers deliberately
+/// ignore it when a tool result already requested end-turn: the oracle still
+/// runs and records the batch hook, but does not let it re-enter the model.
+pub(crate) async fn run_post_tool_batch_hooks(
+    orch: &ConversationOrchestrator,
+    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+) -> (bool, Vec<(ConversationMessage, ToolUseId)>) {
+    run_post_tool_batch_hooks_inner(orch, post_tool_batch_calls, false).await
+}
+
+/// Forced-end twin of [`run_post_tool_batch_hooks`]. Claude still executes the
+/// batch hooks, but it discards block/prevent dispositions, does not synthesize
+/// `hook_stopped_continuation`, and does not surface `additionalContext`.
+pub(crate) async fn run_post_tool_batch_hooks_after_turn_end(
+    orch: &ConversationOrchestrator,
+    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+) -> Vec<(ConversationMessage, ToolUseId)> {
+    run_post_tool_batch_hooks_inner(orch, post_tool_batch_calls, true)
+        .await
+        .1
+}
+
+async fn run_post_tool_batch_hooks_inner(
+    orch: &ConversationOrchestrator,
+    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    turn_already_ended: bool,
+) -> (bool, Vec<(ConversationMessage, ToolUseId)>) {
+    if post_tool_batch_calls.is_empty() {
+        return (false, Vec::new());
+    }
+    // Populate `transcript_path` + `permission_mode` from the same live
+    // sources as the per-tool hook contexts.
+    let (session_id, plan_mode) = {
+        let s = orch.session.lock().await;
+        (s.session_id, s.plan_mode)
+    };
+    let transcript_path = orch
+        .transcript
+        .jsonl_writer
+        .as_ref()
+        .map(|w| w.path().to_path_buf())
+        .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
+    let batch_ctx = HookContext {
+        session_id,
+        cwd: orch.current_cwd(),
+        transcript_path,
+        permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
+        ..Default::default()
+    };
+    let batch_agg = orch
+        .hooks
+        .execute(
+            HookEvent::PostToolBatch {
+                tool_calls: post_tool_batch_calls,
+            },
+            batch_ctx,
+        )
+        .await;
+    let mut injected_messages = Vec::new();
+    let identity = post_tool_batch_identity();
+    let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+
+    if turn_already_ended {
+        // `eBn` yields only `fe.message` from the hook runner, then logs
+        // `blockingError` / `preventContinuation`. A blocking result is a bare
+        // disposition (not a runner message), while additionalContext rides
+        // `fe.additionalContexts`; neither is synthesized into history after
+        // the tool result has already ended the turn. Run-outcome/system
+        // messages are persisted by the hook executor's attachment sink.
+        if matches!(
+            batch_agg.decision,
+            Some(hooks::response::HookDecision::Block)
+        ) || batch_agg.prevent_continuation
+        {
+            tracing::debug!(
+                event = "post_tool_batch_disposition_discarded",
+                "PostToolBatch disposition discarded because a tool result ended the turn"
+            );
+        }
+        return (false, Vec::new());
+    }
+
+    // `additionalContext` is yielded inside the per-hook loop; the stopped
+    // record follows after the loop. Preserve that order when both occur.
+    if !batch_agg.additional_contexts.is_empty() {
+        orch.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+            &identity.hook_name,
+            &identity.tool_use_id,
+            &identity.hook_event,
+            &batch_agg.additional_contexts,
+        ))
+        .await;
+        for ctx in &batch_agg.additional_contexts {
+            injected_messages.push((
+                ConversationMessage::user_meta(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nPostToolBatch hook additional context: {ctx}\n</system-reminder>"
+                    ),
+                ),
+                batch_id.clone(),
+            ));
+        }
+    }
+
+    let stop_reason = post_tool_batch_stop_reason(&batch_agg);
+    if let Some(reason) = &stop_reason {
+        orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
+            &identity, reason,
+        ))
+        .await;
+        injected_messages.push((
+            // Ephemeral rendering of the attachment above. The attachment is
+            // the sole durable transcript record (`In(...)` in the oracle).
+            ConversationMessage::user_meta(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nPostToolBatch hook stopped continuation: {reason}\n</system-reminder>"
+                ),
+            ),
+            batch_id,
+        ));
+    }
+    (stop_reason.is_some(), injected_messages)
+}
+
+/// Compatibility surface for direct dispatch callers and focused hook tests.
+/// Conversation drivers use [`dispatch_tool_uses_tracked_deferred`] so they can
+/// place `PostToolBatch` after persistence and coalesce streaming calls.
+pub(crate) async fn dispatch_tool_uses_tracked(
+    orch: &ConversationOrchestrator,
+    tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Result<
+    (
+        Vec<ContentBlock>,
+        bool,
+        Vec<(ConversationMessage, ToolUseId)>,
+        Vec<ContextModifier>,
+    ),
+    OrchestratorError,
+> {
+    let mut dispatched = dispatch_tool_uses_tracked_deferred(orch, tool_uses, cancel, None).await?;
+    if !dispatched.prevent_continuation {
+        let (batch_prevent, batch_messages) =
+            run_post_tool_batch_hooks(orch, dispatched.post_tool_batch_calls).await;
+        dispatched.prevent_continuation |= batch_prevent;
+        dispatched.injected_messages.extend(batch_messages);
+    }
+    Ok((
+        dispatched.results,
+        dispatched.prevent_continuation,
+        dispatched.injected_messages,
+        dispatched.context_modifiers,
     ))
 }
 
@@ -5908,6 +6155,32 @@ fn post_tool_batch_stop_reason(agg: &hooks::response::AggregateHookResult) -> Op
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| "Execution stopped by PostToolBatch hook".to_string()),
     )
+}
+
+/// Append tool/hook-injected messages to live history and persist only their
+/// durable renderings. Hook `user_meta` messages are ephemeral views of the
+/// attachment record that the hook firer already wrote, so serializing them a
+/// second time would duplicate the transcript entry.
+pub(crate) async fn append_tool_injected_messages(
+    orch: &ConversationOrchestrator,
+    messages: Vec<(ConversationMessage, ToolUseId)>,
+) {
+    if messages.is_empty() {
+        return;
+    }
+    {
+        let mut s = orch.session.lock().await;
+        for (message, source_id) in &messages {
+            s.history.push(message.clone());
+            s.injected_message_sources
+                .insert(message.id(), source_id.clone());
+        }
+    }
+    for (message, _) in &messages {
+        if !message.is_meta() {
+            orch.persist_message_to_jsonl(message).await;
+        }
+    }
 }
 
 /// SKILLEXEC.3 (model scope): fold a tool batch's `context_modifier`s over a
@@ -7144,6 +7417,10 @@ mod hook_context_attachment_tests {
         assert_eq!(
             stop_msg.0.text_content(),
             "<system-reminder>\nPostToolBatch hook stopped continuation: BATCH-STOP\n</system-reminder>"
+        );
+        assert!(
+            stop_msg.0.is_meta(),
+            "the model-facing reminder is an ephemeral rendering of the durable attachment"
         );
         assert!(
             stop_msg.1.as_str().starts_with("hook-"),
@@ -8811,6 +9088,7 @@ mod tool_hook_wiring_tests {
             can_show_permission_prompts: true,
             cwd: None,
             tool_use_id: Some("toolu_workflow_subagent".into()),
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             parent_model: None,

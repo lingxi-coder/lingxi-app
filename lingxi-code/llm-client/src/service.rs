@@ -214,6 +214,10 @@ fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(":free")
 }
 
+const NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD: f64 = 0.95;
+const NEAR_LIMIT_WRAP_UP_MAX5X_THRESHOLD: f64 = 0.99;
+const NEAR_LIMIT_WRAP_UP_MAX20X_THRESHOLD: f64 = 0.9975;
+
 /// A retry-worthy API failure the [`ApiService`] retry loop is about to back off
 /// on, surfaced to the UI so it can show a Claude-Code-style
 /// "Retrying in Ns… (attempt X/Y)" status during the wait (mirrors
@@ -425,6 +429,13 @@ pub struct ApiService {
     /// subsequent success — so a retried-then-recovered 429 never plants a
     /// rejected snapshot (the prior per-attempt-write divergence, CLOSED).
     pending_429: Mutex<Option<Pending429>>,
+    /// One-shot subagent wrap-up hint, armed from a near-limit 2xx snapshot and
+    /// consumed by the query loop exactly once for that five-hour window.
+    pending_near_limit_wrap_up_hint: Mutex<bool>,
+    /// Five-hour reset epoch that already armed or consumed the near-limit
+    /// wrap-up hint. This is the per-window dedupe key: the same reset must not
+    /// re-arm after consumption; a later reset opens a new window.
+    near_limit_wrap_up_window_key: Mutex<Option<u64>>,
     /// Optional AWS auth-refresh driver (2.1.198 `ZBd`, `awsAuthRefresh`).
     ///
     /// When set, an AWS-auth failure (401/403) on the Bedrock provider runs
@@ -763,6 +774,8 @@ impl ApiService {
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
+            pending_near_limit_wrap_up_hint: Mutex::new(false),
+            near_limit_wrap_up_window_key: Mutex::new(None),
             aws_auth: None,
             last_rate_limit_record_ts_ms: Mutex::new(None),
             stream_idle_timeout_override: None,
@@ -2033,6 +2046,21 @@ impl ApiService {
         self.last_429_message.lock().unwrap().clone()
     }
 
+    /// Consume the pending near-limit wrap-up hint once.
+    ///
+    /// The dedupe window key intentionally survives the consume: once a
+    /// subagent has seen the hint for a five-hour window, later responses in
+    /// that same window must not re-arm it. A later reset starts a new window.
+    #[must_use]
+    pub fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        let mut pending = self.pending_near_limit_wrap_up_hint.lock().unwrap();
+        if !*pending {
+            return false;
+        }
+        *pending = false;
+        true
+    }
+
     /// Parse rate-limit headers from a 2xx response and update the cached snapshot.
     ///
     /// Emits a `tracing::warn!` when the overage status indicates the account is
@@ -2115,10 +2143,14 @@ impl ApiService {
         // snapshot on EVERY recorded (non-stale) headers pass — `rawUtilization
         // = extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
         // gated on `has_unified_headers()` like the limits snapshot below.
+        let raw = RawUtilization::from_headers(&hvec);
         if !stale {
-            *self.last_raw_utilization.lock().unwrap() = Some(RawUtilization::from_headers(&hvec));
+            *self.last_raw_utilization.lock().unwrap() = Some(raw);
         }
         let info = RateLimitInfo::from_headers(&hvec);
+        if !stale {
+            self.update_near_limit_wrap_up_state(&info, raw, ts_ms);
+        }
         if !stale && info.has_unified_headers() {
             // Warn when the account is near or at exhaustion.
             match info.overage_status.as_deref() {
@@ -2296,6 +2328,75 @@ impl ApiService {
             *self.last_rate_limit.lock().unwrap() = Some(info);
         }
         *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
+    }
+
+    fn near_limit_wrap_up_threshold(&self) -> f64 {
+        if let Some(slot) = &self.subscription {
+            if let Ok(guard) = slot.read() {
+                if let Some(snapshot) = guard.as_ref() {
+                    return match snapshot.rate_limit_tier.as_deref() {
+                        Some("default_claude_max_5x") => NEAR_LIMIT_WRAP_UP_MAX5X_THRESHOLD,
+                        Some("default_claude_max_20x") => NEAR_LIMIT_WRAP_UP_MAX20X_THRESHOLD,
+                        _ => NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD,
+                    };
+                }
+            }
+        }
+        // The static subscriber seed carries only subscriber/enterprise bits,
+        // not `getRateLimitTier()`. The oracle's `OZt(mw())` therefore falls
+        // through to the default threshold until the live tier snapshot lands.
+        NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD
+    }
+
+    fn update_near_limit_wrap_up_state(
+        &self,
+        info: &RateLimitInfo,
+        raw: RawUtilization,
+        _observation_ts_ms: u128,
+    ) {
+        // Oracle 2.1.252 `extractQuotaStatusFromHeaders` uses `Date.now()` for
+        // expiry/future checks, independently of the observation timestamp
+        // used by the stale-response guard. `five_hour` names the quota bucket;
+        // it is not a "reset within five hours" duration predicate.
+        let now_secs = u64::try_from(Self::now_ms() / 1000).unwrap_or(u64::MAX);
+        let mut pending = self.pending_near_limit_wrap_up_hint.lock().unwrap();
+        let mut window_key = self.near_limit_wrap_up_window_key.lock().unwrap();
+        if window_key.is_some_and(|reset| reset < now_secs) {
+            *pending = false;
+            *window_key = None;
+        }
+
+        let Some(window) = raw.five_hour else {
+            return;
+        };
+        if !window.utilization.is_finite()
+            || window.resets_at <= now_secs
+            || window.utilization < self.near_limit_wrap_up_threshold()
+        {
+            return;
+        }
+
+        // Oracle also requires `!aM()` here, where `aM()` is its separate
+        // low-priority/slow-mode controller. LingXi does not implement that
+        // subsystem, so every representable runtime state is the inactive
+        // branch. If slow mode is added, it must suppress arming here and make
+        // `consume_pending_near_limit_wrap_up_hint` clear-then-return-false.
+
+        // Extra usage suppresses an armed hint but deliberately preserves the
+        // reset key. If overage later turns off in the same window, the hint
+        // must not re-arm (`nearLimitWrapUpWindowKey !== resets_at`).
+        if matches!(
+            info.overage_status.as_deref(),
+            Some("allowed" | "allowed_warning")
+        ) {
+            *pending = false;
+            return;
+        }
+
+        if *window_key != Some(window.resets_at) {
+            *window_key = Some(window.resets_at);
+            *pending = true;
+        }
     }
 
     /// HTTP status code approximation for `emit_failed` (best-effort: only the

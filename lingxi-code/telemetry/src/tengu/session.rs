@@ -1,4 +1,4 @@
-//! `tengu_session_*` event schemas — 20 events emitted by the session layer
+//! `tengu_session_*` event schemas — 19 events emitted by the session layer
 //! (M5 owner; M3-06 schema lock + M5-07 jsonl-persistence triplet + M5-08
 //! resume pair).
 //!
@@ -48,11 +48,14 @@ pub const APPENDED: &str = "tengu_session_appended";
 pub const ROTATED: &str = "tengu_session_rotated";
 /// `tengu_session_corrupted` — writer or reader detected an unrecoverable I/O / parse error.
 pub const CORRUPTED: &str = "tengu_session_corrupted";
+/// `tengu_session_persistence_failed` — transcript persistence failed during a
+/// best-effort write, but the live session continued.
+pub const PERSISTENCE_FAILED: &str = "tengu_session_persistence_failed";
 // NOTE: claude emits a single `tengu_session_resumed` ([`RESUMED`]) on resume —
 // the started/completed pair (`tengu_session_resume_started/_completed`) has 0
 // hits in the 2.1.195 binary, so it was removed for strict parity.
 
-/// Order-locked array of all 18 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 19 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     RESUMED,
@@ -69,9 +72,10 @@ pub(crate) const NAMES: &[&str] = &[
     IMPORT_STARTED,
     IMPORT_COMPLETED,
     IMPORT_FAILED,
-    APPENDED,  // M5-07
-    ROTATED,   // M5-07
-    CORRUPTED, // M5-07
+    APPENDED,           // M5-07
+    ROTATED,            // M5-07
+    CORRUPTED,          // M5-07
+    PERSISTENCE_FAILED, // 2.1.252 persistence-failure parity
 ];
 
 // -- Payload structs (deny_unknown_fields locked) -----------------------------
@@ -266,3 +270,8 @@ pub struct CorruptedPayload {
     /// Whitelisted error description (no PII).
     pub error: Verified,
 }
+
+/// Payload for [`PERSISTENCE_FAILED`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistenceFailedPayload {}

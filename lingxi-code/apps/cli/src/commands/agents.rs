@@ -1,7 +1,7 @@
-//! `lingxi-cli agents` — Manage background agents (M7 cc2.1.198).
+//! `lingxi-cli agents` — Manage background agents (cc2.1.252).
 //!
 //! Byte-faithful surface for the flat `agents` command, ported from the real
-//! 2.1.198 binary's `agentsCommandHandler` (`_Gf` @223856744) +
+//! 2.1.252 binary's `agentsCommandHandler` +
 //! `printAgentsJson` (`pGf` @223853400):
 //!
 //! * `--help`/`-h` → the captured fixture text VERBATIM (commander's layout;
@@ -23,6 +23,11 @@
 //!   (2.1.198: leaving an attached session opens the agent view instead of
 //!   exiting to shell);
 //!   `q`/`Esc`/`Ctrl-C` exits.
+//!
+//! The upstream FleetView new-session dispatch action is not exposed by this
+//! port's agents view. `--restricted` is therefore parsed for CLI parity but is
+//! intentionally inert until that dispatch action exists; it must not mutate
+//! an already-running session selected through connect/resume.
 
 use clap::{Args, Parser};
 use std::io::IsTerminal;
@@ -30,10 +35,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The locked `claude agents --help` text — byte-identical to the captured
-/// fixture (`parity_claude_2_1_198.rs` pins the same bytes from the fixture
-/// side; `cli_subcommand_stubs.rs` asserts this output end-to-end).
+/// 2.1.252 fixture (`cli_agents.rs` asserts this output end-to-end).
 pub const AGENTS_HELP: &str =
-    include_str!("../../../../test-harness/src/parity/fixtures/cc_2_1_198_agents_help.txt");
+    include_str!("../../../../test-harness/src/parity/fixtures/cc_2_1_252_agents_help.txt");
 
 /// `agents` args — byte-match `claude agents --help` (options only; no
 /// children). Repeatable options (`--add-dir`, `--mcp-config`, `--plugin-dir`)
@@ -103,6 +107,10 @@ pub struct Cli {
     /// sessions (repeatable)
     #[arg(long = "plugin-dir", value_name = "path")]
     pub plugin_dir: Vec<PathBuf>,
+
+    /// Start dispatched sessions in restricted mode
+    #[arg(long = "restricted")]
+    pub restricted: bool,
 
     /// Like --plugin-dir but the engine will not read this plugin's .mcp.json
     /// (hidden in the binary's help too — `.hideHelp()`).
@@ -1209,6 +1217,18 @@ mod tests {
     }
 
     #[test]
+    fn restricted_flag_parses_for_agents() {
+        assert!(parse(&["--restricted"]).restricted);
+        assert!(!parse(&[]).restricted);
+    }
+
+    #[test]
+    fn restricted_does_not_reconfigure_connect_root_argv() {
+        assert!(!agents_connect_argv(&parse(&["--restricted"])).restricted);
+        assert!(!agents_connect_argv(&parse(&[])).restricted);
+    }
+
+    #[test]
     fn session_origin_cwd_resolves_from_live_then_job() {
         use crate::agents_registry::{JobState, LiveSessionRecord};
         use serde_json::json;
@@ -1273,6 +1293,18 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--permission-mode bypassPermissions"));
         assert!(joined.contains("--model opus"));
+    }
+
+    #[test]
+    fn restricted_does_not_reconfigure_foreground_resume() {
+        let args = attach_args(&parse(&["--restricted"]), "sid-restricted");
+        assert!(!args.contains(&"--restricted".to_string()));
+        assert!(!attach_args(&parse(&[]), "sid-default").contains(&"--restricted".to_string()));
+
+        let mut root_args = vec!["lingxi-cli".to_string()];
+        root_args.extend(args);
+        let resumed = crate::argv::Argv::from_iter(root_args).unwrap();
+        assert!(!resumed.restricted);
     }
 
     #[test]

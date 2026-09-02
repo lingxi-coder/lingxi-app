@@ -31,14 +31,17 @@ pub use file_history::{FileHistory, FileHistoryBackup, SnapshotRecord};
 pub use metadata::SessionMetadata;
 // Rate-limit resume checkpoint (SC-02): the `RESUME.md` document, the git
 // executor (`q4v`) and the once-per-session latch (`z4v`). The `rate_limited`
-// trigger lives in `orchestrator::turn_loop`; see the module docs for the
-// `near_limit` twin that still needs a caller.
+// hard-429 trigger lives in `orchestrator::turn_loop`; the near-limit twin is
+// dispatched by the subagent runner through `ProviderApiAdapter`.
 pub use rate_limit_checkpoint::{
-    checkpoint_ref, clear_last_checkpoint_result, last_checkpoint_result,
+    checkpoint_ref, checkpoint_result_for_session, checkpoint_session_key,
+    checkpoint_started_for_session, clear_checkpoint_result_for_session,
+    clear_last_checkpoint_result, dispatch_rate_limit_checkpoint, last_checkpoint_result,
     local_checkpoint_commit_allowed, perform_rate_limit_checkpoint, render_resume_md,
     sanitize_todo_line, CheckpointGates, CheckpointRequest, CheckpointResult, CheckpointSkipReason,
-    CheckpointTrigger, ResumeDoc, ALLOW_LOCAL_CHECKPOINT_COMMIT_ENV, CHECKPOINT_REF_PREFIX,
-    MAX_CHECKPOINT_FILE_COUNT, MAX_CHECKPOINT_TOTAL_BYTES, RESUME_MD_REPO_PATH,
+    CheckpointTrigger, OwnedCheckpointRequest, ResumeDoc, ALLOW_LOCAL_CHECKPOINT_COMMIT_ENV,
+    CHECKPOINT_REF_PREFIX, MAX_CHECKPOINT_FILE_COUNT, MAX_CHECKPOINT_TOTAL_BYTES,
+    RESUME_MD_REPO_PATH,
 };
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use rewind::rewind_conversation;

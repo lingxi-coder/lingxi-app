@@ -899,6 +899,16 @@ impl ConversationOrchestrator {
             .collect()
     }
 
+    /// Count the current model-visible MCP tools after the same filtering the
+    /// turn prompt uses.
+    pub(crate) async fn filtered_mcp_tool_count(&self) -> usize {
+        self.filtered_available_tools()
+            .await
+            .into_iter()
+            .filter(|tool| tool.is_mcp())
+            .count()
+    }
+
     /// Execute one host-originated tool request through the same dispatcher as
     /// a model-originated tool use: schema validation, PreToolUse hooks,
     /// permission policy, sandbox-backed tool execution, PostToolUse hooks, and

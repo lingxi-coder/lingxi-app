@@ -76,6 +76,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         injected_permission_gate: None,
         ask_user_question_tx: None,
         computer_access_tx: None,
+        session_agent_observer: None,
         // `assemble` fills this with the connection's own `AudioBridge`.
         audio: None,
         session_started_as_coordinator: false,

@@ -13,6 +13,7 @@ import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } fr
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
+import type { WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
 export type {
@@ -58,6 +59,7 @@ const CH_CLIPBOARD_WRITE_TEXT = 'lingxi:clipboard:writeText';
 const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 const CH_SESSION_NEW = 'lingxi:session:new';
 const CH_SESSION_OPEN = 'lingxi:session:open';
+const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -134,6 +136,7 @@ export interface LingxiApi {
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
+  previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
   providerCredentials(): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
@@ -203,6 +206,7 @@ const api: LingxiApi = {
   removeProject: (path) => ipcRenderer.invoke(CH_PROJECT_REMOVE, path) as Promise<BootstrapState>,
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
+  previewWorkspaceFile: (sessionId, path) => ipcRenderer.invoke(CH_WORKSPACE_FILE_PREVIEW, sessionId, path) as Promise<WorkspaceFilePreview>,
   providerCredentials: () => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET) as Promise<ProviderCredentialMetadata[]>,
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,

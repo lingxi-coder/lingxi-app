@@ -83,15 +83,18 @@ impl McpOAuthTelemetryContext {
 }
 
 #[must_use]
-pub fn telemetry_server_key_hash(name: &str, spec: &McpTransportSpec) -> Verified {
-    telemetry_server_key_hash_for_key(&server_key(name, spec))
+pub fn telemetry_server_key_hash(name: &str, _spec: &McpTransportSpec) -> Verified {
+    // Oracle `tP(name)` is exactly the 12-hex hash of the configured server
+    // name. It is deliberately independent of the OAuth credential storage
+    // key (`name|configHash`) and therefore stable across URL/header changes.
+    telemetry_server_key_hash_for_key(name)
 }
 
 #[must_use]
 pub fn telemetry_server_key_hash_for_key(key: &str) -> Verified {
     let digest = Sha256::digest(key.as_bytes());
-    let mut short = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
+    let mut short = String::with_capacity(12);
+    for byte in digest.iter().take(6) {
         use std::fmt::Write as _;
         let _ = write!(&mut short, "{byte:02x}");
     }
@@ -2049,6 +2052,35 @@ mod tests {
             oauth: None,
         };
         assert_ne!(server_key("acme", &spec_other), key);
+    }
+
+    #[test]
+    fn telemetry_server_key_hash_matches_oracle_sha256_prefix() {
+        let hash = telemetry_server_key_hash_for_key("acme");
+        assert_eq!(hash.as_str().len(), 12);
+        assert!(hash.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(hash.as_str(), "822b33ad87c1");
+
+        let first = McpTransportSpec::Http {
+            url: "https://one.example/mcp".into(),
+            headers: platform_api::McpHeaders::new(),
+            headers_helper: None,
+            oauth: None,
+        };
+        let second = McpTransportSpec::Http {
+            url: "https://two.example/mcp".into(),
+            headers: platform_api::McpHeaders::new(),
+            headers_helper: None,
+            oauth: None,
+        };
+        assert_eq!(
+            telemetry_server_key_hash("acme", &first).as_str(),
+            hash.as_str()
+        );
+        assert_eq!(
+            telemetry_server_key_hash("acme", &second).as_str(),
+            hash.as_str()
+        );
     }
 
     #[test]

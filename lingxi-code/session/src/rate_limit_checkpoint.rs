@@ -92,6 +92,7 @@
 use lingxi_core::session::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
 
 /// `oDi = "refs/claude/checkpoint-"` — the ref namespace a checkpoint commit is
 /// parked under, one ref per session (`<prefix><first 8 chars of session id>`).
@@ -129,6 +130,16 @@ const TODO_LINE_MAX_UTF16: usize = 500;
 
 /// Number of leading session-id characters that name the ref (`o.slice(0,8)`).
 const REF_SESSION_ID_PREFIX_LEN: usize = 8;
+
+/// Canonical key shared by every checkpoint trigger for a protocol session.
+///
+/// `SessionId` displays as `sess:<uuid>`, while the persisted session id and
+/// resume command use the bare UUID. Centralising the conversion prevents the
+/// near-limit and hard-429 paths from occupying different latch entries.
+#[must_use]
+pub fn checkpoint_session_key(session_id: protocol::SessionId) -> String {
+    session_id.as_uuid().to_string()
+}
 
 /// Why the checkpoint ran.
 ///
@@ -594,35 +605,216 @@ pub struct CheckpointRequest<'a> {
     pub gates: CheckpointGates,
 }
 
-/// The `lastCheckpointResult` module-level latch (`tDi` / `_6f`).
-///
-/// Process-global on purpose: `z4v` returns the cached result on every call
-/// after the first, which is what makes the checkpoint a once-per-session
-/// event even though its triggers fire repeatedly (the REPL re-fires on every
-/// rate-limit header, the near-limit arm on every turn).
-static LAST_CHECKPOINT_RESULT: Lazy<std::sync::Mutex<Option<CheckpointResult>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
+/// Owned form used by fire-and-forget callers.
+#[derive(Debug, Clone)]
+pub struct OwnedCheckpointRequest {
+    /// Owning conversation session.
+    pub session_id: String,
+    /// Why the checkpoint ran.
+    pub trigger: CheckpointTrigger,
+    /// Todo state captured at dispatch time.
+    pub todos: Vec<TodoItem>,
+    /// Workspace captured at dispatch time.
+    pub cwd: std::path::PathBuf,
+    /// Caller-supplied safety gates.
+    pub gates: CheckpointGates,
+}
+
+impl OwnedCheckpointRequest {
+    fn borrowed(&self) -> CheckpointRequest<'_> {
+        CheckpointRequest {
+            session_id: &self.session_id,
+            trigger: self.trigger,
+            todos: &self.todos,
+            cwd: &self.cwd,
+            gates: self.gates,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CheckpointLatchEntry {
+    Running(u64),
+    Ready(CheckpointResult),
+}
+
+#[derive(Debug, Default)]
+struct CheckpointLatch {
+    by_session: HashMap<String, CheckpointLatchEntry>,
+    last_ready: Option<(String, CheckpointResult)>,
+    next_generation: u64,
+}
+
+/// The oracle's `lastCheckpointResult` latch is module-global because one CLI
+/// process owns one session. LingXi embeds several conversations in one
+/// process, so the equivalent lifetime key must be the session id. `Running`
+/// is installed synchronously before a detached worker starts, closing the
+/// near-limit/hard-429 race without serializing different sessions.
+static CHECKPOINT_LATCH: Lazy<(std::sync::Mutex<CheckpointLatch>, std::sync::Condvar)> =
+    Lazy::new(|| {
+        (
+            std::sync::Mutex::new(CheckpointLatch::default()),
+            std::sync::Condvar::new(),
+        )
+    });
 
 /// `getLastCheckpointResult()` (`_6f`) — what the last checkpoint decided, or
 /// `None` if none has run in this process.
 ///
-/// This is the value the `useRateLimitCheckpointResult` hook renders; it is
-/// also the once-per-session guard read by [`perform_rate_limit_checkpoint`].
+/// This compatibility view is the value the `useRateLimitCheckpointResult`
+/// hook renders. Dispatch and dedupe use the session-keyed entries above.
 #[must_use]
 pub fn last_checkpoint_result() -> Option<CheckpointResult> {
-    LAST_CHECKPOINT_RESULT
+    CHECKPOINT_LATCH
+        .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .last_ready
+        .as_ref()
+        .map(|(_, result)| result.clone())
 }
 
-/// `clearLastCheckpointResult()` (`tDi(null)`) — forget the latch so the next
-/// trigger re-runs. The oracle calls it at the top of `z4v` and on session
-/// reset.
-pub fn clear_last_checkpoint_result() {
-    *LAST_CHECKPOINT_RESULT
+/// Finished checkpoint result for one conversation session.
+#[must_use]
+pub fn checkpoint_result_for_session(session_id: &str) -> Option<CheckpointResult> {
+    let state = CHECKPOINT_LATCH
+        .0
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match state.by_session.get(session_id) {
+        Some(CheckpointLatchEntry::Ready(result)) => Some(result.clone()),
+        Some(CheckpointLatchEntry::Running(_)) | None => None,
+    }
+}
+
+/// Whether a checkpoint has started or finished for one session.
+#[must_use]
+pub fn checkpoint_started_for_session(session_id: &str) -> bool {
+    CHECKPOINT_LATCH
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_session
+        .contains_key(session_id)
+}
+
+/// `clearLastCheckpointResult()` (`tDi(null)`) — forget every embedded-session
+/// latch. Tests and account-wide teardown use this; a conversation reset uses
+/// [`clear_checkpoint_result_for_session`] so it cannot disturb peers.
+pub fn clear_last_checkpoint_result() {
+    let mut state = CHECKPOINT_LATCH
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.by_session.clear();
+    state.last_ready = None;
+    CHECKPOINT_LATCH.1.notify_all();
+}
+
+/// Clear only one embedded conversation's latch.
+pub fn clear_checkpoint_result_for_session(session_id: &str) {
+    let mut state = CHECKPOINT_LATCH
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.by_session.remove(session_id);
+    if state
+        .last_ready
+        .as_ref()
+        .is_some_and(|(last_session_id, _)| last_session_id == session_id)
+    {
+        state.last_ready = None;
+    }
+    CHECKPOINT_LATCH.1.notify_all();
+}
+
+fn next_checkpoint_generation(state: &mut CheckpointLatch) -> u64 {
+    let generation = state.next_generation;
+    state.next_generation = state.next_generation.wrapping_add(1);
+    generation
+}
+
+fn try_claim_checkpoint(session_id: &str) -> Option<u64> {
+    let mut state = CHECKPOINT_LATCH
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.by_session.contains_key(session_id) {
+        return None;
+    }
+    let generation = next_checkpoint_generation(&mut state);
+    state.by_session.insert(
+        session_id.to_string(),
+        CheckpointLatchEntry::Running(generation),
+    );
+    Some(generation)
+}
+
+fn wait_or_claim_checkpoint(session_id: &str) -> Result<u64, CheckpointResult> {
+    let mut state = CHECKPOINT_LATCH
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        match state.by_session.get(session_id) {
+            Some(CheckpointLatchEntry::Ready(result)) => return Err(result.clone()),
+            Some(CheckpointLatchEntry::Running(_)) => {
+                state = CHECKPOINT_LATCH
+                    .1
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            None => {
+                let generation = next_checkpoint_generation(&mut state);
+                state.by_session.insert(
+                    session_id.to_string(),
+                    CheckpointLatchEntry::Running(generation),
+                );
+                return Ok(generation);
+            }
+        }
+    }
+}
+
+fn finish_claimed_checkpoint(
+    request: &CheckpointRequest<'_>,
+    generation: u64,
+    result: CheckpointResult,
+) -> CheckpointResult {
+    {
+        let mut state = CHECKPOINT_LATCH
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            state.by_session.get(request.session_id),
+            Some(CheckpointLatchEntry::Running(current)) if *current == generation
+        ) {
+            state.by_session.insert(
+                request.session_id.to_string(),
+                CheckpointLatchEntry::Ready(result.clone()),
+            );
+            state.last_ready = Some((request.session_id.to_string(), result.clone()));
+        }
+        CHECKPOINT_LATCH.1.notify_all();
+    }
+    match &result {
+        CheckpointResult::Committed { ref_name, .. } => {
+            tracing::debug!(
+                trigger = request.trigger.as_str(),
+                ref_name = ref_name.as_str(),
+                "rate-limit checkpoint committed"
+            );
+        }
+        CheckpointResult::Skipped(reason) => {
+            tracing::debug!(
+                trigger = request.trigger.as_str(),
+                reason = reason.as_str(),
+                "rate-limit checkpoint skipped"
+            );
+        }
+    }
+    result
 }
 
 /// `performRateLimitCheckpoint(e)` — `z4v` (@292197753).
@@ -641,30 +833,29 @@ pub fn clear_last_checkpoint_result() {
 /// detached thread, matching the oracle's `Promise…catch(()=>{})` at both of
 /// its call sites.
 pub fn perform_rate_limit_checkpoint(request: &CheckpointRequest<'_>) -> CheckpointResult {
-    if let Some(previous) = last_checkpoint_result() {
-        return previous;
-    }
+    let generation = match wait_or_claim_checkpoint(request.session_id) {
+        Ok(generation) => generation,
+        Err(previous) => return previous,
+    };
     let result = run_checkpoint(request);
-    *LAST_CHECKPOINT_RESULT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result.clone());
-    match &result {
-        CheckpointResult::Committed { ref_name, .. } => {
-            tracing::debug!(
-                trigger = request.trigger.as_str(),
-                ref_name = ref_name.as_str(),
-                "rate-limit checkpoint committed"
-            );
-        }
-        CheckpointResult::Skipped(reason) => {
-            tracing::debug!(
-                trigger = request.trigger.as_str(),
-                reason = reason.as_str(),
-                "rate-limit checkpoint skipped"
-            );
-        }
-    }
-    result
+    finish_claimed_checkpoint(request, generation, result)
+}
+
+/// Atomically claim a session's checkpoint slot and run it on a detached OS
+/// thread. Returns `true` only for the first trigger in that session; later
+/// near-limit or hard-429 triggers observe the synchronous `Running`/`Ready`
+/// entry and do not spawn another worker.
+#[must_use]
+pub fn dispatch_rate_limit_checkpoint(request: OwnedCheckpointRequest) -> bool {
+    let Some(generation) = try_claim_checkpoint(&request.session_id) else {
+        return false;
+    };
+    std::thread::spawn(move || {
+        let borrowed = request.borrowed();
+        let result = run_checkpoint(&borrowed);
+        finish_claimed_checkpoint(&borrowed, generation, result);
+    });
+    true
 }
 
 /// One finished `git` invocation.
@@ -1338,6 +1529,16 @@ mod tests {
         assert_eq!(checkpoint_ref(""), "refs/lingxi/checkpoint-");
     }
 
+    #[test]
+    fn protocol_session_key_is_the_bare_uuid_for_all_checkpoint_triggers() {
+        let session_id = protocol::SessionId::new();
+        assert_eq!(
+            checkpoint_session_key(session_id),
+            session_id.as_uuid().to_string()
+        );
+        assert!(!checkpoint_session_key(session_id).starts_with("sess:"));
+    }
+
     /// The empty-list document, whole. Byte-for-byte against `K4v` with the two
     /// documented rebrands — note there is NO `## What's next` section.
     #[test]
@@ -1534,6 +1735,8 @@ mod executor_tests {
     use super::*;
     use std::path::Path;
 
+    static CHECKPOINT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `Qsl(e,t)` — "`inner` IS `outer`, or lives under it". The guard that
     /// stops a repository rooted at (or above) `$HOME` from being snapshotted,
     /// and stops a symlinked working-tree file from being followed out of the
@@ -1587,11 +1790,70 @@ mod executor_tests {
 
     /// The latch is what makes `performRateLimitCheckpoint` once-per-session.
     /// (The gate ladder and the real commit are covered end to end in
-    /// `session/tests/rate_limit_checkpoint_test.rs`, which owns the global
-    /// latch for its whole binary.)
+    /// `session/tests/rate_limit_checkpoint_test.rs`.)
     #[test]
     fn clearing_the_latch_makes_it_none_again() {
+        let _guard = CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_last_checkpoint_result();
         assert_eq!(last_checkpoint_result(), None);
+    }
+
+    #[test]
+    fn detached_dispatch_dedupes_per_session_without_cross_session_leakage() {
+        let _guard = CHECKPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_last_checkpoint_result();
+        let root = tempfile::tempdir().expect("tempdir");
+        let request = |session_id: &str, trigger| OwnedCheckpointRequest {
+            session_id: session_id.to_string(),
+            trigger,
+            todos: Vec::new(),
+            cwd: root.path().to_path_buf(),
+            gates: CheckpointGates {
+                policy_allows: false,
+                ..CheckpointGates::default()
+            },
+        };
+        let a = "aaaaaaaa-0000-4000-8000-000000000000";
+        let b = "bbbbbbbb-0000-4000-8000-000000000000";
+
+        assert!(dispatch_rate_limit_checkpoint(request(
+            a,
+            CheckpointTrigger::NearLimit
+        )));
+        assert!(checkpoint_started_for_session(a));
+        assert!(
+            !dispatch_rate_limit_checkpoint(request(a, CheckpointTrigger::RateLimited)),
+            "a later hard 429 must not start duplicate work"
+        );
+        assert!(
+            dispatch_rate_limit_checkpoint(request(b, CheckpointTrigger::NearLimit)),
+            "an unrelated embedded session needs an independent latch"
+        );
+
+        for _ in 0..100 {
+            if checkpoint_result_for_session(a).is_some()
+                && checkpoint_result_for_session(b).is_some()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            checkpoint_result_for_session(a),
+            Some(CheckpointResult::Skipped(CheckpointSkipReason::Policy))
+        );
+        assert_eq!(
+            checkpoint_result_for_session(b),
+            Some(CheckpointResult::Skipped(CheckpointSkipReason::Policy))
+        );
+
+        clear_checkpoint_result_for_session(a);
+        assert!(!checkpoint_started_for_session(a));
+        assert!(checkpoint_started_for_session(b));
+        clear_last_checkpoint_result();
     }
 }

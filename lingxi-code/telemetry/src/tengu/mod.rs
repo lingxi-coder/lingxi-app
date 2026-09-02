@@ -23,9 +23,10 @@ pub mod ignore_pattern;
 /// `ALL_EVENT_NAMES` — separate from the count-locked event set; kept here for
 /// string-lock testing only, mirroring `workflow`).
 pub mod kairos;
-/// `tengu_mcp_*` analytics-event schemas (2.1.251 §18/§20b). Only the two
-/// confirmed real events; the ~100 other `tengu_mcp_*` binary strings are
-/// Statsig feature-flag names, not events — see the module doc.
+/// `tengu_mcp_*` analytics-event schemas (2.1.252 parity audit). The registry
+/// now pins 44 of the oracle's 55 provider-neutral MCP analytics events; see
+/// the module doc for the remaining 11 and for the still-separate Statsig
+/// flag-name family that shares the `tengu_mcp_*` prefix.
 pub mod mcp;
 pub mod memory;
 pub mod migration;
@@ -115,13 +116,13 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //     two confirmed real `tengu_mcp_*` ANALYTICS events at the oracle —
     //     everything else with that prefix is a Statsig feature-flag name".
     //     THAT CLAIM WAS FALSE and is retracted: scanning 2.1.251 for the
-    //     analytics-bus call shape `s("tengu_mcp_<name>"` returns 53 distinct
+    //     analytics-bus call shape `s("tengu_mcp_<name>"` returns 55 distinct
     //     event names (tengu_mcp_server_connection_succeeded/_failed,
     //     _list_changed, _listen_reopen, _tripwire, _sdk_generation, the four
     //     _oauth_flow_* , _registry_fetch, _elicitation_shown/_response,
     //     _discovery_source, _first_party_auto_auth, …), several of them
     //     corroborated by the oracle's own event allowlist at @156122853.
-    //     This block ports 5 of 53; the other 48 are an OPEN gap. It IS true
+    //     This block now ports 44 of 55; the other 11 are an OPEN gap. It IS true
     //     that many `tengu_mcp_*` STRINGS are Statsig flags, but that does
     //     not make the event set two. See mcp.rs's module doc.
     //     The auto-background event is emitted by the tool dispatcher but

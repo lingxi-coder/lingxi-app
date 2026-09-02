@@ -24,7 +24,7 @@ use crate::context::SubagentContext;
 use futures::StreamExt;
 use llm_client::{LlmError, LlmEvent};
 use platform_api::WorkflowQueryWatchdog;
-use protocol::AgentId;
+use protocol::{AgentId, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
@@ -122,6 +122,51 @@ fn completed_result_text(result: &serde_json::Value) -> Option<String> {
 /// `totalDurationMs`).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+const USAGE_LIMIT_NEAR_WRAP_UP_FLAG: &str = "tengu_vellum_anchor";
+const NEAR_LIMIT_WRAP_UP_NOTE: &str = "[Usage limit approaching. Checkpoint now: finish the current step, then list up to 3 short bullets of the most impactful remaining work. Don't start subagents or long-running work.]";
+
+fn usage_limit_near_wrap_up_enabled() -> bool {
+    ::telemetry::flag_bool(USAGE_LIMIT_NEAR_WRAP_UP_FLAG, false)
+}
+
+async fn maybe_emit_near_limit_wrap_up(
+    history: &mut Vec<ConversationMessage>,
+    ctx: &SubagentContext,
+    api_client: &dyn crate::api::SubagentApiClient,
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    agent_id: AgentId,
+) {
+    if ctx.depth == 0 {
+        return;
+    }
+    // Oracle evaluation order is `depth > 0 && consumePendingHint() &&
+    // flag("tengu_vellum_anchor", false)`: a disabled flag still consumes and
+    // drops the one-shot hint, preventing a stale emission if flags refresh.
+    if !api_client.consume_pending_near_limit_wrap_up_hint() || !usage_limit_near_wrap_up_enabled()
+    {
+        return;
+    }
+
+    // `Le()` is the owning session's print/SDK gate. A background child of an
+    // interactive session is still interactive for this purpose, so `is_async`
+    // must not suppress the checkpoint. The oracle starts this fire-and-forget
+    // work before yielding either the UI notice or the model-visible note.
+    api_client.record_usage_limit_near_wrap_up();
+    let non_interactive = ctx.session_interactive == Some(false);
+    if !non_interactive {
+        api_client.dispatch_near_limit_checkpoint(crate::api::NearLimitCheckpointRequest {
+            session_id: ctx.hook_session_id,
+            cwd: ctx.hook_cwd.clone(),
+            non_interactive,
+        });
+    }
+
+    let note =
+        ConversationMessage::user_meta(MessageId::new(), NEAR_LIMIT_WRAP_UP_NOTE.to_string());
+    history.push(note.clone());
+    emit_message(out_tx, agent_id, &note).await;
 }
 
 fn workflow_watchdog_timeout_error(phase: &str, timeout: Duration) -> LlmError {
@@ -1290,6 +1335,14 @@ async fn run_subagent_loop(
                 if let Some(content) = wake_message.take() {
                     history.push(ConversationMessage::user(MessageId::new(), content));
                 }
+                maybe_emit_near_limit_wrap_up(
+                    &mut history,
+                    &ctx,
+                    api_client.as_ref(),
+                    &out_tx,
+                    agent_id,
+                )
+                .await;
                 let api_call = async {
                     let current_model = model.clone();
                     tracing::debug!(
@@ -1722,6 +1775,10 @@ async fn run_subagent_loop(
                         // `can_use_tool` prompt carries the byte-faithful id instead
                         // of a freshly minted one — matching the main loop's path.
                         tool_use_id: Some(tool_use_id.as_str().to_string()),
+                        // Every tool in this batch belongs to the assistant turn built
+                        // above. Preserve that exact id for per-call telemetry rather
+                        // than minting a substitute at the invocation boundary.
+                        assistant_message_id: Some(assistant_msg.id()),
                         // This subagent's own recursion depth (claude `agentContext.depth`)
                         // → mapped into the dispatched tool's `ToolUseContext.depth`, so a
                         // nested `Agent` call computes the grandchild's depth (`depth+1`)

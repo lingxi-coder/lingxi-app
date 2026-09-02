@@ -3099,6 +3099,43 @@ mod tests {
         h
     }
 
+    fn near_limit_headers(
+        utilization: &str,
+        reset_secs: u64,
+        overage_status: Option<&str>,
+    ) -> BTreeMap<String, String> {
+        let mut h = BTreeMap::new();
+        h.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "five_hour".to_string(),
+        );
+        h.insert(
+            "anthropic-ratelimit-unified-status".to_string(),
+            "allowed".to_string(),
+        );
+        h.insert(
+            "anthropic-ratelimit-unified-5h-utilization".to_string(),
+            utilization.to_string(),
+        );
+        h.insert(
+            "anthropic-ratelimit-unified-5h-reset".to_string(),
+            reset_secs.to_string(),
+        );
+        if let Some(overage_status) = overage_status {
+            h.insert(
+                "anthropic-ratelimit-unified-overage-status".to_string(),
+                overage_status.to_string(),
+            );
+        }
+        h
+    }
+
+    fn reset_in(seconds: u64) -> u64 {
+        u64::try_from(ApiService::now_ms() / 1000)
+            .unwrap_or(u64::MAX)
+            .saturating_add(seconds)
+    }
+
     /// The `Bha`/`Nha` monotonic guard: an out-of-order (older-timestamp)
     /// response must NOT overwrite a newer at-limit snapshot, so the warning
     /// cannot flicker off while still at the limit. A genuinely NEWER response
@@ -3146,6 +3183,212 @@ mod tests {
             Some("rejected".to_string()),
             "an equal-timestamp record is not stale and updates"
         );
+    }
+
+    #[test]
+    fn near_limit_wrap_up_hint_consumes_once_per_window() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let reset = reset_in(24 * 60 * 60);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.95", reset, None),
+            "",
+            1_000_000,
+        );
+
+        assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+        assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+    }
+
+    #[test]
+    fn near_limit_wrap_up_hint_rearms_only_after_window_changes() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let first_reset = reset_in(60 * 60);
+        let second_reset = reset_in(2 * 60 * 60);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.96", first_reset, None),
+            "",
+            1_000_000,
+        );
+        assert!(adapter.consume_pending_near_limit_wrap_up_hint());
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.99", first_reset, None),
+            "",
+            1_010_000,
+        );
+        assert!(
+            !adapter.consume_pending_near_limit_wrap_up_hint(),
+            "same five-hour reset must not re-arm after consumption"
+        );
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.96", second_reset, None),
+            "",
+            1_020_000,
+        );
+        assert!(
+            adapter.consume_pending_near_limit_wrap_up_hint(),
+            "a later five-hour reset opens a new hint window"
+        );
+    }
+
+    #[test]
+    fn stale_parallel_response_does_not_clear_pending_near_limit_wrap_up() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let reset = reset_in(60 * 60);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.96", reset, None),
+            "",
+            2_000,
+        );
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.10", reset, Some("allowed_warning")),
+            "",
+            1_000,
+        );
+
+        assert!(
+            adapter.consume_pending_near_limit_wrap_up_hint(),
+            "stale snapshots must not clear the armed near-limit hint"
+        );
+    }
+
+    #[test]
+    fn near_limit_wrap_up_overage_warning_clears_pending_hint() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let reset = reset_in(60 * 60);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.96", reset, None),
+            "",
+            1_000_000,
+        );
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.96", reset, Some("allowed_warning")),
+            "",
+            1_001_000,
+        );
+
+        assert!(
+            !adapter.consume_pending_near_limit_wrap_up_hint(),
+            "allowed_warning must clear the pending near-limit hint"
+        );
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.99", reset, None),
+            "",
+            1_002_000,
+        );
+        assert!(
+            !adapter.consume_pending_near_limit_wrap_up_hint(),
+            "overage clearing preserves the reset key, so the same window cannot re-arm"
+        );
+    }
+
+    #[test]
+    fn near_limit_wrap_up_threshold_uses_max20x_tier() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
+            .with_subscription(shared_slot(Some(
+                platform_api::subscription::SubscriptionSnapshot {
+                    is_subscriber: true,
+                    subscription_type: Some("max".to_string()),
+                    rate_limit_tier: Some("default_claude_max_20x".to_string()),
+                    ..Default::default()
+                },
+            )));
+        let reset = reset_in(60 * 60);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.99", reset, None),
+            "",
+            1_000_000,
+        );
+        assert!(
+            !adapter.consume_pending_near_limit_wrap_up_hint(),
+            "max20x must not arm at the looser subscriber threshold"
+        );
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.9975", reset, None),
+            "",
+            1_001_000,
+        );
+        assert!(
+            adapter.consume_pending_near_limit_wrap_up_hint(),
+            "max20x must arm at the stricter 99.75% threshold"
+        );
+    }
+
+    #[test]
+    fn near_limit_wrap_up_uses_future_reset_not_a_five_hour_countdown() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let now = u64::try_from(ApiService::now_ms() / 1000).unwrap_or(u64::MAX);
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("1", now.saturating_sub(1), None),
+            "",
+            1_000,
+        );
+        assert!(!adapter.consume_pending_near_limit_wrap_up_hint());
+
+        adapter.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.95", now.saturating_add(24 * 60 * 60), None),
+            "",
+            2_000,
+        );
+        assert!(
+            adapter.consume_pending_near_limit_wrap_up_hint(),
+            "the five-hour bucket may reset more than five hours from now"
+        );
+    }
+
+    #[test]
+    fn near_limit_wrap_up_threshold_uses_exact_rate_limit_tier() {
+        let reset = reset_in(60 * 60);
+
+        let ordinary_subscriber = make_adapter_with_subscriber(
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
+        );
+        ordinary_subscriber.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.95", reset, None),
+            "",
+            1_000,
+        );
+        assert!(
+            ordinary_subscriber.consume_pending_near_limit_wrap_up_hint(),
+            "subscriber status alone does not select the max-5x threshold"
+        );
+
+        let max5 = make_adapter_with_subscriber(
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            SubscriberState::default(),
+        )
+        .with_subscription(shared_slot(Some(
+            platform_api::subscription::SubscriptionSnapshot {
+                rate_limit_tier: Some("default_claude_max_5x".to_string()),
+                ..Default::default()
+            },
+        )));
+        max5.record_rate_limit_from_headers_at(
+            &near_limit_headers("0.989", reset, None),
+            "",
+            1_000,
+        );
+        assert!(!max5.consume_pending_near_limit_wrap_up_hint());
+        max5.record_rate_limit_from_headers_at(&near_limit_headers("0.99", reset, None), "", 2_000);
+        assert!(max5.consume_pending_near_limit_wrap_up_hint());
     }
 
     // ── B6-T1: terminal-only 429 state promotion (pending slot) ──────────────

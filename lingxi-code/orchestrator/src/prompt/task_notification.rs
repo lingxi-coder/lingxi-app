@@ -84,6 +84,10 @@ fn escape_xml(s: &str) -> String {
 }
 
 const WORKFLOW_RESULT_PREVIEW_UTF16: usize = 8_000;
+const TASK_NOTIFICATION_MAX_UTF16: usize = 100_000;
+const TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16: usize = 1_024;
+const TASK_NOTIFICATION_TRUNCATION_MARKER_PREFIX: &str = "\n\n... [";
+const TASK_NOTIFICATION_TRUNCATION_MARKER_SUFFIX: &str = " characters truncated] ...\n\n";
 
 fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
@@ -95,6 +99,186 @@ fn truncate_utf16(value: &str, limit: usize) -> String {
     // serialized to UTF-8 the lone surrogate becomes U+FFFD, so preserve that
     // observable edge case instead of truncating only at Rust `char` bounds.
     String::from_utf16_lossy(&value.encode_utf16().take(limit).collect::<Vec<_>>())
+}
+
+/// Resolve one JavaScript UTF-16 slice boundary to a Rust UTF-8 byte index.
+///
+/// The regex below is ASCII-only. If a UTF-16 boundary bisects a surrogate
+/// pair, the unpaired surrogate in JavaScript cannot participate in a match,
+/// so rounding the start inward/up and the end inward/down preserves every
+/// possible marker match without allocating the entire omitted middle.
+fn utf16_regex_boundary(value: &str, index: usize, round_up: bool) -> usize {
+    let mut utf16_offset = 0usize;
+    for (byte_offset, ch) in value.char_indices() {
+        if utf16_offset == index {
+            return byte_offset;
+        }
+        let next_utf16_offset = utf16_offset + ch.len_utf16();
+        if index < next_utf16_offset {
+            return if round_up {
+                byte_offset + ch.len_utf8()
+            } else {
+                byte_offset
+            };
+        }
+        utf16_offset = next_utf16_offset;
+    }
+    value.len()
+}
+
+fn utf16_regex_slice(value: &str, start: usize, end: usize) -> &str {
+    let start = utf16_regex_boundary(value, start, true);
+    let end = utf16_regex_boundary(value, end, false);
+    &value[start.min(end)..end]
+}
+
+/// Claude's truncation helper drops a trailing high surrogate from the head
+/// slice instead of emitting a malformed UTF-16 string.
+fn truncate_utf16_head(value: &str, limit: usize) -> String {
+    let mut units = value.encode_utf16().take(limit).collect::<Vec<_>>();
+    if units
+        .last()
+        .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+    {
+        units.pop();
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// Claude's truncation helper drops a leading low surrogate from the tail
+/// slice instead of emitting a malformed UTF-16 string.
+fn truncate_utf16_tail(value: &str, limit: usize) -> String {
+    let length = utf16_len(value);
+    let mut units = value
+        .encode_utf16()
+        .skip(length.saturating_sub(limit))
+        .take(limit)
+        .collect::<Vec<_>>();
+    if units
+        .first()
+        .is_some_and(|unit| (0xDC00..=0xDFFF).contains(unit))
+    {
+        units.remove(0);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// Return the semantic characters represented by truncation markers already
+/// present in the middle section.
+///
+/// Claude's ap helper scans only the portion that is about to be replaced.
+/// For each exact \n\n... [N characters truncated] ...\n\n marker there, it
+/// adds back the characters represented by N beyond the marker's own length.
+/// This keeps repeated capping from reporting only the length of an earlier
+/// marker instead of the original omitted content.
+fn folded_truncation_marker_chars(middle: &str) -> f64 {
+    let mut folded = 0.0;
+    let mut search_from = 0usize;
+
+    while let Some(relative_start) =
+        middle[search_from..].find(TASK_NOTIFICATION_TRUNCATION_MARKER_PREFIX)
+    {
+        let start = search_from + relative_start;
+        let digits_start = start + TASK_NOTIFICATION_TRUNCATION_MARKER_PREFIX.len();
+        let mut digits_end = digits_start;
+        while digits_end < middle.len() && middle.as_bytes()[digits_end].is_ascii_digit() {
+            digits_end += 1;
+        }
+        if digits_end == digits_start
+            || !middle[digits_end..].starts_with(TASK_NOTIFICATION_TRUNCATION_MARKER_SUFFIX)
+        {
+            // Match the regex engine's forward scan when a prefix is not a
+            // complete marker.
+            search_from = start + 1;
+            continue;
+        }
+        let digits = &middle[digits_start..digits_end];
+        let marker_end = digits_end + TASK_NOTIFICATION_TRUNCATION_MARKER_SUFFIX.len();
+        let marker_len = marker_end - start;
+
+        if !digits.is_empty()
+            && digits.len() <= 15
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            if let Ok(reported) = digits.parse::<f64>() {
+                if reported >= marker_len as f64 {
+                    // Upstream accumulates into a JavaScript Number. Preserve
+                    // its IEEE-754 rounding rather than saturating a usize;
+                    // ten legal 15-digit markers are already enough for the
+                    // two results to differ.
+                    folded += reported - marker_len as f64;
+                }
+            }
+        }
+
+        // matchAll uses a global regex, so a completed match is not scanned
+        // again as a possible overlapping match.
+        search_from = marker_end;
+    }
+
+    folded
+}
+
+/// JavaScript's Number-to-string threshold switches non-negative integers to
+/// exponent form at 1e21. Rust's Display keeps them in fixed form, so normalize
+/// the large-value arm explicitly after reproducing Number arithmetic above.
+fn format_javascript_nonnegative_integer(value: f64) -> String {
+    if value.is_infinite() {
+        return "Infinity".to_string();
+    }
+    let rendered = value.to_string();
+    if value < 1e21 {
+        return rendered;
+    }
+    if let Some((mantissa, exponent)) = rendered
+        .split_once('e')
+        .or_else(|| rendered.split_once('E'))
+    {
+        let exponent = exponent.parse::<i32>().unwrap_or_default();
+        return format!("{mantissa}e{exponent:+}");
+    }
+
+    let digits = rendered.trim_end_matches('0');
+    let exponent = rendered.len().saturating_sub(1);
+    let mut chars = digits.chars();
+    let first = chars.next().unwrap_or('0');
+    let rest = chars.as_str();
+    if rest.is_empty() {
+        format!("{first}e+{exponent}")
+    } else {
+        format!("{first}.{rest}e+{exponent}")
+    }
+}
+
+/// Claude Code 2.1.252's ap(value, Q8n) cap for one
+/// mode === "task-notification" string.
+///
+/// The 1,024-unit grace window is intentional: values at or below
+/// limit + 1,024 pass through unchanged. Once over the window, the helper
+/// keeps 50,000 UTF-16 units from each side and inserts a semantic truncation
+/// marker. This is called per rendered notification block, before blocks are
+/// aggregated into the shared system-reminder envelope.
+fn truncate_task_notification(value: &str) -> String {
+    let length = utf16_len(value);
+    if length <= TASK_NOTIFICATION_MAX_UTF16 + TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 {
+        return value.to_string();
+    }
+
+    let head_units = TASK_NOTIFICATION_MAX_UTF16 / 2;
+    let tail_units = TASK_NOTIFICATION_MAX_UTF16 - head_units;
+    let head = truncate_utf16_head(value, head_units);
+    let tail = truncate_utf16_tail(value, tail_units);
+    let middle = utf16_regex_slice(value, head_units, length - tail_units);
+    let replaced_units = length
+        .saturating_sub(utf16_len(&head))
+        .saturating_sub(utf16_len(&tail));
+    let semantic_units = replaced_units as f64 + folded_truncation_marker_chars(middle);
+    let semantic_units = format_javascript_nonnegative_integer(semantic_units);
+    let marker = format!(
+        "{TASK_NOTIFICATION_TRUNCATION_MARKER_PREFIX}{semantic_units}{TASK_NOTIFICATION_TRUNCATION_MARKER_SUFFIX}"
+    );
+
+    format!("{head}{marker}{tail}")
 }
 
 /// Render ONE `<task-notification>` block for a drained task, dispatching on its
@@ -444,7 +628,7 @@ pub fn render_reminder(notifications: &[TaskNotification]) -> Option<String> {
     }
     let body = notifications
         .iter()
-        .map(render_one)
+        .map(|notification| truncate_task_notification(&render_one(notification)))
         .collect::<Vec<_>>()
         .join("\n");
     Some(wrap_task_notification(&body))
@@ -634,6 +818,169 @@ mod tests {
             "<result>{}�\n... (truncated 2 chars, full result in /tmp/tasks/w12345678.output)</result>",
             "a".repeat(7_999)
         )));
+    }
+
+    #[test]
+    fn task_notification_cap_keeps_values_through_the_grace_boundary() {
+        let at_boundary =
+            "a".repeat(TASK_NOTIFICATION_MAX_UTF16 + TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16);
+        assert_eq!(truncate_task_notification(&at_boundary), at_boundary);
+
+        let over_boundary = format!(
+            "{}{}{}",
+            "a".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            "b".repeat(TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1),
+            "a".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+        let capped = truncate_task_notification(&over_boundary);
+        assert_ne!(capped, over_boundary);
+        assert!(capped.starts_with(&"a".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)));
+        assert!(capped.ends_with(&"a".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)));
+        assert!(
+            capped.contains("\n\n... [1025 characters truncated] ...\n\n"),
+            "got marker in capped value: {capped}"
+        );
+    }
+
+    #[test]
+    fn task_notification_cap_replaces_only_the_middle_after_the_grace_boundary() {
+        let value = format!(
+            "{}{}{}",
+            "h".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            "m".repeat(TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1),
+            "t".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+        let marker = "\n\n... [1025 characters truncated] ...\n\n";
+        let expected = format!(
+            "{}{}{}",
+            "h".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            marker,
+            "t".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+
+        assert_eq!(truncate_task_notification(&value), expected);
+    }
+
+    #[test]
+    fn task_notification_cap_uses_utf16_slices_at_emoji_boundaries() {
+        let value = format!(
+            "{}😀{}😀{}",
+            "h".repeat(49_999),
+            "m".repeat(1_023),
+            "t".repeat(49_999)
+        );
+        assert_eq!(
+            utf16_len(&value),
+            TASK_NOTIFICATION_MAX_UTF16 + TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1
+        );
+
+        let capped = truncate_task_notification(&value);
+        let expected = format!(
+            "{}\n\n... [1027 characters truncated] ...\n\n{}",
+            "h".repeat(49_999),
+            "t".repeat(49_999)
+        );
+        assert_eq!(capped, expected);
+    }
+
+    #[test]
+    fn marker_scan_preserves_matches_between_split_surrogate_boundaries() {
+        let marker = "\n\n... [5000 characters truncated] ...\n\n";
+        let value = format!("{}😀{marker}😀{}", "h".repeat(49_999), "t".repeat(49_999));
+        let length = utf16_len(&value);
+
+        assert_eq!(
+            utf16_regex_slice(
+                &value,
+                TASK_NOTIFICATION_MAX_UTF16 / 2,
+                length - TASK_NOTIFICATION_MAX_UTF16 / 2,
+            ),
+            marker
+        );
+    }
+
+    #[test]
+    fn task_notification_cap_folds_existing_middle_marker_into_omitted_count() {
+        let existing = "\n\n... [5000 characters truncated] ...\n\n";
+        let value = format!(
+            "{}{}{}",
+            "h".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            format!(
+                "{existing}{}",
+                "m".repeat(TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1)
+            ),
+            "t".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+
+        let capped = truncate_task_notification(&value);
+        assert!(
+            capped.contains("\n\n... [6025 characters truncated] ...\n\n"),
+            "existing marker was not folded into the new count: {capped}"
+        );
+    }
+
+    #[test]
+    fn task_notification_cap_folds_markers_with_javascript_number_rounding() {
+        let existing = "\n\n... [999999999999999 characters truncated] ...\n\n";
+        let markers = existing.repeat(10);
+        let padding = "m".repeat(TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1 - markers.len());
+        let value = format!(
+            "{}{}{}{}",
+            "h".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            markers,
+            padding,
+            "t".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+
+        let capped = truncate_task_notification(&value);
+        assert!(
+            capped.contains("\n\n... [10000000000000516 characters truncated] ...\n\n"),
+            "folding must use JavaScript Number rounding: {capped}"
+        );
+    }
+
+    #[test]
+    fn task_notification_cap_does_not_fold_markers_over_fifteen_digits() {
+        let existing = "\n\n... [9999999999999999 characters truncated] ...\n\n";
+        let padding = "m".repeat(TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16 + 1 - existing.len());
+        let value = format!(
+            "{}{}{}{}",
+            "h".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2),
+            existing,
+            padding,
+            "t".repeat(TASK_NOTIFICATION_MAX_UTF16 / 2)
+        );
+
+        let capped = truncate_task_notification(&value);
+        assert!(
+            capped.contains("\n\n... [1025 characters truncated] ...\n\n"),
+            "the oracle ignores numeric marker payloads over 15 digits: {capped}"
+        );
+    }
+
+    #[test]
+    fn javascript_number_format_uses_the_upstream_exponent_threshold() {
+        assert_eq!(format_javascript_nonnegative_integer(1e21), "1e+21");
+        assert_eq!(
+            format_javascript_nonnegative_integer(18_446_999_999_999_060_000_f64),
+            "18446999999999060000"
+        );
+    }
+
+    #[test]
+    fn task_notification_cap_is_applied_per_block_before_aggregation() {
+        let mut first = base("a12345678", "local_agent", "failed", "first");
+        first.error = Some("x".repeat(200_000));
+        let mut second = base("a12345679", "local_agent", "failed", "second");
+        second.error = Some("y".repeat(200_000));
+
+        let reminder = render_reminder(&[first, second]).expect("reminder");
+        assert_eq!(
+            reminder.matches("characters truncated").count(),
+            2,
+            "each task-notification block should carry its own cap marker"
+        );
+        assert_eq!(reminder.matches("<task-notification>").count(), 2);
     }
 
     #[test]

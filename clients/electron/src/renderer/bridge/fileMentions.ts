@@ -44,3 +44,47 @@ export function promptWithFileMentions(text: string, paths: string[]): string {
   if (!body) return mentions;
   return `${mentions}\n\n${body}`;
 }
+
+/** Recover the leading mention line written by {@link promptWithFileMentions}. */
+export function fileMentionsFromPrompt(text: string): string[] {
+  const separator = text.indexOf('\n\n');
+  const prefix = (separator >= 0 ? text.slice(0, separator) : text).trim();
+  if (!prefix.startsWith('@')) return [];
+  const paths: string[] = [];
+  let index = 0;
+  while (index < prefix.length) {
+    while (/\s/.test(prefix[index] ?? '')) index += 1;
+    if (index >= prefix.length) break;
+    if (prefix[index] !== '@') return [];
+    index += 1;
+    let path = '';
+    if (prefix[index] === '"') {
+      index += 1;
+      let closed = false;
+      while (index < prefix.length) {
+        const character = prefix[index]!;
+        index += 1;
+        if (character === '"') {
+          closed = true;
+          break;
+        }
+        if (character === '\\') {
+          if (index >= prefix.length) return [];
+          path += prefix[index]!;
+          index += 1;
+        } else {
+          path += character;
+        }
+      }
+      if (!closed) return [];
+      if (index < prefix.length && !/\s/.test(prefix[index]!)) return [];
+    } else {
+      const start = index;
+      while (index < prefix.length && !/\s/.test(prefix[index]!)) index += 1;
+      path = prefix.slice(start, index);
+    }
+    if (!path || path.includes('\0')) return [];
+    paths.push(path);
+  }
+  return [...new Set(paths)];
+}

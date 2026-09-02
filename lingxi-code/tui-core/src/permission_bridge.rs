@@ -40,6 +40,12 @@ pub struct PermissionExchange {
     /// rule. This is used for tools that require a human decision on every
     /// invocation (MCP `requiresUserInteraction: true`).
     pub suppress_always_allow_rule: bool,
+    /// Exact persistence choice derived from real `permission_suggestions`
+    /// metadata. `None` means the transport must omit the "don't ask again"
+    /// row. Keeping the update beside its label prevents the response path from
+    /// recomputing a different rule.
+    pub permission_persistence:
+        Option<permission::allow_suggestion::PermissionPersistenceSuggestion>,
     /// Engine-computed optional Auto action. `None` means the transport must
     /// not render an Auto row; clients must not infer this from the request.
     pub auto_mode_prompt: Option<AutoModePrompt>,

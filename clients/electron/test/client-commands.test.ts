@@ -30,6 +30,8 @@ test('the guard can actually fail', () => {
 test('the shared definition covers every newly-added command and listing kind', () => {
   const shared = readFileSync(join(root, 'src/shared/clientCommands.ts'), 'utf8');
   const newCommands = [
+    'list_session_agents',
+    'load_session_agent_transcript',
     'update_settings',
     'update_permission_rules',
     'set_default_permission_mode',

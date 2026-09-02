@@ -6,8 +6,8 @@
 //! bypass_permissions}` modules).
 //!
 //! One view covers all three [`PermissionRequest`] variants:
-//! - `ToolUseConfirm` — a 3-option select dialog (allow once / allow always /
-//!   deny) over the tool name + input preview.
+//! - `ToolUseConfirm` — a 2- or 3-option select dialog (allow once / optional
+//!   persistence-or-auto row / deny) over the tool name + input preview.
 //! - `ExitPlanMode` — the plan-approval select dialog ("Ready to code?" with
 //!   the claude-code option grammar) over the multi-line plan body.
 //! - `BypassPermissionsMode` — the typed-`yes` confirmation (the locked
@@ -65,9 +65,9 @@ enum Prompt {
         /// `Some(rows)` pins the locked `ToolUseConfirm` viewport height;
         /// `None` sizes to the dialog content (plan approval).
         fixed_height: Option<u16>,
-        /// `false` ⇒ the dialog was built with 2 rows (allow-once / deny),
-        /// so a `Selected(1)` outcome means Deny, not AllowAlways.
-        always_allow_offered: bool,
+        /// `false` ⇒ the dialog was built with 2 rows (allow-once / deny), so
+        /// a `Selected(1)` outcome means Deny, not a second approval action.
+        second_approval_offered: bool,
         /// Engine-computed optional Auto action; clients must not infer it.
         auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
     },
@@ -109,7 +109,10 @@ impl PermissionView {
                 if input.chars().count() > 68 {
                     input = format!("{}…", input.chars().take(67).collect::<String>());
                 }
-                let always_allow_offered = !suppress_always_allow_rule;
+                let permission_persistence_row = exchange
+                    .permission_persistence
+                    .as_ref()
+                    .map(|suggestion| suggestion.label.clone());
                 let deny_row = format!(
                     "No, and tell {} what to do differently (esc)",
                     branding::PRODUCT_NAME
@@ -127,29 +130,34 @@ impl PermissionView {
                 // (`ma0` @302931138 renders "Yes, and don't ask again
                 // for " + the bolded rule display) and OMITS the row
                 // entirely when no rule can be derived. The port has
-                // `permission_suggestions` as a field but no engine
-                // source for it (hooks/src/hook_payload.rs:639,
-                // executor.rs:2184 pass None), so the rule display
-                // cannot be composed here yet and the row stays
-                // unconditional with its own wording. Closing that gap
-                // is the suggestions engine, not a copy fix.
+                // `permission_suggestions` metadata is carried on the
+                // transport context and precomposed into
+                // `permission_persistence`; when absent the row is omitted
+                // entirely instead of inventing fallback copy.
                 //
                 // §27b: the oracle ALSO omits row 2 outright when the tool's
                 // `suppressesAlwaysAllowRule()` is true (@182520462/@172369864
                 // `showAlwaysAllow:...&&e.tool.suppressesAlwaysAllowRule?.(e.input)!==!0&&...`)
                 // — a persisted rule would be written but then ignored by a
                 // tool that needs fresh interaction on every call.
-                let rows = if !always_allow_offered {
-                    vec!["Yes".to_string(), deny_row]
-                } else if let Some(auto_mode_prompt) = auto_mode_prompt {
+                let rows = if let Some(auto_mode_prompt) =
+                    auto_mode_prompt.filter(|_| !suppress_always_allow_rule)
+                {
                     vec![
                         "Yes".to_string(),
                         auto_mode_prompt.label().to_string(),
                         deny_row,
                     ]
+                } else if !suppress_always_allow_rule {
+                    if let Some(permission_persistence_row) = permission_persistence_row {
+                        vec!["Yes".to_string(), permission_persistence_row, deny_row]
+                    } else {
+                        vec!["Yes".to_string(), deny_row]
+                    }
                 } else {
-                    vec!["Yes".to_string(), "Yes, allow always".to_string(), deny_row]
+                    vec!["Yes".to_string(), deny_row]
                 };
+                let second_approval_offered = rows.len() == 3;
                 Prompt::Select {
                     dialog: DialogView::new(
                         "Permission required",
@@ -157,7 +165,7 @@ impl PermissionView {
                         rows,
                     ),
                     fixed_height: Some(VIEWPORT_HEIGHT),
-                    always_allow_offered,
+                    second_approval_offered,
                     auto_mode_prompt,
                 }
             }
@@ -199,7 +207,7 @@ impl PermissionView {
                     // edits, Deny stays in plan mode.
                     dialog: DialogView::new("Ready to code?", body, rows),
                     fixed_height: None,
-                    always_allow_offered: !suppress_always_allow_rule,
+                    second_approval_offered: !suppress_always_allow_rule,
                     auto_mode_prompt,
                 }
             }
@@ -301,7 +309,7 @@ impl BottomPaneView for PermissionView {
         let response = match &mut self.prompt {
             Prompt::Select {
                 dialog,
-                always_allow_offered,
+                second_approval_offered,
                 auto_mode_prompt,
                 ..
             } => {
@@ -315,13 +323,14 @@ impl BottomPaneView for PermissionView {
                         DialogOutcome::Selected(idx) => Some(match idx {
                             0 => PermissionResponse::AllowOnce,
                             // §27b: row 1 is "Yes, allow always" only when
-                            // `always_allow_offered` and no Auto action is
+                            // the second approval row exists, and Auto takes
+                            // over that slot when present.
                             // present. A suppressed dialog has only 2 rows,
                             // so idx 1 there is the deny row.
-                            1 if *always_allow_offered && auto_mode_prompt.is_some() => {
+                            1 if *second_approval_offered && auto_mode_prompt.is_some() => {
                                 PermissionResponse::AllowAuto
                             }
-                            1 if *always_allow_offered => PermissionResponse::AllowAlways,
+                            1 if *second_approval_offered => PermissionResponse::AllowAlways,
                             _ => PermissionResponse::Deny,
                         }),
                         // Esc denies (a resolution, not a silent dismissal):
@@ -374,6 +383,7 @@ mod tests {
                 resp_tx,
                 worker: None,
                 suppress_always_allow_rule: false,
+                permission_persistence: None,
                 auto_mode_prompt: None,
             },
             resp_rx,
@@ -381,6 +391,27 @@ mod tests {
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+        let (mut exchange, resp_rx) = exchange_for(PermissionRequest::ToolUseConfirm {
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({ "command": "ls -la" }),
+            default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
+        });
+        exchange.permission_persistence =
+            permission::allow_suggestion::permission_persistence_suggestion(
+                "Bash",
+                &serde_json::json!([{
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+                    "behavior": "allow",
+                    "destination": "session"
+                }]),
+            );
+        (exchange, resp_rx)
+    }
+
+    fn tool_exchange_without_suggestion(
+    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "Bash".to_string(),
             tool_input: serde_json::json!({ "command": "ls -la" }),
@@ -390,7 +421,7 @@ mod tests {
     }
 
     /// §27b: a request from a tool marked `requiresUserInteraction` — the
-    /// dialog must omit "Yes, allow always".
+    /// dialog must omit the persistence row.
     fn suppressed_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (mut exchange, resp_rx) = exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "mcp__server__tool".to_string(),
@@ -420,6 +451,7 @@ mod tests {
                 resp_tx,
                 worker: None,
                 suppress_always_allow_rule: false,
+                permission_persistence: None,
                 auto_mode_prompt: Some(permission::gate::AutoModePrompt::ExitPlanMode),
             },
             resp_rx,
@@ -506,7 +538,7 @@ mod tests {
         let mut view = PermissionView::new(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, 9));
         assert!(text.contains("Yes, and switch to auto mode"), "{text}");
-        assert!(!text.contains("allow always"), "{text}");
+        assert!(!text.contains("don't ask again"), "{text}");
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('2'))),
             ViewOutcome::PermissionResponse(PermissionResponse::AllowAuto)
@@ -562,8 +594,8 @@ mod tests {
         let view = PermissionView::new(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
         assert!(
-            !text.contains("allow always"),
-            "suppressed dialog must not render \"Yes, allow always\": {text:?}"
+            !text.contains("don't ask again"),
+            "suppressed dialog must not render a persistence row: {text:?}"
         );
         // The other two rows are unaffected.
         assert!(text.contains("Yes"));
@@ -571,11 +603,34 @@ mod tests {
     }
 
     #[test]
-    fn unsuppressed_request_still_offers_allow_always() {
+    fn suggested_request_renders_dynamic_persistence_row() {
         let (exchange, _resp_rx) = tool_exchange();
         let view = PermissionView::new(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
-        assert!(text.contains("allow always"));
+        assert!(
+            text.contains("Yes, and don't ask again for ls -la"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn request_without_suggestion_omits_persistence_row() {
+        let (exchange, _resp_rx) = tool_exchange_without_suggestion();
+        let view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
+        assert!(!text.contains("don't ask again"), "{text}");
+        assert!(text.contains("Yes"), "{text}");
+        assert!(text.contains("differently"), "{text}");
+    }
+
+    #[test]
+    fn suppressed_request_with_suggestion_still_omits_persistence_row() {
+        let (mut exchange, _resp_rx) = tool_exchange();
+        exchange.suppress_always_allow_rule = true;
+        let view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
+        assert!(!text.contains("don't ask again"), "{text}");
+        assert!(text.contains("differently"), "{text}");
     }
 
     #[test]

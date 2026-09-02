@@ -742,8 +742,10 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: false,
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         };
         let desc = tool_description(&t);
         assert_eq!(desc, format!("Bash({}\u{2026})", "x".repeat(40)));
@@ -758,8 +760,10 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         };
         assert_eq!(tool_description(&t), "Read(/tmp/a.txt)");
 
@@ -773,8 +777,10 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         };
         assert_eq!(tool_description(&t), "Grep(foo)");
 
@@ -788,8 +794,10 @@ mod tests {
             status: ToolStatus::Queued,
             is_concurrency_safe: true,
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         };
         assert_eq!(tool_description(&t), "SafeTool");
     }
@@ -850,6 +858,14 @@ mod tests {
             panic!("expected ToolResult block")
         };
         assert!(*is_error, "unknown-tool block must be an error");
+        assert_eq!(results[0].post_tool_batch_calls.len(), 1);
+        assert_eq!(
+            results[0].post_tool_batch_calls[0].tool_response,
+            Some(json!(
+                "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>"
+            )),
+            "PostToolBatch covers every assistant tool_use and reads the yielded result content"
+        );
     }
 
     /// Test 3: Exclusive-barrier stop.
@@ -889,8 +905,10 @@ mod tests {
             status: ToolStatus::Completed,
             is_concurrency_safe: true,
             result: Some(result_block),
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         });
         exec.tools.push(TrackedTool {
             id: id1,
@@ -901,8 +919,10 @@ mod tests {
             status: ToolStatus::Executing,
             is_concurrency_safe: false, // exclusive barrier
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         });
         exec.tools.push(TrackedTool {
             id: id2,
@@ -913,8 +933,10 @@ mod tests {
             status: ToolStatus::Completed,
             is_concurrency_safe: true,
             result: Some(result_block2),
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         });
 
         let results = exec.take_newly_completed();
@@ -951,8 +973,10 @@ mod tests {
             status: ToolStatus::Executing,
             is_concurrency_safe: true, // safe → NOT a barrier
             result: None,
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         });
         exec.tools.push(TrackedTool {
             id: id1.clone(),
@@ -969,8 +993,10 @@ mod tests {
                 provider_tool_use_id: None,
                 content_blocks: None,
             }),
+            prevent_continuation: false,
             injected: Vec::new(),
             modifiers: Vec::new(),
+            post_tool_batch_calls: Vec::new(),
         });
 
         let results = exec.take_newly_completed();

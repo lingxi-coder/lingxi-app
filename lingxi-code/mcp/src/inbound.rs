@@ -11,6 +11,10 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use jsonrpc::{InboundHandler, Request, Response};
 use serde_json::{json, Value};
+use telemetry::pii::Verified;
+use telemetry::tengu::mcp::{ElicitationMode, ElicitationResponsePayload, ElicitationShownPayload};
+#[cfg(test)]
+use telemetry::tengu::mcp::{ELICITATION_RESPONSE, ELICITATION_SHOWN};
 
 use crate::hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
 
@@ -173,11 +177,27 @@ impl ElicitationCreateHandler {
                 .cloned(),
         }
     }
+
+    /// Provider-neutral MCP elicitation telemetry normalizes the wire mode the
+    /// same way the oracle's hook path does: only the exact `"url"` literal
+    /// stays URL mode; everything else is treated as form.
+    fn telemetry_mode(params: Option<&Value>) -> ElicitationMode {
+        match params
+            .and_then(Value::as_object)
+            .and_then(|o| o.get("mode"))
+            .and_then(Value::as_str)
+        {
+            Some("url") => ElicitationMode::Url,
+            Some(_) | None => ElicitationMode::Form,
+        }
+    }
 }
 
 #[async_trait]
 impl InboundHandler for ElicitationCreateHandler {
     async fn handle(&self, req: Request) -> Response {
+        let mode = Self::telemetry_mode(req.params.as_ref());
+        emit_elicitation_shown(mode);
         // When a dispatcher is wired, consult the `Elicitation` hook first.
         // Mirrors `runElicitationHooks` (elicitationHandler.ts:91-107):
         //   * hook RESPONDS  -> use {action, content} as the answer.
@@ -187,9 +207,13 @@ impl InboundHandler for ElicitationCreateHandler {
             let hook_req = self.build_hook_request(req.params.as_ref());
             match dispatcher.dispatch_elicitation(hook_req).await {
                 ElicitationHookOutcome::Respond(answer) => {
+                    if let Some(action) = answer.get("action").and_then(Value::as_str) {
+                        emit_elicitation_response(mode, action);
+                    }
                     return Response::success(req.id, answer);
                 }
                 ElicitationHookOutcome::Deny => {
+                    emit_elicitation_response(mode, "decline");
                     return Response::success(req.id, json!({ "action": "decline" }));
                 }
                 // Pass: no hook intervened — default behavior takes over.
@@ -197,8 +221,66 @@ impl InboundHandler for ElicitationCreateHandler {
             }
         }
         // claude-code default: deny all elicitations until UI layer overrides.
+        emit_elicitation_response(mode, "cancel");
         Response::success(req.id, json!({ "action": "cancel" }))
     }
+}
+
+fn emit_elicitation_shown(mode: ElicitationMode) {
+    let payload = ElicitationShownPayload { mode };
+    telemetry::emit_mcp_elicitation_shown(&payload);
+    #[cfg(test)]
+    record_test_elicitation_telemetry_event(ELICITATION_SHOWN, &payload);
+}
+
+fn emit_elicitation_response(mode: ElicitationMode, action: &str) {
+    // MCP's ElicitResult action is a closed, low-cardinality enum. A malformed
+    // hook response is returned unchanged by the pre-existing hook seam, but
+    // must not turn arbitrary hook text into an analytics dimension.
+    if !matches!(action, "accept" | "decline" | "cancel") {
+        return;
+    }
+    let payload = ElicitationResponsePayload {
+        mode,
+        action: Verified::assert_safe(action.to_string()),
+    };
+    telemetry::emit_mcp_elicitation_response(&payload);
+    #[cfg(test)]
+    record_test_elicitation_telemetry_event(ELICITATION_RESPONSE, &payload);
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedElicitationTelemetryEvent {
+    name: &'static str,
+    payload: Value,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ELICITATION_TELEMETRY_EVENTS:
+        std::cell::RefCell<Vec<CapturedElicitationTelemetryEvent>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(test)]
+fn clear_test_elicitation_telemetry_events() {
+    TEST_ELICITATION_TELEMETRY_EVENTS.with(|events| events.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn take_test_elicitation_telemetry_events() -> Vec<CapturedElicitationTelemetryEvent> {
+    TEST_ELICITATION_TELEMETRY_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+#[cfg(test)]
+fn record_test_elicitation_telemetry_event<T: serde::Serialize>(name: &'static str, payload: &T) {
+    TEST_ELICITATION_TELEMETRY_EVENTS.with(|events| {
+        events.borrow_mut().push(CapturedElicitationTelemetryEvent {
+            name,
+            payload: serde_json::to_value(payload).expect("serialize elicitation telemetry"),
+        });
+    });
 }
 
 #[cfg(test)]
@@ -487,5 +569,136 @@ mod tests {
         let result = resp.result.expect("success result");
         let bytes = serde_json::to_vec(&result).unwrap();
         assert_eq!(bytes, br#"{"action":"cancel"}"#);
+    }
+
+    #[tokio::test]
+    async fn elicitation_default_cancel_emits_form_shown_and_response_once() {
+        clear_test_elicitation_telemetry_events();
+        let handler = ElicitationCreateHandler::new();
+        let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
+        assert_eq!(resp.result.unwrap(), json!({"action": "cancel"}));
+        assert_eq!(
+            take_test_elicitation_telemetry_events(),
+            vec![
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_SHOWN,
+                    payload: serde_json::to_value(ElicitationShownPayload {
+                        mode: ElicitationMode::Form,
+                    })
+                    .unwrap(),
+                },
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_RESPONSE,
+                    payload: serde_json::to_value(ElicitationResponsePayload {
+                        mode: ElicitationMode::Form,
+                        action: Verified::assert_safe("cancel".to_string()),
+                    })
+                    .unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn elicitation_url_cancel_emits_url_mode() {
+        clear_test_elicitation_telemetry_events();
+        let handler = ElicitationCreateHandler::new();
+        let resp = handler
+            .handle(elicit_req(json!({"message": "Pick", "mode": "url"})))
+            .await;
+        assert_eq!(resp.result.unwrap(), json!({"action": "cancel"}));
+        assert_eq!(
+            take_test_elicitation_telemetry_events(),
+            vec![
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_SHOWN,
+                    payload: serde_json::to_value(ElicitationShownPayload {
+                        mode: ElicitationMode::Url,
+                    })
+                    .unwrap(),
+                },
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_RESPONSE,
+                    payload: serde_json::to_value(ElicitationResponsePayload {
+                        mode: ElicitationMode::Url,
+                        action: Verified::assert_safe("cancel".to_string()),
+                    })
+                    .unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn elicitation_hook_deny_emits_form_decline_response() {
+        clear_test_elicitation_telemetry_events();
+        let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Deny));
+        let handler = ElicitationCreateHandler::with_dispatcher(
+            "linear",
+            Some(mock as Arc<dyn HookDispatcher>),
+        );
+        let resp = handler
+            .handle(elicit_req(json!({"message": "Pick", "mode": "other"})))
+            .await;
+        assert_eq!(resp.result.unwrap(), json!({"action": "decline"}));
+        assert_eq!(
+            take_test_elicitation_telemetry_events(),
+            vec![
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_SHOWN,
+                    payload: serde_json::to_value(ElicitationShownPayload {
+                        mode: ElicitationMode::Form,
+                    })
+                    .unwrap(),
+                },
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_RESPONSE,
+                    payload: serde_json::to_value(ElicitationResponsePayload {
+                        mode: ElicitationMode::Form,
+                        action: Verified::assert_safe("decline".to_string()),
+                    })
+                    .unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn elicitation_hook_response_emits_actual_url_action() {
+        clear_test_elicitation_telemetry_events();
+        let mock = Arc::new(MockDispatcher::new(ElicitationHookOutcome::Respond(
+            json!({"action": "accept", "content": {"token": "xyz"}}),
+        )));
+        let handler = ElicitationCreateHandler::with_dispatcher(
+            "linear",
+            Some(mock as Arc<dyn HookDispatcher>),
+        );
+        let resp = handler
+            .handle(elicit_req(json!({"message": "Pick", "mode": "url"})))
+            .await;
+        assert_eq!(
+            resp.result.unwrap(),
+            json!({"action": "accept", "content": {"token": "xyz"}})
+        );
+        assert_eq!(
+            take_test_elicitation_telemetry_events(),
+            vec![
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_SHOWN,
+                    payload: serde_json::to_value(ElicitationShownPayload {
+                        mode: ElicitationMode::Url,
+                    })
+                    .unwrap(),
+                },
+                CapturedElicitationTelemetryEvent {
+                    name: ELICITATION_RESPONSE,
+                    payload: serde_json::to_value(ElicitationResponsePayload {
+                        mode: ElicitationMode::Url,
+                        action: Verified::assert_safe("accept".to_string()),
+                    })
+                    .unwrap(),
+                },
+            ]
+        );
     }
 }

@@ -44,7 +44,7 @@ pub mod tool_resolver;
 pub mod transcript;
 pub mod worktree_policy;
 
-pub use api::SubagentApiClient;
+pub use api::{NearLimitCheckpointRequest, SubagentApiClient};
 pub use builtins::{builtin_agent_definitions, fork_agent_definition, fusion_panel_definition};
 pub use catalog::{
     load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown,

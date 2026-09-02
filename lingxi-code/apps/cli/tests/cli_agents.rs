@@ -1,6 +1,6 @@
-//! (M7 cc2.1.198) End-to-end locks for the `agents` subcommand surface.
+//! (cc2.1.252) End-to-end locks for the `agents` subcommand surface.
 //!
-//! Oracle: the real 2.1.198 binary, verified live on 2026-07-02:
+//! Oracle: the real 2.1.252 binary, verified live on 2026-09-01:
 //! * `claude agents --help` → the captured fixture, exit 0;
 //! * `claude agents --json` → pretty-printed array from the live-session
 //!   registry (`sessions/<pid>.json`) + job store (`jobs/<short>/state.json`),
@@ -17,7 +17,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 const AGENTS_HELP_FIXTURE: &str =
-    include_str!("../../../test-harness/src/parity/fixtures/cc_2_1_198_agents_help.txt");
+    include_str!("../../../test-harness/src/parity/fixtures/cc_2_1_252_agents_help.txt");
 
 /// `agents --help` / `-h` print the fixture byte-for-byte, exit 0.
 #[test]
@@ -30,6 +30,12 @@ fn agents_help_matches_fixture_byte_for_byte() {
             .code(0)
             .stdout(predicate::eq(AGENTS_HELP_FIXTURE));
     }
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .args(["agents", "--restricted", "--help"])
+        .assert()
+        .code(0)
+        .stdout(predicate::eq(AGENTS_HELP_FIXTURE));
 }
 
 /// `agents --json` with an empty registry prints `[]` + newline, exit 0.
@@ -207,6 +213,20 @@ fn agents_bypass_flags_non_tty_still_refuse() {
         .stderr(predicate::str::contains("requires an interactive terminal"));
 }
 
+/// `--restricted` is accepted by the 2.1.252 agents surface and reaches the
+/// normal non-TTY refusal path instead of being treated as an unknown option.
+#[test]
+fn agents_restricted_non_tty_still_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("LINGXI_CONFIG_DIR", home.path())
+        .args(["agents", "--restricted"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("requires an interactive terminal"));
+}
+
 /// The full fixture flag surface parses (parse-and-carry for
 /// dispatch-affecting flags) — `--json` still works with all of them set.
 #[test]
@@ -243,6 +263,7 @@ fn agents_accepts_full_fixture_flag_surface() {
             "{}",
             "--strict-mcp-config",
             "--allow-dangerously-skip-permissions",
+            "--restricted",
         ])
         .assert()
         .code(0)

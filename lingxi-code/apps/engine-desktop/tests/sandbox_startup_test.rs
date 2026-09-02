@@ -102,6 +102,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         injected_permission_gate: None,
         ask_user_question_tx: None,
         computer_access_tx: None,
+        session_agent_observer: None,
         audio: None,
         session_started_as_coordinator: false,
         memory_provider: None,

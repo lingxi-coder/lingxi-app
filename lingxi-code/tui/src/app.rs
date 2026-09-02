@@ -1577,6 +1577,16 @@ mod tests {
                 resp_tx,
                 worker: None,
                 suppress_always_allow_rule: false,
+                permission_persistence:
+                    permission::allow_suggestion::permission_persistence_suggestion(
+                        "Bash",
+                        &serde_json::json!([{
+                            "type": "addRules",
+                            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+                            "behavior": "allow",
+                            "destination": "session"
+                        }]),
+                    ),
                 auto_mode_prompt: None,
             },
             resp_rx,

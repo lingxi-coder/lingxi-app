@@ -12,6 +12,14 @@ import type { AllowedClientCommand } from '../../shared/clientCommands.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 
+export interface WorkspaceFilePreview {
+  kind: 'text' | 'binary';
+  path: string;
+  size: number;
+  content?: string;
+  truncated: boolean;
+}
+
 export type { AllowedClientCommand } from '../../shared/clientCommands.js';
 export type {
   PinnedSessionRecord,
@@ -95,6 +103,7 @@ export interface LingxiApi {
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
+  previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
   providerCredentials(): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;

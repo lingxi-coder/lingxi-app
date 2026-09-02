@@ -61,6 +61,26 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Observe a static JSON-schema rejection before the dispatcher returns it
+    /// to the model. Implementations may use this for rejection telemetry; the
+    /// default deliberately has no side effects.
+    async fn on_input_schema_rejected(
+        &self,
+        _input: &Value,
+        _tool_use_id: Option<&str>,
+        _assistant_message_id: Option<&protocol::MessageId>,
+    ) {
+    }
+
+    /// Whether this successful result asks the query loop to end immediately.
+    ///
+    /// Claude Code carries this as `ToolResult.endsTurn`. It is deliberately a
+    /// result-sensitive hook rather than a static tool capability so a tool may
+    /// decide per invocation. The default keeps every existing tool unchanged.
+    fn result_ends_turn(&self, _result: &ToolCallResult) -> bool {
+        false
+    }
+
     /// Optional MCP server routing role.  Native and generic tools return
     /// `None`; MCP per-tool entries may expose `comms` to coordinator routing.
     fn mcp_role(&self) -> Option<&str> {
@@ -346,6 +366,64 @@ pub enum InterruptBehavior {
     Cancel,
     /// Block until the in-flight call finishes naturally.
     Block,
+}
+
+/// Why a successful tool result ended the current turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultTurnEndSource {
+    /// The native tool result returned `endsTurn: true`.
+    Tool,
+    /// The tool result's MCP `_meta` block requested turn termination.
+    McpMeta,
+}
+
+impl ToolResultTurnEndSource {
+    /// Analytics wire value used by `tengu_mcp_tool_result_ended_turn`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::McpMeta => "mcp_meta",
+        }
+    }
+}
+
+/// Extra metadata for a successful tool result that ends the current turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultTurnEnd {
+    /// Marker that won the oracle's `tool`-before-`mcp_meta` precedence.
+    pub source: ToolResultTurnEndSource,
+}
+
+/// Classify whether a successful tool result requests turn termination.
+///
+/// This is the exact `qbt` precedence from Claude Code 2.1.252:
+/// `toolEndsTurn` wins over MCP metadata, and an error result never ends the
+/// turn even when either marker is present.
+#[must_use]
+pub fn tool_result_turn_end(
+    tool_ends_turn: bool,
+    is_error: bool,
+    mcp_meta: Option<&serde_json::Value>,
+) -> Option<ToolResultTurnEnd> {
+    if is_error {
+        return None;
+    }
+    if tool_ends_turn {
+        return Some(ToolResultTurnEnd {
+            source: ToolResultTurnEndSource::Tool,
+        });
+    }
+    mcp_meta
+        .and_then(serde_json::Value::as_object)
+        .and_then(|meta| meta.get("_meta"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|meta| meta.get("claude/endTurn"))
+        .and_then(serde_json::Value::as_bool)
+        .filter(|value| *value)
+        .map(|_| ToolResultTurnEnd {
+            source: ToolResultTurnEndSource::McpMeta,
+        })
 }
 
 /// A one-shot mutator a tool returns to adjust the turn's [`ToolUseContext`] —
@@ -738,5 +816,55 @@ mod user_facing_name_default_tests {
         assert!(t
             .coerce_input(&serde_json::json!({ "timeout_ms": 5000 }))
             .is_none());
+    }
+
+    #[test]
+    fn tool_result_turn_end_matches_tool_mcp_and_error_precedence() {
+        let detected = tool_result_turn_end(
+            false,
+            false,
+            Some(&serde_json::json!({
+                "_meta": { "claude/endTurn": true }
+            })),
+        );
+        assert_eq!(
+            detected,
+            Some(ToolResultTurnEnd {
+                source: ToolResultTurnEndSource::McpMeta,
+            })
+        );
+        assert_eq!(
+            tool_result_turn_end(
+                true,
+                false,
+                Some(&serde_json::json!({ "_meta": { "claude/endTurn": true } })),
+            ),
+            Some(ToolResultTurnEnd {
+                source: ToolResultTurnEndSource::Tool,
+            })
+        );
+        assert!(tool_result_turn_end(
+            false,
+            false,
+            Some(&serde_json::json!({
+                "_meta": { "claude/endTurn": false }
+            }))
+        )
+        .is_none());
+        assert!(tool_result_turn_end(
+            false,
+            false,
+            Some(&serde_json::json!({
+                "_meta": { "vendor/endTurn": true }
+            }))
+        )
+        .is_none());
+        assert!(tool_result_turn_end(true, true, None).is_none());
+        assert!(tool_result_turn_end(
+            false,
+            true,
+            Some(&serde_json::json!({ "_meta": { "claude/endTurn": true } })),
+        )
+        .is_none());
     }
 }

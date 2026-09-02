@@ -10,7 +10,7 @@ use lingxi_core::token::Usage;
 use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
 // ---- Scripted loop-mode fixtures -------------------------------------
@@ -122,6 +122,86 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
         *self.last_tools.lock().unwrap() = tools;
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+static NEAR_LIMIT_WRAP_UP_FLAG_LOCK: RwLock<()> = RwLock::new(());
+
+fn near_limit_wrap_up_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    NEAR_LIMIT_WRAP_UP_FLAG_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct NearLimitWrapUpFlagOn;
+
+impl NearLimitWrapUpFlagOn {
+    fn set() -> Self {
+        ::telemetry::test_set_flag("tengu_vellum_anchor", true);
+        Self
+    }
+}
+
+impl Drop for NearLimitWrapUpFlagOn {
+    fn drop(&mut self) {
+        ::telemetry::test_clear_flag("tengu_vellum_anchor");
+    }
+}
+
+struct NearLimitHintApiClient {
+    response: llm_client::LlmResponse,
+    last_messages: Mutex<Vec<ConversationMessage>>,
+    pending_hint: AtomicBool,
+    consume_calls: AtomicUsize,
+    near_limit_observations: AtomicUsize,
+    checkpoint_requests: Mutex<Vec<crate::api::NearLimitCheckpointRequest>>,
+}
+
+impl NearLimitHintApiClient {
+    fn new(response: llm_client::LlmResponse, pending_hint: bool) -> Arc<Self> {
+        Arc::new(Self {
+            response,
+            last_messages: Mutex::new(Vec::new()),
+            pending_hint: AtomicBool::new(pending_hint),
+            consume_calls: AtomicUsize::new(0),
+            near_limit_observations: AtomicUsize::new(0),
+            checkpoint_requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn last_messages(&self) -> Vec<ConversationMessage> {
+        self.last_messages.lock().unwrap().clone()
+    }
+
+    fn checkpoint_requests(&self) -> Vec<crate::api::NearLimitCheckpointRequest> {
+        self.checkpoint_requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for NearLimitHintApiClient {
+    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        self.consume_calls.fetch_add(1, Ordering::SeqCst);
+        self.pending_hint.swap(false, Ordering::SeqCst)
+    }
+
+    fn dispatch_near_limit_checkpoint(&self, request: crate::api::NearLimitCheckpointRequest) {
+        self.checkpoint_requests.lock().unwrap().push(request);
+    }
+
+    fn record_usage_limit_near_wrap_up(&self) {
+        self.near_limit_observations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        *self.last_messages.lock().unwrap() = messages;
+        Ok(self.response.clone())
     }
 }
 
@@ -536,6 +616,155 @@ async fn drain(mut rx: mpsc::Receiver<SubagentEvent>) -> Vec<SubagentEvent> {
         out.push(ev);
     }
     out
+}
+
+#[tokio::test]
+async fn subagent_near_limit_wrap_up_is_exact_and_dispatches_once_through_wrapper() {
+    let _flag_lock = near_limit_wrap_up_write();
+    let _flag = NearLimitWrapUpFlagOn::set();
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), true);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog {
+            stall_timeout_ms: 1_000,
+            max_retries: 0,
+        },
+        Vec::new(),
+    ));
+    let mut ctx = loop_ctx(wrapped, None, 1);
+    ctx.depth = 1;
+    ctx.session_interactive = Some(true);
+    ctx.is_async = true;
+    ctx.hook_session_id = protocol::SessionId::new();
+    ctx.hook_cwd = tempdir.path().to_path_buf();
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(16);
+    run_subagent(ctx.clone(), event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    let messages = api.last_messages();
+    let note_count = messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                ConversationMessage::User { content, is_meta: true, .. }
+                    if matches!(content.as_slice(), [ContentBlock::Text { text, .. }]
+                        if text == NEAR_LIMIT_WRAP_UP_NOTE)
+            )
+        })
+        .count();
+    assert_eq!(note_count, 1, "the model-visible note is one-shot");
+    let last = messages.last().expect("near-limit note");
+    assert!(matches!(
+        last,
+        ConversationMessage::User { content, is_meta: true, .. }
+            if matches!(content.as_slice(), [ContentBlock::Text { text, .. }]
+                if text == NEAR_LIMIT_WRAP_UP_NOTE)
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SubagentEvent::Message { message, .. }
+                if serde_json::from_value::<ConversationMessage>(message.clone()).is_ok_and(|message|
+                    matches!(message,
+                        ConversationMessage::User { content, is_meta: true, .. }
+                            if matches!(content.as_slice(), [ContentBlock::Text { text, .. }]
+                                if text == NEAR_LIMIT_WRAP_UP_NOTE)))))
+            .count(),
+        1,
+        "the note is yielded exactly once"
+    );
+
+    assert!(api.consume_calls.load(Ordering::SeqCst) >= 1);
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 1);
+    let requests = api.checkpoint_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0],
+        crate::api::NearLimitCheckpointRequest {
+            session_id: ctx.hook_session_id,
+            cwd: tempdir.path().to_path_buf(),
+            non_interactive: false,
+        },
+        "an async child still belongs to its interactive parent session"
+    );
+}
+
+#[tokio::test]
+async fn disabled_near_limit_flag_consumes_and_drops_the_pending_hint() {
+    let _flag_lock = near_limit_wrap_up_write();
+    ::telemetry::test_clear_flag("tengu_vellum_anchor");
+    let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), true);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.depth = 1;
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert!(api.consume_calls.load(Ordering::SeqCst) >= 1);
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 0);
+    assert!(!api.pending_hint.load(Ordering::SeqCst));
+    assert!(api.checkpoint_requests().is_empty());
+    assert!(!api.last_messages().iter().any(|message| matches!(
+        message,
+        ConversationMessage::User { content, .. }
+            if content.iter().any(|block| matches!(block,
+                ContentBlock::Text { text, .. } if text == NEAR_LIMIT_WRAP_UP_NOTE
+            ))
+    )));
+}
+
+#[tokio::test]
+async fn main_depth_does_not_consume_the_subagent_near_limit_hint() {
+    let _flag_lock = near_limit_wrap_up_write();
+    let _flag = NearLimitWrapUpFlagOn::set();
+    let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), true);
+    let ctx = loop_ctx(api.clone(), None, 1);
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(api.consume_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 0);
+    assert!(api.pending_hint.load(Ordering::SeqCst));
+    assert!(api.checkpoint_requests().is_empty());
+}
+
+#[tokio::test]
+async fn near_limit_noninteractive_subagent_gets_hint_but_does_not_dispatch_checkpoint() {
+    let _flag_lock = near_limit_wrap_up_write();
+    let _flag = NearLimitWrapUpFlagOn::set();
+    let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), true);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.depth = 1;
+    ctx.session_interactive = Some(false);
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert!(api.last_messages().iter().any(|message| matches!(
+        message,
+        ConversationMessage::User { content, is_meta: true, .. }
+            if content.iter().any(|block| matches!(block,
+                ContentBlock::Text { text, .. } if text == NEAR_LIMIT_WRAP_UP_NOTE
+            ))
+    )));
+    assert_eq!(api.near_limit_observations.load(Ordering::SeqCst), 1);
+    assert!(api.checkpoint_requests().is_empty());
 }
 
 #[tokio::test]

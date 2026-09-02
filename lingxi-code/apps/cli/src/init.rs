@@ -1069,6 +1069,7 @@ pub(crate) fn resolve_desktop_config(
         )),
         ask_user_question_tx: None,
         computer_access_tx: None,
+        session_agent_observer: None,
         // No device audio on the CLI/TUI path: audio is proxied to a connected
         // client, and this host has none. The `voice`/`speech` tools are
         // therefore not registered here at all.

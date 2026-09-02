@@ -4392,6 +4392,7 @@ async fn merge_declared_json_records<T, E>(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::sync::Arc;
     use telemetry::{AnalyticsValue, InMemorySink};
@@ -4425,6 +4426,33 @@ mod tests {
                     !value.contains(&raw_path),
                     "metadata field {key} leaked plugin path: {value}"
                 );
+            }
+        }
+    }
+
+    struct SeedEnvRestore {
+        previous_claude: Option<OsString>,
+        previous_lingxi: Option<OsString>,
+    }
+
+    impl SeedEnvRestore {
+        fn capture() -> Self {
+            Self {
+                previous_claude: std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR"),
+                previous_lingxi: std::env::var_os("LINGXI_PLUGIN_SEED_DIR"),
+            }
+        }
+    }
+
+    impl Drop for SeedEnvRestore {
+        fn drop(&mut self) {
+            match self.previous_claude.as_ref() {
+                Some(value) => std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", value),
+                None => std::env::remove_var("CLAUDE_CODE_PLUGIN_SEED_DIR"),
+            }
+            match self.previous_lingxi.as_ref() {
+                Some(value) => std::env::set_var("LINGXI_PLUGIN_SEED_DIR", value),
+                None => std::env::remove_var("LINGXI_PLUGIN_SEED_DIR"),
             }
         }
     }
@@ -5002,12 +5030,12 @@ mod tests {
 
     #[tokio::test]
     async fn seed_cache_is_used_only_when_primary_is_missing_and_is_shadowed_otherwise() {
-        use std::sync::Mutex;
-
-        static SEED_ENV_SERIAL: Mutex<()> = Mutex::new(());
-        let _guard = SEED_ENV_SERIAL.lock().expect("seed env lock");
-        let previous_claude = std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR");
-        let previous_lingxi = std::env::var_os("LINGXI_PLUGIN_SEED_DIR");
+        let _guard = crate::plugin_seed_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Declared after the mutex guard so it restores both process-global
+        // variables before the lock is released, including during unwinding.
+        let _restore = SeedEnvRestore::capture();
         std::env::remove_var("LINGXI_PLUGIN_SEED_DIR");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -5054,15 +5082,6 @@ mod tests {
                 .await;
         assert_eq!(loaded_from_seed.len(), 1);
         assert_eq!(loaded_from_seed[0].2, seed);
-
-        match previous_claude {
-            Some(value) => std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", value),
-            None => std::env::remove_var("CLAUDE_CODE_PLUGIN_SEED_DIR"),
-        }
-        match previous_lingxi {
-            Some(value) => std::env::set_var("LINGXI_PLUGIN_SEED_DIR", value),
-            None => std::env::remove_var("LINGXI_PLUGIN_SEED_DIR"),
-        }
     }
 
     #[tokio::test]

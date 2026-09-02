@@ -25,8 +25,10 @@ const MCP_INTERRUPTED_MESSAGE: &str = "The tool call was interrupted before a re
 type DispatchOutcome = Result<
     (
         ContentBlock,
+        bool,
         Vec<(ConversationMessage, ToolUseId)>,
         Vec<ContextModifier>,
+        Vec<hooks::events::PostToolBatchCall>,
     ),
     crate::error::OrchestratorError,
 >;
@@ -132,10 +134,15 @@ pub(crate) struct TrackedTool {
     /// The result block once `Completed` (the unknown-tool case fills it
     /// synchronously at `add_tool` time).
     pub(crate) result: Option<ContentBlock>,
+    /// A per-tool Pre/PostToolUse hook requested that the loop stop.
+    pub(crate) prevent_continuation: bool,
     /// Tool-injected follow-up messages (SKILLEXEC.3) + context modifiers,
     /// threaded through unchanged from `dispatch_tool_uses_tracked`.
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
+    /// This tool's resolved-call entry, deferred so the streaming driver can
+    /// fire one `PostToolBatch` for the complete model-response batch.
+    pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
 }
 
 // ============================================================================
@@ -304,6 +311,8 @@ impl<'a> StreamingToolExecutor<'a> {
         match self.orch.tools.find_by_name(&name) {
             None => {
                 let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone());
+                let post_tool_batch_calls =
+                    vec![post_tool_batch_call_for_result(&id, &name, &input, &block)];
                 self.tools.push(TrackedTool {
                     id,
                     name,
@@ -313,8 +322,10 @@ impl<'a> StreamingToolExecutor<'a> {
                     status: ToolStatus::Completed,
                     is_concurrency_safe: true,
                     result: Some(block),
+                    prevent_continuation: false,
                     injected: Vec::new(),
                     modifiers: Vec::new(),
+                    post_tool_batch_calls,
                 });
             }
             Some(tool) => {
@@ -333,8 +344,10 @@ impl<'a> StreamingToolExecutor<'a> {
                     status: ToolStatus::Queued,
                     is_concurrency_safe: safe,
                     result: None,
+                    prevent_continuation: false,
                     injected: Vec::new(),
                     modifiers: Vec::new(),
+                    post_tool_batch_calls: Vec::new(),
                 });
             }
         }
@@ -421,32 +434,46 @@ impl<'a> StreamingToolExecutor<'a> {
         let name = self.tools[i].name.clone();
         let input = self.tools[i].input.clone();
         let provider_id = self.tools[i].provider_id.clone();
+        let assistant_id = self.tools[i].assistant_id;
         let orch = self.orch;
         // Hand this tool a child of the executor's `tool_abort` token. When the
         // turn is discarded (or the user interrupts, via the parented
         // `user_cancel`), `tool_abort` fires and this child fires too — an
         // in-flight Bash kills its subprocess.
         let child = self.tool_abort.child_token();
-        let fut =
-            async move {
-                let single = vec![(id, name, input, provider_id)];
-                let outcome: DispatchOutcome =
-                    match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single, Some(child))
-                        .await
-                    {
-                        // `single` has one element, so `pop()` == the only result.
-                        Ok((mut blocks, _prevent, injected, modifiers)) => blocks
-                            .pop()
-                            .map(|b| (b, injected, modifiers))
-                            .ok_or_else(|| {
-                                crate::error::OrchestratorError::StreamingProtocol(format!(
-                                    "dispatch returned empty for tool index {i}"
-                                ))
-                            }),
-                        Err(e) => Err(e),
-                    };
-                (i, outcome)
-            };
+        let fut = async move {
+            let single = vec![(id, name, input, provider_id)];
+            let outcome: DispatchOutcome =
+                match crate::turn_loop::dispatch_tool_uses_tracked_deferred(
+                    orch,
+                    &single,
+                    Some(child),
+                    Some(assistant_id),
+                )
+                .await
+                {
+                    // `single` has one element, so `pop()` == the only result.
+                    Ok(mut dispatched) => dispatched
+                        .results
+                        .pop()
+                        .map(|block| {
+                            (
+                                block,
+                                dispatched.prevent_continuation,
+                                dispatched.injected_messages,
+                                dispatched.context_modifiers,
+                                dispatched.post_tool_batch_calls,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            crate::error::OrchestratorError::StreamingProtocol(format!(
+                                "dispatch returned empty for tool index {i}"
+                            ))
+                        }),
+                    Err(e) => Err(e),
+                };
+            (i, outcome)
+        };
         self.inflight.push(Box::pin(fut));
     }
 
@@ -498,6 +525,13 @@ impl<'a> StreamingToolExecutor<'a> {
         let abort_reason = self.abort_reason_for(i);
         // Cancelled in-flight tool: discard its real outcome for the synthetic.
         if let Some(reason) = abort_reason {
+            // A completed real MCP result may already have recorded `_meta`
+            // and an end-turn request before the executor notices the abort.
+            // The synthetic error is the result that survives, so neither may
+            // leak onto its transcript line or terminate the turn.
+            self.orch
+                .clear_discarded_tool_result_metadata(&self.tools[i].id)
+                .await;
             // Denial-kind housekeeping: the dispatch-site catch may already have
             // recorded a kind (`interrupted` for a `ToolError::Aborted`, or
             // `cancelled` from the pre-cancel guard) for the block we are about
@@ -542,6 +576,13 @@ impl<'a> StreamingToolExecutor<'a> {
             let mut block =
                 synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
+            let post_tool_batch_call = post_tool_batch_call_for_result(
+                &self.tools[i].id,
+                &self.tools[i].name,
+                &self.tools[i].input,
+                &block,
+            );
+            self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
             self.tools[i].result = Some(block);
             // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
             self.tools[i].status = ToolStatus::Completed;
@@ -549,12 +590,14 @@ impl<'a> StreamingToolExecutor<'a> {
         }
         // Otherwise record the real outcome (existing handling).
         match outcome {
-            Ok((mut block, injected, modifiers)) => {
+            Ok((mut block, prevent, injected, modifiers, post_tool_batch_calls)) => {
                 // Copy the provider id onto the result for egress replay.
                 set_provider_id(&mut block, self.tools[i].provider_id.clone());
                 self.tools[i].result = Some(block);
+                self.tools[i].prevent_continuation = prevent;
                 self.tools[i].injected = injected;
                 self.tools[i].modifiers = modifiers;
+                self.tools[i].post_tool_batch_calls = post_tool_batch_calls;
                 self.tools[i].status = ToolStatus::Completed;
             }
             Err(e) => {
@@ -563,7 +606,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 // (toolExecution.ts:471-480): `Error calling tool (<name>): <msg>`
                 // wrapped in `<tool_use_error>`.
                 let name = &self.tools[i].name;
-                self.tools[i].result = Some(ContentBlock::ToolResult {
+                let block = ContentBlock::ToolResult {
                     tool_use_id: self.tools[i].id.clone(),
                     content: format!(
                         "<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"
@@ -571,7 +614,15 @@ impl<'a> StreamingToolExecutor<'a> {
                     is_error: true,
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
                     content_blocks: None,
-                });
+                };
+                let post_tool_batch_call = post_tool_batch_call_for_result(
+                    &self.tools[i].id,
+                    &self.tools[i].name,
+                    &self.tools[i].input,
+                    &block,
+                );
+                self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
+                self.tools[i].result = Some(block);
                 self.tools[i].status = ToolStatus::Completed;
             }
         }
@@ -626,6 +677,13 @@ impl<'a> StreamingToolExecutor<'a> {
             let mut block =
                 synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
+            let post_tool_batch_call = post_tool_batch_call_for_result(
+                &self.tools[i].id,
+                &self.tools[i].name,
+                &self.tools[i].input,
+                &block,
+            );
+            self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
             self.tools[i].result = Some(block);
             self.tools[i].status = ToolStatus::Completed;
         }
@@ -716,6 +774,34 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
     }
 }
 
+fn post_tool_batch_call_for_result(
+    id: &ToolUseId,
+    name: &str,
+    input: &serde_json::Value,
+    block: &ContentBlock,
+) -> hooks::events::PostToolBatchCall {
+    let tool_response = match block {
+        ContentBlock::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } => Some(content_blocks.as_ref().map_or_else(
+            || serde_json::Value::String(content.clone()),
+            |blocks| {
+                serde_json::to_value(blocks)
+                    .unwrap_or_else(|_| serde_json::Value::String(content.clone()))
+            },
+        )),
+        _ => None,
+    };
+    hooks::events::PostToolBatchCall {
+        tool_name: name.to_string(),
+        tool_input: input.clone(),
+        tool_use_id: id.clone(),
+        tool_response,
+    }
+}
+
 // ============================================================================
 // Task 9: ordered result drain (TS getCompletedResults / hasUnfinishedTools)
 // ============================================================================
@@ -726,9 +812,12 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
 /// per-turn assistant via that assistant's captured JSONL uuid (TS
 /// `sourceToolAssistantUUID`), so no per-result assistant id is carried here.
 pub(crate) struct DrainedResult {
+    pub(crate) tool: String,
     pub(crate) block: ContentBlock,
+    pub(crate) prevent_continuation: bool,
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
+    pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
 }
 
 impl<'a> StreamingToolExecutor<'a> {
@@ -743,9 +832,12 @@ impl<'a> StreamingToolExecutor<'a> {
                 ToolStatus::Completed => {
                     t.status = ToolStatus::Yielded;
                     out.push(DrainedResult {
+                        tool: t.name.clone(),
                         block: t.result.clone().expect("completed tool has result"),
+                        prevent_continuation: t.prevent_continuation,
                         injected: std::mem::take(&mut t.injected),
                         modifiers: std::mem::take(&mut t.modifiers),
+                        post_tool_batch_calls: std::mem::take(&mut t.post_tool_batch_calls),
                     });
                 }
                 ToolStatus::Yielded => continue,

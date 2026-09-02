@@ -24,7 +24,12 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use telemetry::pii::Verified;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::mcp::{self as tengu_mcp, PendingCallPayload};
+use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -76,10 +81,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
-/// Oracle `A8v` (`cc-238.js @229642095`). `cached` and `unconfigured` are
-/// `.optional()` there; the port's registry models neither a discovery-cache
-/// bucket nor an "unconfigured remote" error code, so both keys are omitted
-/// from every result rather than emitted empty.
+/// Oracle `A8v` (`cc-238.js @229642095`). `cached` and `unconfigured` remain
+/// optional in the schema even though the call result includes both arrays.
 static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -114,32 +117,43 @@ impl WaitForMcpServersTool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitState {
+    Connected,
+    Cached,
+    Failed,
+    Pending,
+    NeedsAuth,
+    Disabled,
+    Unconfigured,
+}
+
 /// The settled buckets the oracle's `call` produces.
 #[derive(Default)]
 struct Buckets {
     connected: Vec<String>,
+    cached: Vec<String>,
     failed: Vec<String>,
     still_pending: Vec<String>,
     needs_auth: Vec<String>,
     disabled: Vec<String>,
+    unconfigured: Vec<String>,
     unknown: Vec<String>,
 }
 
 /// Bucket the current action states of the requested servers, plus the
 /// requested names that no configured server matches (oracle `_`, "unknown").
-fn bucket(states: &[(String, platform_api::McpActionState)], requested: &[String]) -> Buckets {
-    use platform_api::McpActionState as S;
+fn bucket(states: &[(String, WaitState)], requested: &[String]) -> Buckets {
     let mut b = Buckets::default();
     for (name, state) in states {
         match state {
-            S::Connected => b.connected.push(name.clone()),
-            S::Pending => b.still_pending.push(name.clone()),
-            S::NeedsAuth => b.needs_auth.push(name.clone()),
-            S::Disabled => b.disabled.push(name.clone()),
-            S::Failed => b.failed.push(name.clone()),
-            // Oracle `default:` — the `switch(v.type)` has no `needs-approval`
-            // arm, so such a client falls through and lands in NO bucket.
-            S::NeedsApproval => {}
+            WaitState::Connected => b.connected.push(name.clone()),
+            WaitState::Cached => b.cached.push(name.clone()),
+            WaitState::Failed => b.failed.push(name.clone()),
+            WaitState::Pending => b.still_pending.push(name.clone()),
+            WaitState::NeedsAuth => b.needs_auth.push(name.clone()),
+            WaitState::Disabled => b.disabled.push(name.clone()),
+            WaitState::Unconfigured => b.unconfigured.push(name.clone()),
         }
     }
     // Oracle: `let y=new Set(c.map((v)=>au(v.name))),_=n.filter((v)=>!y.has(au(v)))`
@@ -160,10 +174,7 @@ fn bucket(states: &[(String, platform_api::McpActionState)], requested: &[String
 /// Restrict a full action-state listing to the requested server names, matching
 /// on the raw name OR its normalized form (oracle
 /// `i=()=>Zpr(t).filter((v)=>n.includes(v.name)||o.has(au(v.name)))`).
-fn select(
-    states: Vec<(String, platform_api::McpActionState)>,
-    requested: &[String],
-) -> Vec<(String, platform_api::McpActionState)> {
+fn select(states: Vec<(String, WaitState)>, requested: &[String]) -> Vec<(String, WaitState)> {
     let normalized: BTreeSet<String> = requested
         .iter()
         .map(|s| mcp::normalization::normalize_name_for_mcp(s))
@@ -177,6 +188,89 @@ fn select(
         .collect()
 }
 
+async fn snapshot_wait_states(registry: &mcp::McpRegistry) -> Vec<(String, WaitState)> {
+    let connections = registry.connections.read().await;
+    let mut out = Vec::with_capacity(connections.len());
+    for state in connections.values() {
+        let wait_state = if state.config().disabled {
+            WaitState::Disabled
+        } else {
+            match state {
+                mcp::McpConnectionState::Connected { .. }
+                | mcp::McpConnectionState::HealthChecking { .. } => WaitState::Connected,
+                mcp::McpConnectionState::Cached { .. } => WaitState::Cached,
+                mcp::McpConnectionState::Connecting { .. }
+                | mcp::McpConnectionState::Reconnecting { .. } => WaitState::Pending,
+                mcp::McpConnectionState::AwaitingOAuth { .. } => WaitState::NeedsAuth,
+                mcp::McpConnectionState::Failed { config, .. }
+                | mcp::McpConnectionState::Disconnected { config, .. }
+                | mcp::McpConnectionState::Stopped { config } => {
+                    if config.is_unconfigured() {
+                        WaitState::Unconfigured
+                    } else {
+                        WaitState::Failed
+                    }
+                }
+            }
+        };
+        out.push((state.name().to_string(), wait_state));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn verified_int(n: u64) -> AnalyticsValue {
+    AnalyticsValue::Int(n as i64)
+}
+
+async fn emit_pending_call(bus: &Arc<AnalyticsBus>, payload: &PendingCallPayload) {
+    let mut md: LogEventMetadata = HashMap::new();
+    md.insert(
+        "requestedCount".into(),
+        verified_int(u64::from(payload.requested_count)),
+    );
+    md.insert(
+        "connectedCount".into(),
+        verified_int(u64::from(payload.connected_count)),
+    );
+    md.insert(
+        "cachedCount".into(),
+        verified_int(u64::from(payload.cached_count)),
+    );
+    md.insert(
+        "failedCount".into(),
+        verified_int(u64::from(payload.failed_count)),
+    );
+    md.insert(
+        "pendingCount".into(),
+        verified_int(u64::from(payload.pending_count)),
+    );
+    md.insert(
+        "needsAuthCount".into(),
+        verified_int(u64::from(payload.needs_auth_count)),
+    );
+    md.insert(
+        "disabledCount".into(),
+        verified_int(u64::from(payload.disabled_count)),
+    );
+    md.insert(
+        "unconfiguredCount".into(),
+        verified_int(u64::from(payload.unconfigured_count)),
+    );
+    md.insert(
+        "unknownCount".into(),
+        verified_int(u64::from(payload.unknown_count)),
+    );
+    md.insert("waitMs".into(), verified_int(payload.wait_ms));
+    md.insert("matched".into(), AnalyticsValue::Bool(payload.matched));
+    md.insert(
+        "matchType".into(),
+        AnalyticsValue::String(payload.match_type.as_str().to_string()),
+    );
+    md.insert("success".into(), AnalyticsValue::Bool(payload.success));
+    bus.log_event(tengu_mcp::PENDING_CALL, md).await;
+}
+
 /// Oracle `mapToolResultToToolResultBlockParam` (`cc-238.js @229644106`): a
 /// `\n`-joined list of non-empty lines, `is_error` = `!ready`.
 fn render_for_model(b: &Buckets, ready: bool) -> String {
@@ -185,6 +279,12 @@ fn render_for_model(b: &Buckets, ready: bool) -> String {
         lines.push(format!(
             "Connected (their tools are now available \u{2014} call them directly): {}",
             b.connected.join(", ")
+        ));
+    }
+    if !b.cached.is_empty() {
+        lines.push(format!(
+            "Cached (their tools are available now; connects on first call): {}",
+            b.cached.join(", ")
         ));
     }
     if !b.failed.is_empty() {
@@ -206,6 +306,12 @@ fn render_for_model(b: &Buckets, ready: bool) -> String {
         lines.push(format!(
             "Disabled (ask the user to enable via /mcp): {}",
             b.disabled.join(", ")
+        ));
+    }
+    if !b.unconfigured.is_empty() {
+        lines.push(format!(
+            "Not configured (no URL set \u{2014} retrying will not help; the user must configure the server first): {}",
+            b.unconfigured.join(", ")
         ));
     }
     if !b.unknown.is_empty() {
@@ -300,7 +406,7 @@ impl Tool for WaitForMcpServersTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let Some(registry) = self.ctx.mcp_registry.as_ref() else {
@@ -322,11 +428,10 @@ impl Tool for WaitForMcpServersTool {
             })
             .unwrap_or_default();
         let requested: Vec<String> = if explicit.is_empty() {
-            registry
-                .action_states()
+            snapshot_wait_states(registry)
                 .await
                 .into_iter()
-                .filter(|(_, s)| *s == platform_api::McpActionState::Pending)
+                .filter(|(_, s)| *s == WaitState::Pending)
                 .map(|(n, _)| n)
                 .collect()
         } else {
@@ -335,20 +440,37 @@ impl Tool for WaitForMcpServersTool {
 
         // Oracle wait loop: poll every 50ms while any selected client is still
         // `pending` and the 5s budget has not elapsed.
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
+        let wait_started = std::time::Instant::now();
+        let deadline = wait_started + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
         loop {
-            let now = select(registry.action_states().await, &requested);
-            let any_pending = now
-                .iter()
-                .any(|(_, s)| *s == platform_api::McpActionState::Pending);
+            if ctx
+                .cancel
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                break;
+            }
+            let now = select(snapshot_wait_states(registry).await, &requested);
+            let any_pending = now.iter().any(|(_, s)| *s == WaitState::Pending);
             if !any_pending || std::time::Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+            let poll = tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            if let Some(cancel) = ctx.cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break,
+                    () = poll => {}
+                }
+            } else {
+                poll.await;
+            }
         }
 
-        let settled = select(registry.action_states().await, &requested);
+        // Oracle captures `waitMs` immediately after the polling loop and only
+        // then takes the settled state snapshot.
+        let waited_ms = wait_started.elapsed().as_millis() as u64;
+        let settled = select(snapshot_wait_states(registry).await, &requested);
         let buckets = bucket(&settled, &requested);
         // Oracle `S`: ready when nothing is still pending, failed, needing auth,
         // disabled or unknown. (`cached` and `unconfigured` do NOT block.)
@@ -357,16 +479,35 @@ impl Tool for WaitForMcpServersTool {
             && buckets.needs_auth.is_empty()
             && buckets.disabled.is_empty()
             && buckets.unknown.is_empty();
+        let pending_payload = PendingCallPayload {
+            requested_count: u32::try_from(requested.len()).unwrap_or(u32::MAX),
+            connected_count: u32::try_from(buckets.connected.len()).unwrap_or(u32::MAX),
+            cached_count: u32::try_from(buckets.cached.len()).unwrap_or(u32::MAX),
+            failed_count: u32::try_from(buckets.failed.len()).unwrap_or(u32::MAX),
+            pending_count: u32::try_from(buckets.still_pending.len()).unwrap_or(u32::MAX),
+            needs_auth_count: u32::try_from(buckets.needs_auth.len()).unwrap_or(u32::MAX),
+            disabled_count: u32::try_from(buckets.disabled.len()).unwrap_or(u32::MAX),
+            unconfigured_count: u32::try_from(buckets.unconfigured.len()).unwrap_or(u32::MAX),
+            unknown_count: u32::try_from(buckets.unknown.len()).unwrap_or(u32::MAX),
+            wait_ms: waited_ms,
+            matched: ready,
+            match_type: Verified::assert_safe("wait".to_string()),
+            success: ready,
+        };
+
+        emit_pending_call(&self.ctx.bus, &pending_payload).await;
 
         let model_content = render_for_model(&buckets, ready);
         Ok(ToolCallResult {
             data: json!({
                 "ready": ready,
                 "connected": buckets.connected,
+                "cached": buckets.cached,
                 "failed": buckets.failed,
                 "stillPending": buckets.still_pending,
                 "needsAuth": buckets.needs_auth,
                 "disabled": buckets.disabled,
+                "unconfigured": buckets.unconfigured,
                 "unknown": buckets.unknown,
             }),
             model_content: Some(model_content),
@@ -382,6 +523,7 @@ impl Tool for WaitForMcpServersTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use telemetry::InMemorySink;
 
     #[test]
     fn name_is_byte_exact() {
@@ -413,14 +555,18 @@ mod tests {
     fn result_renderer_matches_the_oracle_lines() {
         let b = Buckets {
             connected: vec!["a".into()],
+            cached: vec!["cache".into()],
             needs_auth: vec!["b".into()],
+            unconfigured: vec!["cfg".into()],
             ..Buckets::default()
         };
         assert_eq!(
             render_for_model(&b, false),
             "ready: false\n\
              Connected (their tools are now available \u{2014} call them directly): a\n\
-             Needs authentication (ask the user to run /mcp): b"
+             Cached (their tools are available now; connects on first call): cache\n\
+             Needs authentication (ask the user to run /mcp): b\n\
+             Not configured (no URL set \u{2014} retrying will not help; the user must configure the server first): cfg"
         );
         assert_eq!(
             render_for_model(&Buckets::default(), true),
@@ -433,10 +579,7 @@ mod tests {
     /// on the NORMALIZED name (oracle `au`).
     #[test]
     fn unknown_bucket_compares_normalized_names() {
-        let states = vec![(
-            "my.server".to_string(),
-            platform_api::McpActionState::Connected,
-        )];
+        let states = vec![("my.server".to_string(), WaitState::Connected)];
         let b = bucket(&states, &["my_server".into(), "nope".into()]);
         assert_eq!(b.connected, vec!["my.server".to_string()]);
         assert_eq!(
@@ -449,9 +592,67 @@ mod tests {
     /// Readiness ignores `connected` but is blocked by every other bucket.
     #[test]
     fn ready_requires_every_blocking_bucket_empty() {
-        let states = vec![("s".to_string(), platform_api::McpActionState::Pending)];
+        let states = vec![("s".to_string(), WaitState::Pending)];
         let b = bucket(&states, &["s".into()]);
         assert_eq!(b.still_pending, vec!["s".to_string()]);
         assert!(b.unknown.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_call_event_carries_oracle_bucket_counts() {
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let payload = PendingCallPayload {
+            requested_count: 8,
+            connected_count: 1,
+            cached_count: 1,
+            failed_count: 1,
+            pending_count: 1,
+            needs_auth_count: 1,
+            disabled_count: 1,
+            unconfigured_count: 1,
+            unknown_count: 1,
+            wait_ms: 123,
+            matched: false,
+            match_type: Verified::assert_safe("wait".to_string()),
+            success: false,
+        };
+        emit_pending_call(&bus, &payload).await;
+
+        let events = sink.events().await;
+        let event = events
+            .iter()
+            .find(|event| event.name == tengu_mcp::PENDING_CALL)
+            .expect("pending-call telemetry emitted");
+        for (key, expected) in [
+            ("requestedCount", 8),
+            ("connectedCount", 1),
+            ("cachedCount", 1),
+            ("failedCount", 1),
+            ("pendingCount", 1),
+            ("needsAuthCount", 1),
+            ("disabledCount", 1),
+            ("unconfiguredCount", 1),
+            ("unknownCount", 1),
+            ("waitMs", 123),
+        ] {
+            assert!(matches!(
+                event.metadata.get(key),
+                Some(AnalyticsValue::Int(value)) if *value == expected
+            ));
+        }
+        assert!(matches!(
+            event.metadata.get("matched"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+        assert!(matches!(
+            event.metadata.get("success"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+        assert!(matches!(
+            event.metadata.get("matchType"),
+            Some(AnalyticsValue::String(value)) if value == "wait"
+        ));
     }
 }

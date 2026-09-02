@@ -213,8 +213,19 @@ where
                     .get(reqwest::header::WWW_AUTHENTICATE)
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string);
+                // Streamable HTTP servers commonly explain a stale session in
+                // a 400 response body (for example "Server not initialized").
+                // Preserve only a small local diagnostic prefix so the MCP
+                // client can apply the SDK's narrow stale-session classifier;
+                // this value is never attached to telemetry.
+                let body = if status == 400 {
+                    bounded_error_body(response, 4_096).await
+                } else {
+                    String::new()
+                };
                 tracing::warn!(status, "mcp http: non-success response");
-                if let Some(error) = http_error_message(&frame, status, www_authenticate.as_deref())
+                if let Some(error) =
+                    http_error_message(&frame, status, www_authenticate.as_deref(), &body)
                 {
                     if inbound_tx.send(error).is_err() {
                         return;
@@ -297,6 +308,7 @@ fn http_error_message(
     request: &JsonRpcMessage,
     status: u16,
     www_authenticate: Option<&str>,
+    body: &str,
 ) -> Option<JsonRpcMessage> {
     let request = serde_json::to_value(request).ok()?;
     let id = request.get("id")?.clone();
@@ -312,9 +324,58 @@ fn http_error_message(
             "message": marker,
             "data": {
                 "httpStatus": status,
-                "wwwAuthenticate": www_authenticate
+                "wwwAuthenticate": www_authenticate,
+                "body": body
             }
         }
     }))
     .ok()
+}
+
+async fn bounded_error_body(response: reqwest::Response, max_bytes: usize) -> String {
+    let mut bytes = Vec::with_capacity(max_bytes.min(1_024));
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        if remaining == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() == max_bytes {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_error_message_retains_local_stale_session_detail() {
+        let request: JsonRpcMessage = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {}
+        }))
+        .expect("request");
+        let error = http_error_message(
+            &request,
+            400,
+            None,
+            "Server not initialized for this session",
+        )
+        .expect("error response");
+        let value = serde_json::to_value(error).expect("serialize response");
+        assert_eq!(value["error"]["data"]["httpStatus"], 400);
+        assert_eq!(
+            value["error"]["data"]["body"],
+            "Server not initialized for this session"
+        );
+    }
 }

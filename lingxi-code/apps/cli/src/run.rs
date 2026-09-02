@@ -80,6 +80,69 @@ fn budget_halt_notice(total_usd: f64, max_budget_usd: f64) -> String {
     format!("Budget limit reached (${total_usd} of ${max_budget_usd}); stopping background agents.")
 }
 
+async fn emit_prompt_suggestion_if_enabled(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: &Arc<StreamJsonStream>,
+) {
+    if argv.prompt_suggestions_enabled() != Some(true) {
+        return;
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut handle = tokio::spawn(generate_and_emit_prompt_suggestion(
+        runtime.orchestrator.clone(),
+        stream.clone(),
+        cancel.clone(),
+    ));
+    if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
+        .await
+        .is_err()
+    {
+        cancel.cancel();
+        handle.abort();
+    }
+}
+
+async fn generate_and_emit_prompt_suggestion(
+    orchestrator: Arc<orchestrator::ConversationOrchestrator>,
+    stream: Arc<StreamJsonStream>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let Ok(suggestion) = orchestrator
+        .generate_prompt_suggestion_query(cancel.clone())
+        .await
+    else {
+        return;
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    let Some(suggestion) = suggestion else {
+        return;
+    };
+    stream.emit_prompt_suggestion(&suggestion).await;
+}
+
+fn spawn_prompt_suggestion_if_enabled(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: &Arc<StreamJsonStream>,
+) -> Option<(
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<()>,
+)> {
+    if argv.prompt_suggestions_enabled() != Some(true) {
+        return None;
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let handle = tokio::spawn(generate_and_emit_prompt_suggestion(
+        runtime.orchestrator.clone(),
+        stream.clone(),
+        cancel.clone(),
+    ));
+    Some((cancel, handle))
+}
+
 /// Render a non-negative finite `f64` like JavaScript `Number#toFixed(2)`.
 /// Rust's precision formatter uses ties-to-even (`1.125 -> 1.12`), while the
 /// ECMAScript rule chooses the larger decimal integer on an exact tie
@@ -414,6 +477,10 @@ pub async fn run_stream_json_print(
                 &betas,
             )
             .await;
+        // The SDK contract queues the result first, then starts the
+        // history-inert suggestion side query. Informational suggestion frames
+        // may therefore follow the turn-complete result.
+        emit_prompt_suggestion_if_enabled(argv, runtime, &stream).await;
         stream.flush().await;
         exit_codes::SUCCESS
     }
@@ -1951,6 +2018,10 @@ pub async fn run_stream_json_input_loop(
     let betas = argv.betas.clone().unwrap_or_default();
     let mut last_turn_err: Option<orchestrator::OrchestratorError> = None;
     let mut had_any_turn = false;
+    let mut prompt_suggestion_task: Option<(
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    )> = None;
     // Per-toolUseID orphaned-permission dedup (twin of claude-code's
     // `handledOrphanedToolUseIds` Set, print.ts:2766/5272/5287): each DISTINCT
     // unresolved tool_use recovers once; a same-id re-delivery is skipped. NOT a
@@ -2036,7 +2107,6 @@ pub async fn run_stream_json_input_loop(
                 continue;
             }
         }
-        had_any_turn = true;
         let prompt = content_to_prompt(&turn.content);
         let external_message_id = turn
             .uuid
@@ -2061,6 +2131,14 @@ pub async fn run_stream_json_input_loop(
                 emit_dedup_skip_terminal(&queue_lifecycle, uuid);
                 continue;
             }
+        }
+
+        // UUID replays are discarded by Claude Code before they reach the
+        // query loop. Only a genuinely new query aborts the prior suggestion
+        // and makes this a non-empty session.
+        had_any_turn = true;
+        if let Some((cancel, _)) = prompt_suggestion_task.take() {
+            cancel.cancel();
         }
 
         // Under --replay-user-messages, re-emit the inbound user frame as
@@ -2152,6 +2230,29 @@ pub async fn run_stream_json_input_loop(
         .await;
         match turn_result {
             Ok(_) => {
+                let cost = runtime.orchestrator.snapshot_cost().await;
+                let result_text = stream.get_last_result_text().await;
+                let model = {
+                    let session_handle = runtime.orchestrator.session();
+                    let session = session_handle.lock().await;
+                    session.model.clone()
+                };
+                stream
+                    .emit_result_success(
+                        &result_text,
+                        "end_turn",
+                        &cost,
+                        &model,
+                        fast_mode_state,
+                        fast_mode_disabled_reason,
+                        &betas,
+                    )
+                    .await;
+                // The SDK starts generation after queuing every successful
+                // result. A later user turn aborts this task when dequeued;
+                // starting even when input is already queued preserves that
+                // timing and its suppression telemetry.
+                prompt_suggestion_task = spawn_prompt_suggestion_if_enabled(argv, runtime, &stream);
                 // Reset the cancel signal for the next turn.
                 let _ = cancel_tx.send(false);
                 last_turn_err = None;
@@ -2177,6 +2278,16 @@ pub async fn run_stream_json_input_loop(
     let _ = ctrl_req_task.await;
     let _ = resolver_task.await;
 
+    if let Some((cancel, mut handle)) = prompt_suggestion_task.take() {
+        if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
+            .await
+            .is_err()
+        {
+            cancel.cancel();
+            handle.abort();
+        }
+    }
+
     if !had_any_turn {
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
@@ -2197,7 +2308,6 @@ pub async fn run_stream_json_input_loop(
 
     // ⑤ Emit the result frame.
     let cost = runtime.orchestrator.snapshot_cost().await;
-    let result_text = stream.get_last_result_text().await;
     let model = {
         let session_handle = runtime.orchestrator.session();
         let session = session_handle.lock().await;
@@ -2221,17 +2331,9 @@ pub async fn run_stream_json_input_loop(
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
-        stream
-            .emit_result_success(
-                &result_text,
-                "end_turn",
-                &cost,
-                &model,
-                fast_mode_state,
-                fast_mode_disabled_reason,
-                &betas,
-            )
-            .await;
+        // Successful multi-turn results are emitted at each turn boundary,
+        // before that turn's optional prompt suggestion. Do not duplicate the
+        // last result when stdin closes.
         stream.flush().await;
         exit_codes::SUCCESS
     }

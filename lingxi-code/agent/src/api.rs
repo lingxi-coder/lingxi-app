@@ -19,10 +19,26 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, LlmResponse};
 use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
-use protocol::AgentId;
+use protocol::{AgentId, SessionId};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const OBSERVER_EVENT_BUFFER: usize = 100;
+
+/// Host-owned inputs for the fire-and-forget near-limit checkpoint.
+///
+/// The agent loop owns the exact oracle timing, but the host owns persistence
+/// policy and the checkpoint implementation. Keeping this request provider-
+/// neutral avoids a dependency from `agent` back into the `session` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearLimitCheckpointRequest {
+    /// Owning conversation session, not the child agent id.
+    pub session_id: SessionId,
+    /// Owning conversation workspace (the oracle's process cwd).
+    pub cwd: PathBuf,
+    /// Whether the owning conversation is non-interactive.
+    pub non_interactive: bool,
+}
 
 /// Ordered, bounded hand-off from the child event pump to host observers.
 ///
@@ -87,6 +103,23 @@ impl ObserverEventSink {
 /// provide a scripted mock (see [`crate::runner`] tests).
 #[async_trait]
 pub trait SubagentApiClient: Send + Sync {
+    /// Consume a pending near-limit wrap-up hint for the current subagent
+    /// query loop. Default no-op preserves existing mocks and non-provider
+    /// implementations.
+    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        false
+    }
+
+    /// Dispatch the near-limit resume checkpoint without blocking the query
+    /// loop. The production provider adapter delegates to the session-owned
+    /// checkpoint machinery; mocks and hosts without persistence stay no-op.
+    fn dispatch_near_limit_checkpoint(&self, _request: NearLimitCheckpointRequest) {}
+
+    /// Record the oracle's `y("usage_limit_near_wrapup")` success gate. The
+    /// provider host owns the telemetry transport; agent-only mocks remain
+    /// no-op and the query loop does not depend on a concrete sink.
+    fn record_usage_limit_near_wrap_up(&self) {}
+
     /// Workflow-only watchdog policy attached by the spawn adapter. Ordinary
     /// clients return `None`, so non-workflow subagents retain their existing
     /// transport/retry behavior.
@@ -318,6 +351,18 @@ impl WorkflowWatchdogApiClient {
 
 #[async_trait]
 impl SubagentApiClient for WorkflowWatchdogApiClient {
+    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        self.inner.consume_pending_near_limit_wrap_up_hint()
+    }
+
+    fn dispatch_near_limit_checkpoint(&self, request: NearLimitCheckpointRequest) {
+        self.inner.dispatch_near_limit_checkpoint(request);
+    }
+
+    fn record_usage_limit_near_wrap_up(&self) {
+        self.inner.record_usage_limit_near_wrap_up();
+    }
+
     fn workflow_query_watchdog(&self) -> Option<WorkflowQueryWatchdog> {
         Some(self.policy)
     }

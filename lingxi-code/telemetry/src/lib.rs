@@ -100,6 +100,13 @@ pub fn emit_session_corrupted(session_id: &str, error: &str) {
     crate::otel::emit_named_log_event(crate::tengu::session::CORRUPTED, &attrs);
 }
 
+/// Convenience for [`crate::tengu::session::PERSISTENCE_FAILED`].
+pub fn emit_session_persistence_failed() {
+    tracing::error!(event = crate::tengu::session::PERSISTENCE_FAILED);
+    let attrs = std::collections::BTreeMap::<String, crate::otel::AttrValue>::new();
+    crate::otel::emit_named_log_event(crate::tengu::session::PERSISTENCE_FAILED, &attrs);
+}
+
 // -- M5-10 emit helpers for the 6 batch-1 slash commands ---------------------
 //
 // Each command emits three lifecycle events: `_started`, `_completed`, and
@@ -618,6 +625,55 @@ pub fn emit_mcp_reset_mcpjson_choices() {
     tracing::info!(event = crate::tengu::mcp::RESET_MCPJSON_CHOICES);
 }
 
+/// Emit [`crate::tengu::mcp::COMMAND_INLINE`].
+pub fn emit_mcp_command_inline(payload: &crate::tengu::mcp::CommandInlinePayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::COMMAND_INLINE,
+        action = payload.action.as_str(),
+    );
+    let attrs = std::iter::IntoIterator::into_iter([(
+        "action".to_string(),
+        crate::otel::AttrValue::from(payload.action.as_str().to_string()),
+    )])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::mcp::COMMAND_INLINE, &attrs);
+}
+
+/// Emit [`crate::tengu::mcp::ELICITATION_SHOWN`].
+pub fn emit_mcp_elicitation_shown(payload: &crate::tengu::mcp::ElicitationShownPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::ELICITATION_SHOWN,
+        mode = payload.mode.wire_str(),
+    );
+    let attrs = std::iter::IntoIterator::into_iter([(
+        "mode".to_string(),
+        crate::otel::AttrValue::from(payload.mode.wire_str().to_string()),
+    )])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::mcp::ELICITATION_SHOWN, &attrs);
+}
+
+/// Emit [`crate::tengu::mcp::ELICITATION_RESPONSE`].
+pub fn emit_mcp_elicitation_response(payload: &crate::tengu::mcp::ElicitationResponsePayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::ELICITATION_RESPONSE,
+        mode = payload.mode.wire_str(),
+        action = payload.action.as_str(),
+    );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "mode".to_string(),
+            crate::otel::AttrValue::from(payload.mode.wire_str().to_string()),
+        ),
+        (
+            "action".to_string(),
+            crate::otel::AttrValue::from(payload.action.as_str().to_string()),
+        ),
+    ])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::mcp::ELICITATION_RESPONSE, &attrs);
+}
+
 /// Emit [`crate::tengu::mcp::AUTH_CONFIG_AUTHENTICATE`].
 pub fn emit_mcp_auth_config_authenticate(
     payload: &crate::tengu::mcp::AuthConfigAuthenticatePayload,
@@ -757,6 +813,52 @@ pub fn emit_mcp_tool_call_auth_error(payload: &crate::tengu::mcp::ToolCallAuthEr
         auth_error_kind = payload.auth_error_kind.wire_str(),
         mcp_server_key_hash = payload.mcp_server_key_hash.as_str(),
     );
+}
+
+/// Emit [`crate::tengu::mcp::RECONCILE`].
+pub fn emit_mcp_reconcile(payload: &crate::tengu::mcp::ReconcilePayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::RECONCILE,
+        caller = payload.caller.as_str(),
+        desiredCount = payload.desired_count,
+        currentCount = payload.current_count,
+        toRemoveCount = payload.to_remove_count,
+        toAddCount = payload.to_add_count,
+        toReplaceCount = payload.to_replace_count,
+        retainedPluginCount = payload.retained_plugin_count,
+    );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "caller".to_string(),
+            crate::otel::AttrValue::from(payload.caller.as_str().to_string()),
+        ),
+        (
+            "desiredCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.desired_count)),
+        ),
+        (
+            "currentCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.current_count)),
+        ),
+        (
+            "toRemoveCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.to_remove_count)),
+        ),
+        (
+            "toAddCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.to_add_count)),
+        ),
+        (
+            "toReplaceCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.to_replace_count)),
+        ),
+        (
+            "retainedPluginCount".to_string(),
+            crate::otel::AttrValue::from(i64::from(payload.retained_plugin_count)),
+        ),
+    ])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::mcp::RECONCILE, &attrs);
 }
 
 #[cfg(test)]
@@ -1050,6 +1152,97 @@ mod mcp_config_parse_gate_tests {
                 ),
                 (MCP_CONFIG_PARSE_GATE.to_string(), None),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod mcp_reconcile_tests {
+    use super::*;
+    use crate::tengu::mcp::ReconcilePayload;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type ReconcileRow = (String, String, u64);
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        rows: Arc<StdMutex<Vec<ReconcileRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                caller: Option<String>,
+                retained_plugin_count: Option<u64>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_u64(&mut self, field: &Field, value: u64) {
+                    if field.name() == "retainedPluginCount" {
+                        self.retained_plugin_count = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "caller" => self.caller = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "caller" => self.caller = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                caller: None,
+                retained_plugin_count: None,
+            };
+            event.record(&mut v);
+            if let (Some(name), Some(caller), Some(retained_plugin_count)) =
+                (v.event, v.caller, v.retained_plugin_count)
+            {
+                self.rows
+                    .lock()
+                    .unwrap()
+                    .push((name, caller, retained_plugin_count));
+            }
+        }
+    }
+
+    #[test]
+    fn emit_mcp_reconcile_carries_caller_and_retained_plugin_count() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_reconcile(&ReconcilePayload {
+            caller: Verified::assert_safe("unknown".to_string()),
+            desired_count: 1,
+            current_count: 2,
+            to_remove_count: 0,
+            to_add_count: 1,
+            to_replace_count: 0,
+            retained_plugin_count: 1,
+        });
+
+        assert_eq!(
+            cap.rows.lock().unwrap().clone(),
+            vec![(
+                crate::tengu::mcp::RECONCILE.to_string(),
+                "unknown".to_string(),
+                1,
+            )]
         );
     }
 }

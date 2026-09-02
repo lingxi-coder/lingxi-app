@@ -284,7 +284,7 @@ fn check_telemetry_schema() -> DoctorCheck {
     //   4. HERE
     // Re-count against `mcp::NAMES.len()` / `plugin::NAMES.len()`; never paste
     // the number a failing assertion printed.
-    let expected = 395;
+    let expected = 416;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
     ToolStaticContext, ToolUseContext,
@@ -84,6 +84,11 @@ impl Tool for StructuredOutputTool {
         true
     }
 
+    fn result_ends_turn(&self, _result: &ToolCallResult) -> bool {
+        // Claude Code's StructuredOutput result carries `endsTurn: true`.
+        true
+    }
+
     async fn check_permissions(
         &self,
         _input: &Value,
@@ -122,7 +127,7 @@ impl Tool for StructuredOutputTool {
             *slot = Some(input);
         }
         Ok(ToolCallResult {
-            data: json!({ "ok": true }),
+            data: Value::String("Structured output provided successfully".to_string()),
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
@@ -135,6 +140,7 @@ impl Tool for StructuredOutputTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn tool_exposes_the_user_schema_as_input_schema() {
@@ -158,7 +164,14 @@ mod tests {
             )
             .await
             .expect("call ok");
-        assert_eq!(result.data, json!({ "ok": true }));
+        assert_eq!(
+            result.data,
+            Value::String("Structured output provided successfully".to_string())
+        );
+        assert!(
+            tool.result_ends_turn(&result),
+            "StructuredOutput mirrors the oracle's endsTurn:true result"
+        );
         assert_eq!(
             slot.lock().unwrap().as_ref(),
             Some(&json!({"answer": 42})),

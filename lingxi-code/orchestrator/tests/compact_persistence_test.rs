@@ -319,8 +319,26 @@ async fn cold_resume_reconstructs_post_compact_state_inner() {
 /// `U6r(trigger, preTokens, lastUuid)`, leaving `messagesSummarized` undefined
 /// (dropped by `JSON.stringify`). Only the unported message-selector
 /// (`up_to`/`from`) path sets `messagesSummarized:f.length`.
-#[tokio::test]
-async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized() {
+#[test]
+fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized() {
+    std::thread::Builder::new()
+        .name("compact-boundary-persistence".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("compact boundary runtime")
+                .block_on(
+                    compact_boundary_carries_discovered_tools_and_omits_messages_summarized_inner(),
+                );
+        })
+        .expect("spawn compact boundary test thread")
+        .join()
+        .expect("compact boundary test thread");
+}
+
+async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized_inner() {
     let dir = tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));

@@ -1,10 +1,9 @@
 //! SC-02 — the rate-limit resume checkpoint, end to end against real `git`.
 //!
-//! `performRateLimitCheckpoint` (cc-238.js @292197753) latches its result
-//! PROCESS-WIDE (`getLastCheckpointResult`), which is what makes it a
-//! once-per-session event. That latch is also why every case here lives in one
-//! sequential test function in its own binary: two of these running in parallel
-//! would each observe the other's latch.
+//! `performRateLimitCheckpoint` (cc-238.js @292197753) latches its result for
+//! the owning session, which makes it a once-per-session event while allowing
+//! LingXi's embedded multi-session hosts to run independently. Every case here
+//! still lives in one sequential test because it exercises one session id.
 //!
 //! The oracle's live trigger is the REPL rate-limit callback (@306528240); the
 //! port's twin is `orchestrator::turn_loop::maybe_checkpoint_on_rate_limit`,

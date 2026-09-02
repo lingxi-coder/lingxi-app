@@ -258,6 +258,8 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
                         name: request.name,
                         model: request.model.unwrap_or_else(|| "inherited".to_string()),
                         model_profile: request.model_profile,
+                        persistent: false,
+                        initial_message_index: 0,
                     },
                 )
                 .await;
@@ -4462,6 +4464,8 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
             name: Some("Design agent".to_string()),
             model: "deepseek-v4-flash".to_string(),
             model_profile: Some("deepseek".to_string()),
+            persistent: false,
+            initial_message_index: 0,
         },
     )
     .await;
@@ -4562,6 +4566,8 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             name: Some("Design agent".to_string()),
             model: "deepseek-v4-flash".to_string(),
             model_profile: Some("deepseek".to_string()),
+            persistent: false,
+            initial_message_index: 0,
         },
     )
     .await;

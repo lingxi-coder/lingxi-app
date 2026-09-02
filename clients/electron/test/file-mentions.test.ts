@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   activeFileMention,
+  fileMentionsFromPrompt,
   fileMentionToken,
   promptWithFileMentions,
 } from '../src/renderer/bridge/fileMentions';
@@ -15,6 +16,17 @@ test('active file mention follows the whitespace-delimited TUI semantics', () =>
   });
   assert.equal(activeFileMention('email@example.com', 9), null);
   assert.equal(activeFileMention('plain text', 5), null);
+});
+
+test('serialized file mentions can be reconstructed without parsing the prompt body', () => {
+  assert.deepEqual(
+    fileMentionsFromPrompt('@src/app.ts @"My Files/read\\ me.md"\n\nreview this'),
+    ['src/app.ts', 'My Files/read me.md'],
+  );
+  assert.deepEqual(fileMentionsFromPrompt('@src/app.ts'), ['src/app.ts']);
+  assert.deepEqual(fileMentionsFromPrompt('email@example.com\n\nbody'), []);
+  assert.deepEqual(fileMentionsFromPrompt('@"unterminated\n\nbody'), []);
+  assert.deepEqual(fileMentionsFromPrompt('@src/app.ts extra\n\nbody'), []);
 });
 
 test('file mentions quote whitespace paths', () => {

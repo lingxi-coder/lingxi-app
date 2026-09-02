@@ -27,7 +27,7 @@ struct Fixture {
 fn event_names_match_registry_byte_for_byte() {
     let fx: Fixture = load_fixture("tengu_events");
     let registry = telemetry::tengu::ALL_EVENT_NAMES;
-    assert_eq!(fx.registry_count_lock, 395);
+    assert_eq!(fx.registry_count_lock, 416);
     assert_eq!(registry.len(), fx.registry_count_lock);
     assert_eq!(
         fx.event_names.len(),
@@ -48,22 +48,35 @@ fn event_names_match_registry_byte_for_byte() {
 fn current_audit_keeps_unimplemented_mcp_telemetry_visible() {
     let fx: Fixture = load_fixture("tengu_events");
     assert!(
-        fx.current_audit.contains("23 of the oracle's 53")
-            && fx.current_audit.contains("29 absent"),
+        fx.current_audit.contains("44 of the oracle's 55")
+            && fx.current_audit.contains("11 absent"),
         "current audit must retain the confirmed MCP telemetry remainder: {}",
         fx.current_audit
     );
     assert!(
-        fx.current_audit.contains("schema-only"),
-        "plugin telemetry must remain marked schema-only until production emit sites exist"
-    );
-    assert!(
-        fx.current_audit.contains("23 of the oracle's 53")
-            && fx
-                .current_audit
-                .contains("now in this count-locked registry"),
+        fx.current_audit.contains("44 of the oracle's 55")
+            && fx.current_audit.contains("count-locked registry now pins"),
         "the audit must retain the confirmed registered MCP event names"
     );
+    for missing in [
+        "instructions_pool_change",
+        "dropped_tools_pool_change",
+        "skills_funnel",
+        "arg_trailing_invoke_suffix",
+        "description_contains_toolcall_xml",
+        "dialog_choice",
+        "multidialog_choice",
+        "proxy_needs_approval_retry",
+        "registry_fetch",
+        "sdk_generation",
+        "tripwire",
+    ] {
+        assert!(
+            fx.current_audit.contains(missing),
+            "current audit must name missing MCP event {missing}: {}",
+            fx.current_audit
+        );
+    }
 }
 
 #[test]

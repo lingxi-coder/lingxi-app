@@ -3,6 +3,8 @@
 //! Everything below derives from one constant so the advertised version, child
 //! process identity, and WebFetch user agent cannot drift independently.
 
+const AGENTS_HELP: &str = include_str!("../src/parity/fixtures/cc_2_1_252_agents_help.txt");
+
 #[test]
 fn version_const_is_2_1_252() {
     assert_eq!(platform_api::CLAUDE_CODE_VERSION, "2.1.252");
@@ -38,4 +40,12 @@ fn version_facing_identifiers_share_one_source() {
         format!("Claude-User (claude-code/{version}; +https://support.anthropic.com/)")
             .contains(version)
     );
+}
+
+#[test]
+fn agents_help_fixture_pins_restricted_dispatch_surface() {
+    assert!(AGENTS_HELP.starts_with("Usage: claude agents [options]\n"));
+    assert!(AGENTS_HELP.contains(
+        "  --restricted                          Start dispatched sessions in restricted\n                                        mode\n"
+    ));
 }

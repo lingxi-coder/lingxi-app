@@ -696,11 +696,10 @@ pub struct Argv {
     // (`!Hl(i)` — falsy tokens false/0/no/off → false, the rest true), and a
     // TRUTHY value outside `--print` + `--output-format=stream-json` is a
     // fatal `Es(...)` (see [`Argv::validate_prompt_suggestions_args`],
-    // enforced in `run_cli`; verified live: exit 1). RESIDUAL: the actual
-    // per-turn `prompt_suggestion` stream-json message needs the
-    // binary's post-turn prediction side-call (`prompt_suggestion_generate`),
-    // which lingxi's print pipeline does not have — accepted flag is carried
-    // but no suggestion messages are emitted yet.
+    // enforced in `run_cli`; verified live: exit 1). The actual per-turn
+    // `prompt_suggestion` stream-json message is emitted by the print/SDK loop
+    // after a successful turn via the same forked side-query machinery that
+    // other history-inert post-turn helpers reuse.
     #[arg(
         long = "prompt-suggestions",
         value_name = "value",

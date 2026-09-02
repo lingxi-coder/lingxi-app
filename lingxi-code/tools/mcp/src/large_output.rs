@@ -72,14 +72,16 @@ pub fn process_mcp_result(
     output_dir: &Path,
     now_millis: u128,
 ) -> Value {
-    process_mcp_result_with_exact_count(
+    process_mcp_result_detailed(
         content,
         server_name,
         tool_name,
         output_dir,
         now_millis,
         ExactCountOutcome::Unsupported,
+        inferred_result_type(content),
     )
+    .content
 }
 
 /// Outcome of the exact provider token-count stage for the large-output guard.
@@ -107,6 +109,44 @@ pub enum ExactCountOutcome {
     Unsupported,
 }
 
+/// The transformed MCP result shape before large-output handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpLargeResultType {
+    ToolResult,
+    StructuredContent,
+    ContentArray,
+}
+
+impl McpLargeResultType {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::ToolResult => "toolResult",
+            Self::StructuredContent => "structuredContent",
+            Self::ContentArray => "contentArray",
+        }
+    }
+}
+
+/// Telemetry metadata for an MCP large-result handling branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LargeResultHandledTelemetry {
+    pub outcome: &'static str,
+    pub reason: &'static str,
+    pub size_estimate_tokens: u64,
+    pub persisted_size_chars: Option<u64>,
+    pub result_type: Option<&'static str>,
+    pub block_count: Option<u64>,
+    pub persisted_as: Option<&'static str>,
+}
+
+/// Detailed MCP large-result processing outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessedMcpResult {
+    pub content: Value,
+    pub telemetry: Option<LargeResultHandledTelemetry>,
+}
+
 /// Process an MCP result with the provider's exact token count when available.
 /// See [`ExactCountOutcome`] for the three route states this handles.
 #[must_use]
@@ -118,14 +158,67 @@ pub fn process_mcp_result_with_exact_count(
     now_millis: u128,
     exact_token_count: ExactCountOutcome,
 ) -> Value {
+    process_mcp_result_detailed(
+        content,
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        exact_token_count,
+        inferred_result_type(content),
+    )
+    .content
+}
+
+/// Process an MCP result with exact-count routing and return both the content
+/// and any `tengu_mcp_large_result_handled` branch data.
+#[must_use]
+pub fn process_mcp_result_detailed(
+    content: &Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: ExactCountOutcome,
+    result_type: McpLargeResultType,
+) -> ProcessedMcpResult {
+    let large_output_files_setting = std::env::var("ENABLE_MCP_LARGE_OUTPUT_FILES").ok();
+    process_mcp_result_detailed_with_setting(
+        content,
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        exact_token_count,
+        result_type,
+        large_output_files_setting.as_deref(),
+    )
+}
+
+fn process_mcp_result_detailed_with_setting(
+    content: &Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: ExactCountOutcome,
+    result_type: McpLargeResultType,
+    large_output_files_setting: Option<&str>,
+) -> ProcessedMcpResult {
     // IDE tools are not going to the model directly (client.ts:2727-2731).
     if server_name == "ide" {
-        return content.clone();
+        return ProcessedMcpResult {
+            content: content.clone(),
+            telemetry: None,
+        };
     }
 
     // Under the large-output threshold → forward verbatim (client.ts:2733-2736).
     if !mcp_content_needs_exact_count(content) {
-        return content.clone();
+        return ProcessedMcpResult {
+            content: content.clone(),
+            telemetry: None,
+        };
     }
 
     // The `AJr` needs-truncation predicate: Claude only enters large-output
@@ -133,31 +226,58 @@ pub fn process_mcp_result_with_exact_count(
     match exact_token_count {
         // `AJr` `catch`→`false`: a count-endpoint failure on a route that HAS a
         // count endpoint (Anthropic) forwards the content verbatim.
-        ExactCountOutcome::CountFailed => return content.clone(),
+        ExactCountOutcome::CountFailed => {
+            return ProcessedMcpResult {
+                content: content.clone(),
+                telemetry: None,
+            };
+        }
         // `!!(n && n > Fmo())` is false when the exact count is within the cap.
         ExactCountOutcome::Counted(tokens) if tokens <= DEFAULT_MAX_MCP_OUTPUT_TOKENS => {
-            return content.clone();
+            return ProcessedMcpResult {
+                content: content.clone(),
+                telemetry: None,
+            };
         }
         // Exact count over the cap, OR a route with no exact-count endpoint
         // (the accepted multi-provider divergence stays conservative): fall
         // through to large-output handling.
         ExactCountOutcome::Counted(_) | ExactCountOutcome::Unsupported => {}
     }
+    let size_estimate_tokens = content_size_estimate(content);
 
     // Feature gate: an explicitly-falsy ENABLE_MCP_LARGE_OUTPUT_FILES reverts to
     // the old truncation behavior (client.ts:2741-2748). Unset → persist.
-    if is_env_defined_falsy(
-        std::env::var("ENABLE_MCP_LARGE_OUTPUT_FILES")
-            .ok()
-            .as_deref(),
-    ) {
-        return truncate_mcp_content(content);
+    if is_env_defined_falsy(large_output_files_setting) {
+        return ProcessedMcpResult {
+            content: truncate_mcp_content(content),
+            telemetry: Some(LargeResultHandledTelemetry {
+                outcome: "truncated",
+                reason: "env_disabled",
+                size_estimate_tokens,
+                persisted_size_chars: None,
+                result_type: None,
+                block_count: None,
+                persisted_as: None,
+            }),
+        };
     }
 
     // Images: persisting as JSON defeats image compression / viewability, so
     // fall back to truncation (client.ts:2756-2765).
     if content_contains_images(content) {
-        return truncate_mcp_content(content);
+        return ProcessedMcpResult {
+            content: truncate_mcp_content(content),
+            telemetry: Some(LargeResultHandledTelemetry {
+                outcome: "truncated",
+                reason: "contains_images",
+                size_estimate_tokens,
+                persisted_size_chars: None,
+                result_type: None,
+                block_count: None,
+                persisted_as: None,
+            }),
+        };
     }
 
     // Singleton-unwrap (`tengu_mcp_singleton_unwrap`, Statsig default true ⇒
@@ -180,10 +300,9 @@ pub fn process_mcp_result_with_exact_count(
             "application/json",
         ),
     };
-    // `contentLength.toLocaleString()` operates on the JS string length
-    // (UTF-16 units); `chars().count()` is the closest UTF-8 analogue and
-    // coincides for the (near-)ASCII serialized JSON.
-    let content_length = content_str.chars().count() as u64;
+    // `contentLength.toLocaleString()` operates on JavaScript string length
+    // (UTF-16 code units), including for an astral character in plain text.
+    let content_length = js_string_len(&content_str);
 
     let persist_id = format!(
         "mcp-{}-{}-{now_millis}",
@@ -204,18 +323,38 @@ pub fn process_mcp_result_with_exact_count(
             } else {
                 None
             };
-            Value::String(get_large_output_instructions(
-                &filepath,
-                content_length,
-                &format_description(content, is_plain_text),
-                line_stats.as_ref(),
-            ))
+            ProcessedMcpResult {
+                content: Value::String(get_large_output_instructions(
+                    &filepath,
+                    content_length,
+                    &format_description(content, is_plain_text),
+                    line_stats.as_ref(),
+                )),
+                telemetry: Some(LargeResultHandledTelemetry {
+                    outcome: "persisted",
+                    reason: "file_saved",
+                    size_estimate_tokens,
+                    persisted_size_chars: Some(content_length),
+                    result_type: Some(result_type.wire_str()),
+                    block_count: content.as_array().map(|blocks| blocks.len() as u64),
+                    persisted_as: Some(if is_plain_text { "text" } else { "json" }),
+                }),
+            }
         }
         // Write failed → the persist-failed truncation-info message
         // (client.ts:2775-2784).
-        PersistBinaryResult::Err { error } => {
-            Value::String(persist_failed_message(content_length, &error))
-        }
+        PersistBinaryResult::Err { error } => ProcessedMcpResult {
+            content: Value::String(persist_failed_message(content_length, &error)),
+            telemetry: Some(LargeResultHandledTelemetry {
+                outcome: "truncated",
+                reason: "persist_failed",
+                size_estimate_tokens,
+                persisted_size_chars: None,
+                result_type: None,
+                block_count: None,
+                persisted_as: None,
+            }),
+        },
     }
 }
 
@@ -240,6 +379,14 @@ pub fn content_contains_images(content: &Value) -> bool {
     content
         .as_array()
         .is_some_and(|blocks| blocks.iter().any(is_image_block))
+}
+
+fn inferred_result_type(content: &Value) -> McpLargeResultType {
+    match content {
+        Value::Array(_) => McpLargeResultType::ContentArray,
+        Value::String(_) => McpLargeResultType::ToolResult,
+        _ => McpLargeResultType::ContentArray,
+    }
 }
 
 // -- internals ---------------------------------------------------------------
@@ -272,10 +419,12 @@ fn content_size_estimate(content: &Value) -> u64 {
 /// (TS uses the UTF-16 string length); identical for ASCII, the same convention
 /// the microcompact port uses.
 fn rough_token_count_estimation(content: &str) -> u64 {
-    u64::try_from(content.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(2)
-        / 4
+    js_string_len(content).saturating_add(2) / 4
+}
+
+/// JavaScript `String.prototype.length` for valid Rust strings.
+fn js_string_len(content: &str) -> u64 {
+    u64::try_from(content.encode_utf16().count()).unwrap_or(u64::MAX)
 }
 
 /// `block.type === 'image'`.
@@ -355,8 +504,7 @@ fn infer_compact_schema(value: &Value, depth: i32) -> String {
 /// Per-line statistics for a persisted plain-text result: `{count, maxLen}`
 /// (`client.ts:2773-2778`). `count` is the line count after dropping one
 /// trailing empty line; `max_len` is the longest line. TS measures `String`
-/// `.length` (UTF-16 units); `chars().count()` is the UTF-8 analogue used
-/// throughout this module (identical for ASCII).
+/// `.length` (UTF-16 units).
 struct LineStats {
     count: u64,
     max_len: u64,
@@ -371,7 +519,7 @@ fn compute_line_stats(content: &str) -> LineStats {
     }
     let max_len = lines
         .iter()
-        .map(|l| l.chars().count() as u64)
+        .map(|line| js_string_len(line))
         .max()
         .unwrap_or(0);
     LineStats {
@@ -505,13 +653,33 @@ fn truncation_message() -> String {
     )
 }
 
-/// `truncateString` (`mcpValidation.ts:87-92`): the first `max_chars` characters
-/// (whole string when shorter). Char-based (TS slices UTF-16 units); identical
-/// for ASCII and never splits a UTF-8 codepoint.
+/// Oracle `rs`: the first `max_chars` JavaScript iterator elements. JS string
+/// iteration is Unicode-scalar-safe, matching Rust's `chars()` here.
 fn truncate_string(content: &str, max_chars: usize) -> String {
     match content.char_indices().nth(max_chars) {
         Some((idx, _)) => content[..idx].to_string(),
         None => content.to_string(),
+    }
+}
+
+/// Oracle `ce`: take a prefix by UTF-16 code-unit budget without retaining a
+/// dangling high surrogate. Rust strings cannot hold an isolated surrogate,
+/// so stopping before the scalar that would cross the budget is equivalent.
+fn truncate_string_utf16(content: &str, max_code_units: usize) -> String {
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (index, ch) in content.char_indices() {
+        let units = ch.len_utf16();
+        if used.saturating_add(units) > max_code_units {
+            break;
+        }
+        used += units;
+        end = index + ch.len_utf8();
+    }
+    if end == content.len() {
+        content.to_string()
+    } else {
+        content[..end].to_string()
     }
 }
 
@@ -533,12 +701,12 @@ fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
                     break;
                 }
                 let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                let text_len = text.chars().count();
+                let text_len = usize::try_from(js_string_len(text)).unwrap_or(usize::MAX);
                 if text_len <= remaining {
                     result.push(block.clone());
                     current_chars += text_len;
                 } else {
-                    result.push(text_block(&truncate_string(text, remaining)));
+                    result.push(text_block(&truncate_string_utf16(text, remaining)));
                     break;
                 }
             }
@@ -633,6 +801,9 @@ mod tests {
         assert_eq!(rough_token_count_estimation("ab"), 1); // (2+2)/4 = 1
         assert_eq!(rough_token_count_estimation(&"a".repeat(50_000)), 12_500);
         assert_eq!(rough_token_count_estimation(&"a".repeat(50_004)), 12_501);
+        // JS measures UTF-16 code units: two astral scalars are length four,
+        // not Rust's two scalars or their eight UTF-8 bytes.
+        assert_eq!(rough_token_count_estimation("😀😀"), 1);
     }
 
     #[test]
@@ -1081,6 +1252,16 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
         // Two trailing newlines: only ONE empty element is popped.
         let ls = compute_line_stats("x\n\n");
         assert_eq!((ls.count, ls.max_len), (2, 1));
+        let ls = compute_line_stats("😀x\n旗");
+        assert_eq!((ls.count, ls.max_len), (2, 3));
+    }
+
+    #[test]
+    fn array_text_truncation_uses_surrogate_safe_utf16_budget() {
+        assert_eq!(truncate_string_utf16("a😀b", 1), "a");
+        assert_eq!(truncate_string_utf16("a😀b", 2), "a");
+        assert_eq!(truncate_string_utf16("a😀b", 3), "a😀");
+        assert_eq!(truncate_string_utf16("a😀b", 4), "a😀b");
     }
 
     #[test]
@@ -1111,6 +1292,73 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
             "string content persisted with .txt ext"
         );
         assert!(text.contains("Format: Plain text\n"));
+    }
+
+    #[test]
+    fn detailed_env_disabled_branch_reports_truncation_telemetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+        let processed = process_mcp_result_detailed_with_setting(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::Unsupported,
+            McpLargeResultType::ContentArray,
+            Some("0"),
+        );
+
+        assert!(
+            processed.content.is_array(),
+            "env-disabled branch truncates"
+        );
+        assert_eq!(
+            processed.telemetry,
+            Some(LargeResultHandledTelemetry {
+                outcome: "truncated",
+                reason: "env_disabled",
+                size_estimate_tokens: content_size_estimate(&content),
+                persisted_size_chars: None,
+                result_type: None,
+                block_count: None,
+                persisted_as: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detailed_persist_success_reports_oracle_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(30_000), text_of_len(30_000)]);
+        let processed = process_mcp_result_detailed(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::Unsupported,
+            McpLargeResultType::ContentArray,
+        );
+
+        assert!(processed.content.as_str().is_some());
+        assert_eq!(
+            processed.telemetry,
+            Some(LargeResultHandledTelemetry {
+                outcome: "persisted",
+                reason: "file_saved",
+                size_estimate_tokens: content_size_estimate(&content),
+                persisted_size_chars: Some(
+                    serde_json::to_string_pretty(&content)
+                        .unwrap()
+                        .encode_utf16()
+                        .count() as u64
+                ),
+                result_type: Some("contentArray"),
+                block_count: Some(2),
+                persisted_as: Some("json"),
+            })
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
 pub mod ide;
+pub mod session_agents;
 pub mod settings_watch;
 mod skill_loader;
 
@@ -190,6 +191,209 @@ fn resolve_memory_feature_gates(
         memdir_prefetch_enabled || session_memory_enabled,
         session_memory_enabled,
     )
+}
+
+async fn emit_mcp_servers_inventory(
+    bus: &telemetry::AnalyticsBus,
+    payload: &telemetry::tengu::mcp::ServersPayload,
+) {
+    let mut metadata = telemetry::LogEventMetadata::new();
+    for (key, value) in [
+        ("enterprise", payload.enterprise),
+        ("global", payload.global),
+        ("project", payload.project),
+        ("user", payload.user),
+        ("plugin", payload.plugin),
+        ("agent", payload.agent),
+        ("claudeai", payload.claudeai),
+    ] {
+        metadata.insert(
+            key.to_string(),
+            telemetry::AnalyticsValue::Int(i64::from(value)),
+        );
+    }
+    bus.log_event(telemetry::tengu::mcp::SERVERS, metadata)
+        .await;
+}
+
+async fn emit_mcp_tools_commands_loaded(
+    bus: &telemetry::AnalyticsBus,
+    payload: &telemetry::tengu::mcp::ToolsCommandsLoadedPayload,
+) {
+    let metadata = [
+        (
+            "tools_count".to_string(),
+            telemetry::AnalyticsValue::Int(i64::from(payload.tools_count)),
+        ),
+        (
+            "commands_count".to_string(),
+            telemetry::AnalyticsValue::Int(i64::from(payload.commands_count)),
+        ),
+        (
+            "commands_metadata_length".to_string(),
+            telemetry::AnalyticsValue::Int(i64::from(payload.commands_metadata_length)),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    bus.log_event(telemetry::tengu::mcp::TOOLS_COMMANDS_LOADED, metadata)
+        .await;
+}
+
+fn utf16_code_units_len(value: &str) -> u32 {
+    u32::try_from(value.encode_utf16().count()).unwrap_or(u32::MAX)
+}
+
+fn registered_mcp_tool_count(
+    tools: &[(protocol::McpConnectionId, Vec<Arc<dyn tool_api::Tool>>)],
+) -> u32 {
+    tools.iter().fold(0u32, |total, (_, tools)| {
+        total.saturating_add(u32::try_from(tools.len()).unwrap_or(u32::MAX))
+    })
+}
+
+fn mcp_servers_inventory_payload(
+    configs: &[mcp::McpServerConfig],
+) -> telemetry::tengu::mcp::ServersPayload {
+    let mut by_name = BTreeMap::new();
+    for config in configs {
+        let bucket = match config.scope {
+            // LingXi's `Managed` scope is a port-side split of the same
+            // enterprise-managed settings tier. The 2.1.252 oracle has no
+            // separate `managed` inventory bucket.
+            mcp::ConfigScope::Enterprise | mcp::ConfigScope::Managed => "enterprise",
+            mcp::ConfigScope::User => "global",
+            mcp::ConfigScope::Project => "project",
+            mcp::ConfigScope::Local => "user",
+            mcp::ConfigScope::Dynamic => "plugin",
+            mcp::ConfigScope::Agent => "agent",
+            mcp::ConfigScope::ClaudeAi => "claudeai",
+        };
+        by_name.insert(config.name.clone(), bucket);
+    }
+
+    let mut payload = telemetry::tengu::mcp::ServersPayload {
+        enterprise: 0,
+        global: 0,
+        project: 0,
+        user: 0,
+        plugin: 0,
+        agent: 0,
+        claudeai: 0,
+    };
+    for bucket in by_name.values() {
+        match *bucket {
+            "enterprise" => payload.enterprise = payload.enterprise.saturating_add(1),
+            "global" => payload.global = payload.global.saturating_add(1),
+            "project" => payload.project = payload.project.saturating_add(1),
+            "user" => payload.user = payload.user.saturating_add(1),
+            "plugin" => payload.plugin = payload.plugin.saturating_add(1),
+            "agent" => payload.agent = payload.agent.saturating_add(1),
+            "claudeai" => payload.claudeai = payload.claudeai.saturating_add(1),
+            _ => {}
+        }
+    }
+    payload
+}
+
+fn mcp_tools_commands_loaded_payload(
+    tools_count: u32,
+    commands: &[command_api::model::SlashCommand],
+) -> telemetry::tengu::mcp::ToolsCommandsLoadedPayload {
+    let commands_metadata_length = commands.iter().fold(0u32, |total, command| {
+        total
+            .saturating_add(utf16_code_units_len(&command.name))
+            .saturating_add(utf16_code_units_len(&command.description))
+            .saturating_add(
+                command
+                    .argument_hint
+                    .as_deref()
+                    .map_or(0, utf16_code_units_len),
+            )
+    });
+    telemetry::tengu::mcp::ToolsCommandsLoadedPayload {
+        tools_count,
+        commands_count: u32::try_from(commands.len()).unwrap_or(u32::MAX),
+        commands_metadata_length,
+    }
+}
+
+#[cfg(test)]
+mod mcp_telemetry_helper_tests {
+    use super::{mcp_servers_inventory_payload, mcp_tools_commands_loaded_payload};
+    use platform_api::McpTransportSpec;
+    use protocol::McpConnectionId;
+    use std::collections::HashMap;
+
+    fn stdio_config(name: &str, scope: mcp::ConfigScope) -> mcp::McpServerConfig {
+        mcp::McpServerConfig {
+            name: name.to_string(),
+            spec: McpTransportSpec::Stdio {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            scope,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            tools: Vec::new(),
+            tool_permissions: Default::default(),
+            config_error: None,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn mcp_server_inventory_matches_oracle_scope_buckets_and_folds_managed_into_enterprise() {
+        let payload = mcp_servers_inventory_payload(&[
+            stdio_config("enterprise", mcp::ConfigScope::Enterprise),
+            stdio_config("managed", mcp::ConfigScope::Managed),
+            stdio_config("global", mcp::ConfigScope::User),
+            stdio_config("project", mcp::ConfigScope::Project),
+            stdio_config("user", mcp::ConfigScope::Local),
+            stdio_config("dynamic", mcp::ConfigScope::Dynamic),
+            stdio_config("agent", mcp::ConfigScope::Agent),
+            stdio_config("claudeai", mcp::ConfigScope::ClaudeAi),
+        ]);
+
+        assert_eq!(payload.enterprise, 2);
+        assert_eq!(payload.global, 1);
+        assert_eq!(payload.project, 1);
+        assert_eq!(payload.user, 1);
+        assert_eq!(payload.plugin, 1);
+        assert_eq!(payload.agent, 1);
+        assert_eq!(payload.claudeai, 1);
+    }
+
+    #[test]
+    fn mcp_tools_commands_loaded_uses_utf16_lengths_like_the_oracle_js_strings() {
+        let prompts = [(
+            "srv".to_string(),
+            McpConnectionId::new(),
+            platform_api::McpPromptDto {
+                name: "emoji".to_string(),
+                description: Some("desc😀".to_string()),
+                arguments: vec![platform_api::McpPromptArgumentDto {
+                    name: "旗".to_string(),
+                    description: None,
+                    required: true,
+                }],
+            },
+        )];
+        let commands = command_api::mcp_prompts::mcp_prompt_commands(&prompts);
+        let payload = mcp_tools_commands_loaded_payload(7, &commands);
+
+        assert_eq!(payload.tools_count, 7);
+        assert_eq!(payload.commands_count, 1);
+        assert_eq!(
+            payload.commands_metadata_length,
+            "srv:emoji".encode_utf16().count() as u32
+                + "desc😀".encode_utf16().count() as u32
+                + "<旗>".encode_utf16().count() as u32
+        );
+    }
 }
 
 /// Port of `getAPIProvider()` (`utils/model/providers.ts:6-14`).
@@ -2794,6 +2998,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     ask_user_question_tx: None,
 ///     // `None` ⟶ `request_access` uses the fail-closed DenyAllResolver.
 ///     computer_access_tx: None,
+///     session_agent_observer: None,
 ///     // `None` ⟶ no device audio: the `voice`/`speech` tools are not
 ///     // registered at all (see `register_desktop_tools`).
 ///     audio: None,
@@ -3192,6 +3397,11 @@ pub struct DesktopConfig {
     /// `request_access` on the fail-closed `DenyAllResolver` default.
     pub computer_access_tx:
         Option<tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>>,
+    /// Optional connection-scoped observer for real subagent lifecycle and
+    /// message events. The bridge supplies this after it creates its outbound
+    /// event sink; CLI/TUI hosts leave it unset so their behavior is unchanged.
+    pub session_agent_observer:
+        Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
     /// Optional device-audio capability (microphone / recognizer / synthesizer).
     ///
     /// `Some` only on the bridge path: `bridge_server::boot::assemble` builds an
@@ -3455,6 +3665,10 @@ impl std::fmt::Debug for DesktopConfig {
                 "computer_access_tx",
                 &self.computer_access_tx.as_ref().map(|_| "<configured>"),
             )
+            .field(
+                "session_agent_observer",
+                &self.session_agent_observer.as_ref().map(|_| "<configured>"),
+            )
             .field("audio", &self.audio.as_ref().map(|_| "<configured>"))
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
@@ -3566,6 +3780,7 @@ impl Default for DesktopConfig {
             bg_session_forker: None,
             ask_user_question_tx: None,
             computer_access_tx: None,
+            session_agent_observer: None,
             // Default: no device audio ⟶ the `voice`/`speech` tools are not
             // registered (only the bridge composition root wires an AudioBridge).
             audio: None,
@@ -7862,12 +8077,12 @@ pub async fn build(
     // `with_default_model` anchors `AgentModel::Inherit` + family-alias tiers to
     // the parent model so built-in subagent spawns resolve to a concrete wire id
     // instead of passing `"inherit"`/`"haiku"` raw (parity batch 22).
-    // G4: boot-stable session id stamped on the child runner's SubagentStart
-    // HookContext (the runtime orchestrator session id is not available at boot;
-    // this is cosmetic on the SubagentStart wire payload — the additionalContext
-    // collection keys on agent_id/agent_type, set by the runner per spawn).
-    let subagent_hook_session_id = protocol::SessionId::new();
-    let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+    // G4/SC-02: stamp the owning conversation id on child hook/checkpoint
+    // context. The near-limit checkpoint uses this value as its per-session
+    // dedupe/ref key, so a cosmetic random id would split it from the main
+    // session's hard-429 checkpoint.
+    let subagent_hook_session_id = main_session_id;
+    let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_session_interactive(interactive_session)
         .with_api_client(subagent_api)
         // #15: the parent model handed to the spawner must be the RESOLVED
@@ -7907,16 +8122,15 @@ pub async fn build(
         .with_session_provider_first_party(session_provider_first_party)
         // G4/G5: stamp the session id + cwd on the `HookContext` the child runner
         // builds for the SubagentStart fire (the orchestrator's hook context is
-        // session-scoped at runtime; the spawner uses a boot-stable session id —
-        // the field is cosmetic on the wire payload, the load-bearing
-        // agent_id/agent_type are set by the runner per spawn).
+        // session-scoped at runtime; the spawner uses the boot-stable owning
+        // session id so both hook payloads and checkpoint keys remain aligned.
         // FIX C: also thread the boot-computed MAIN-session subagents dir
         // (`…/projects/<sanitize(cwd)>/<main_session>/subagents`) so each spawned
         // child's `agent_transcript_path` (the agent-scoped `SubagentStop` field)
         // resolves to the real `…/subagents/agent-<id>.jsonl` (claude-code
         // `getAgentTranscriptPath`) instead of the prior `/tmp` placeholder. The
-        // subdir keys on the MAIN session id (claude `getSessionId()`), NOT the
-        // cosmetic `subagent_hook_session_id`.
+        // subdir and hook context both key on the MAIN session id (claude
+        // `getSessionId()`).
         .with_hook_context(
             subagent_hook_session_id,
             cwd.clone(),
@@ -7952,6 +8166,9 @@ pub async fn build(
         .with_subagent_env_renderer(std::sync::Arc::new(
             orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
         ));
+    if let Some(observer) = cfg.session_agent_observer.clone() {
+        subagent_spawner_concrete = subagent_spawner_concrete.with_spawn_observer(observer);
+    }
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     // G4/G5: grab the set-once hook-executor + skill-loader cells BEFORE boxing,
@@ -9238,7 +9455,7 @@ pub async fn build(
     )))
     // Full teammate parity (P1): inherit the shared budget enforcer + fire
     // SubagentStart via the same `HookExecutorImpl` the orchestrator uses, and
-    // stamp the SubagentStart `HookContext` (session id + cwd). `hooks` /
+    // stamp the SubagentStart `HookContext` (owning session id + cwd). `hooks` /
     // `budget_enforcer` already exist here (the teammate handler is built after
     // them), unlike the spawner's deferred cells. The advertised tool pool +
     // skills-preload registries are filled via handles below (they don't exist
@@ -10344,9 +10561,9 @@ pub async fn build(
         }
         tools_inner.register_builtin(workflow_tool);
     }
-    for (conn_id, mcp_tools) in
-        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await
-    {
+    let registered_mcp_tools =
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
+    for (conn_id, mcp_tools) in registered_mcp_tools {
         tools_inner.register_mcp_tools(conn_id, mcp_tools);
     }
     // Structured output (`--json-schema`): register the forced `StructuredOutput`
@@ -11194,9 +11411,9 @@ pub async fn build(
     // without it they existed on the wire and nowhere the user or model could
     // reach. Merged LAST so a same-named local command wins — a remote server
     // must not shadow one of the user's own.
-    for cmd in
-        command_api::mcp_prompts::mcp_prompt_commands(&mcp_registry.connected_prompts().await)
-    {
+    let mcp_prompt_commands =
+        command_api::mcp_prompts::mcp_prompt_commands(&mcp_registry.connected_prompts().await);
+    for cmd in mcp_prompt_commands.iter().cloned() {
         if reg.resolve(&cmd.name).is_none() {
             reg.register_command(cmd);
         }
@@ -11367,6 +11584,37 @@ pub async fn build(
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }));
     }
+    // Inventory only configs that actually reached the live registry. Counting
+    // discovered plugin manifests here over-reported blocked, colliding, or
+    // failed-to-materialize plugin servers.
+    let inventory_configs = {
+        let connections = mcp_registry.connections.read().await;
+        connections
+            .values()
+            .map(|state| state.config().clone())
+            .collect::<Vec<_>>()
+    };
+    emit_mcp_servers_inventory(
+        analytics_bus.as_ref(),
+        &mcp_servers_inventory_payload(&inventory_configs),
+    )
+    .await;
+
+    // Oracle `Pd` reports the completed discovery round once. Re-snapshot
+    // after plugin materialization so enabled plugin MCP tools/prompts are not
+    // omitted from the one startup event.
+    let loaded_mcp_tools =
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
+    let loaded_mcp_prompt_commands =
+        command_api::mcp_prompts::mcp_prompt_commands(&mcp_registry.connected_prompts().await);
+    emit_mcp_tools_commands_loaded(
+        analytics_bus.as_ref(),
+        &mcp_tools_commands_loaded_payload(
+            registered_mcp_tool_count(&loaded_mcp_tools),
+            &loaded_mcp_prompt_commands,
+        ),
+    )
+    .await;
     repo_root_reloader
         .set_plugin_runtime(plugin_runtime.clone())
         .await;
@@ -13428,6 +13676,7 @@ mod tests {
             // questionnaire surface.
             ask_user_question_tx: None,
             computer_access_tx: None,
+            session_agent_observer: None,
             audio: None,
         };
         (tmp, cfg)
@@ -19427,6 +19676,7 @@ mod workspace_lease_forwarding_tests {
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             request_source: None,

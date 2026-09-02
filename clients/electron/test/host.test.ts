@@ -1,10 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CH_BRIDGE_RESTART, CH_SETTINGS_UPDATE, HostController } from '../src/main/host';
+import {
+  CH_BRIDGE_RESTART,
+  CH_SETTINGS_UPDATE,
+  CH_WORKSPACE_FILE_PREVIEW,
+  HostController,
+  readWorkspaceFilePreview,
+} from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 
@@ -17,6 +23,95 @@ function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; 
   });
   return { promise, resolve: (value?: T) => resolvePromise(value as T), reject: rejectPromise };
 }
+
+test('workspace preview is bounded UTF-8 and rejects traversal, binary content, and symlinks', () => {
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-preview-project-'));
+  const outsideDirectory = mkdtempSync(join(tmpdir(), 'lingxi-preview-outside-'));
+  const project = realpathSync.native(projectDirectory);
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'src', 'app.ts'), 'export const answer = 42;\n');
+    assert.deepEqual(readWorkspaceFilePreview(project, 'src/app.ts'), {
+      kind: 'text',
+      path: 'src/app.ts',
+      size: 26,
+      content: 'export const answer = 42;\n',
+      truncated: false,
+    });
+
+    writeFileSync(join(project, 'invalid.bin'), Buffer.from([0x61, 0xff, 0x62]));
+    assert.equal(readWorkspaceFilePreview(project, 'invalid.bin').kind, 'binary');
+    writeFileSync(join(project, 'controls.bin'), Buffer.from([0, 1, 2, 3, 4, 5]));
+    assert.equal(readWorkspaceFilePreview(project, 'controls.bin').kind, 'binary');
+
+    const cap = 512 * 1024;
+    writeFileSync(join(project, 'large.txt'), Buffer.concat([
+      Buffer.alloc(cap - 1, 'a'),
+      Buffer.from('😀tail'),
+    ]));
+    const large = readWorkspaceFilePreview(project, 'large.txt');
+    assert.equal(large.kind, 'text');
+    assert.equal(large.truncated, true);
+    assert.equal(large.content?.length, cap - 1);
+
+    writeFileSync(join(outsideDirectory, 'secret.txt'), 'outside');
+    if (process.platform !== 'win32') {
+      symlinkSync(join(outsideDirectory, 'secret.txt'), join(project, 'linked.txt'));
+      symlinkSync(outsideDirectory, join(project, 'linked-dir'));
+      assert.throws(() => readWorkspaceFilePreview(project, 'linked.txt'), /symlink/);
+      assert.throws(() => readWorkspaceFilePreview(project, 'linked-dir/secret.txt'), /symlink/);
+    }
+    assert.throws(() => readWorkspaceFilePreview(project, '../secret.txt'), /traversal|outside/);
+    assert.throws(() => readWorkspaceFilePreview(project, join(outsideDirectory, 'secret.txt')), /relative/);
+    assert.throws(() => readWorkspaceFilePreview(project, 'bad\0path'), /invalid/);
+  } finally {
+    rmSync(projectDirectory, { recursive: true, force: true });
+    rmSync(outsideDirectory, { recursive: true, force: true });
+  }
+});
+
+test('workspace preview IPC is fenced to the exact active session and its project', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-preview-ipc-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-preview-ipc-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const otherSessionId = '22222222-3333-4444-8555-666666666666';
+  writeFileSync(join(project, 'readme.txt'), 'hello');
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession({ projectPath: project, sessionId: otherSessionId });
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    get: (requested: string) => requested === sessionId
+      ? { projectPath: project, connectionState: { status: 'connected' as const } }
+      : undefined,
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const preview = handlers.get(CH_WORKSPACE_FILE_PREVIEW);
+  assert.ok(preview);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    await assert.rejects(() => Promise.resolve(preview!(event, sessionId, 'readme.txt')), /not active/);
+    settings.setActiveSession({ projectPath: project, sessionId });
+    assert.equal((await preview!(event, sessionId, 'readme.txt') as { content?: string }).content, 'hello');
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
 
 test('bridge restart IPC re-checks session ownership and active work at execution time', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-restart-ipc-settings-'));

@@ -505,6 +505,132 @@ async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
     );
 }
 
+#[tokio::test]
+async fn mcp_end_turn_result_persists_only_mcp_meta() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let orch = orch_with_writer(dir.path(), session_path.clone());
+
+    let tuid = protocol::ToolUseId::new();
+    orch.record_tool_use_result(&tuid, serde_json::json!([{"type":"text","text":"hi"}]))
+        .await;
+    orch.record_tool_use_mcp_meta(&tuid, serde_json::json!({"_meta":{"claude/endTurn":true}}))
+        .await;
+    orch.record_pending_tool_result_turn_end(
+        &tuid,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::McpMeta,
+        },
+    )
+    .await;
+
+    let msg = ConversationMessage::User {
+        id: protocol::MessageId::new(),
+        content: vec![protocol::ContentBlock::ToolResult {
+            tool_use_id: tuid.clone(),
+            content: "hi".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    orch.persist_message_to_jsonl(&msg).await;
+
+    let raw = std::fs::read_to_string(&session_path).expect("session file");
+    let line = raw.lines().next().expect("one line");
+    assert!(
+        line.contains(r#""mcpMeta":{"_meta":{"claude/endTurn":true}}"#),
+        "the MCP marker must persist verbatim, got: {line}"
+    );
+    assert!(
+        !line.contains(r#""toolEndsTurn""#),
+        "MCP metadata ends the turn through mcpMeta; toolEndsTurn is reserved for native ToolResult.endsTurn: {line}"
+    );
+}
+
+#[tokio::test]
+async fn native_end_turn_result_persists_tool_ends_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let orch = orch_with_writer(dir.path(), session_path.clone());
+
+    let tuid = protocol::ToolUseId::new();
+    orch.record_tool_use_result(&tuid, serde_json::json!({"ok": true}))
+        .await;
+    orch.record_pending_tool_result_turn_end(
+        &tuid,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::Tool,
+        },
+    )
+    .await;
+
+    let msg = ConversationMessage::User {
+        id: protocol::MessageId::new(),
+        content: vec![protocol::ContentBlock::ToolResult {
+            tool_use_id: tuid,
+            content: "done".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    orch.persist_message_to_jsonl(&msg).await;
+
+    let raw = std::fs::read_to_string(&session_path).expect("session file");
+    let line = raw.lines().next().expect("one line");
+    assert!(
+        line.contains(r#""toolEndsTurn":true"#),
+        "native ToolResult.endsTurn must persist at the top level: {line}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_end_turn_markers_use_the_last_result_and_drain_all_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let orch = orch_with_writer(dir.path(), dir.path().join("session.jsonl"));
+    let native = protocol::ToolUseId::new();
+    let mcp = protocol::ToolUseId::new();
+    orch.record_pending_tool_result_turn_end(
+        &native,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::Tool,
+        },
+    )
+    .await;
+    orch.record_pending_tool_result_turn_end(
+        &mcp,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::McpMeta,
+        },
+    )
+    .await;
+
+    let selected = orch
+        .take_pending_tool_result_turn_ends(&[native.clone(), mcp.clone()])
+        .await
+        .expect("one batch-level end request");
+    assert_eq!(
+        selected.source,
+        tool_api::tool_trait::ToolResultTurnEndSource::McpMeta,
+        "the last matching result overwrites the query's scalar end source"
+    );
+    assert!(
+        orch.transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .is_empty(),
+        "all matching side-table entries must be removed after the turn"
+    );
+}
+
 /// O1: the exactly-one-`tool_result` guard (claude's `Tpr`) applies to
 /// EVERY tool-result head key, not just `toolDenialKind` — a batched user
 /// message carrying two results cannot attribute one message-level value.
@@ -1558,4 +1684,91 @@ async fn merged_assistant_persists_model_profile_for_resume() {
             .and_then(|value| value.as_str()),
         Some("openrouter")
     );
+}
+
+#[tokio::test]
+async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_parent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let orch = orch_with_writer(dir.path(), session_path.clone());
+    let mcp_id = protocol::ToolUseId::new();
+    let native_id = protocol::ToolUseId::new();
+    let assistant = ConversationMessage::Assistant {
+        id: protocol::MessageId::new(),
+        content: vec![
+            protocol::ContentBlock::ToolUse {
+                id: mcp_id.clone(),
+                name: "McpEnd".into(),
+                input: serde_json::json!({}),
+                provider_id: None,
+            },
+            protocol::ContentBlock::ToolUse {
+                id: native_id.clone(),
+                name: "NativeEnd".into(),
+                input: serde_json::json!({}),
+                provider_id: None,
+            },
+        ],
+        stop_reason: Some("tool_use".into()),
+    };
+    orch.persist_assistant_merged(&assistant, None, None).await;
+
+    orch.record_tool_use_result(&mcp_id, serde_json::json!({"mcp": true}))
+        .await;
+    orch.record_tool_use_mcp_meta(
+        &mcp_id,
+        serde_json::json!({"_meta":{"claude/endTurn":true}}),
+    )
+    .await;
+    orch.record_pending_tool_result_turn_end(
+        &mcp_id,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::McpMeta,
+        },
+    )
+    .await;
+    orch.record_tool_use_result(&native_id, serde_json::json!({"native": true}))
+        .await;
+    orch.record_pending_tool_result_turn_end(
+        &native_id,
+        tool_api::tool_trait::ToolResultTurnEnd {
+            source: tool_api::tool_trait::ToolResultTurnEndSource::Tool,
+        },
+    )
+    .await;
+
+    for (id, text) in [(&mcp_id, "mcp"), (&native_id, "native")] {
+        let result = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: text.into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let parent = orch.source_tool_assistant_uuid(id).await;
+        orch.persist_message_to_jsonl_with_parent(&result, parent)
+            .await;
+    }
+
+    let lines = read_jsonl(&session_path);
+    assert_eq!(lines.len(), 3);
+    let assistant_uuid = lines[0].uuid.as_str();
+    assert_eq!(lines[1].parent_uuid.as_deref(), Some(assistant_uuid));
+    assert_eq!(lines[2].parent_uuid.as_deref(), Some(assistant_uuid));
+    assert_eq!(
+        lines[1].extra.get("mcpMeta"),
+        Some(&serde_json::json!({"_meta":{"claude/endTurn":true}}))
+    );
+    assert!(lines[1].extra.get("toolEndsTurn").is_none());
+    assert_eq!(
+        lines[2].extra.get("toolEndsTurn"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(lines[2].extra.get("mcpMeta").is_none());
 }

@@ -272,8 +272,24 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
 
 /// An allowed FQN (`allow: ["mcp__mock__b"]`) passes the gate and reaches the
 /// server's `call_tool`, round-tripping a non-error result.
-#[tokio::test]
-async fn allowed_fqn_tool_use_reaches_server() {
+#[test]
+fn allowed_fqn_tool_use_reaches_server() {
+    std::thread::Builder::new()
+        .name("mcp-permission-allowed".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("MCP permission runtime")
+                .block_on(allowed_fqn_tool_use_reaches_server_inner());
+        })
+        .expect("spawn MCP permission test thread")
+        .join()
+        .expect("MCP permission test thread");
+}
+
+async fn allowed_fqn_tool_use_reaches_server_inner() {
     let (tools, mcp_registry, mock) = seed(&["a", "b"]).await;
     let perms = policy_gate(
         r#"{ "permissions": { "allow": ["mcp__mock__b"] } }"#,

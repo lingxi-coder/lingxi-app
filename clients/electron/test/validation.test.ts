@@ -26,6 +26,11 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.deepEqual(validateClientCommand({ type: 'list_models' }), { type: 'list_models' });
   assert.deepEqual(validateClientCommand({ type: 'list_sessions', limit: 25 }), { type: 'list_sessions', limit: 25 });
   assert.deepEqual(validateClientCommand({ type: 'task_output', task_id: 'task-1', offset: 0 }), { type: 'task_output', task_id: 'task-1', offset: 0 });
+  assert.deepEqual(validateClientCommand({ type: 'list_session_agents' }), { type: 'list_session_agents' });
+  assert.deepEqual(
+    validateClientCommand({ type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' }),
+    { type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' },
+  );
   assert.deepEqual(validateClientCommand({ type: 'task_list', status_filter: { type: 'paused' } }), { type: 'task_list', status_filter: { type: 'paused' } });
   assert.deepEqual(validateClientCommand({ type: 'set_permission_mode', mode: 'auto' }), { type: 'set_permission_mode', mode: 'auto' });
   assert.deepEqual(validateClientCommand({ type: 'get_conversation_controls' }), { type: 'get_conversation_controls' });
@@ -48,6 +53,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: 'model opus' }), /invalid slash command/);
   assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/' }), /invalid slash command/);
   assert.throws(() => validateClientCommand({ type: 'task_list', status_filter: { type: ['paused'] } }), /invalid task status/);
+  assert.throws(() => validateClientCommand({ type: 'list_session_agents', extra: true }), /unsupported fields/);
+  assert.throws(() => validateClientCommand({ type: 'load_session_agent_transcript', agent_id: '../outside' }), /invalid agent id/);
   assert.throws(
     () => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'status' }] }),
     /invalid listing selection/,

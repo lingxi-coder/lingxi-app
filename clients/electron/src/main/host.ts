@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
-import { writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
 import type {
@@ -59,6 +60,119 @@ export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
+export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
+
+export interface WorkspaceFilePreview {
+  kind: 'text' | 'binary';
+  path: string;
+  size: number;
+  content?: string;
+  truncated: boolean;
+}
+
+const MAX_WORKSPACE_FILE_PREVIEW_BYTES = 512 * 1024;
+
+function pathEscapes(root: string, candidate: string): boolean {
+  const value = relative(root, candidate);
+  return value === '..' || value.startsWith(`..${sep}`) || isAbsolute(value);
+}
+
+function decodedTextLooksBinary(value: string): boolean {
+  let controls = 0;
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code === 0) return true;
+    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0c && code !== 0x0d) || code === 0x7f) {
+      controls += 1;
+    }
+  }
+  return controls > Math.max(3, Math.floor(value.length / 100));
+}
+
+function decodeWorkspacePreview(sample: Buffer, truncated: boolean): string | undefined {
+  const maxTrim = truncated ? Math.min(3, sample.length) : 0;
+  for (let trim = 0; trim <= maxTrim; trim += 1) {
+    try {
+      const value = new TextDecoder('utf-8', { fatal: true }).decode(
+        trim === 0 ? sample : sample.subarray(0, sample.length - trim),
+      );
+      return decodedTextLooksBinary(value) ? undefined : value;
+    } catch {
+      // Only an incomplete UTF-8 sequence at the bounded preview edge is
+      // recoverable. Never scan backwards through the whole file: an invalid
+      // byte in the middle is binary/corrupt, and doing so would be O(n²).
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Read a bounded UTF-8 workspace file without following symlinks or allowing
+ * traversal outside the canonical project root. Binary files intentionally
+ * return metadata only; the renderer never receives arbitrary bytes.
+ */
+export function readWorkspaceFilePreview(workspace: string, input: unknown): WorkspaceFilePreview {
+  if (typeof input !== 'string' || input.length === 0 || input.length > 4_096 || input.includes('\0')) {
+    throw new Error('invalid workspace file path');
+  }
+  if (isAbsolute(input)) throw new Error('workspace file path must be relative');
+  const segments = input.split(/[\\/]/);
+  if (segments.some((segment) => segment === '..')) throw new Error('workspace file path traversal is not allowed');
+  const root = realpathSync.native(resolve(workspace));
+  if (!lstatSync(root).isDirectory()) throw new Error('workspace root is not a directory');
+  const candidate = resolve(root, input);
+  const escaped = relative(root, candidate);
+  if (pathEscapes(root, candidate)) {
+    throw new Error('workspace file path is outside the project');
+  }
+  let component = root;
+  for (const segment of escaped.split(sep).filter(Boolean)) {
+    component = join(component, segment);
+    if (lstatSync(component).isSymbolicLink()) {
+      throw new Error('workspace file symlinks are not previewable');
+    }
+  }
+  const canonical = realpathSync.native(candidate);
+  if (pathEscapes(root, canonical)) {
+    throw new Error('workspace file resolves outside the project');
+  }
+  const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+  const fd = openSync(candidate, constants.O_RDONLY | noFollow);
+  try {
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile()) throw new Error('workspace preview requires a regular file');
+    const openedPath = lstatSync(candidate);
+    if (!openedPath.isFile() || openedPath.isSymbolicLink()) {
+      throw new Error('workspace preview target changed while opening');
+    }
+    if (openedPath.dev !== metadata.dev || openedPath.ino !== metadata.ino) {
+      throw new Error('workspace preview target changed while opening');
+    }
+    // Re-check containment after opening. O_NOFOLLOW pins the final component
+    // on Unix; this second realpath check also catches an ancestor swap on the
+    // normal (non-adversarial) cross-platform path.
+    if (pathEscapes(root, realpathSync.native(candidate))) {
+      throw new Error('workspace file resolves outside the project');
+    }
+    const size = metadata.size;
+    const length = Math.min(size, MAX_WORKSPACE_FILE_PREVIEW_BYTES);
+    const bytes = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const read = readSync(fd, bytes, offset, length - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    const sample = bytes.subarray(0, offset);
+    const truncated = size > MAX_WORKSPACE_FILE_PREVIEW_BYTES;
+    const content = decodeWorkspacePreview(sample, truncated);
+    return content === undefined
+      ? { kind: 'binary', path: input, size, truncated }
+      : { kind: 'text', path: input, size, content, truncated };
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * The macOS System Settings deep links this app ever opens: the `computer`
@@ -283,6 +397,17 @@ export class HostController {
       const workspace = this.requireWorkspace();
       if (!this.settings.hasProject(workspace)) throw new Error('project is not in the project list');
       return this.workspaceFiles.search(workspace, query);
+    });
+    this.ipc.handle(CH_WORKSPACE_FILE_PREVIEW, async (event: IpcMainInvokeEvent, sessionId: unknown, path: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(sessionId)) throw new Error('invalid session id');
+      const active = this.settings.getPublic().activeSession;
+      if (!active || active.sessionId !== sessionId) throw new Error('session is not active');
+      const runtime = this.bridge.get(sessionId);
+      if (!runtime) throw new Error('session runtime is not open');
+      const project = this.requireProject(runtime.projectPath);
+      if (canonicalWorkspace(active.projectPath) !== project) throw new Error('session project mismatch');
+      return readWorkspaceFilePreview(project, path);
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);

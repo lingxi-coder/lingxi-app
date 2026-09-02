@@ -27,7 +27,9 @@ use permission::result::PermissionMetadata;
 use permission::{McpToolMaxPermission, PermissionDecisionReason, PermissionResult};
 use platform_api::{McpPermissionCeiling, McpTransportSpec};
 use serde_json::{json, Value};
+use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::mcp::{self as tengu_mcp, LargeResultHandledPayload};
 use telemetry::tengu::tool::{
     LIST_MCP_RESOURCES_COMPLETED, LIST_MCP_RESOURCES_FAILED, LIST_MCP_RESOURCES_STARTED,
     MCP_AUTH_COMPLETED, MCP_AUTH_FAILED, MCP_AUTH_STARTED, MCP_COMPLETED, MCP_FAILED, MCP_STARTED,
@@ -344,6 +346,93 @@ fn validate_structured_content_against_output_schema(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct MissingRequiredInputPreflight {
+    missing_keys: Vec<String>,
+    required_count: u64,
+    missing_count: u64,
+    present_key_count: u64,
+    max_string_value_len: u64,
+    has_pseudo_tag_debris: bool,
+}
+
+fn inspect_missing_required_input(
+    input: &Value,
+    schema: Option<&Value>,
+) -> Option<MissingRequiredInputPreflight> {
+    let Value::Object(map) = input else {
+        return None;
+    };
+    let schema = schema?.as_object()?;
+    let required = schema.get("required")?.as_array()?;
+    let required_keys: Vec<String> = required
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if required_keys.is_empty() {
+        return None;
+    }
+
+    let missing_keys: Vec<String> = required_keys
+        .iter()
+        .filter(|key| !map.contains_key(key.as_str()))
+        .cloned()
+        .collect();
+    if missing_keys.is_empty() {
+        return None;
+    }
+
+    let suspicious_closing_tags: Vec<String> = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|properties| properties.keys())
+        .chain(required_keys.iter())
+        .filter(|key| js_string_len(key) >= 4)
+        .map(|key| format!("</{}>", key.to_lowercase()))
+        .collect();
+
+    let mut max_string_value_len = 0_u64;
+    let mut has_pseudo_tag_debris = false;
+    for value in map.values() {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        max_string_value_len = max_string_value_len.max(js_string_len(text));
+        if has_pseudo_tag_debris {
+            continue;
+        }
+        let lower = text.to_lowercase();
+        if lower.contains("</parameter>")
+            || lower.contains("<parameter name=")
+            || lower.contains("</invoke>")
+            || suspicious_closing_tags
+                .iter()
+                .any(|needle| lower.contains(needle))
+        {
+            has_pseudo_tag_debris = true;
+        }
+    }
+
+    Some(MissingRequiredInputPreflight {
+        required_count: required_keys.len() as u64,
+        missing_count: missing_keys.len() as u64,
+        present_key_count: map.len() as u64,
+        max_string_value_len,
+        has_pseudo_tag_debris,
+        missing_keys,
+    })
+}
+
+fn missing_required_message(missing_keys: &[String]) -> String {
+    if missing_keys.len() == 1 {
+        format!("MCPTool: missing required property {:?}", missing_keys[0])
+    } else {
+        format!("MCPTool: missing required properties {:?}", missing_keys)
+    }
+}
+
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
 /// forwarded MCP `notifications/progress` (MCP.4). Mirrors
 /// `services/mcp/client.ts:3104-3112`:
@@ -451,12 +540,103 @@ fn verified_str(s: &str) -> AnalyticsValue {
     AnalyticsValue::String(Verified::assert_safe(s.to_string()).into_inner())
 }
 
+/// JavaScript `String.prototype.length`: count UTF-16 code units, not UTF-8
+/// bytes or Unicode scalar values.
+fn js_string_len(s: &str) -> u64 {
+    u64::try_from(s.encode_utf16().count()).unwrap_or(u64::MAX)
+}
+
 async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, AnalyticsValue)]) {
     let mut md: LogEventMetadata = HashMap::new();
     for (k, v) in fields {
         md.insert((*k).into(), v.clone());
     }
     bus.log_event(event, md).await;
+}
+
+async fn emit_mcp_input_missing_required(
+    bus: &Arc<AnalyticsBus>,
+    tool_use_id: Option<&str>,
+    message_id: &protocol::MessageId,
+    tool_input_size_bytes: u64,
+    preflight: &MissingRequiredInputPreflight,
+) {
+    let mut md: LogEventMetadata = HashMap::new();
+    // Oracle `Un(e.name)` intentionally collapses every `mcp__*` tool name to
+    // the low-cardinality literal `mcp_tool`. Raw server/tool names are not
+    // fields on this event.
+    md.insert("toolName".into(), verified_str("mcp_tool"));
+    md.insert("isMcp".into(), AnalyticsValue::Bool(true));
+    md.insert(
+        "toolInputSizeBytes".into(),
+        verified_int(tool_input_size_bytes),
+    );
+    md.insert(
+        "requiredCount".into(),
+        verified_int(preflight.required_count),
+    );
+    md.insert("missingCount".into(), verified_int(preflight.missing_count));
+    md.insert(
+        "presentKeyCount".into(),
+        verified_int(preflight.present_key_count),
+    );
+    md.insert(
+        "maxStringValueLen".into(),
+        verified_int(preflight.max_string_value_len),
+    );
+    md.insert(
+        "hasPseudoTagDebris".into(),
+        AnalyticsValue::Bool(preflight.has_pseudo_tag_debris),
+    );
+    if let Some(tool_use_id) = tool_use_id {
+        md.insert("toolUseID".into(), verified_str(tool_use_id));
+    }
+    md.insert(
+        "messageID".into(),
+        verified_str(&message_id.as_uuid().to_string()),
+    );
+    bus.log_event(tengu_mcp::INPUT_MISSING_REQUIRED, md).await;
+}
+
+async fn emit_mcp_large_result_handled(
+    bus: &Arc<AnalyticsBus>,
+    handled: LargeResultHandledPayload,
+) {
+    let mut md: LogEventMetadata = HashMap::new();
+    md.insert(
+        "outcome".into(),
+        AnalyticsValue::String(handled.outcome.as_str().to_string()),
+    );
+    md.insert(
+        "reason".into(),
+        AnalyticsValue::String(handled.reason.as_str().to_string()),
+    );
+    md.insert(
+        "sizeEstimateTokens".into(),
+        verified_int(handled.size_estimate_tokens),
+    );
+    if let Some(persisted_size_chars) = handled.persisted_size_chars {
+        md.insert(
+            "persistedSizeChars".into(),
+            verified_int(persisted_size_chars),
+        );
+    }
+    if let Some(result_type) = handled.result_type.as_ref() {
+        md.insert(
+            "resultType".into(),
+            AnalyticsValue::String(result_type.as_str().to_string()),
+        );
+    }
+    if let Some(block_count) = handled.block_count {
+        md.insert("blockCount".into(), verified_int(u64::from(block_count)));
+    }
+    if let Some(persisted_as) = handled.persisted_as.as_ref() {
+        md.insert(
+            "persistedAs".into(),
+            AnalyticsValue::String(persisted_as.as_str().to_string()),
+        );
+    }
+    bus.log_event(tengu_mcp::LARGE_RESULT_HANDLED, md).await;
 }
 
 // `tengu_feature_ok` / `tengu_feature_sad` / `tengu_feature_bad` — the generic
@@ -783,6 +963,25 @@ impl MCPTool {
         })
     }
 
+    async fn generic_input_schema(&self, full_name: &str) -> Option<Value> {
+        let registry = self.mcp_registry()?;
+        let connections = registry.connections.read().await;
+        connections.iter().find_map(|(table_key, state)| {
+            let (config, tools) = match state {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => return None,
+            };
+            if table_key != &config.name {
+                return None;
+            }
+            tools
+                .iter()
+                .find(|dto| dto.full_name == full_name)
+                .map(|dto| dto.input_schema.clone())
+        })
+    }
+
     fn bus(&self) -> &Arc<AnalyticsBus> {
         &self.ctx.bus
     }
@@ -972,7 +1171,7 @@ async fn process_mcp_call_result(
                 now_millis,
                 rand_tag: &rand_tag,
             };
-            let model_content = match &dto.structured_content {
+            let (model_content, large_result_type) = match &dto.structured_content {
                 Some(sc) => {
                     let sc_json = serde_json::to_string(sc).unwrap_or_default();
                     // jqd (binary @198966347): when the result ALSO carries
@@ -999,7 +1198,10 @@ async fn process_mcp_call_result(
                         })
                         .unwrap_or_default();
                     if non_text.is_empty() {
-                        Value::String(sc_json)
+                        (
+                            Value::String(sc_json),
+                            crate::large_output::McpLargeResultType::StructuredContent,
+                        )
                     } else {
                         let transformed = crate::transform_result::transform_result_content(
                             &Value::Array(non_text),
@@ -1008,14 +1210,25 @@ async fn process_mcp_call_result(
                         );
                         let mut arr = transformed.as_array().cloned().unwrap_or_default();
                         arr.push(json!({ "type": "text", "text": sc_json }));
-                        Value::Array(arr)
+                        (
+                            Value::Array(arr),
+                            crate::large_output::McpLargeResultType::ContentArray,
+                        )
                     }
                 }
-                None => crate::transform_result::transform_result_content(
-                    &dto.content,
-                    &server,
-                    persist_ctx,
-                ),
+                None => {
+                    let transformed = crate::transform_result::transform_result_content(
+                        &dto.content,
+                        &server,
+                        persist_ctx,
+                    );
+                    let result_type = if transformed.is_array() {
+                        crate::large_output::McpLargeResultType::ContentArray
+                    } else {
+                        crate::large_output::McpLargeResultType::ToolResult
+                    };
+                    (transformed, result_type)
+                }
             };
             // MCP large-output guard (claude-code `processMCPResult`): over-
             // threshold non-image content is persisted to disk and replaced
@@ -1049,14 +1262,36 @@ async fn process_mcp_call_result(
                 } else {
                     crate::large_output::ExactCountOutcome::Unsupported
                 };
-            let content = crate::large_output::process_mcp_result_with_exact_count(
+            let processed = crate::large_output::process_mcp_result_detailed(
                 &model_content,
                 &server,
                 &tool,
                 &output_dir,
                 now_millis,
                 exact_token_count,
+                large_result_type,
             );
+            if let Some(handled) = processed.telemetry {
+                emit_mcp_large_result_handled(
+                    &bus,
+                    LargeResultHandledPayload {
+                        outcome: Verified::assert_safe(handled.outcome.to_string()),
+                        reason: Verified::assert_safe(handled.reason.to_string()),
+                        size_estimate_tokens: handled.size_estimate_tokens,
+                        persisted_size_chars: handled.persisted_size_chars,
+                        result_type: handled
+                            .result_type
+                            .map(|value| Verified::assert_safe(value.to_string())),
+                        block_count: handled
+                            .block_count
+                            .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+                        persisted_as: handled
+                            .persisted_as
+                            .map(|value| Verified::assert_safe(value.to_string())),
+                    },
+                )
+                .await;
+            }
             // 1:1 with the binary's MCPTool result `data`: claude-code sets
             // `data = mcpResult.content` DIRECTLY (the content-block ARRAY, a
             // bare string, or a large-output file replacement) — there is NO
@@ -1064,7 +1299,7 @@ async fn process_mcp_call_result(
             // `data` VERBATIM as the `tool_result` content blocks when it is an
             // array. `dto.is_error` rides the analytics path only (the dispatch
             // sets the block's `is_error` separately — it never read this key).
-            let data = content;
+            let data = processed.content;
             // Model-facing render: claude-code passes the MCP content directly
             // as the `tool_result` content (`MCPTool.ts:70-76`). The dispatch's
             // `tool_result_to_model_text` would JSON-dump an ARRAY/string `data`
@@ -1139,6 +1374,33 @@ impl Tool for MCPTool {
     }
     fn is_mcp(&self) -> bool {
         true
+    }
+    async fn on_input_schema_rejected(
+        &self,
+        input: &Value,
+        tool_use_id: Option<&str>,
+        assistant_message_id: Option<&protocol::MessageId>,
+    ) {
+        let Some(preflight) = inspect_missing_required_input(input, Some(self.input_schema()))
+        else {
+            return;
+        };
+        let Some(message_id) = assistant_message_id else {
+            return;
+        };
+        // Oracle `b(input).length`: JSON serialization followed by JavaScript
+        // UTF-16 code-unit length, despite the historical `Bytes` suffix.
+        let tool_input_size_bytes = serde_json::to_string(input)
+            .map(|json| js_string_len(&json))
+            .unwrap_or(0);
+        emit_mcp_input_missing_required(
+            self.bus(),
+            tool_use_id,
+            message_id,
+            tool_input_size_bytes,
+            &preflight,
+        )
+        .await;
     }
     fn mcp_role(&self) -> Option<&str> {
         self.mcp_role.as_deref()
@@ -1321,17 +1583,11 @@ impl Tool for MCPTool {
             .bound_server_key
             .clone()
             .unwrap_or_else(|| server.clone());
-
-        // STARTED.
-        emit(
-            self.bus(),
-            MCP_STARTED,
-            &[
-                ("_PROTO_server_name", pii(&server)),
-                ("_PROTO_tool_name", pii(&tool)),
-            ],
-        )
-        .await;
+        // Despite the oracle field's historical `Bytes` suffix, `W` is
+        // `JSON.stringify(input).length`: JavaScript UTF-16 code units.
+        let tool_input_size_bytes = serde_json::to_string(&arguments)
+            .map(|json| js_string_len(&json))
+            .unwrap_or(0);
 
         let registry = match self.mcp_registry() {
             Some(r) => r,
@@ -1365,6 +1621,45 @@ impl Tool for MCPTool {
                 "MCPTool: MCP server {server:?} is not registered"
             )));
         }
+
+        let generic_input_schema = if self.full_name.is_none() {
+            self.generic_input_schema(&full_name).await
+        } else {
+            None
+        };
+        if let Some(preflight) = inspect_missing_required_input(
+            &arguments,
+            self.bound_schema.as_ref().or(generic_input_schema.as_ref()),
+        ) {
+            let tool_use_id = ctx.tool_use_id.as_ref().map(|id| id.to_string());
+            let Some(message_id) = ctx.assistant_message_id.as_ref() else {
+                return Err(ToolError::InvalidInput(missing_required_message(
+                    &preflight.missing_keys,
+                )));
+            };
+            emit_mcp_input_missing_required(
+                self.bus(),
+                tool_use_id.as_deref(),
+                message_id,
+                tool_input_size_bytes,
+                &preflight,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(missing_required_message(
+                &preflight.missing_keys,
+            )));
+        }
+
+        // STARTED.
+        emit(
+            self.bus(),
+            MCP_STARTED,
+            &[
+                ("_PROTO_server_name", pii(&server)),
+                ("_PROTO_tool_name", pii(&tool)),
+            ],
+        )
+        .await;
 
         // MCP.3 + MCP.4: thread the model's toolUseId into the request and wire
         // MCP progress-notification forwarding. claude-code reads the toolUseId
@@ -4093,6 +4388,350 @@ pub(crate) mod cached_resource_test_support {
             .connect(cached_server_config(name))
             .await
             .expect("seed connected server");
+    }
+}
+
+#[cfg(test)]
+mod input_missing_required_preflight_tests {
+    use super::*;
+    use bytes::Bytes;
+    use jsonrpc::{Connection, Mode};
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
+        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+    use telemetry::InMemorySink;
+    use tokio::sync::mpsc;
+
+    struct StubTransport;
+
+    #[async_trait]
+    impl McpTransport for StubTransport {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!()
+        }
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<platform_api::McpToolResultDto, McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    fn paired() -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let conn = Arc::new(Connection::new_streams(
+            peer_to_us_rx,
+            us_to_peer_tx,
+            Mode::Lines,
+        ));
+        (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    #[test]
+    fn inspect_missing_required_matches_oracle_summary_fields() {
+        let schema = json!({
+            "type": "object",
+            "required": ["token", "body"],
+            "properties": {
+                "token": { "type": "string" },
+                "body": { "type": "string" },
+                "note": { "type": "string" }
+            }
+        });
+        let input = json!({
+            "token": "ok",
+            "note": "payload </body>"
+        });
+
+        let preflight =
+            inspect_missing_required_input(&input, Some(&schema)).expect("missing required");
+        assert_eq!(preflight.required_count, 2);
+        assert_eq!(preflight.missing_count, 1);
+        assert_eq!(preflight.present_key_count, 2);
+        assert_eq!(preflight.max_string_value_len, 15);
+        assert!(preflight.has_pseudo_tag_debris);
+        assert_eq!(preflight.missing_keys, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn inspect_missing_required_uses_javascript_utf16_lengths() {
+        let schema = json!({
+            "type": "object",
+            "required": ["token"],
+            "properties": { "token": { "type": "string" } }
+        });
+        let input = json!({ "note": "😀😀" });
+        let preflight = inspect_missing_required_input(&input, Some(&schema)).unwrap();
+        assert_eq!(preflight.max_string_value_len, 4);
+        assert_eq!(js_string_len(&serde_json::to_string(&input).unwrap()), 15);
+    }
+
+    #[tokio::test]
+    async fn missing_required_preflight_emits_event_and_skips_transport() {
+        let (conn, _peer_tx, mut peer_rx) = paired();
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let fs = tool_api::test_support::make_dummy_fs();
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let mut ctx =
+            tool_api::test_support::ctx_for_file_tools(fs, bus, vec![std::env::temp_dir()]);
+        ctx.mcp_registry = Some(registry);
+
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__slow__slowtool".to_string(),
+            "slow tool".to_string(),
+            json!({
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                    "token": { "type": "string" },
+                    "note": { "type": "string" }
+                }
+            }),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-missing"));
+        let assistant_message_id = protocol::MessageId::new();
+        use_ctx.assistant_message_id = Some(assistant_message_id);
+
+        let err = tool
+            .call(
+                json!({ "note": "leftover </token>" }),
+                use_ctx,
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect_err("missing required must fail before transport");
+        assert!(format!("{err}").contains("missing required property"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), peer_rx.recv())
+                .await
+                .is_err(),
+            "preflight must stop before any MCP request frame is sent"
+        );
+
+        let events = sink.events().await;
+        let event = events
+            .iter()
+            .find(|event| event.name == tengu_mcp::INPUT_MISSING_REQUIRED)
+            .expect("missing-required telemetry emitted");
+        assert!(matches!(
+            event.metadata.get("toolInputSizeBytes"),
+            Some(AnalyticsValue::Int(value)) if *value > 0
+        ));
+        for (key, expected) in [
+            ("requiredCount", 1),
+            ("missingCount", 1),
+            ("presentKeyCount", 1),
+            ("maxStringValueLen", 17),
+        ] {
+            assert!(matches!(
+                event.metadata.get(key),
+                Some(AnalyticsValue::Int(value)) if *value == expected
+            ));
+        }
+        assert!(matches!(
+            event.metadata.get("hasPseudoTagDebris"),
+            Some(AnalyticsValue::Bool(true))
+        ));
+        assert!(matches!(
+            event.metadata.get("toolUseID"),
+            Some(AnalyticsValue::String(value)) if value == "tu-missing"
+        ));
+        assert!(matches!(
+            event.metadata.get("messageID"),
+            Some(AnalyticsValue::String(value))
+                if value == &assistant_message_id.as_uuid().to_string()
+        ));
+        assert!(matches!(
+            event.metadata.get("toolName"),
+            Some(AnalyticsValue::String(value)) if value == "mcp_tool"
+        ));
+        assert!(matches!(
+            event.metadata.get("isMcp"),
+            Some(AnalyticsValue::Bool(true))
+        ));
+        assert!(!event.metadata.contains_key("_PROTO_server_name"));
+        assert!(!event.metadata.contains_key("_PROTO_tool_name"));
+        assert!(
+            !events.iter().any(|event| event.name == MCP_STARTED),
+            "preflight rejection must happen before MCP_STARTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_rejection_hook_emits_missing_required_before_call() {
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![std::env::temp_dir()],
+        );
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__slow__slowtool".to_string(),
+            "slow tool".to_string(),
+            json!({
+                "type": "object",
+                "required": ["token"],
+                "properties": { "token": { "type": "string" } }
+            }),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+        let assistant_message_id = protocol::MessageId::new();
+
+        tool.on_input_schema_rejected(
+            &json!({ "note": "😀" }),
+            Some("tu-schema"),
+            Some(&assistant_message_id),
+        )
+        .await;
+
+        let events = sink.events().await;
+        let event = events
+            .iter()
+            .find(|event| event.name == tengu_mcp::INPUT_MISSING_REQUIRED)
+            .expect("schema-rejection hook emits missing-required telemetry");
+        assert!(matches!(
+            event.metadata.get("toolUseID"),
+            Some(AnalyticsValue::String(value)) if value == "tu-schema"
+        ));
+        assert!(matches!(
+            event.metadata.get("messageID"),
+            Some(AnalyticsValue::String(value))
+                if value == &assistant_message_id.as_uuid().to_string()
+        ));
+        assert!(matches!(
+            event.metadata.get("toolInputSizeBytes"),
+            Some(AnalyticsValue::Int(value)) if *value == 13
+        ));
+        assert!(!event.metadata.contains_key("_PROTO_server_name"));
+        assert!(!event.metadata.contains_key("_PROTO_tool_name"));
+    }
+
+    #[tokio::test]
+    async fn large_result_handled_event_uses_oracle_field_names() {
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+
+        emit_mcp_large_result_handled(
+            &bus,
+            LargeResultHandledPayload {
+                outcome: Verified::assert_safe("persisted".to_string()),
+                reason: Verified::assert_safe("file_saved".to_string()),
+                size_estimate_tokens: 15_000,
+                persisted_size_chars: Some(60_123),
+                result_type: Some(Verified::assert_safe("contentArray".to_string())),
+                block_count: Some(2),
+                persisted_as: Some(Verified::assert_safe("json".to_string())),
+            },
+        )
+        .await;
+
+        let events = sink.events().await;
+        let event = events
+            .iter()
+            .find(|event| event.name == tengu_mcp::LARGE_RESULT_HANDLED)
+            .expect("large-result telemetry emitted");
+        assert!(matches!(
+            event.metadata.get("outcome"),
+            Some(AnalyticsValue::String(value)) if value == "persisted"
+        ));
+        assert!(matches!(
+            event.metadata.get("reason"),
+            Some(AnalyticsValue::String(value)) if value == "file_saved"
+        ));
+        for (key, expected) in [
+            ("sizeEstimateTokens", 15_000),
+            ("persistedSizeChars", 60_123),
+            ("blockCount", 2),
+        ] {
+            assert!(matches!(
+                event.metadata.get(key),
+                Some(AnalyticsValue::Int(value)) if *value == expected
+            ));
+        }
+        assert!(matches!(
+            event.metadata.get("resultType"),
+            Some(AnalyticsValue::String(value)) if value == "contentArray"
+        ));
+        assert!(matches!(
+            event.metadata.get("persistedAs"),
+            Some(AnalyticsValue::String(value)) if value == "json"
+        ));
+        assert!(!event.metadata.contains_key("_PROTO_server_name"));
+        assert!(!event.metadata.contains_key("_PROTO_tool_name"));
     }
 }
 

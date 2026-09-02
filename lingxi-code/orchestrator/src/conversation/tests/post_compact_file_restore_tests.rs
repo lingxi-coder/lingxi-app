@@ -3,9 +3,16 @@ use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::read_file_state::{set, ReadFileEntry};
 use tool_api::registry::ToolRegistry;
+use tracing::field::Field;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::Registry;
 
 fn stale_entry(content: &str) -> ReadFileEntry {
     ReadFileEntry {
@@ -68,6 +75,79 @@ fn restore_names(events: &[telemetry::RecordedEvent]) -> Vec<String> {
         .filter(|e| e.name.starts_with("tengu_post_compact_file_restore"))
         .map(|e| e.name.clone())
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedTelemetryEvent {
+    event: String,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Default, Clone)]
+struct TelemetryEventCapture {
+    events: Arc<StdMutex<Vec<CapturedTelemetryEvent>>>,
+}
+
+impl<S: Subscriber> Layer<S> for TelemetryEventCapture {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        struct V {
+            event: Option<String>,
+            fields: BTreeMap<String, String>,
+        }
+
+        impl tracing::field::Visit for V {
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                if field.name() != "event" {
+                    self.fields
+                        .insert(field.name().to_string(), value.to_string());
+                }
+            }
+
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                if field.name() != "event" {
+                    self.fields
+                        .insert(field.name().to_string(), value.to_string());
+                }
+            }
+
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                if field.name() != "event" {
+                    self.fields
+                        .insert(field.name().to_string(), value.to_string());
+                }
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "event" {
+                    self.event = Some(value.to_string());
+                } else {
+                    self.fields
+                        .insert(field.name().to_string(), value.to_string());
+                }
+            }
+
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}").trim_matches('"').to_string();
+                if field.name() == "event" {
+                    self.event = Some(rendered);
+                } else {
+                    self.fields.insert(field.name().to_string(), rendered);
+                }
+            }
+        }
+
+        let mut visitor = V {
+            event: None,
+            fields: BTreeMap::new(),
+        };
+        event.record(&mut visitor);
+        if let Some(event) = visitor.event {
+            self.events.lock().unwrap().push(CapturedTelemetryEvent {
+                event,
+                fields: visitor.fields,
+            });
+        }
+    }
 }
 
 async fn register_invoked_skill(
@@ -325,6 +405,51 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
             .expect("cancel must preserve read-state")
             .content,
         "model-visible snapshot"
+    );
+}
+
+#[tokio::test]
+async fn transcript_append_failure_emits_session_persistence_failed() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let capture = TelemetryEventCapture::default();
+    let _guard = tracing::subscriber::set_default(Registry::default().with(capture.clone()));
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        sink.clone(),
+    )
+    .await;
+    let session_id = orch.session.lock().await.session_id.to_string();
+    let operation = "hook_attachment";
+    let error = "write_fail".to_string();
+
+    orch.record_transcript_append_failure(&session_id, operation, &error)
+        .await;
+
+    let events = capture.events.lock().unwrap().clone();
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|event| event.event == telemetry::tengu::session::PERSISTENCE_FAILED)
+        .cloned()
+        .collect();
+    assert_eq!(
+        matching,
+        vec![CapturedTelemetryEvent {
+            event: telemetry::tengu::session::PERSISTENCE_FAILED.to_string(),
+            fields: BTreeMap::new(),
+        }],
+        "append-failure telemetry must emit exactly one session-persistence event with no payload fields; all captured events: {events:?}",
+    );
+    assert!(
+        sink.events().await.is_empty(),
+        "session persistence failure should not be routed through AnalyticsBus",
+    );
+    let leaked = format!("{matching:?}");
+    assert!(
+        !leaked.contains(&session_id) && !leaked.contains(operation) && !leaked.contains(&error),
+        "captured telemetry event must not leak raw session/operation/error details: {leaked}",
     );
 }
 

@@ -45,7 +45,11 @@ impl StreamingTurnState {
 
 enum StreamingIterationDisposition {
     Continue,
+    /// A natural completion may absorb input queued while the model streamed.
     Complete(MessageId),
+    /// A result-level end request is terminal for this query. Pending input is
+    /// left for the next turn instead of causing another model invocation.
+    ForcedComplete(MessageId),
     Return(ConversationOutcome),
 }
 
@@ -125,6 +129,7 @@ struct PumpedStreamingIteration<'a> {
     api_success_message_count: u32,
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
+    pre_batch_mcp_tool_count: usize,
 }
 
 enum PumpStreamingOutcome<'a> {
@@ -135,6 +140,9 @@ enum PumpStreamingOutcome<'a> {
 struct FinalizedStreamingIteration {
     pumped: crate::streaming_loop::PumpedTurn,
     assistant_id: MessageId,
+    tool_prevent_continuation: bool,
+    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    pre_batch_mcp_tool_count: usize,
     partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause>,
     partial_finalize_notice_id: Option<MessageId>,
     aborted_during_stream: bool,
@@ -1012,6 +1020,10 @@ impl StreamingTurnDriver<'_> {
                 return Ok(PumpStreamingOutcome::Complete(message_id));
             }
         };
+        // Polling the stream can start tool execution immediately. Snapshot
+        // the live MCP count before that point so a tool-triggered registry
+        // refresh can be compared after PostToolBatch, as in the oracle.
+        let pre_batch_mcp_tool_count = orch.filtered_mcp_tool_count().await;
 
         // 3. Pump the stream (with mid-stream 529 → non-streaming fallback OR
         //    the cc 2.1.199 partial-finalize, whichever applies).
@@ -1293,6 +1305,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            pre_batch_mcp_tool_count,
         }))
     }
 
@@ -1318,6 +1331,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            pre_batch_mcp_tool_count,
         } = pumped_iteration;
 
         // Inline tool descriptions are committed only after a complete,
@@ -1585,12 +1599,16 @@ impl StreamingTurnDriver<'_> {
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled);
 
-        orch.drive_streaming_tools(&mut exec, &pumped, &tool_use_parent_uuids, &assistant_uuid)
+        let (tool_prevent_continuation, post_tool_batch_calls) = orch
+            .drive_streaming_tools(&mut exec, &pumped, &tool_use_parent_uuids, &assistant_uuid)
             .await;
 
         FinalizedStreamingIteration {
             pumped,
             assistant_id,
+            tool_prevent_continuation,
+            post_tool_batch_calls,
+            pre_batch_mcp_tool_count,
             partial_finalize,
             partial_finalize_notice_id,
             aborted_during_stream,
@@ -1734,17 +1752,25 @@ impl StreamingTurnDriver<'_> {
                     }
                 };
 
-            let pumped_iteration = match Self::pump_iteration(
+            let pumped = Self::pump_iteration(
                 orch,
                 prepared,
                 &system_prompt,
                 &user_cancel,
                 &mut loop_state,
             )
-            .await?
-            {
-                PumpStreamingOutcome::Pumped(iteration) => iteration,
-                PumpStreamingOutcome::Complete(message_id) => {
+            .await;
+            let pumped_iteration = match pumped {
+                Err(error) => {
+                    // `open_iteration` enables SDK frame buffering before the
+                    // stream is opened. Every error path must release that
+                    // session-scoped buffer or later tool frames disappear.
+                    orch.set_tool_frame_buffering(false).await;
+                    return Err(error);
+                }
+                Ok(PumpStreamingOutcome::Pumped(iteration)) => iteration,
+                Ok(PumpStreamingOutcome::Complete(message_id)) => {
+                    orch.set_tool_frame_buffering(false).await;
                     final_message_id = message_id;
                     break;
                 }
@@ -1753,6 +1779,9 @@ impl StreamingTurnDriver<'_> {
             let FinalizedStreamingIteration {
                 pumped,
                 assistant_id,
+                tool_prevent_continuation,
+                post_tool_batch_calls,
+                pre_batch_mcp_tool_count,
                 partial_finalize,
                 partial_finalize_notice_id,
                 aborted_during_stream,
@@ -1790,6 +1819,19 @@ impl StreamingTurnDriver<'_> {
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
             {
+                // Abort wins over a result-level end request. Results that were
+                // allowed to finish (notably Block-behavior tools) may have
+                // recorded one before this checkpoint, so drain the side table
+                // even though the end-turn path below is intentionally skipped.
+                let _ = orch
+                    .take_pending_tool_result_turn_ends(
+                        &pumped
+                            .tool_uses
+                            .iter()
+                            .map(|tool_use| tool_use.id.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await;
                 let cost = orch.snapshot_cost_real().await;
                 let (abort_reason, interrupt_message) = if aborted_during_stream {
                     ("aborted_streaming", INTERRUPT_MESSAGE)
@@ -1822,6 +1864,18 @@ impl StreamingTurnDriver<'_> {
             // stop_reason still rides on the persisted partial assistant line
             // (patched above) for resume fidelity.
             if partial_finalize.is_some() {
+                // A finalized partial is terminal before normal tool-result
+                // disposition. Do not leave an end marker from a completed
+                // result live in the session-scoped side table.
+                let _ = orch
+                    .take_pending_tool_result_turn_ends(
+                        &pumped
+                            .tool_uses
+                            .iter()
+                            .map(|tool_use| tool_use.id.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await;
                 let cost = orch.snapshot_cost_real().await;
                 orch.output.emit_end_turn("model_error", &cost).await;
                 final_message_id = partial_finalize_notice_id.unwrap_or(assistant_id);
@@ -1829,7 +1883,14 @@ impl StreamingTurnDriver<'_> {
             }
 
             match orch
-                .decide_streaming_disposition(&mut loop_state, &pumped, assistant_id)
+                .decide_streaming_disposition(
+                    &mut loop_state,
+                    &pumped,
+                    assistant_id,
+                    tool_prevent_continuation,
+                    post_tool_batch_calls,
+                    pre_batch_mcp_tool_count,
+                )
                 .await?
             {
                 StreamingIterationDisposition::Continue => continue,
@@ -1841,6 +1902,10 @@ impl StreamingTurnDriver<'_> {
                     if orch.drain_mid_turn_input().await {
                         continue;
                     }
+                    final_message_id = message_id;
+                    break;
+                }
+                StreamingIterationDisposition::ForcedComplete(message_id) => {
                     final_message_id = message_id;
                     break;
                 }
@@ -2231,43 +2296,51 @@ impl ConversationOrchestrator {
                 TurnStepOutcome::Ended {
                     final_message_id: id,
                     stop_reason,
+                    allow_budget_continuation,
+                    tool_requested_end,
                 } => {
                     // hooks B4: fire Stop hooks BEFORE the token-budget check
                     // (order: recovery → stop-hooks → token-budget, TS
                     // `query.ts:1262-1308`).
-                    match self
-                        .handle_stop_at_end(
-                            &stop_reason,
-                            &mut stop_hook_active,
-                            &mut stop_hook_blocking_count,
-                            turn_count,
-                            id,
-                        )
-                        .await
-                    {
-                        StopHookFlow::Terminate(outcome) => return Ok(outcome),
-                        StopHookFlow::TerminateMaxTurns => {
-                            return Err(OrchestratorError::MaxTurnsReached {
-                                max_turns: self.config.max_turns,
-                            });
+                    if tool_requested_end {
+                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
+                            .await;
+                    } else {
+                        match self
+                            .handle_stop_at_end(
+                                &stop_reason,
+                                &mut stop_hook_active,
+                                &mut stop_hook_blocking_count,
+                                turn_count,
+                                id,
+                            )
+                            .await
+                        {
+                            StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                            StopHookFlow::TerminateMaxTurns => {
+                                return Err(OrchestratorError::MaxTurnsReached {
+                                    max_turns: self.config.max_turns,
+                                });
+                            }
+                            StopHookFlow::LoopAgain => {
+                                // RECOV.4: a Stop hook forced the loop to continue —
+                                // reset the max_output_tokens recovery bookkeeping so the
+                                // continued turn starts a fresh escalation episode (TS
+                                // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
+                                // + `maxOutputTokensOverride: undefined` on the
+                                // stop-hook-blocking continuation).
+                                recovery.reset_max_output_tokens_recovery();
+                                continue;
+                            }
+                            StopHookFlow::FallThrough => {}
                         }
-                        StopHookFlow::LoopAgain => {
-                            // RECOV.4: a Stop hook forced the loop to continue —
-                            // reset the max_output_tokens recovery bookkeeping so the
-                            // continued turn starts a fresh escalation episode (TS
-                            // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
-                            // + `maxOutputTokensOverride: undefined` on the
-                            // stop-hook-blocking continuation).
-                            recovery.reset_max_output_tokens_recovery();
-                            continue;
-                        }
-                        StopHookFlow::FallThrough => {}
                     }
                     // A3: at a natural end-of-turn, consult the token budget. If
                     // it says `continue`, inject the meta nudge, reset the A1
                     // recovery count (per `query.ts:1332`), and loop again
                     // instead of breaking. When budget is off this is a no-op.
-                    if stop_reason == "end_turn"
+                    if allow_budget_continuation
+                        && stop_reason == "end_turn"
                         && self
                             .maybe_continue_for_budget(
                                 budget.as_mut(),
@@ -2383,7 +2456,7 @@ impl ConversationOrchestrator {
         pumped: &crate::streaming_loop::PumpedTurn,
         tool_use_parent_uuids: &std::collections::HashMap<protocol::ToolUseId, String>,
         assistant_uuid: &Option<String>,
-    ) {
+    ) -> (bool, Vec<hooks::events::PostToolBatchCall>) {
         // 5. Drive tools through the StreamingToolExecutor (faithful port of
         //    claude-code's `StreamingToolExecutor` + `query.ts:826-862`).
         //    Each tool runs the same hook + permission + registry pipeline
@@ -2393,6 +2466,8 @@ impl ConversationOrchestrator {
         //    assistant-parented topology), in RECEIVED order — diverging from
         //    the old single-batched-user-message shape and matching the TS
         //    `sessionStorage` `sourceToolAssistantUUID → parentUuid` mapping.
+        let mut prevent_continuation = false;
+        let mut post_tool_batch_calls = Vec::new();
         if !pumped.tool_uses.is_empty() {
             // The executor (`exec`) was created BEFORE the stream and its
             // tools were registered + dispatched MID-STREAM by
@@ -2437,6 +2512,8 @@ impl ConversationOrchestrator {
                 exec.process_queue();
                 // persist whatever just completed, in order
                 for drained in exec.take_newly_completed() {
+                    prevent_continuation |= drained.prevent_continuation;
+                    post_tool_batch_calls.extend(drained.post_tool_batch_calls);
                     // Parent this tool_result to ITS tool_use's per-block
                     // assistant line uuid (TS `sourceToolAssistantUUID`),
                     // falling back to the turn's last assistant block uuid if
@@ -2463,7 +2540,7 @@ impl ConversationOrchestrator {
                         ..
                     } = &drained.block
                     {
-                        self.release_tool_frame(tool_use_id, content, *is_error)
+                        self.release_tool_frame(tool_use_id, &drained.tool, content, *is_error)
                             .await;
                     }
                     // O3: keep this result's tool id so its hook
@@ -2564,6 +2641,22 @@ impl ConversationOrchestrator {
         }
         // Drive finished: stop holding frames.
         self.set_tool_frame_buffering(false).await;
+        // Concurrent safe tools can finish out of order. PostToolBatch is
+        // defined from the assistant's original `toolUseBlocks.map(...)`, so
+        // restore received order before firing the single batch event.
+        let mut ordered_batch_calls = Vec::with_capacity(post_tool_batch_calls.len());
+        for tool_use in &pumped.tool_uses {
+            if let Some(index) = post_tool_batch_calls
+                .iter()
+                .position(|call| call.tool_use_id == tool_use.id)
+            {
+                ordered_batch_calls.push(post_tool_batch_calls.remove(index));
+            }
+        }
+        // Defensive preservation for a future synthetic call whose id is not
+        // represented in `pumped.tool_uses`.
+        ordered_batch_calls.extend(post_tool_batch_calls);
+        (prevent_continuation, ordered_batch_calls)
     }
 
     async fn finish_natural_streaming_end(
@@ -2621,11 +2714,26 @@ impl ConversationOrchestrator {
         return Ok(StreamingIterationDisposition::Complete(assistant_id));
     }
 
+    async fn finish_tool_requested_streaming_end(
+        &self,
+        loop_state: &mut StreamingTurnState,
+        assistant_id: MessageId,
+    ) -> Result<StreamingIterationDisposition, OrchestratorError> {
+        self.fire_tool_result_end_stop_hooks("end_turn", loop_state.stop_hook_active)
+            .await;
+        let cost = self.snapshot_cost_real().await;
+        self.output.emit_end_turn("end_turn", &cost).await;
+        Ok(StreamingIterationDisposition::ForcedComplete(assistant_id))
+    }
+
     async fn decide_streaming_disposition(
         &self,
         loop_state: &mut StreamingTurnState,
         pumped: &crate::streaming_loop::PumpedTurn,
         assistant_id: MessageId,
+        tool_prevent_continuation: bool,
+        post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+        pre_batch_mcp_tool_count: usize,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         // #78 nudge guard `!Pt(ce)` (streaming twin): suppress the
         // thinking-only nudge during a StructuredOutput exchange. Computed
@@ -2652,6 +2760,56 @@ impl ConversationOrchestrator {
             // terminal arms below. Subsumes the former
             // `Some("tool_use") if !pumped.tool_uses.is_empty()` arm.
             _ if !pumped.tool_uses.is_empty() => {
+                let turn_end = self
+                    .take_pending_tool_result_turn_ends(
+                        &pumped
+                            .tool_uses
+                            .iter()
+                            .map(|tool_use| tool_use.id.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await;
+                if tool_prevent_continuation {
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("hook_stopped", &cost).await;
+                    return Ok(StreamingIterationDisposition::Return(
+                        ConversationOutcome::EndTurn {
+                            turn_count: loop_state.turn_count,
+                            final_message_id: assistant_id,
+                        },
+                    ));
+                }
+                if let Some(turn_end) = turn_end {
+                    crate::turn_loop::emit_tool_result_ended_turn_telemetry(self, turn_end).await;
+                    let batch_messages =
+                        crate::turn_loop::run_post_tool_batch_hooks_after_turn_end(
+                            self,
+                            post_tool_batch_calls,
+                        )
+                        .await;
+                    crate::turn_loop::append_tool_injected_messages(self, batch_messages).await;
+                    return self
+                        .finish_tool_requested_streaming_end(loop_state, assistant_id)
+                        .await;
+                }
+                let (batch_prevent, batch_messages) =
+                    crate::turn_loop::run_post_tool_batch_hooks(self, post_tool_batch_calls).await;
+                crate::turn_loop::append_tool_injected_messages(self, batch_messages).await;
+                if batch_prevent {
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("hook_stopped", &cost).await;
+                    return Ok(StreamingIterationDisposition::Return(
+                        ConversationOutcome::EndTurn {
+                            turn_count: loop_state.turn_count,
+                            final_message_id: assistant_id,
+                        },
+                    ));
+                }
+                crate::turn_loop::emit_tools_refreshed_mid_turn_telemetry(
+                    self,
+                    pre_batch_mcp_tool_count,
+                )
+                .await;
                 // EndConversation (2.1.206, streaming twin): a 2nd
                 // consecutive EndConversation call raised the shared
                 // end-request slot during tool dispatch above. Consume it;
@@ -3045,6 +3203,8 @@ impl ConversationOrchestrator {
                 TurnStepOutcome::Ended {
                     stop_reason,
                     final_message_id: id,
+                    allow_budget_continuation,
+                    tool_requested_end,
                 } => {
                     // hooks B4: Stop hooks (cancelable twin). `TurnOutcome` does
                     // not distinguish StopHookPrevented from EndTurn, so both the
@@ -3052,29 +3212,34 @@ impl ConversationOrchestrator {
                     // EndTurn; only `LoopAgain` (a Stop hook asking to keep
                     // working) loops. `handle_stop_at_end` already emits the
                     // end-turn on Terminate, so we don't re-emit there.
-                    match self
-                        .handle_stop_at_end(
-                            &stop_reason,
-                            &mut stop_hook_active,
-                            &mut stop_hook_blocking_count,
-                            turn_count,
-                            id,
-                        )
-                        .await
-                    {
-                        StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
-                        // Binary blocking-branch max-turns end — mirror this fn's
-                        // own top-of-loop guard, which returns `TurnOutcome::MaxTurns`.
-                        StopHookFlow::TerminateMaxTurns => return Ok(TurnOutcome::MaxTurns),
-                        StopHookFlow::LoopAgain => {
-                            // RECOV.4: a Stop hook forced the loop to continue —
-                            // reset the max_output_tokens recovery bookkeeping so
-                            // the continued turn starts a fresh escalation episode
-                            // (TS `query.ts:1291`), matching `run_turn`.
-                            recovery.reset_max_output_tokens_recovery();
-                            continue;
+                    if tool_requested_end {
+                        self.fire_tool_result_end_stop_hooks(&stop_reason, stop_hook_active)
+                            .await;
+                    } else {
+                        match self
+                            .handle_stop_at_end(
+                                &stop_reason,
+                                &mut stop_hook_active,
+                                &mut stop_hook_blocking_count,
+                                turn_count,
+                                id,
+                            )
+                            .await
+                        {
+                            StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
+                            // Binary blocking-branch max-turns end — mirror this fn's
+                            // own top-of-loop guard, which returns `TurnOutcome::MaxTurns`.
+                            StopHookFlow::TerminateMaxTurns => return Ok(TurnOutcome::MaxTurns),
+                            StopHookFlow::LoopAgain => {
+                                // RECOV.4: a Stop hook forced the loop to continue —
+                                // reset the max_output_tokens recovery bookkeeping so
+                                // the continued turn starts a fresh escalation episode
+                                // (TS `query.ts:1291`), matching `run_turn`.
+                                recovery.reset_max_output_tokens_recovery();
+                                continue;
+                            }
+                            StopHookFlow::FallThrough => {}
                         }
-                        StopHookFlow::FallThrough => {}
                     }
                     // A3: at a natural end-of-turn, consult the token budget. If
                     // it says continue, inject the meta nudge, reset the A1
@@ -3086,7 +3251,8 @@ impl ConversationOrchestrator {
                     // `"end_turn"` branch, this driver carries the live
                     // `stop_reason`, so a TERMINAL end (blocking_limit /
                     // prompt_too_long) must NOT trigger budget continuation.
-                    if stop_reason == "end_turn"
+                    if allow_budget_continuation
+                        && stop_reason == "end_turn"
                         && self
                             .maybe_continue_for_budget(
                                 budget.as_mut(),

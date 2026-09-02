@@ -204,3 +204,79 @@ async fn xaa_token_exchange_4xx_clears_id_token() {
         other => panic!("expected TokenExchange error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn authorization_server_issuer_mismatch_remains_metadata_discovery_failure() {
+    struct IssuerMismatch;
+    #[async_trait]
+    impl HttpTransport for IssuerMismatch {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            let (status, body) = if req.url.contains("oauth-protected-resource") {
+                (
+                    200,
+                    r#"{"resource":"https://mcp.example.com/mcp","authorization_servers":["https://as.example.com/root"]}"#.to_string(),
+                )
+            } else if req.url.contains("oauth-authorization-server") {
+                (
+                    200,
+                    r#"{"issuer":"https://other.example.com/root","token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                )
+            } else {
+                (404, String::new())
+            };
+            Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body,
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+            Err(HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    let http = Arc::new(IssuerMismatch) as Arc<dyn HttpTransport>;
+    let err = xaa::perform_cross_app_access(
+        &http,
+        "https://mcp.example.com/mcp",
+        &XaaConfig {
+            client_id: "as-client",
+            client_secret: "as-secret",
+            idp_client_id: "idp-client",
+            idp_client_secret: None,
+            idp_id_token: "the-id-token",
+            idp_token_endpoint: "https://idp.example.com/token",
+        },
+    )
+    .await
+    .expect_err("issuer mismatch must fail");
+    match err {
+        xaa::XaaError::NoAuthServer(detail) => {
+            assert!(
+                detail.contains("https://as.example.com/root"),
+                "candidate AS URL should stay in the aggregate error: {detail}"
+            );
+            assert!(
+                detail.contains(
+                    "XAA: AS metadata discovery failed: issuer mismatch: expected https://as.example.com/root, got https://other.example.com/root"
+                ),
+                "aggregate error should preserve the stable metadata-failure detail: {detail}"
+            );
+        }
+        other => panic!("expected NoAuthServer aggregate failure, got {other:?}"),
+    }
+
+    let direct = xaa::discover_authorization_server(&http, "https://as.example.com/root")
+        .await
+        .expect_err("direct metadata discovery must return the metadata mismatch");
+    match direct {
+        xaa::XaaError::AsMetadata(detail) => {
+            assert_eq!(
+                detail,
+                "issuer mismatch: expected https://as.example.com/root, got https://other.example.com/root"
+            );
+        }
+        other => panic!("expected AsMetadata mismatch failure, got {other:?}"),
+    }
+}

@@ -214,7 +214,10 @@ pub async fn discover_oidc(
             "XAA IdP: OIDC discovery returned invalid/non-JSON metadata at {url}"
         ))
     })?;
-    if !meta.token_endpoint.starts_with("https://") {
+    if url::Url::parse(&meta.token_endpoint)
+        .ok()
+        .is_none_or(|endpoint| endpoint.scheme() != "https")
+    {
         return Err(McpError::OAuth(format!(
             "XAA IdP: refusing non-HTTPS token endpoint: {}",
             meta.token_endpoint
@@ -733,6 +736,37 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
             idp_id_token,
             idp_token_endpoint: oidc.token_endpoint,
         }))
+    }
+
+    async fn peek_id_token_cache_hit(
+        &self,
+        server_name: &str,
+        _server_url: &str,
+    ) -> Result<bool, McpError> {
+        // Match `performMCPXaaAuth`: the AS client config and both secret
+        // lookups happen before `idTokenCacheHit` is sampled and before the
+        // failure-telemetry try/catch begins. Repeating these read-only checks
+        // in `xaa_inputs` keeps the trait seam stateless while preserving that
+        // observable ordering.
+        let Some((_as_client_id, server_key)) = self.server_lookup.lookup(server_name).await else {
+            return Err(McpError::OAuth(format!(
+                "XAA: server '{server_name}' is not XAA-provisioned (no AS client config)."
+            )));
+        };
+        if get_as_client_secret(&self.storage, &server_key)
+            .await?
+            .is_none()
+        {
+            return Err(McpError::OAuth(format!(
+                "XAA: AS client secret not found for '{server_name}'. Re-add the server with its --client-secret."
+            )));
+        }
+        let _ = get_idp_client_secret(&self.storage, &self.settings.issuer).await?;
+        Ok(
+            get_cached_id_token(&self.storage, &self.clock, &self.settings.issuer)
+                .await?
+                .is_some(),
+        )
     }
 
     /// Drop this IdP's cached id_token (`clearIdpIdToken(idp.issuer)`,

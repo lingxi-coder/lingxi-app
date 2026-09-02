@@ -384,6 +384,14 @@ pub enum SubagentObservation {
         model: String,
         /// Provider profile used to route [`Self::model`], when pinned.
         model_profile: Option<String>,
+        /// Whether this child parks after each successful turn-set and can be
+        /// resumed later. A `Completed` observation for such a child means
+        /// "idle", not terminal death.
+        persistent: bool,
+        /// First absolute client-message index emitted by this runner. Fresh
+        /// children start at zero; restored persistent children start after
+        /// the visible messages already present in their transcript.
+        initial_message_index: u64,
     },
     /// The child emitted a typed progress beacon while still running.
     Progress {

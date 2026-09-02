@@ -684,6 +684,35 @@ fn provider_label(profile_name: &str) -> &str {
 /// a provider profile, so `profile` is always `None`.
 #[async_trait]
 impl agent::SubagentApiClient for ProviderApiAdapter {
+    fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
+        self.service.consume_pending_near_limit_wrap_up_hint()
+    }
+
+    fn dispatch_near_limit_checkpoint(&self, request: agent::NearLimitCheckpointRequest) {
+        // The port has one shared `SessionState.todos` list rather than the
+        // oracle's per-agent todo buckets. A child-specific bucket therefore
+        // has no representable entries here; keep it empty instead of
+        // accidentally snapshotting the main thread's plan.
+        let _ = session::dispatch_rate_limit_checkpoint(session::OwnedCheckpointRequest {
+            session_id: session::checkpoint_session_key(request.session_id),
+            trigger: session::CheckpointTrigger::NearLimit,
+            todos: Vec::new(),
+            cwd: request.cwd,
+            gates: session::CheckpointGates {
+                non_interactive: request.non_interactive,
+                remote_workspace: false,
+                policy_allows: session::local_checkpoint_commit_allowed(),
+            },
+        });
+    }
+
+    fn record_usage_limit_near_wrap_up(&self) {
+        // Oracle `y("usage_limit_near_wrapup")`: a success/count gate rather
+        // than a `tengu_*` analytics-bus event. Match the existing `y(...)`
+        // ports by emitting a debug tracing event with the literal gate name.
+        tracing::debug!(event = "usage_limit_near_wrapup");
+    }
+
     async fn messages_create(
         &self,
         model: &str,

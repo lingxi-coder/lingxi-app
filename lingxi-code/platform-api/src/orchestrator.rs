@@ -2850,21 +2850,11 @@ pub trait OutputStream: Send + Sync {
     /// (ShellError) branch is likewise unmodeled: LingXi's Bash tool returns an
     /// `Ok` interrupted result rather than an `Err`.
     ///
-    /// STILL MISSING — the SDK FRAME for executor-substituted synthetics. The
-    /// PERSISTED side is now complete for both substitution paths: an in-flight
-    /// tool whose result `drain_one` discards has its dispatch-site kind
-    /// rewritten to `user-rejected`, and a tool cancelled while still QUEUED
-    /// gets the same kind recorded by `apply_abort_to_pending`'s caller — both
-    /// matching `createSyntheticErrorMessage` (2.1.220 @232972524).
-    /// What remains is that the stream-json frame still comes from DISPATCH,
-    /// not from the executor: the in-flight case emits its frame before the
-    /// substitution is known (so the frame carries the pre-substitution kind),
-    /// and the queued case emits no frame at all because dispatch never ran.
-    /// Fixing either requires moving frame production to the executor, which
-    /// also changes SDK frame ORDER from completion order to received order —
-    /// a contract encoded in `client-protocol/tests/events_test.rs` and
-    /// `client-protocol/snapshots/feed_status.json`, so it needs an explicit
-    /// decision rather than a silent rewrite.
+    /// The streaming driver buffers dispatch-side SDK frames and releases them
+    /// from the executor's received-order drain point. That lets a cancelled
+    /// tool substitute its final synthetic content and denial provenance before
+    /// the frame is emitted, while still giving a queued-then-cancelled tool a
+    /// frame even though dispatch never ran.
     async fn emit_tool_result_denied(
         &self,
         id: &protocol::ToolUseId,

@@ -7,7 +7,7 @@
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
 use lingxi_core::SessionState;
-use protocol::{AgentId, McpConnectionId, ToolUseId};
+use protocol::{AgentId, McpConnectionId, MessageId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -24,6 +24,12 @@ pub struct ToolUseContext {
     pub messages: Vec<protocol::ConversationMessage>,
     /// The tool-use id assigned by the model, if this call is bound to one.
     pub tool_use_id: Option<ToolUseId>,
+    /// The current assistant message that owns this tool-use batch, if known.
+    /// Main-loop dispatch sets this to the live assistant turn id so tools and
+    /// telemetry hooks can attribute validation failures to the current
+    /// request. Omitted for call sites that have no current assistant message
+    /// (for example isolated unit tests and subagent helper invocations).
+    pub assistant_message_id: Option<MessageId>,
     /// The agent that issued this call, if known.
     pub agent_id: Option<AgentId>,
     /// The DISPLAY NAME of the teammate that issued this call, if known
@@ -118,6 +124,7 @@ impl ToolUseContext {
             },
             messages: Vec::new(),
             tool_use_id: None,
+            assistant_message_id: None,
             agent_id: None,
             agent_name: None,
             team_name: None,

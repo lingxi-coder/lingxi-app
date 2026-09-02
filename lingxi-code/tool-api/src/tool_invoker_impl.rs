@@ -223,6 +223,7 @@ impl ToolInvoker for RegistryToolInvoker {
             },
             messages: vec![],
             tool_use_id: ctx.tool_use_id.clone().map(protocol::ToolUseId::from),
+            assistant_message_id: ctx.assistant_message_id,
             agent_id: ctx.parent_agent_id,
             agent_name: ctx.agent_name.clone(),
             team_name: ctx.team_name.clone(),
@@ -713,12 +714,13 @@ mod tests {
 
     // ──── swarm identity: SubagentInvocationContext name/team → ToolUseContext ────
 
-    /// Tool fixture that records the `(agent_name, team_name)` the dispatched
+    /// Tool fixture that records the `(agent_name, team_name, assistant_message_id)` the dispatched
     /// `ToolUseContext` carries, so a test can assert the swarm identity flows
     /// through the invoker (claude-code `getAgentName()` /
     /// `getTeammateContext()?.teamName`).
     struct NameRecordingTool {
-        captured: Arc<StdMutex<Option<(Option<String>, Option<String>)>>>,
+        captured:
+            Arc<StdMutex<Option<(Option<String>, Option<String>, Option<protocol::MessageId>)>>>,
     }
     #[async_trait]
     impl Tool for NameRecordingTool {
@@ -766,7 +768,11 @@ mod tests {
             ctx: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            *self.captured.lock().unwrap() = Some((ctx.agent_name.clone(), ctx.team_name.clone()));
+            *self.captured.lock().unwrap() = Some((
+                ctx.agent_name.clone(),
+                ctx.team_name.clone(),
+                ctx.assistant_message_id,
+            ));
             Ok(ToolCallResult {
                 data: json!({}),
                 model_content: None,
@@ -787,13 +793,13 @@ mod tests {
     /// actually fire for an in-process teammate (it keys on these).
     #[tokio::test]
     async fn registry_invoker_threads_swarm_identity_into_tool_use_ctx() {
-        let captured: Arc<StdMutex<Option<(Option<String>, Option<String>)>>> =
-            Arc::new(StdMutex::new(None));
+        let captured = Arc::new(StdMutex::new(None));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(NameRecordingTool {
             captured: captured.clone(),
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
+        let assistant_message_id = protocol::MessageId::new();
 
         invoker
             .invoke(
@@ -808,6 +814,7 @@ mod tests {
                     can_show_permission_prompts: true,
                     cwd: None,
                     tool_use_id: None,
+                    assistant_message_id: Some(assistant_message_id),
                     depth: 0,
                     observer: None,
                     parent_model: None,
@@ -821,7 +828,8 @@ mod tests {
             .expect("dispatch ok");
 
         let captured = captured.lock().unwrap();
-        let (agent_name, team_name) = captured.as_ref().expect("NameRecordingTool::call ran");
+        let (agent_name, team_name, captured_message_id) =
+            captured.as_ref().expect("NameRecordingTool::call ran");
         assert_eq!(
             agent_name.as_deref(),
             Some("researcher"),
@@ -831,6 +839,11 @@ mod tests {
             team_name.as_deref(),
             Some("alpha"),
             "the team name reaches ToolUseContext.team_name (getTeammateContext()?.teamName)"
+        );
+        assert_eq!(
+            *captured_message_id,
+            Some(assistant_message_id),
+            "the current assistant message id reaches ToolUseContext unchanged"
         );
     }
 
@@ -975,6 +988,7 @@ mod tests {
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             parent_model: None,
@@ -1158,6 +1172,7 @@ mod tests {
             can_show_permission_prompts: can_show,
             cwd: None,
             tool_use_id: None,
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             parent_model: None,
@@ -1297,6 +1312,7 @@ mod tests {
             can_show_permission_prompts: true,
             cwd: None,
             tool_use_id: Some(id.to_string()),
+            assistant_message_id: None,
             depth: 0,
             observer: None,
             parent_model: None,

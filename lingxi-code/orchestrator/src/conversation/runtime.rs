@@ -57,6 +57,11 @@ pub(crate) struct TranscriptStore {
     /// `Uks(agentId, meta)` (2.1.220 BIN off **232969604**) returns the MCP
     /// server's meta verbatim when `agentId` is absent.
     pub(crate) tool_use_mcp_meta: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// `tool_use_id` → a successful tool result's turn-end request, consumed by
+    /// the turn drivers only after the matching `tool_result` has been
+    /// persisted and its post-result hooks/attachments have run.
+    pub(crate) pending_tool_result_turn_end:
+        Mutex<std::collections::HashMap<String, tool_api::tool_trait::ToolResultTurnEnd>>,
     /// `tool_use_id` → claude's `sourceToolAssistantUUID`: the uuid of the
     /// ASSISTANT transcript line that carried this `tool_use` block
     /// (`sourceToolAssistantUUID: i.uuid` at every producer site). claude's
@@ -114,6 +119,7 @@ impl TranscriptStore {
             tool_frames: Mutex::new(None),
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
+            pending_tool_result_turn_end: Mutex::new(std::collections::HashMap::new()),
             tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
             pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
@@ -126,6 +132,7 @@ impl TranscriptStore {
         *self.tool_frames.lock().await = None;
         self.tool_use_results.lock().await.clear();
         self.tool_use_mcp_meta.lock().await.clear();
+        self.pending_tool_result_turn_end.lock().await.clear();
         self.tool_source_assistant_uuids.lock().await.clear();
         self.pending_hook_attachments.lock().await.clear();
         *self.git_branch_cache.lock().await = None;

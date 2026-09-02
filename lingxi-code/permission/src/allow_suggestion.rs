@@ -38,8 +38,12 @@
 //! exactly as `:*` would; the exact-command fallback requires a byte-equal
 //! command.
 
-use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+use crate::rule::{
+    normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,
+    PermissionRuleValue,
+};
 use crate::shell_command::{command_from_input, is_shell_tool};
+use crate::PermissionUpdateDestination;
 use serde_json::Value;
 use std::sync::LazyLock;
 
@@ -69,6 +73,79 @@ pub fn allow_suggestion(tool_name: &str, input: &Value) -> PermissionRule {
         // Nothing narrowable → fall back to the prior tool-wide allow.
         None => PermissionRule::allow_tool_session(tool_name),
     }
+}
+
+/// One safe, fully described persistence choice rendered by a permission UI.
+///
+/// `update` is deliberately retained in its original wire shape. When the user
+/// selects the row, the permission gate must apply these exact bytes rather
+/// than recomputing a rule from the current tool input: upstream returns the
+/// selected consent row's `applies` value verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPersistenceSuggestion {
+    /// Human-readable label for the consent row.
+    pub label: String,
+    /// Exact `PermissionUpdate` object selected by this row.
+    pub update: Value,
+    /// Parsed equivalent used by the TUI's session fast path and persistence.
+    pub rule: PermissionRule,
+    /// Destination carried by `update`.
+    pub destination: PermissionUpdateDestination,
+}
+
+/// Build the `ToolUseConfirm` persistence row from raw
+/// `permission_suggestions` metadata.
+///
+/// The generic TUI can currently describe only one rule. Therefore it accepts
+/// exactly one `addRules`/allow update containing exactly one rule, targeted at
+/// the tool being prompted, and only the two destinations upstream consent
+/// rows expose (`session` and `localSettings`). More complex suggestion groups
+/// fail closed instead of rendering one rule while silently applying others.
+#[must_use]
+pub fn permission_persistence_suggestion(
+    prompted_tool_name: &str,
+    suggestions: &Value,
+) -> Option<PermissionPersistenceSuggestion> {
+    let updates = suggestions.as_array()?;
+    let [update] = updates.as_slice() else {
+        return None;
+    };
+    let object = update.as_object()?;
+    if object.get("type").and_then(Value::as_str)? != "addRules"
+        || object.get("behavior").and_then(Value::as_str)? != "allow"
+    {
+        return None;
+    }
+    let destination = match object.get("destination").and_then(Value::as_str)? {
+        "session" => PermissionUpdateDestination::Session,
+        "localSettings" => PermissionUpdateDestination::LocalSettings,
+        _ => return None,
+    };
+    let rules = object.get("rules").and_then(Value::as_array)?;
+    let [wire_rule] = rules.as_slice() else {
+        return None;
+    };
+    let value = rule_value_from_wire(wire_rule)?;
+    if value.tool_name != normalize_legacy_tool_name(prompted_tool_name)
+        || !safe_permission_label_piece(&value.tool_name)
+    {
+        return None;
+    }
+    let target = match value.rule_content.as_deref() {
+        Some(content) if safe_permission_label_piece(content) => content.to_string(),
+        Some(_) => return None,
+        None => format!("any {} command", value.tool_name),
+    };
+    Some(PermissionPersistenceSuggestion {
+        label: format!("Yes, and don't ask again for {target}"),
+        update: update.clone(),
+        rule: PermissionRule {
+            value,
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Session,
+        },
+        destination,
+    })
 }
 
 /// Whether a session/allow `rule` matches a live call to `tool_name`/`input`.
@@ -121,6 +198,24 @@ fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
         return webfetch_domain(input).map(|host| format!("domain:{host}"));
     }
     None
+}
+
+fn rule_value_from_wire(rule: &Value) -> Option<PermissionRuleValue> {
+    let object = rule.as_object()?;
+    let tool_name = normalize_legacy_tool_name(object.get("toolName").and_then(Value::as_str)?);
+    let rule_content = match object.get("ruleContent") {
+        None => None,
+        Some(Value::String(content)) => Some(content.clone()),
+        Some(_) => return None,
+    };
+    Some(PermissionRuleValue {
+        tool_name,
+        rule_content,
+    })
+}
+
+fn safe_permission_label_piece(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 160 && !value.chars().any(char::is_control)
 }
 
 /// The 2.1.211 `KQt` interpreter blocklist `Bro`: if the command's first
@@ -529,5 +624,85 @@ mod tests {
         assert!(rule.value.rule_content.is_none());
         assert_eq!(rule.value.tool_name, "mcp__server__tool");
         assert!(matches!(rule.behavior, PermissionBehavior::Allow));
+    }
+
+    #[test]
+    fn permission_persistence_suggestion_preserves_exact_update() {
+        let suggestions = json!([
+            {
+                "type": "addRules",
+                "rules": [{"toolName": "Bash", "ruleContent": "git commit *"}],
+                "behavior": "allow",
+                "destination": "session"
+            }
+        ]);
+        let suggestion = permission_persistence_suggestion("Bash", &suggestions).unwrap();
+        assert_eq!(
+            suggestion.label,
+            "Yes, and don't ask again for git commit *"
+        );
+        assert_eq!(suggestion.update, suggestions[0]);
+        assert_eq!(
+            suggestion.rule.value.rule_content.as_deref(),
+            Some("git commit *")
+        );
+        assert_eq!(suggestion.destination, PermissionUpdateDestination::Session);
+    }
+
+    #[test]
+    fn permission_persistence_suggestion_handles_legacy_tool_wide_rules() {
+        let suggestions = json!([
+            {
+                "type": "addRules",
+                "rules": [{"toolName": "Task"}],
+                "behavior": "allow",
+                "destination": "session"
+            }
+        ]);
+        assert_eq!(
+            permission_persistence_suggestion("Agent", &suggestions)
+                .map(|suggestion| suggestion.label),
+            Some("Yes, and don't ask again for any Agent command".to_string())
+        );
+    }
+
+    #[test]
+    fn permission_persistence_suggestion_fails_closed_for_ambiguous_or_unsafe_updates() {
+        let update = |rule: Value| {
+            json!([{
+                "type": "addRules",
+                "rules": [rule],
+                "behavior": "allow",
+                "destination": "session"
+            }])
+        };
+        assert!(permission_persistence_suggestion(
+            "Bash",
+            &update(json!({"toolName": "Edit", "ruleContent": "/tmp/a"}))
+        )
+        .is_none());
+        assert!(permission_persistence_suggestion(
+            "Bash",
+            &update(json!({"toolName": "Bash", "ruleContent": "safe\nforged row"}))
+        )
+        .is_none());
+        assert!(permission_persistence_suggestion(
+            "Bash",
+            &json!([
+                {
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "git status"}],
+                    "behavior": "allow",
+                    "destination": "session"
+                },
+                {
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "rm -rf *"}],
+                    "behavior": "allow",
+                    "destination": "session"
+                }
+            ])
+        )
+        .is_none());
     }
 }

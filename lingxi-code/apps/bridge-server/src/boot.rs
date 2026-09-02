@@ -431,6 +431,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // `computer_access_sink()`) exists, wiring the Electron-facing
         // `BridgeComputerAccessBroker`.
         computer_access_tx: None,
+        // Filled by `assemble_with_provider_keys` after the connection-scoped
+        // event sink exists; this keeps subagent lifecycle events on the same
+        // authenticated session stream as ordinary turn events.
+        session_agent_observer: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -869,6 +873,16 @@ pub async fn assemble_with_provider_keys(
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
+    // Subagent lifecycle/message events use the same authenticated sink as the
+    // main turn. `initialize_live_session` canonicalizes this id before this
+    // function is entered, so the observer and engine transcript share one
+    // session fence even when the host did not provide an id explicitly.
+    cfg.session_agent_observer = Some(Arc::new(
+        engine_desktop::session_agents::DesktopSessionAgentObserver::new(
+            event_sink.clone(),
+            cfg.session_id_override.clone().unwrap_or_default(),
+        ),
+    ));
     let message_output = client_adapter::AdapterOutputStream::new(event_sink.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
     let permission_sink = connection.permission_sink();
@@ -1509,6 +1523,7 @@ mod tests {
             injected_permission_gate: None,
             ask_user_question_tx: None,
             computer_access_tx: None,
+            session_agent_observer: None,
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,

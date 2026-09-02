@@ -5,7 +5,7 @@
 use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_395_entries() {
+fn registry_is_exactly_416_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -87,11 +87,11 @@ fn registry_is_exactly_395_entries() {
     //     two confirmed real `tengu_mcp_*` analytics events at the oracle —
     //     the ~100 other `tengu_mcp_*` binary strings are Statsig
     //     feature-flag names, not events". The first half is FALSE. The
-    //     analytics-bus call shape `s("tengu_mcp_<name>"` matches 53 DISTINCT
+    //     analytics-bus call shape `s("tengu_mcp_<name>"` matches 55 DISTINCT
     //     event names in 2.1.251. Many `tengu_mcp_*` strings really are
-    //     Statsig flags — that is the true half — but the event set is 53,
-    //     not 2, and this block ports 3 of them. The other 50 are an OPEN
-    //     parity gap. Reading this count as "MCP telemetry is complete" is
+    //     Statsig flags — that is the true half — but the event set is 55,
+    //     not 2. The registry now pins 44 of them, leaving 11 OPEN gaps.
+    //     Reading this count as "MCP telemetry is complete" is
     //     exactly the error the retracted wording invited.
     //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
     //     siblings; the port had NO plugin telemetry module before this):
@@ -127,11 +127,20 @@ fn registry_is_exactly_395_entries() {
     // The plugin tail block later grew from 14 to 24 names (additional CLI
     // entry points plus prune/state-file observability), so the compiled
     // registry is now 385 + 10 = 395.
+    // 2.1.252 session persistence-failure parity appends one more
+    // `tengu_session_*` event, growing the registry to 396.
+    // Provider-neutral, non-deferred MCP analytics parity then appends 20 more
+    // MCP tail names (`add`, `delete`, `get`, `list`, `login`, `logout`,
+    // `command_inline`, `elicitation_shown`, `elicitation_response`,
+    // `input_missing_required`, `large_result_handled`, `pending_call`,
+    // `servers`, `tool_result_ended_turn`, `tools_commands_loaded`,
+    // `tools_refreshed_mid_turn`, `oauth_flow_failure`, `session_expired`,
+    // `list_paginated`, `reconcile`): 396 + 20 = 416.
     //
-    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (24)
+    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (44)
     // and telemetry/src/tengu/plugin.rs::NAMES.len() (24), not pasted from a
     // failing assertion.
-    assert_eq!(ALL_EVENT_NAMES.len(), 395);
+    assert_eq!(ALL_EVENT_NAMES.len(), 416);
 }
 
 #[test]
@@ -247,7 +256,7 @@ fn category_ordering_preserved() {
     // M5-07 grew the session block by +3 (appended/rotated/corrupted): 15 -> 18.
     // M5-08 grew it by +2 (resume_started/completed): 18 -> 20.
     // D3 strict-parity consolidated session-resume telemetry: 20 -> 18.
-    for n in &ALL_EVENT_NAMES[55..73] {
+    for n in &ALL_EVENT_NAMES[55..74] {
         assert!(n.starts_with("tengu_session_"), "session block: {n}");
     }
     // M4-05 grew the tool block by +24 (67 → 91); M4-06 grew it by +6 (91 → 97);
@@ -267,23 +276,23 @@ fn category_ordering_preserved() {
     // ExitWorktree 2.1.206 parity added 2 more byte-exact events
     // (tengu_worktree_kept, tengu_worktree_removed) to the tool block:
     // 133 -> 135, shifting every downstream offset by another +2.
-    for n in &ALL_EVENT_NAMES[73..208] {
+    for n in &ALL_EVENT_NAMES[74..209] {
         assert!(
             n.starts_with("tengu_tool_") || n.starts_with("tengu_worktree_"),
             "tool block: {n}"
         );
     }
     // D2 strict-parity dropped tengu_cost_recorded: cost block 10 -> 9.
-    for n in &ALL_EVENT_NAMES[208..217] {
+    for n in &ALL_EVENT_NAMES[209..218] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[217..225] {
+    for n in &ALL_EVENT_NAMES[218..226] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[225..237] {
+    for n in &ALL_EVENT_NAMES[226..238] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[237..240] {
+    for n in &ALL_EVENT_NAMES[238..241] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
@@ -293,7 +302,7 @@ fn category_ordering_preserved() {
     // Block size is now 17; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[240..257] {
+    for n in &ALL_EVENT_NAMES[241..258] {
         assert!(
             n.starts_with("tengu_orchestrator_") || n.starts_with("tengu_repl_"),
             "orchestrator block: {n}"
@@ -304,14 +313,14 @@ fn category_ordering_preserved() {
     // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released).
     // Grep/Glob telemetry removed shifts the start back by -6 (tool block
     // 140→134): 259..263.
-    for n in &ALL_EVENT_NAMES[257..261] {
+    for n in &ALL_EVENT_NAMES[258..262] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
     // … → release → command. Grep/Glob telemetry removed shifts it back by -6
     // (tool block 140→134): 263..317.
-    for n in &ALL_EVENT_NAMES[261..315] {
+    for n in &ALL_EVENT_NAMES[262..316] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
@@ -322,7 +331,7 @@ fn category_ordering_preserved() {
     //        (+screen_opened/screen_closed/search_opened). Block shifted by +2
     //        total vs M6-09 (release 2→3→4). Grep/Glob telemetry removed shifts
     //        it back by -6 (tool block 140→134): 317..330.
-    for n in &ALL_EVENT_NAMES[315..328] {
+    for n in &ALL_EVENT_NAMES[316..329] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
     // FileReadTool analytics block (4 events, #13 added the 4th) appended at the
@@ -330,7 +339,7 @@ fn category_ordering_preserved() {
     // (NOT `tengu_tool_*`), kept after the tui block so every per-block prefix
     // slice above stays valid.
     assert_eq!(
-        &ALL_EVENT_NAMES[328..332],
+        &ALL_EVENT_NAMES[329..333],
         &[
             "tengu_file_read_dedup",
             "tengu_session_file_read",
@@ -345,7 +354,7 @@ fn category_ordering_preserved() {
     // the worktree-206-parity tool-block growth, +2 by the
     // exit-worktree-206-parity tool-block growth).
     assert_eq!(
-        &ALL_EVENT_NAMES[332..341],
+        &ALL_EVENT_NAMES[333..342],
         &telemetry::tengu::migration::NAMES,
         "config-migration tail block",
     );
@@ -353,14 +362,14 @@ fn category_ordering_preserved() {
     // block — bypass dialog accept (BypassPermissionsModeDialog.tsx).
     // Position 341..342.
     assert_eq!(
-        &ALL_EVENT_NAMES[341..342],
+        &ALL_EVENT_NAMES[342..343],
         &telemetry::tengu::permission::NAMES,
         "permission-flow tail block",
     );
     // Coordinator swarm block (3 events) appended after the permission block —
     // tengu_team_created/_deleted/coordinator_mode_switched. Positions 342..345.
     assert_eq!(
-        &ALL_EVENT_NAMES[342..345],
+        &ALL_EVENT_NAMES[343..346],
         &telemetry::tengu::coordinator::NAMES,
         "coordinator swarm tail block",
     );
@@ -368,24 +377,25 @@ fn category_ordering_preserved() {
     // the coordinator block — tengu_awsAuthRefresh_missing_trust /
     // tengu_awsCredentialExport_missing_trust. Positions 345..347.
     assert_eq!(
-        &ALL_EVENT_NAMES[345..347],
+        &ALL_EVENT_NAMES[346..348],
         telemetry::tengu::oauth::AWS_AUTH_NAMES,
         "AWS auth-refresh trust-gate tail block",
     );
-    // MCP analytics-event block (24 events, 2.1.252 byte-alignment
+    // MCP analytics-event block (44 events, 2.1.252 byte-alignment
     // B8/§20a/§20b/§11 plus registry/catalog/connect, `mcp serve`, listen
-    // recovery, reset-choice, and provider-neutral OAuth/auth events) appended
-    // after the AWS auth-refresh block. Positions 347..371.
+    // recovery, provider-neutral OAuth/auth, and the non-deferred command /
+    // elicitation / pending / large-result / reconcile family) appended after
+    // the AWS auth-refresh block. Positions 348..392.
     assert_eq!(
-        &ALL_EVENT_NAMES[347..371],
+        &ALL_EVENT_NAMES[348..392],
         telemetry::tengu::mcp::NAMES,
         "MCP analytics-event tail block",
     );
     // Plugin event block (24 events, 2.1.251 byte-alignment B8 plus CLI
     // entry-point and prune/state-file observability) appended after the MCP
-    // block. Positions 371..395.
+    // block. Positions 392..416.
     assert_eq!(
-        &ALL_EVENT_NAMES[371..395],
+        &ALL_EVENT_NAMES[392..416],
         telemetry::tengu::plugin::NAMES,
         "plugin event tail block",
     );
@@ -403,6 +413,26 @@ fn mcp_events_registered() {
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_resource_templates_fetched"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tool_auto_backgrounded"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_start"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_add"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_delete"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_get"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_list"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_login"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_logout"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_command_inline"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_elicitation_shown"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_elicitation_response"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_input_missing_required"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_large_result_handled"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_pending_call"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_servers"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tool_result_ended_turn"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tools_commands_loaded"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tools_refreshed_mid_turn"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_oauth_flow_failure"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_session_expired"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_list_paginated"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_reconcile"));
 }
 
 #[test]

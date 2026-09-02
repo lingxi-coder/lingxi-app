@@ -537,10 +537,10 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   );
 }
 
-export function BetaTopBar({ bridge, tasksOpen, onToggleTasks, theme, onTheme }: {
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, theme, onTheme }: {
   bridge: UseBridge;
-  tasksOpen: boolean;
-  onToggleTasks(): void;
+  runtimeCenterOpen: boolean;
+  onToggleRuntimeCenter(): void;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
 }) {
@@ -559,7 +559,7 @@ export function BetaTopBar({ bridge, tasksOpen, onToggleTasks, theme, onTheme }:
       <button className="no-drag" type="button" aria-label="Toggle theme" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 30, height: 30, display: 'grid', placeItems: 'center', borderRadius: 7, border: `0.5px solid ${t.border}`, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
         <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
       </button>
-      <button className="no-drag" type="button" aria-label="Toggle background tasks" aria-pressed={tasksOpen} onClick={onToggleTasks} style={{ width: 30, height: 30, display: 'grid', placeItems: 'center', borderRadius: 7, border: `0.5px solid ${tasksOpen ? t.accentBorder : t.border}`, background: tasksOpen ? t.accentBg : 'transparent', color: tasksOpen ? t.accent : t.text3, cursor: 'pointer' }}>
+      <button className="no-drag" type="button" data-runtime-center-trigger="true" aria-label="Toggle runtime center" aria-controls="runtime-center-overview" aria-expanded={runtimeCenterOpen} onClick={onToggleRuntimeCenter} style={{ width: 30, height: 30, display: 'grid', placeItems: 'center', borderRadius: 7, border: `0.5px solid ${runtimeCenterOpen ? t.accentBorder : t.border}`, background: runtimeCenterOpen ? t.accentBg : 'transparent', color: runtimeCenterOpen ? t.accent : t.text3, cursor: 'pointer' }}>
         <Icon name="tasks" size={15} />
       </button>
     </header>
@@ -1272,7 +1272,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme, onOpen
     const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     const submittingSessionId = draftSessionId.current;
     try {
-      await bridge.sendPrompt(value, images);
+      await bridge.sendPrompt(
+        value,
+        images,
+        imageAttachments.map((attachment) => attachment.name),
+        snapshot.files,
+      );
       clearComposer(submittingSessionId);
     } catch {
       setImageNotice('发送失败，图片附件已保留，可以重试。');

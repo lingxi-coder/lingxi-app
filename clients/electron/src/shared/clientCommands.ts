@@ -22,6 +22,8 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'task_list',
   'task_output',
   'task_stop',
+  'list_session_agents',
+  'load_session_agent_transcript',
   'set_permission_mode',
   'run_slash_command',
   'get_conversation_controls',

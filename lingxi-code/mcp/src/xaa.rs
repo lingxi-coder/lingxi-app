@@ -175,34 +175,15 @@ pub fn redact_tokens(raw: &str) -> String {
 // URL normalization (xaa.ts:56-67) — RFC 8414 §3.3 / RFC 9728 §3.3 compare.
 // ---------------------------------------------------------------------------
 
-/// Syntax-based normalization for issuer/resource identifier comparison:
-/// lowercase scheme + host, drop a default port, strip a trailing slash. This
-/// is a pragmatic subset of RFC 3986 §6.2.2 (no `url` dep in this crate).
+/// Exact `new URL(value).href.replace(/\/$/, "")` normalization used by XAA.
+/// Invalid input falls back to the original string with one trailing slash
+/// removed, matching the JavaScript catch arm.
 fn normalize_url(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    let Some((scheme, rest)) = trimmed.split_once("://") else {
-        return trimmed.to_string();
-    };
-    let scheme_lc = scheme.to_ascii_lowercase();
-    // Split authority from path.
-    let (authority, path) = match rest.split_once('/') {
-        Some((a, p)) => (a, Some(p)),
-        None => (rest, None),
-    };
-    // Lowercase host, drop a default port for the scheme.
-    let authority_lc = authority.to_ascii_lowercase();
-    let authority_norm = match authority_lc.rsplit_once(':') {
-        Some((host, port))
-            if (scheme_lc == "https" && port == "443") || (scheme_lc == "http" && port == "80") =>
-        {
-            host.to_string()
-        }
-        _ => authority_lc,
-    };
-    match path {
-        Some(p) => format!("{scheme_lc}://{authority_norm}/{p}"),
-        None => format!("{scheme_lc}://{authority_norm}"),
-    }
+    let normalized = url::Url::parse(url).map_or_else(|_| url.to_string(), |url| url.to_string());
+    normalized
+        .strip_suffix('/')
+        .unwrap_or(normalized.as_str())
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +316,10 @@ pub async fn discover_authorization_server(
     // RFC 8414 §3.3 / RFC 9728 §3 require HTTPS — refuse to POST an id_token +
     // client_secret over plaintext even if the issuer self-consistently
     // reported http:// (xaa.ts:195-202).
-    if !meta.token_endpoint.starts_with("https://") {
+    if url::Url::parse(&meta.token_endpoint)
+        .ok()
+        .is_none_or(|endpoint| endpoint.scheme() != "https")
+    {
         return Err(XaaError::AsMetadata(format!(
             "refusing non-HTTPS token endpoint: {}",
             meta.token_endpoint
@@ -750,6 +734,11 @@ mod tests {
         assert_eq!(
             normalize_url("https://as.example.com:8443"),
             "https://as.example.com:8443"
+        );
+        assert_eq!(
+            normalize_url("https://as.example.com/path//"),
+            "https://as.example.com/path/",
+            "only the final slash is removed"
         );
     }
 

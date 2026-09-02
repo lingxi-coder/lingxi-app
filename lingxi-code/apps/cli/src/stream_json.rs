@@ -696,6 +696,25 @@ impl StreamJsonStream {
         self.enqueue(&frame);
     }
 
+    fn build_prompt_suggestion_frame(session_id: &str, suggestion: &str, uuid: &str) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".into(), json!("prompt_suggestion"));
+        obj.insert("suggestion".into(), json!(suggestion));
+        obj.insert("uuid".into(), json!(uuid));
+        obj.insert("session_id".into(), json!(session_id));
+        Value::Object(obj)
+    }
+
+    pub async fn emit_prompt_suggestion(&self, suggestion: &str) {
+        if self.suppress_frames || suggestion.trim().is_empty() {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let frame = Self::build_prompt_suggestion_frame(&session_id, suggestion, &uuid);
+        self.enqueue(&frame);
+    }
+
     /// Emit the `system/status` frame (status: "requesting"). Called just
     /// before the API turn starts.
     /// No-op when `suppress_frames` is true.
@@ -2294,6 +2313,26 @@ mod tests {
         assert_eq!(frame["id"], id.to_string());
         assert_eq!(frame["tool"], "Bash");
         assert_eq!(frame["elapsed_ms"], 4_321);
+    }
+
+    #[test]
+    fn prompt_suggestion_frame_matches_expected_shape() {
+        let frame = StreamJsonStream::build_prompt_suggestion_frame(
+            "sess-prompt",
+            "How should I test this?",
+            "uuid-prompt",
+        );
+        let keys: Vec<&str> = frame
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["type", "suggestion", "uuid", "session_id"]);
+        assert_eq!(frame["type"], "prompt_suggestion");
+        assert_eq!(frame["suggestion"], "How should I test this?");
+        assert_eq!(frame["session_id"], "sess-prompt");
+        assert_eq!(frame["uuid"], "uuid-prompt");
     }
 
     #[tokio::test]

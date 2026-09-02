@@ -394,6 +394,17 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'task_stop':
       exactKeys(input, ['type', 'task_id']);
       return { type, task_id: string(input['task_id'], 'task id') };
+    case 'list_session_agents':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'load_session_agent_transcript': {
+      exactKeys(input, ['type', 'agent_id']);
+      const agentId = string(input['agent_id'], 'agent id', 128);
+      if (agentId !== 'main' && !/^agent:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(agentId)) {
+        throw new Error('invalid agent id');
+      }
+      return { type, agent_id: agentId };
+    }
     case 'refresh_listings': {
       exactKeys(input, ['type', 'which']);
       if (!Array.isArray(input['which']) || input['which'].length === 0 || input['which'].length > 3) {

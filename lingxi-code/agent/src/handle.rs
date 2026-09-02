@@ -62,6 +62,44 @@ pub fn workflow_transcript_subdir_override() -> Option<std::path::PathBuf> {
         .flatten()
 }
 
+fn subagent_usage_from_llm_usage(usage: &llm_client::Usage) -> SubagentUsage {
+    let bt = usage.billable_tokens;
+    SubagentUsage {
+        total_tokens: bt
+            .input
+            .saturating_add(bt.cache_write)
+            .saturating_add(bt.cache_read)
+            .saturating_add(bt.output),
+        input_tokens: bt.input,
+        output_tokens: bt.output,
+        cache_creation_input_tokens: bt.cache_write,
+        cache_read_input_tokens: bt.cache_read,
+    }
+}
+
+fn observer_initial_message_index(messages: Option<&[ConversationMessage]>) -> u64 {
+    messages
+        .unwrap_or_default()
+        .iter()
+        .filter(|message| match message {
+            ConversationMessage::User { is_meta: true, .. } => false,
+            ConversationMessage::User {
+                is_compact_summary: true,
+                ..
+            } => false,
+            ConversationMessage::User {
+                is_visible_in_transcript_only: true,
+                ..
+            } => false,
+            ConversationMessage::System {
+                subtype: Some(subtype),
+                ..
+            } if subtype.starts_with("agent_") => false,
+            _ => true,
+        })
+        .count() as u64
+}
+
 /// Production [`SubagentSpawner`] backed by a [`StateMachinePool`].
 ///
 /// Constructed and registered on the host `BuiltinToolContext` so
@@ -1764,10 +1802,15 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         // are parked until `stop`, the sole caller of the pool's only
         // slot-release. Oracle `Agr`'s cleanup is in `runAgent`'s
         // unconditional teardown list and fires on the async path too.
+        let request_name = request.name.clone().or_else(|| request.description.clone());
         let (ctx, agent_mcp_cleanups) =
             self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
-        let (_aid, rx) = match self.pool.allocate(ctx).await {
+        let resolved_agent_type = ctx.agent_definition.agent_type.clone();
+        let resolved_model = crate::runner::resolve_model(&ctx);
+        let resolved_model_profile = ctx.model_profile.clone();
+        let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
+        let (_aid, mut rx) = match self.pool.allocate(ctx).await {
             Ok(pair) => pair,
             Err(e) => {
                 // Never allocated, so `stop` will never be called for this id:
@@ -1789,7 +1832,91 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
                 .await
                 .insert(agent_id, agent_mcp_cleanups);
         }
-        Ok((agent_id, rx))
+        // Persistent agents are pumped by the task layer rather than this
+        // spawner, so wrap their channel to preserve the same global observer
+        // contract as one-shot agents. The forwarded receiver retains the
+        // original event shape for the task handler while this side reports
+        // real messages and terminal lifecycle transitions to Desktop.
+        let observers: Vec<Arc<dyn SubagentSpawnObserver>> =
+            self.spawn_observer.iter().cloned().collect();
+        if observers.is_empty() {
+            return Ok((agent_id, rx));
+        }
+        let observer_events = crate::api::ObserverEventSink::new(observers);
+        let forward_agent_id = agent_id;
+        let (tx, forwarded_rx) = tokio::sync::mpsc::channel(100);
+        observer_events.try_emit(SubagentObservation::Allocated {
+            agent_id,
+            agent_type: resolved_agent_type,
+            name: request_name,
+            model: resolved_model,
+            model_profile: resolved_model_profile,
+            persistent: true,
+            initial_message_index,
+        });
+        tokio::spawn(async move {
+            let mut forwarding = true;
+            let mut terminal_death_seen = false;
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    SubagentEvent::Message { message, .. } => {
+                        if let Ok(conversation) =
+                            serde_json::from_value::<ConversationMessage>(message.clone())
+                        {
+                            observer_events.try_emit(SubagentObservation::Message {
+                                agent_id: forward_agent_id,
+                                message: conversation,
+                            });
+                        }
+                    }
+                    SubagentEvent::Completed {
+                        result,
+                        usage,
+                        total_tool_use_count,
+                        total_duration_ms,
+                        assistant_message_count,
+                        last_request_id,
+                        ..
+                    } => observer_events.emit_terminal(SubagentObservation::Completed {
+                        agent_id: forward_agent_id,
+                        content: result.clone(),
+                        usage: subagent_usage_from_llm_usage(usage),
+                        total_tool_use_count: *total_tool_use_count,
+                        total_duration_ms: *total_duration_ms,
+                        assistant_message_count: *assistant_message_count,
+                        last_request_id: last_request_id.clone(),
+                    }),
+                    SubagentEvent::Failed { error, .. } => {
+                        terminal_death_seen = true;
+                        observer_events.emit_terminal(SubagentObservation::Failed {
+                            agent_id: forward_agent_id,
+                            error: error.clone(),
+                        });
+                    }
+                    SubagentEvent::Killed { .. } => {
+                        terminal_death_seen = true;
+                        observer_events.emit_terminal(SubagentObservation::Killed {
+                            agent_id: forward_agent_id,
+                        })
+                    }
+                    SubagentEvent::Progress { .. } => {}
+                }
+                if forwarding && tx.send(event).await.is_err() {
+                    // The task-side consumer disappeared, but this wrapper is
+                    // now the only receiver draining the real child. Keep
+                    // draining so the runner cannot deadlock and Desktop still
+                    // receives its eventual terminal lifecycle.
+                    forwarding = false;
+                }
+            }
+            if !terminal_death_seen {
+                observer_events.emit_terminal(SubagentObservation::Failed {
+                    agent_id: forward_agent_id,
+                    error: "persistent subagent channel closed unexpectedly".to_string(),
+                });
+            }
+        });
+        Ok((agent_id, forwarded_rx))
     }
 
     async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError> {
@@ -2101,6 +2228,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         }
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
+        let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = match self.pool.allocate(ctx).await {
             Ok(pair) => pair,
@@ -2135,6 +2263,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
             name: request_name.clone(),
             model: resolved_model.clone(),
             model_profile: resolved_model_profile.clone(),
+            persistent: false,
+            initial_message_index,
         });
 
         // Pump the slot until terminal. The runner emits Progress/Message
@@ -2156,12 +2286,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     // `getTokenCountFromUsage` = input + cache_creation + cache_read
                     // + output of the FINAL turn's usage (tokens.ts:46-54); the
                     // runner already carries that final usage (no cross-turn sum).
-                    let bt = usage.billable_tokens;
-                    let total_tokens = bt
-                        .input
-                        .saturating_add(bt.cache_write)
-                        .saturating_add(bt.cache_read)
-                        .saturating_add(bt.output);
+                    let usage_rollup = subagent_usage_from_llm_usage(&usage);
+                    let total_tokens = usage_rollup.total_tokens;
                     // claude `response_char_count: content.length`
                     // (agentToolUtils.ts:328) — despite the name, this is the
                     // NUMBER of text BLOCKS in the final response (`content` is the
@@ -2180,34 +2306,18 @@ impl SubagentSpawner for PoolSubagentSpawner {
                                 .count() as u64
                         })
                         .unwrap_or(0);
-                    let cbt = cumulative_usage.billable_tokens;
+                    let cumulative_usage_rollup = subagent_usage_from_llm_usage(&cumulative_usage);
                     break SubagentResult::Completed {
                         agent_id: child_id,
                         content: result,
-                        usage: SubagentUsage {
-                            total_tokens,
-                            input_tokens: bt.input,
-                            output_tokens: bt.output,
-                            cache_creation_input_tokens: bt.cache_write,
-                            cache_read_input_tokens: bt.cache_read,
-                        },
+                        usage: usage_rollup,
                         total_tool_use_count,
                         total_duration_ms,
                         total_tokens,
                         assistant_message_count,
                         response_char_count,
                         last_request_id,
-                        cumulative_usage: SubagentUsage {
-                            total_tokens: cbt
-                                .input
-                                .saturating_add(cbt.cache_write)
-                                .saturating_add(cbt.cache_read)
-                                .saturating_add(cbt.output),
-                            input_tokens: cbt.input,
-                            output_tokens: cbt.output,
-                            cache_creation_input_tokens: cbt.cache_write,
-                            cache_read_input_tokens: cbt.cache_read,
-                        },
+                        cumulative_usage: cumulative_usage_rollup,
                     };
                 }
                 Some(SubagentEvent::Failed {
@@ -2771,6 +2881,69 @@ mod tests {
             cost: None,
             provider_metadata: serde_json::Value::Null,
         }
+    }
+
+    #[test]
+    fn llm_usage_rollup_maps_only_billable_subagent_fields() {
+        let usage = llm_client::Usage {
+            billable_tokens: llm_client::TokenUsage {
+                input: 11,
+                output: 7,
+                cache_write: 5,
+                cache_read: 3,
+                reasoning_output: 55,
+            },
+            ..llm_client::Usage::default()
+        };
+
+        assert_eq!(
+            super::subagent_usage_from_llm_usage(&usage),
+            SubagentUsage {
+                total_tokens: 26,
+                input_tokens: 11,
+                output_tokens: 7,
+                cache_creation_input_tokens: 5,
+                cache_read_input_tokens: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn restored_observer_index_counts_only_client_visible_messages() {
+        let visible = ConversationMessage::user(MessageId::new(), "visible".to_string());
+        let hidden_meta = ConversationMessage::user_meta(MessageId::new(), "meta".to_string());
+        let compact_summary = ConversationMessage::User {
+            id: MessageId::new(),
+            content: Vec::new(),
+            is_meta: false,
+            is_compact_summary: true,
+            is_visible_in_transcript_only: false,
+        };
+        let transcript_only = ConversationMessage::User {
+            id: MessageId::new(),
+            content: Vec::new(),
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: true,
+        };
+        let lifecycle = ConversationMessage::System {
+            id: MessageId::new(),
+            content: "idle".to_string(),
+            subtype: Some("agent_idle".to_string()),
+            compact_metadata: None,
+        };
+
+        assert_eq!(
+            super::observer_initial_message_index(Some(&[
+                hidden_meta,
+                compact_summary,
+                transcript_only,
+                visible,
+                lifecycle,
+            ])),
+            1
+        );
+        assert_eq!(super::observer_initial_message_index(None), 0);
     }
 
     #[tokio::test]

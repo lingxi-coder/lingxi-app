@@ -64,8 +64,12 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
-        let session_id = self.session.lock().await.session_id.to_string();
+        let protocol_session_id = self.session.lock().await.session_id;
+        let session_id = protocol_session_id.to_string();
         compaction::invoked_skills::clear_session(&session_id);
+        session::clear_checkpoint_result_for_session(&session::checkpoint_session_key(
+            protocol_session_id,
+        ));
         self.compaction_runtime
             .reset_context_collapse_and_session_memory()
             .await;

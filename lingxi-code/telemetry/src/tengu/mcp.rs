@@ -1,7 +1,7 @@
 //! `tengu_mcp_*` **analytics-event** schemas (2.1.252 registry/catalog/connect
 //! slice, plus 2.1.251 §20a/§20b and §11 discovery-cache).
 //!
-//! ## Scope: 10 of the 53 provider-neutral oracle MCP analytics events
+//! ## Scope: 44 of the 55 provider-neutral oracle MCP analytics events
 //!
 //! An earlier revision of this doc claimed the two originally-ported names
 //! were "the ONLY two confirmed real `tengu_mcp_*` ANALYTICS events at the
@@ -16,7 +16,7 @@
 //!   other Anthropic- or IDE-specific families)
 //! - 4 `tengu_mcp_channel_*` names
 //!
-//! That leaves **53 provider-neutral events**, among them
+//! That leaves **55 provider-neutral events**, among them
 //! `tengu_mcp_server_connection_succeeded` / `_failed`,
 //! `tengu_mcp_list_changed`, `tengu_mcp_listen_reopen`,
 //! `tengu_mcp_sdk_generation`, `tengu_mcp_oauth_flow_start` / `_success` /
@@ -36,13 +36,69 @@
 //! events", and conflating the two produced both the retracted claim below
 //! and an under-modelled [`DegradedReason`].
 //!
-//! **This module deliberately ports 12 of the 53 provider-neutral names.** The
-//! remaining 41 are an OPEN parity gap, not a closed one. Do not read
+//! **This module deliberately ports 44 of the 55 provider-neutral names.** The
+//! remaining 11 are an OPEN parity gap, not a closed one. Do not read
 //! `NAMES.len()`, [`crate::tengu::ALL_EVENT_NAMES`], or the
 //! `tengu_events.json` parity fixture as evidence that MCP analytics is
 //! complete.
 //!
-//! ## The twelve ported events
+//! The exact remaining 11 provider-neutral oracle names not registered here are:
+//! `tengu_mcp_instructions_pool_change`,
+//! `tengu_mcp_dropped_tools_pool_change`,
+//! `tengu_mcp_skills_funnel`,
+//! `tengu_mcp_arg_trailing_invoke_suffix`,
+//! `tengu_mcp_description_contains_toolcall_xml`,
+//! `tengu_mcp_dialog_choice`,
+//! `tengu_mcp_multidialog_choice`,
+//! `tengu_mcp_proxy_needs_approval_retry`,
+//! `tengu_mcp_registry_fetch`,
+//! `tengu_mcp_sdk_generation`,
+//! and `tengu_mcp_tripwire`.
+//!
+//! ## Newly re-extracted 2.1.252 call sites in this parity pass
+//!
+//! The local 2.1.252 oracle dump was re-extracted before this edit. Exact
+//! payload literals added in this pass include:
+//!
+//! - `tengu_mcp_add` — `s("tengu_mcp_add",{type:c(M),scope:c(A),source:w("command"),transport:c(M),transportExplicit:T,looksLikeUrl:H})`,
+//!   plus the JSON import arm `s("tengu_mcp_add",{scope:c(m),source:w("json"),type:h})`
+//!   and the Desktop import arm `s("tengu_mcp_add",{scope:c(g),platform:c(a),source:w("desktop")})`.
+//! - `tengu_mcp_delete` / `_get` / `_list` / `_login` / `_logout` —
+//!   `s("tengu_mcp_delete",{name:s,scope:c(C)})`, `s("tengu_mcp_get",{name:s})`,
+//!   `s("tengu_mcp_list",{})`, `s("tengu_mcp_login",{})`,
+//!   and `s("tengu_mcp_logout",{})`.
+//! - `tengu_mcp_command_inline` —
+//!   `s("tengu_mcp_command_inline",{action:c(S)})`.
+//! - `tengu_mcp_elicitation_shown` / `_response` —
+//!   `s("tengu_mcp_elicitation_shown",{mode:c(ae)})` and
+//!   `s("tengu_mcp_elicitation_response",{mode:c(ae),action:c(...)})`.
+//! - `tengu_mcp_input_missing_required` —
+//!   `s("tengu_mcp_input_missing_required",{toolName:Un(e.name),isMcp:!0,toolUseID:ve(t),messageID:ve(_),toolInputSizeBytes:W,requiredCount:fn.requiredCount,missingCount:fn.missingCount,presentKeyCount:fn.presentKeyCount,maxStringValueLen:fn.maxStringValueLen,hasPseudoTagDebris:fn.hasPseudoTagDebris,...rpe(o.agentContext),queryChainId:ve(o.queryTracking?.chainId),queryDepth:o.queryTracking?.depth,...A&&{mcpServerType:c(A)},...x&&{mcpServerBaseUrl:gg(x)},...C&&{requestId:ve(C)},...k6(e.name,M),...e.mcpInfo?.pluginTelemetry})`.
+//! - `tengu_mcp_large_result_handled` — truncation arms emit
+//!   `{outcome,reason,sizeEstimateTokens}` and the persisted-file arm also emits
+//!   `{persistedSizeChars,resultType,blockCount,persistedAs}`.
+//! - `tengu_mcp_pending_call` —
+//!   `s("tengu_mcp_pending_call",{requestedCount:o.length,connectedCount:M.length,cachedCount:F.length,failedCount:U.length,pendingCount:B.length,needsAuthCount:W.length,disabledCount:z.length,unconfiguredCount:pe.length,unknownCount:me.length,waitMs:A,matched:ge,matchType:w("wait"),success:ge})`.
+//! - `tengu_mcp_servers` —
+//!   `s("tengu_mcp_servers",{enterprise,global,project,user,plugin,agent,claudeai})`.
+//! - `tengu_mcp_tool_result_ended_turn` —
+//!   `s("tengu_mcp_tool_result_ended_turn",{queryChainId:B,queryDepth:W,source:c(e)})`.
+//! - `tengu_mcp_tools_commands_loaded` —
+//!   `s("tengu_mcp_tools_commands_loaded",{tools_count:_.length,commands_count:P.length,commands_metadata_length:U})`.
+//! - `tengu_mcp_tools_refreshed_mid_turn` —
+//!   `s("tengu_mcp_tools_refreshed_mid_turn",{oldMcpCount:fo,newMcpCount:di,recovered:fo===0&&di>0})`.
+//! - `tengu_mcp_oauth_flow_failure` — XAA-only:
+//!   `s("tengu_mcp_oauth_flow_failure",{authMethod:w("xaa"),xaaFailureStage:c(C),idTokenCacheHit:S})`.
+//! - `tengu_mcp_session_expired` — at least
+//!   `{errorCode?,transportType,...identitySpread,mcpServerName?,mcpToolName?}`.
+//! - `tengu_mcp_list_paginated` —
+//!   `s("tengu_mcp_list_paginated",{method:c(e),pageCount:t,itemCount:o,outcome:c(r),source:c(d)})`
+//!   and the later helper
+//!   `s("tengu_mcp_list_paginated",{method:c(e),pageCount:t,itemCount:r,outcome:c(o)})`.
+//! - `tengu_mcp_reconcile` —
+//!   `s("tengu_mcp_reconcile",{caller:_,desiredCount:j.size,currentCount:B.size,toRemoveCount:oe.length,toAddCount:G.length,toReplaceCount:De.length,retainedPluginCount:re.size})`.
+//!
+//! ## The previously ported events
 //!
 //! - `tengu_mcp_start` — emitted by the `mcp serve` CLI path once the local
 //!   stdio server runtime is initialized and just before it enters the request
@@ -136,15 +192,17 @@
 //! `Option<Verified>`; see [`server_name_gate`] for what this port can and
 //! cannot evaluate.
 //!
-//! ## Known-missing: the `..._` identity spread
+//! ## Privacy-safe `..._` identity spread
 //!
 //! Every per-server emission above also spreads `_ = Xe(e.config, e.name)`
-//! (@182265525): `function Xe(e,t){let o=Lg(e),r=t?{mcpServerKeyHash:eP(t)}:{};
+//! (@182372738): `function Xe(e,t){let o=Og(e),r=t?{mcpServerKeyHash:tP(t)}:{};
 //! if(o)return{mcpServerBaseUrl:o,...r};return r}` — i.e. an optional
 //! `mcpServerBaseUrl` plus `mcpServerKeyHash`, the hashed identifier the
-//! oracle carries in place of the raw name. Neither is modelled here:
-//! `eP`'s digest is not traced, and inventing a hash would fabricate wire
-//! data rather than port it. Recorded as an open gap, not a settled shape.
+//! oracle carries in place of the raw name. `tP` is SHA-256 of the configured
+//! server name truncated to 12 lowercase hex characters; the misleadingly
+//! named base-URL dimension is likewise a 12-character SHA-256 prefix of the
+//! credential/query/fragment-free normalized URL. Producers must never place
+//! either raw value in these analytics dimensions.
 
 use crate::pii::Verified;
 use serde::{Deserialize, Serialize};
@@ -212,6 +270,47 @@ pub const SERVER_NEEDS_AUTH: &str = "tengu_mcp_server_needs_auth";
 /// `tengu_mcp_tool_call_auth_error` — a tool call hit an auth failure after
 /// retry handling.
 pub const TOOL_CALL_AUTH_ERROR: &str = "tengu_mcp_tool_call_auth_error";
+/// `tengu_mcp_add` — CLI `mcp add` command entry.
+pub const ADD: &str = "tengu_mcp_add";
+/// `tengu_mcp_delete` — CLI `mcp remove` command entry.
+pub const DELETE: &str = "tengu_mcp_delete";
+/// `tengu_mcp_get` — CLI `mcp get` command entry.
+pub const GET: &str = "tengu_mcp_get";
+/// `tengu_mcp_list` — CLI `mcp list` command entry.
+pub const LIST: &str = "tengu_mcp_list";
+/// `tengu_mcp_login` — CLI `mcp login` command entry.
+pub const LOGIN: &str = "tengu_mcp_login";
+/// `tengu_mcp_logout` — CLI `mcp logout` command entry.
+pub const LOGOUT: &str = "tengu_mcp_logout";
+/// `tengu_mcp_command_inline` — inline `/mcp` control handling.
+pub const COMMAND_INLINE: &str = "tengu_mcp_command_inline";
+/// `tengu_mcp_elicitation_shown` — an inbound elicitation was surfaced.
+pub const ELICITATION_SHOWN: &str = "tengu_mcp_elicitation_shown";
+/// `tengu_mcp_elicitation_response` — an inbound elicitation was answered.
+pub const ELICITATION_RESPONSE: &str = "tengu_mcp_elicitation_response";
+/// `tengu_mcp_input_missing_required` — MCP input omitted required keys.
+pub const INPUT_MISSING_REQUIRED: &str = "tengu_mcp_input_missing_required";
+/// `tengu_mcp_large_result_handled` — large-result truncation/persist handling.
+pub const LARGE_RESULT_HANDLED: &str = "tengu_mcp_large_result_handled";
+/// `tengu_mcp_pending_call` — pending MCP-server readiness telemetry.
+pub const PENDING_CALL: &str = "tengu_mcp_pending_call";
+/// `tengu_mcp_servers` — scope-bucket inventory telemetry.
+pub const SERVERS: &str = "tengu_mcp_servers";
+/// `tengu_mcp_tool_result_ended_turn` — an MCP tool result ended the turn.
+pub const TOOL_RESULT_ENDED_TURN: &str = "tengu_mcp_tool_result_ended_turn";
+/// `tengu_mcp_tools_commands_loaded` — prefetched MCP tool/command counts.
+pub const TOOLS_COMMANDS_LOADED: &str = "tengu_mcp_tools_commands_loaded";
+/// `tengu_mcp_tools_refreshed_mid_turn` — mid-turn MCP tool refresh delta.
+pub const TOOLS_REFRESHED_MID_TURN: &str = "tengu_mcp_tools_refreshed_mid_turn";
+/// `tengu_mcp_oauth_flow_failure` — XAA-only OAuth flow failure telemetry.
+pub const OAUTH_FLOW_FAILURE: &str = "tengu_mcp_oauth_flow_failure";
+/// `tengu_mcp_session_expired` — a tool call hit a stale session or dropped
+/// response.
+pub const SESSION_EXPIRED: &str = "tengu_mcp_session_expired";
+/// `tengu_mcp_list_paginated` — paginated MCP list traversal telemetry.
+pub const LIST_PAGINATED: &str = "tengu_mcp_list_paginated";
+/// `tengu_mcp_reconcile` — live registry diff telemetry.
+pub const RECONCILE: &str = "tengu_mcp_reconcile";
 
 /// Registry block — order is locked (append-only). Consumed by
 /// [`crate::tengu::ALL_EVENT_NAMES`].
@@ -240,6 +339,26 @@ pub const NAMES: &[&str] = &[
     OAUTH_ISSUER_ECHO_MISMATCH,
     SERVER_NEEDS_AUTH,
     TOOL_CALL_AUTH_ERROR,
+    ADD,
+    DELETE,
+    GET,
+    LIST,
+    LOGIN,
+    LOGOUT,
+    COMMAND_INLINE,
+    ELICITATION_SHOWN,
+    ELICITATION_RESPONSE,
+    INPUT_MISSING_REQUIRED,
+    LARGE_RESULT_HANDLED,
+    PENDING_CALL,
+    SERVERS,
+    TOOL_RESULT_ENDED_TURN,
+    TOOLS_COMMANDS_LOADED,
+    TOOLS_REFRESHED_MID_TURN,
+    OAUTH_FLOW_FAILURE,
+    SESSION_EXPIRED,
+    LIST_PAGINATED,
+    RECONCILE,
 ];
 
 /// Payload for [`START`].
@@ -465,6 +584,259 @@ pub struct ToolCallAuthErrorPayload {
     pub transport_type: Verified,
     pub auth_error_kind: ToolCallAuthErrorKind,
     pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`ADD`]. The command-line add/import paths share `scope` and
+/// `source`; the remaining fields are call-site-specific and therefore
+/// optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddPayload {
+    pub scope: Verified,
+    pub source: Verified,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub server_type: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Verified>,
+    #[serde(rename = "transportExplicit", skip_serializing_if = "Option::is_none")]
+    pub transport_explicit: Option<bool>,
+    #[serde(rename = "looksLikeUrl", skip_serializing_if = "Option::is_none")]
+    pub looks_like_url: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Verified>,
+}
+
+/// Payload for [`DELETE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletePayload {
+    pub name: Verified,
+    pub scope: Verified,
+}
+
+/// Payload for [`GET`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetPayload {
+    pub name: Verified,
+}
+
+/// Payload for [`COMMAND_INLINE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandInlinePayload {
+    pub action: Verified,
+}
+
+/// `tengu_mcp_elicitation_*`'s `mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationMode {
+    Form,
+    Url,
+}
+
+impl ElicitationMode {
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Form => "form",
+            Self::Url => "url",
+        }
+    }
+}
+
+/// Payload for [`ELICITATION_SHOWN`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElicitationShownPayload {
+    pub mode: ElicitationMode,
+}
+
+/// Payload for [`ELICITATION_RESPONSE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ElicitationResponsePayload {
+    pub mode: ElicitationMode,
+    pub action: Verified,
+}
+
+/// Payload for [`INPUT_MISSING_REQUIRED`]. The oracle spreads additional
+/// agent/plugin attribution helpers here; this registry slice models only the
+/// exact stable fields the Rust substrate can surface truthfully today.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputMissingRequiredPayload {
+    #[serde(rename = "toolName")]
+    pub tool_name: Verified,
+    #[serde(rename = "isMcp")]
+    pub is_mcp: bool,
+    #[serde(rename = "toolUseID", skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<Verified>,
+    #[serde(rename = "messageID")]
+    pub message_id: Verified,
+    #[serde(rename = "toolInputSizeBytes")]
+    pub tool_input_size_bytes: u64,
+    #[serde(rename = "requiredCount")]
+    pub required_count: u32,
+    #[serde(rename = "missingCount")]
+    pub missing_count: u32,
+    #[serde(rename = "presentKeyCount")]
+    pub present_key_count: u32,
+    #[serde(rename = "maxStringValueLen")]
+    pub max_string_value_len: u32,
+    #[serde(rename = "hasPseudoTagDebris")]
+    pub has_pseudo_tag_debris: bool,
+    #[serde(rename = "queryChainId", skip_serializing_if = "Option::is_none")]
+    pub query_chain_id: Option<Verified>,
+    #[serde(rename = "queryDepth", skip_serializing_if = "Option::is_none")]
+    pub query_depth: Option<u32>,
+    #[serde(rename = "mcpServerType", skip_serializing_if = "Option::is_none")]
+    pub mcp_server_type: Option<Verified>,
+    #[serde(rename = "mcpServerBaseUrl", skip_serializing_if = "Option::is_none")]
+    pub mcp_server_base_url: Option<Verified>,
+    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Verified>,
+}
+
+/// Payload for [`LARGE_RESULT_HANDLED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LargeResultHandledPayload {
+    pub outcome: Verified,
+    pub reason: Verified,
+    pub size_estimate_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_size_chars: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<Verified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_as: Option<Verified>,
+}
+
+/// Payload for [`PENDING_CALL`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingCallPayload {
+    pub requested_count: u32,
+    pub connected_count: u32,
+    pub cached_count: u32,
+    pub failed_count: u32,
+    pub pending_count: u32,
+    pub needs_auth_count: u32,
+    pub disabled_count: u32,
+    pub unconfigured_count: u32,
+    pub unknown_count: u32,
+    pub wait_ms: u64,
+    pub matched: bool,
+    pub match_type: Verified,
+    pub success: bool,
+}
+
+/// Payload for [`SERVERS`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServersPayload {
+    pub enterprise: u32,
+    pub global: u32,
+    pub project: u32,
+    pub user: u32,
+    pub plugin: u32,
+    pub agent: u32,
+    pub claudeai: u32,
+}
+
+/// Payload for [`TOOL_RESULT_ENDED_TURN`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolResultEndedTurnPayload {
+    pub query_chain_id: Verified,
+    pub query_depth: u32,
+    pub source: Verified,
+}
+
+/// Payload for [`TOOLS_COMMANDS_LOADED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsCommandsLoadedPayload {
+    pub tools_count: u32,
+    pub commands_count: u32,
+    pub commands_metadata_length: u32,
+}
+
+/// Payload for [`TOOLS_REFRESHED_MID_TURN`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolsRefreshedMidTurnPayload {
+    pub old_mcp_count: u32,
+    pub new_mcp_count: u32,
+    pub recovered: bool,
+}
+
+/// Payload for [`OAUTH_FLOW_FAILURE`]. The 2.1.252 oracle emits this only for
+/// the XAA branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OAuthFlowFailurePayload {
+    pub auth_method: Verified,
+    pub xaa_failure_stage: Verified,
+    pub id_token_cache_hit: bool,
+}
+
+/// XAA-specific shape of [`OAUTH_FLOW_SUCCESS`]. The ordinary interactive
+/// OAuth flow uses [`OAuthFlowSuccessPayload`]; Claude Code deliberately emits
+/// this smaller `{authMethod,idTokenCacheHit}` shape for silent XAA.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OAuthXaaFlowSuccessPayload {
+    /// Literal `xaa` for the silent cross-app flow.
+    pub auth_method: Verified,
+    /// Whether a reusable IdP token existed before acquisition began.
+    pub id_token_cache_hit: bool,
+}
+
+/// Payload for [`SESSION_EXPIRED`]. Raw server/tool names are deliberately not
+/// modeled: the oracle exposes them only behind a first-party allow gate. The
+/// provider-neutral identity is the hashed server key plus a hash of the
+/// credential-, query-, and fragment-free base URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionExpiredPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<Verified>,
+    pub transport_type: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server_base_url: Option<Verified>,
+    pub mcp_server_key_hash: Verified,
+}
+
+/// Payload for [`LIST_PAGINATED`]. `page_count` and `source` are optional
+/// because the 2.1.252 oracle has one helper arm that omits them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ListPaginatedPayload {
+    pub method: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
+    pub item_count: u32,
+    pub outcome: Verified,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Verified>,
+}
+
+/// Payload for [`RECONCILE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReconcilePayload {
+    pub caller: Verified,
+    pub desired_count: u32,
+    pub current_count: u32,
+    pub to_remove_count: u32,
+    pub to_add_count: u32,
+    pub to_replace_count: u32,
+    pub retained_plugin_count: u32,
 }
 
 /// Oracle `HT(name, config)` — decides whether `mcpServerName` is attached

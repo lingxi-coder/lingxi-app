@@ -263,6 +263,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         },
         messages: vec![],
         tool_use_id: None,
+        assistant_message_id: None,
         agent_id: None,
         agent_name: None,
         team_name: None,

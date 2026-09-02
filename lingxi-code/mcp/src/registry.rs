@@ -94,6 +94,17 @@ pub trait XaaConfigProvider: Send + Sync {
         server_url: &str,
     ) -> Result<Option<XaaInputs>, McpError>;
 
+    /// Whether the provider can confirm a cached IdP `id_token` exists before
+    /// attempting XAA acquisition. Mirrors claude-code's pre-acquire cache peek
+    /// used for `idTokenCacheHit` analytics.
+    async fn peek_id_token_cache_hit(
+        &self,
+        _server_name: &str,
+        _server_url: &str,
+    ) -> Result<bool, McpError> {
+        Ok(false)
+    }
+
     /// Drop the cached IdP `id_token` so the next [`Self::xaa_inputs`] call
     /// re-acquires a fresh one (auth.ts `clearIdpIdToken(idp.issuer)`, 1840-1847).
     ///
@@ -2719,21 +2730,54 @@ impl McpRegistry {
         let Err(error) = first else {
             return first;
         };
-        if !error.is_auth_response() {
-            return Err(error);
-        }
-
         let raw_name = {
             let connections = self.connections.read().await;
             connections
                 .keys()
                 .find(|name| normalize_name_for_mcp(name) == server)
                 .cloned()
+        };
+        let config = if let Some(raw_name) = raw_name.as_deref() {
+            self.get_config(raw_name).await
+        } else {
+            None
+        };
+        let session_expired = config
+            .as_ref()
+            .is_some_and(|config| config.spec.kind() == "http" && error.is_session_expired());
+        if !error.is_auth_response() && !session_expired {
+            return Err(error);
         }
-        .ok_or_else(|| crate::client::McpClientError::Rpc(error.to_string()))?;
-        self.reconnect(&raw_name)
-            .await
-            .map_err(|retry_error| crate::client::McpClientError::Rpc(retry_error.to_string()))?;
+
+        if session_expired {
+            let config = config
+                .as_ref()
+                .expect("session_expired implies config was resolved");
+            let identity = oauth::McpOAuthTelemetryContext::for_server(&config.name, &config.spec);
+            emit_session_expired(&telemetry::tengu::mcp::SessionExpiredPayload {
+                error_code: error
+                    .session_expired_error_code()
+                    .map(|code| telemetry::Verified::assert_safe(code.to_string())),
+                transport_type: telemetry::Verified::assert_safe(
+                    config
+                        .metadata
+                        .transport
+                        .clone()
+                        .unwrap_or_else(|| config.spec.kind().to_string()),
+                ),
+                mcp_server_key_hash: identity.mcp_server_key_hash,
+                mcp_server_base_url: telemetry_mcp_server_base_url(&config.spec),
+            });
+        }
+
+        let raw_name =
+            raw_name.ok_or_else(|| crate::client::McpClientError::Rpc(error.to_string()))?;
+        if session_expired {
+            self.reconnect_preserving_auth(&raw_name).await
+        } else {
+            self.reconnect(&raw_name).await
+        }
+        .map_err(|retry_error| crate::client::McpClientError::Rpc(retry_error.to_string()))?;
         let mut _refreshed_from_cache = false;
         let refreshed = if let Some(client) = self.get_client(server).await {
             Some(client)
@@ -5524,15 +5568,37 @@ impl McpRegistry {
                 config.name
             ))
         })?;
-        let inputs = provider
-            .xaa_inputs(&config.name, spec_url(&config.spec))
-            .await?
-            .ok_or_else(|| {
-                McpError::OAuth(format!(
+        let server_url = spec_url(&config.spec);
+        // The oracle performs this read before entering the failure-telemetry
+        // try/catch. A storage failure therefore aborts the flow rather than
+        // being mislabeled as an IdP cache miss.
+        let id_token_cache_hit = provider
+            .peek_id_token_cache_hit(&config.name, server_url)
+            .await?;
+        let inputs = match provider.xaa_inputs(&config.name, server_url).await {
+            Ok(Some(inputs)) => inputs,
+            Ok(None) => {
+                emit_oauth_flow_failure(&telemetry::tengu::mcp::OAuthFlowFailurePayload {
+                    auth_method: telemetry::Verified::assert_safe("xaa".to_string()),
+                    xaa_failure_stage: telemetry::Verified::assert_safe("idp_login".to_string()),
+                    id_token_cache_hit,
+                });
+                return Err(McpError::OAuth(format!(
                     "XAA: server '{}' is not XAA-provisioned (no IdP/AS inputs).",
                     config.name
-                ))
-            })?;
+                )));
+            }
+            Err(error) => {
+                emit_oauth_flow_failure(&telemetry::tengu::mcp::OAuthFlowFailurePayload {
+                    auth_method: telemetry::Verified::assert_safe("xaa".to_string()),
+                    xaa_failure_stage: telemetry::Verified::assert_safe(
+                        xaa_provider_failure_stage(&error).to_string(),
+                    ),
+                    id_token_cache_hit,
+                });
+                return Err(error);
+            }
+        };
 
         let result = match crate::xaa::perform_cross_app_access(
             &deps.http,
@@ -5551,6 +5617,13 @@ impl McpRegistry {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(server = %config.name, "XAA silent exchange failed: {e}");
+                emit_oauth_flow_failure(&telemetry::tengu::mcp::OAuthFlowFailurePayload {
+                    auth_method: telemetry::Verified::assert_safe("xaa".to_string()),
+                    xaa_failure_stage: telemetry::Verified::assert_safe(
+                        xaa_flow_failure_stage(&e).to_string(),
+                    ),
+                    id_token_cache_hit,
+                });
                 // 4xx token-exchange ⇒ the cached id_token was rejected; drop it
                 // so the next resolve re-acquires (auth.ts:1840-1847
                 // `clearIdpIdToken(idp.issuer)`). 5xx (IdP outage) keeps it.
@@ -5585,6 +5658,10 @@ impl McpRegistry {
         oauth::store_tokens(&deps.storage, &deps.clock, key, &stored)
             .await
             .map_err(McpError::from)?;
+        emit_xaa_oauth_flow_success(&telemetry::tengu::mcp::OAuthXaaFlowSuccessPayload {
+            auth_method: telemetry::Verified::assert_safe("xaa".to_string()),
+            id_token_cache_hit,
+        });
 
         Ok(stored.into_tokens())
     }
@@ -6253,6 +6330,28 @@ impl McpRegistry {
         // connection under the SAME scoped key it was torn down from,
         // instead of falling back to the plain `config.name` and stranding
         // the subagent's dispatch target.
+        self.connect_locked(config, Some(name.to_string()))
+            .await
+            .map(|_| ())
+    }
+
+    /// Re-establish a stale Streamable HTTP session without revoking the
+    /// server's OAuth grant. A 400/404 session-id failure invalidates only the
+    /// transport session; treating it like a user-requested disconnect would
+    /// log the user out and diverge from Claude Code's connection-cache reset.
+    async fn reconnect_preserving_auth(&self, name: &str) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        let config = {
+            let conns = self.connections.read().await;
+            let Some(state) = conns.get(name) else {
+                return Err(McpError::Internal(format!(
+                    "no MCP server named \"{name}\""
+                )));
+            };
+            state.config().clone()
+        };
+        self.disconnect_locked_inner(name, false, false).await?;
         self.connect_locked(config, Some(name.to_string()))
             .await
             .map(|_| ())
@@ -7454,15 +7553,131 @@ fn resource_templates_fetched_payload(
 }
 
 fn mcp_server_key_hash(server_name: &str) -> telemetry::pii::Verified {
-    use sha2::Digest as _;
+    oauth::telemetry_server_key_hash_for_key(server_name)
+}
 
-    let digest = sha2::Sha256::digest(server_name.as_bytes());
-    let mut short = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
-        use std::fmt::Write as _;
-        let _ = write!(&mut short, "{byte:02x}");
+fn emit_oauth_flow_failure(payload: &telemetry::tengu::mcp::OAuthFlowFailurePayload) {
+    tracing::info!(
+        event = telemetry::tengu::mcp::OAUTH_FLOW_FAILURE,
+        authMethod = payload.auth_method.as_str(),
+        xaaFailureStage = payload.xaa_failure_stage.as_str(),
+        idTokenCacheHit = payload.id_token_cache_hit,
+    );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "authMethod".to_string(),
+            telemetry::otel::AttrValue::from(payload.auth_method.as_str().to_string()),
+        ),
+        (
+            "xaaFailureStage".to_string(),
+            telemetry::otel::AttrValue::from(payload.xaa_failure_stage.as_str().to_string()),
+        ),
+        (
+            "idTokenCacheHit".to_string(),
+            telemetry::otel::AttrValue::from(payload.id_token_cache_hit),
+        ),
+    ])
+    .collect();
+    telemetry::otel::emit_named_log_event(telemetry::tengu::mcp::OAUTH_FLOW_FAILURE, &attrs);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::OAUTH_FLOW_FAILURE,
+        serde_json::to_value(payload).expect("serialize test oauth_flow_failure payload"),
+    );
+}
+
+fn emit_xaa_oauth_flow_success(payload: &telemetry::tengu::mcp::OAuthXaaFlowSuccessPayload) {
+    tracing::info!(
+        event = telemetry::tengu::mcp::OAUTH_FLOW_SUCCESS,
+        authMethod = payload.auth_method.as_str(),
+        idTokenCacheHit = payload.id_token_cache_hit,
+    );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "authMethod".to_string(),
+            telemetry::otel::AttrValue::from(payload.auth_method.as_str().to_string()),
+        ),
+        (
+            "idTokenCacheHit".to_string(),
+            telemetry::otel::AttrValue::from(payload.id_token_cache_hit),
+        ),
+    ])
+    .collect();
+    telemetry::otel::emit_named_log_event(telemetry::tengu::mcp::OAUTH_FLOW_SUCCESS, &attrs);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::OAUTH_FLOW_SUCCESS,
+        serde_json::to_value(payload).expect("serialize test XAA oauth_flow_success payload"),
+    );
+}
+
+fn telemetry_mcp_server_base_url(
+    spec: &platform_api::McpTransportSpec,
+) -> Option<telemetry::Verified> {
+    let mut url = url::Url::parse(spec_url(spec)).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    let normalized = url.to_string();
+    let normalized = normalized.strip_suffix('/').unwrap_or(normalized.as_str());
+    // Oracle `gg(IAe(config))` hashes the credential/query/fragment-free URL
+    // with SHA-256 and keeps the first 12 hex digits. The misleading
+    // `mcpServerBaseUrl` field name must not cause the normalized URL itself to
+    // leave the process.
+    Some(oauth::telemetry_server_key_hash_for_key(normalized))
+}
+
+fn emit_session_expired(payload: &telemetry::tengu::mcp::SessionExpiredPayload) {
+    match payload.error_code.as_ref() {
+        Some(error_code) => tracing::info!(
+            event = telemetry::tengu::mcp::SESSION_EXPIRED,
+            errorCode = error_code.as_str(),
+            transportType = payload.transport_type.as_str(),
+            mcpServerKeyHash = payload.mcp_server_key_hash.as_str(),
+            mcpServerBaseUrl = payload
+                .mcp_server_base_url
+                .as_ref()
+                .map(telemetry::Verified::as_str),
+        ),
+        None => tracing::info!(
+            event = telemetry::tengu::mcp::SESSION_EXPIRED,
+            transportType = payload.transport_type.as_str(),
+            mcpServerKeyHash = payload.mcp_server_key_hash.as_str(),
+            mcpServerBaseUrl = payload
+                .mcp_server_base_url
+                .as_ref()
+                .map(telemetry::Verified::as_str),
+        ),
     }
-    telemetry::pii::Verified::assert_safe(short)
+    let mut attrs = std::collections::BTreeMap::from([
+        (
+            "transportType".to_string(),
+            telemetry::otel::AttrValue::from(payload.transport_type.as_str().to_string()),
+        ),
+        (
+            "mcpServerKeyHash".to_string(),
+            telemetry::otel::AttrValue::from(payload.mcp_server_key_hash.as_str().to_string()),
+        ),
+    ]);
+    if let Some(error_code) = payload.error_code.as_ref() {
+        attrs.insert(
+            "errorCode".to_string(),
+            telemetry::otel::AttrValue::from(error_code.as_str().to_string()),
+        );
+    }
+    if let Some(base_url) = payload.mcp_server_base_url.as_ref() {
+        attrs.insert(
+            "mcpServerBaseUrl".to_string(),
+            telemetry::otel::AttrValue::from(base_url.as_str().to_string()),
+        );
+    }
+    telemetry::otel::emit_named_log_event(telemetry::tengu::mcp::SESSION_EXPIRED, &attrs);
+    #[cfg(test)]
+    record_test_telemetry_event(
+        telemetry::tengu::mcp::SESSION_EXPIRED,
+        serde_json::to_value(payload).expect("serialize test session_expired payload"),
+    );
 }
 
 fn emit_server_needs_auth_for_config(config: &McpServerConfig, cause: Option<&str>) {
@@ -7522,6 +7737,28 @@ fn tool_call_auth_error_code(error: &crate::client::McpClientError) -> &'static 
         crate::client::McpClientError::HttpResponse { status, .. } if *status == 403 => "403",
         crate::client::McpClientError::HttpResponse { .. } => "401",
         _ => "401",
+    }
+}
+
+fn xaa_flow_failure_stage(error: &crate::xaa::XaaError) -> &'static str {
+    match error {
+        crate::xaa::XaaError::TokenExchange { .. } => "token_exchange",
+        crate::xaa::XaaError::JwtBearer(_) => "jwt_bearer",
+        crate::xaa::XaaError::Prm(_)
+        | crate::xaa::XaaError::NoAuthServer(_)
+        | crate::xaa::XaaError::AsMetadata(_) => "discovery",
+    }
+}
+
+fn xaa_provider_failure_stage(error: &McpError) -> &'static str {
+    match error {
+        McpError::OAuth(message)
+            if message.starts_with("XAA IdP: OIDC discovery")
+                || message.starts_with("XAA IdP: refusing non-HTTPS token endpoint") =>
+        {
+            "discovery"
+        }
+        _ => "idp_login",
     }
 }
 
@@ -8747,6 +8984,83 @@ mod tests {
                 .send(Bytes::from(second_response))
                 .await
                 .expect("send second auth error response");
+        })
+    }
+
+    fn spawn_tool_call_session_expired_then_success(
+        mock: Arc<BridgeMock>,
+        first_connection_id: Option<ConnId>,
+        tool_name: &'static str,
+        input: Value,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let first_connection_id = if let Some(id) = first_connection_id {
+                id
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Some(id) = mock.conns.lock().unwrap().keys().next().copied() {
+                            break id;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("first live connection appears")
+            };
+            let (first_tx, mut first_rx) = mock
+                .take_tool_call_peer(first_connection_id)
+                .expect("first tool-call peer");
+            let first_input = input.clone();
+            let first_request = tokio::time::timeout(Duration::from_secs(2), async move {
+                let request_frame = first_rx.recv().await.expect("first tools/call frame");
+                let request: Value =
+                    serde_json::from_slice(&request_frame).expect("first tools/call json");
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], tool_name);
+                assert_eq!(request["params"]["arguments"], first_input);
+                request
+            })
+            .await
+            .expect("first tools/call request");
+            let mut first_response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": first_request["id"].clone(),
+                "error": {
+                    "code": -32001,
+                    "message": "MCP_HTTP_STATUS=404;WWW_AUTHENTICATE="
+                }
+            }))
+            .expect("session expired response");
+            first_response.push(b'\n');
+            first_tx
+                .send(Bytes::from(first_response))
+                .await
+                .expect("send session expired response");
+
+            let second_connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(id) = mock
+                        .conns
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .copied()
+                        .find(|id| *id != first_connection_id)
+                    {
+                        break id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reconnect publishes a second live connection");
+            let (second_tx, second_rx) = mock
+                .take_tool_call_peer(second_connection_id)
+                .expect("second tool-call peer");
+            spawn_tool_call_response(second_tx, second_rx, tool_name, input)
+                .await
+                .expect("second tools/call responder");
         })
     }
 
@@ -15586,6 +15900,171 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_expired_base_url_dimension_is_normalized_and_hashed() {
+        let secret = http_cfg(
+            "srv",
+            "https://alice:password@mcp.example.com/v1/?token=secret#fragment",
+        );
+        let clean = http_cfg("srv", "https://mcp.example.com/v1");
+        let doubled = http_cfg("srv", "https://mcp.example.com/v1//");
+        let secret_hash = telemetry_mcp_server_base_url(&secret.spec).unwrap();
+        let clean_hash = telemetry_mcp_server_base_url(&clean.spec).unwrap();
+        let doubled_hash = telemetry_mcp_server_base_url(&doubled.spec).unwrap();
+        assert_eq!(secret_hash.as_str(), clean_hash.as_str());
+        assert_ne!(
+            doubled_hash.as_str(),
+            clean_hash.as_str(),
+            "oracle removes exactly one trailing slash"
+        );
+        assert_eq!(secret_hash.as_str().len(), 12);
+        assert!(secret_hash
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn http_tool_call_session_expired_reconnects_once_and_retries() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg).await.expect("connect");
+
+        let input = serde_json::json!({"city": "sf"});
+        let responder = spawn_tool_call_session_expired_then_success(
+            mock.clone(),
+            None,
+            "alpha",
+            input.clone(),
+        );
+        let result = registry
+            .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+            .await
+            .expect("tool call succeeds after session-expired reconnect");
+        responder.await.expect("session expired responder");
+
+        let refreshed_id = registry
+            .clients
+            .read()
+            .await
+            .get("srv")
+            .and_then(|entry| entry.connection_id)
+            .expect("refreshed client id");
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool":"alpha","input":{"city":"sf"}}))
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            2,
+            "a session-expired tool call must use exactly one reconnect retry"
+        );
+        assert!(
+            mock.conns.lock().unwrap().contains_key(&refreshed_id),
+            "the post-retry client must point at the refreshed generation"
+        );
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::SESSION_EXPIRED)
+            .expect("session expired telemetry");
+        assert_eq!(event.payload["errorCode"], serde_json::json!("404"));
+        assert_eq!(event.payload["transportType"], serde_json::json!("http"));
+        assert!(event.payload["mcpServerKeyHash"].as_str().is_some());
+        let base_url_hash = event.payload["mcpServerBaseUrl"]
+            .as_str()
+            .expect("base URL hash");
+        assert_eq!(base_url_hash.len(), 12);
+        assert!(base_url_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!base_url_hash.contains("mcp.example.com"));
+        assert!(event.payload.get("mcpServerName").is_none());
+        assert!(event.payload.get("mcpToolName").is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_session_reconnect_preserves_oauth_grant() {
+        struct UnusedHttp;
+        #[async_trait]
+        impl platform_api::HttpTransport for UnusedHttp {
+            async fn request(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
+            unreachable!()
+        };
+        *oauth = Some(platform_api::McpOAuthConfigDto {
+            client_id: Some("client-id".into()),
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+        let clock = Arc::new(FixedClock(
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        ));
+        let storage = Arc::new(XaaMemStorage::default());
+        let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+        let key = oauth::server_key(&cfg.name, &cfg.spec);
+        oauth::store_tokens(
+            &storage_dyn,
+            &(clock.clone() as Arc<dyn platform_api::Clock>),
+            &key,
+            &oauth::StoredTokens {
+                access_token: "still-valid".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at_unix: 10_000,
+                client_id: Some("client-id".into()),
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store grant");
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_oauth(OAuthDeps {
+            http: Arc::new(UnusedHttp),
+            clock: clock as Arc<dyn platform_api::Clock>,
+            storage: storage_dyn.clone(),
+            on_authorization_url: Arc::new(|_| {}),
+            xaa_config: None,
+        });
+        registry.connect(cfg).await.expect("connect");
+        registry
+            .reconnect_preserving_auth("srv")
+            .await
+            .expect("stale-session reconnect");
+        assert!(oauth::load_tokens(&storage_dyn, &key)
+            .await
+            .expect("load grant")
+            .is_some());
+    }
+
     #[tokio::test]
     async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause() {
         let _capture = test_telemetry_capture_lock()
@@ -17046,6 +17525,10 @@ mod tests {
     /// jwt-bearer endpoint too, driving `exchange_calls` to 2.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn xaa_concurrent_resolves_share_one_exchange() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
         std::env::set_var("LINGXI_ENABLE_XAA", "1");
 
         let http = GatedXaaHttp::new();
@@ -17088,6 +17571,296 @@ mod tests {
             1,
             "single-flight: exactly one AS jwt-bearer exchange for two concurrent resolves"
         );
+        let success_events: Vec<_> = take_test_telemetry_events()
+            .into_iter()
+            .filter(|event| event.name == telemetry::tengu::mcp::OAUTH_FLOW_SUCCESS)
+            .collect();
+        assert_eq!(success_events.len(), 1);
+        assert_eq!(
+            success_events[0].payload,
+            serde_json::json!({"authMethod":"xaa","idTokenCacheHit":false})
+        );
+    }
+
+    #[tokio::test]
+    async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+        struct IssuerMismatchHttp;
+        #[async_trait]
+        impl platform_api::HttpTransport for IssuerMismatchHttp {
+            async fn request(
+                &self,
+                req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+                let (status, body) = if req.url.contains("oauth-protected-resource") {
+                    (
+                        200,
+                        r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com/root"]}"#.to_string(),
+                    )
+                } else if req.url.contains("oauth-authorization-server") {
+                    (
+                        200,
+                        r#"{"issuer":"https://other.example.com/root","token_endpoint":"https://other.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    )
+                } else {
+                    (404, String::new())
+                };
+                Ok(protocol::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body,
+                    body_bytes: Vec::new(),
+                })
+            }
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(OAuthDeps {
+            http: Arc::new(IssuerMismatchHttp),
+            clock: Arc::new(FixedClock(
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+            )),
+            storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+            on_authorization_url: Arc::new(|_url: &str| {}),
+            xaa_config: Some(Arc::new(FixedXaaProvider)),
+        });
+
+        let config = xaa_unit_test_config("xaa-issuer");
+        let key = oauth::server_key(&config.name, &config.spec);
+        let deps = registry.oauth.as_ref().unwrap().clone();
+        let error = registry
+            .resolve_xaa_token(&config, &key, &deps)
+            .await
+            .expect_err("issuer mismatch must fail");
+        std::env::remove_var("LINGXI_ENABLE_XAA");
+
+        assert!(
+            matches!(error, McpError::OAuth(_)),
+            "unexpected error: {error:?}"
+        );
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::OAUTH_FLOW_FAILURE)
+            .expect("XAA flow failure telemetry");
+        assert_eq!(event.payload["authMethod"], serde_json::json!("xaa"));
+        assert_eq!(
+            event.payload["xaaFailureStage"],
+            serde_json::json!("discovery")
+        );
+        assert_eq!(event.payload["idTokenCacheHit"], serde_json::json!(false));
+        assert!(events
+            .iter()
+            .all(|event| event.name != telemetry::tengu::mcp::OAUTH_ISSUER_ECHO_MISMATCH));
+    }
+
+    #[test]
+    fn xaa_prm_failure_is_classified_as_discovery_without_error_detail() {
+        let error = crate::xaa::XaaError::Prm("secret-bearing transport detail".to_string());
+
+        assert_eq!(xaa_flow_failure_stage(&error), "discovery");
+    }
+
+    #[tokio::test]
+    async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+        struct CacheHitXaaProvider;
+        #[async_trait]
+        impl XaaConfigProvider for CacheHitXaaProvider {
+            async fn xaa_inputs(
+                &self,
+                _server_name: &str,
+                _server_url: &str,
+            ) -> Result<Option<XaaInputs>, McpError> {
+                Ok(Some(XaaInputs {
+                    client_id: "as-client".into(),
+                    client_secret: "as-secret".into(),
+                    idp_client_id: "idp-client".into(),
+                    idp_client_secret: None,
+                    idp_id_token: "the-id-token".into(),
+                    idp_token_endpoint: "https://idp.example.com/token".into(),
+                }))
+            }
+
+            async fn peek_id_token_cache_hit(
+                &self,
+                _server_name: &str,
+                _server_url: &str,
+            ) -> Result<bool, McpError> {
+                Ok(true)
+            }
+        }
+
+        struct JwtBearerFailureHttp;
+        #[async_trait]
+        impl platform_api::HttpTransport for JwtBearerFailureHttp {
+            async fn request(
+                &self,
+                req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+                let (status, body) = if req.url.contains("oauth-protected-resource") {
+                    (
+                        200,
+                        r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com/root"]}"#.to_string(),
+                    )
+                } else if req.url.contains("oauth-authorization-server") {
+                    (
+                        200,
+                        r#"{"issuer":"https://as.example.com/root","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string(),
+                    )
+                } else if req.url.contains("idp.example.com/token") {
+                    (
+                        200,
+                        "{\"access_token\":\"idp-access\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:id-jag\",\"token_type\":\"Bearer\",\"expires_in\":3600}".to_string(),
+                    )
+                } else if req.url.contains("as.example.com/token") {
+                    (400, r#"{"error":"invalid_grant"}"#.to_string())
+                } else {
+                    (404, String::new())
+                };
+                Ok(protocol::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body,
+                    body_bytes: Vec::new(),
+                })
+            }
+
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(OAuthDeps {
+            http: Arc::new(JwtBearerFailureHttp),
+            clock: Arc::new(FixedClock(
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+            )),
+            storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+            on_authorization_url: Arc::new(|_url: &str| {}),
+            xaa_config: Some(Arc::new(CacheHitXaaProvider)),
+        });
+
+        let config = xaa_unit_test_config("xaa-jwt-bearer");
+        let key = oauth::server_key(&config.name, &config.spec);
+        let deps = registry.oauth.as_ref().unwrap().clone();
+        let error = registry
+            .resolve_xaa_token(&config, &key, &deps)
+            .await
+            .expect_err("jwt-bearer failure must fail");
+        std::env::remove_var("LINGXI_ENABLE_XAA");
+
+        assert!(matches!(error, McpError::OAuth(_)));
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::OAUTH_FLOW_FAILURE)
+            .expect("oauth flow failure telemetry");
+        assert_eq!(event.payload["authMethod"], serde_json::json!("xaa"));
+        assert_eq!(
+            event.payload["xaaFailureStage"],
+            serde_json::json!("jwt_bearer")
+        );
+        assert_eq!(event.payload["idTokenCacheHit"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn xaa_provider_discovery_failure_emits_oauth_flow_failure() {
+        let _capture = test_telemetry_capture_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_test_telemetry_events();
+        std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+        struct DiscoveryFailingXaaProvider;
+        #[async_trait]
+        impl XaaConfigProvider for DiscoveryFailingXaaProvider {
+            async fn xaa_inputs(
+                &self,
+                _server_name: &str,
+                _server_url: &str,
+            ) -> Result<Option<XaaInputs>, McpError> {
+                Err(McpError::OAuth(
+                    "XAA IdP: OIDC discovery transport: timeout".into(),
+                ))
+            }
+
+            async fn peek_id_token_cache_hit(
+                &self,
+                _server_name: &str,
+                _server_url: &str,
+            ) -> Result<bool, McpError> {
+                Ok(true)
+            }
+        }
+
+        struct UnusedHttp;
+        #[async_trait]
+        impl platform_api::HttpTransport for UnusedHttp {
+            async fn request(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+                Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(OAuthDeps {
+            http: Arc::new(UnusedHttp),
+            clock: Arc::new(FixedClock(
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+            )),
+            storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+            on_authorization_url: Arc::new(|_url: &str| {}),
+            xaa_config: Some(Arc::new(DiscoveryFailingXaaProvider)),
+        });
+
+        let config = xaa_unit_test_config("xaa-provider-discovery");
+        let key = oauth::server_key(&config.name, &config.spec);
+        let deps = registry.oauth.as_ref().unwrap().clone();
+        let error = registry
+            .resolve_xaa_token(&config, &key, &deps)
+            .await
+            .expect_err("provider discovery failure must fail");
+        std::env::remove_var("LINGXI_ENABLE_XAA");
+
+        assert!(matches!(error, McpError::OAuth(_)));
+        let events = take_test_telemetry_events();
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::OAUTH_FLOW_FAILURE)
+            .expect("oauth flow failure telemetry");
+        assert_eq!(event.payload["authMethod"], serde_json::json!("xaa"));
+        assert_eq!(
+            event.payload["xaaFailureStage"],
+            serde_json::json!("discovery")
+        );
+        assert_eq!(event.payload["idTokenCacheHit"], serde_json::json!(true));
     }
 }
 

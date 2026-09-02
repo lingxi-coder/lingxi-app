@@ -1,7 +1,7 @@
 use telemetry::tengu::session;
 
 #[test]
-fn all_18_session_event_names_are_locked() {
+fn all_19_session_event_names_are_locked() {
     let names: &[&str] = &[
         session::STARTED,
         session::RESUMED,
@@ -21,11 +21,12 @@ fn all_18_session_event_names_are_locked() {
         session::APPENDED,
         session::ROTATED,
         session::CORRUPTED,
+        session::PERSISTENCE_FAILED,
     ];
     assert_eq!(
         names.len(),
-        18,
-        "session category must declare exactly 18 events"
+        19,
+        "session category must declare exactly 19 events"
     );
     for n in names {
         assert!(
@@ -40,6 +41,10 @@ fn all_18_session_event_names_are_locked() {
     assert_eq!(session::APPENDED, "tengu_session_appended");
     assert_eq!(session::ROTATED, "tengu_session_rotated");
     assert_eq!(session::CORRUPTED, "tengu_session_corrupted");
+    assert_eq!(
+        session::PERSISTENCE_FAILED,
+        "tengu_session_persistence_failed"
+    );
 }
 
 #[test]
@@ -94,10 +99,25 @@ fn corrupted_payload_round_trips() {
 }
 
 #[test]
+fn persistence_failed_payload_round_trips() {
+    let p = session::PersistenceFailedPayload::default();
+    let s = serde_json::to_string(&p).expect("ser");
+    assert_eq!(s, "{}");
+    let _: session::PersistenceFailedPayload = serde_json::from_str(&s).expect("de");
+    assert!(
+        serde_json::from_str::<session::PersistenceFailedPayload>(r#"{"error":"path"}"#).is_err()
+    );
+}
+
+#[test]
 fn three_new_names_have_correct_prefixes() {
     assert_eq!(session::APPENDED, "tengu_session_appended");
     assert_eq!(session::ROTATED, "tengu_session_rotated");
     assert_eq!(session::CORRUPTED, "tengu_session_corrupted");
+    assert_eq!(
+        session::PERSISTENCE_FAILED,
+        "tengu_session_persistence_failed"
+    );
 }
 
 #[test]

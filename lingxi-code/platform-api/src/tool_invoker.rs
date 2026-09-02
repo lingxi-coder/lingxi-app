@@ -9,7 +9,7 @@
 //! See M4-05 wiring follow-up plan.
 
 use async_trait::async_trait;
-use protocol::AgentId;
+use protocol::{AgentId, MessageId};
 use serde_json::Value;
 use std::any::Any;
 use thiserror::Error;
@@ -71,6 +71,12 @@ pub struct SubagentInvocationContext {
     /// site that has no originating block id (test fixtures / legacy callers),
     /// in which case the gate mints a fresh id exactly as before.
     pub tool_use_id: Option<String>,
+    /// Stable id of the assistant message that contains this tool-use block.
+    /// This is the real model-authored message id (not the provider request id
+    /// and never a synthesized replacement) and is forwarded to
+    /// `ToolUseContext` for per-call telemetry correlation. `None` is reserved
+    /// for callers that do not originate from an assistant message.
+    pub assistant_message_id: Option<MessageId>,
     /// The DISPATCHING agent's recursion depth (claude `agentContext.depth`).
     /// The dispatch invoker maps it into `ToolUseContext.depth`, so a recursive
     /// `Agent` call inside the dispatched tool computes the child's depth and the

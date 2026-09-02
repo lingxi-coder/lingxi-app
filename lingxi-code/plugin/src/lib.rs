@@ -11,6 +11,14 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+fn plugin_seed_env_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub mod agent_validation;
 pub mod brand_normalize;
 pub mod dependency;

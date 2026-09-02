@@ -34,6 +34,23 @@ import {
   reduceDesktopEvent,
   type DesktopState,
 } from './desktopState';
+import {
+  addRuntimeResources,
+  closeRuntimeCenterItem,
+  commitRuntimeResources,
+  emptyRuntimeCenterState,
+  openRuntimeCenterItem,
+  promptRuntimeResources,
+  reduceRuntimeCenterEvent,
+  resourcesFromRestoredMessages,
+  rollbackRuntimeResources,
+  setRuntimeCenterOverviewOpen,
+  setRuntimeInspectorOpen,
+  toggleRuntimeCenterSection,
+  type RuntimeCenterItemRef,
+  type RuntimeCenterSection,
+  type RuntimeCenterState,
+} from './runtimeCenterState';
 import type {
   BootstrapState,
   ConnectionState,
@@ -46,6 +63,7 @@ import type {
   SessionRuntimeSummary,
   SystemSettingsPane,
   WorkspaceFileSearchResult,
+  WorkspaceFilePreview,
   WorkspaceMetadata,
 } from './lingxi';
 
@@ -76,6 +94,7 @@ export interface UseBridge {
   readonly connected: boolean;
   readonly conversation: ConversationState;
   readonly desktop: DesktopState;
+  readonly runtimeCenter: RuntimeCenterState;
   readonly usage: UsageSnapshot | null;
   readonly running: boolean;
   readonly isCancelling: boolean;
@@ -84,7 +103,7 @@ export interface UseBridge {
   readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
   readonly error: string | null;
   clearError(): void;
-  sendPrompt(text: string, images?: ImageRefDto[]): Promise<void>;
+  sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
   beginLocalCommand(raw: string): void;
@@ -193,6 +212,14 @@ export interface UseBridge {
   setFastMode(enabled: boolean): Promise<void>;
   setPermissionMode(mode: PermissionModeId): Promise<void>;
   refreshTasks(): Promise<void>;
+  refreshSessionAgents(): Promise<void>;
+  loadSessionAgentTranscript(agentId: string): Promise<void>;
+  openRuntimeItem(item: RuntimeCenterItemRef): void;
+  closeRuntimeItem(item: RuntimeCenterItemRef): void;
+  setRuntimeCenterOverviewOpen(open: boolean): void;
+  setRuntimeInspectorOpen(open: boolean): void;
+  toggleRuntimeCenterSection(section: RuntimeCenterSection): void;
+  previewWorkspaceFile(path: string): Promise<WorkspaceFilePreview>;
   taskOutput(taskId: string): Promise<void>;
   stopTask(taskId: string): Promise<void>;
   refreshSettingsSnapshot(): Promise<void>;
@@ -519,6 +546,7 @@ interface RuntimeState {
   connection: ConnectionState;
   conversation: ConversationState;
   desktop: DesktopState;
+  runtimeCenter: RuntimeCenterState;
   permissionQueue: PermissionRequest[];
   computerAccessQueue: ComputerAccessRequestDto[];
   askUserQuestionQueue: AskUserQuestionRequestDto[];
@@ -534,6 +562,7 @@ function emptyRuntimeState(connection: ConnectionState = { status: 'idle' }): Ru
     connection,
     conversation: emptyConversation(),
     desktop: emptyDesktopState(),
+    runtimeCenter: emptyRuntimeCenterState(),
     permissionQueue: [],
     computerAccessQueue: [],
     askUserQuestionQueue: [],
@@ -573,6 +602,7 @@ export function useBridge(): UseBridge {
   const restartOperationsRef = useRef(new Map<string, Promise<void>>());
   const catalogRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const catalogRequestGenerations = useRef(new Map<string, number>());
+  const runtimeResourceSendSequence = useRef(0);
 
   const persistedActiveSession = bootstrap?.activeSession ?? bootstrap?.settings.activeSession;
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
@@ -631,6 +661,7 @@ export function useBridge(): UseBridge {
     : runtime?.connection ?? bootstrap?.connection ?? { status: 'idle' };
   const conversation = runtime?.conversation ?? emptyConversation();
   const desktop = runtime?.desktop ?? emptyDesktopState();
+  const runtimeCenter = runtime?.runtimeCenter ?? emptyRuntimeCenterState();
   const permissionQueue = runtime?.permissionQueue ?? [];
   const computerAccessQueue = runtime?.computerAccessQueue ?? [];
   const askUserQuestionQueue = runtime?.askUserQuestionQueue ?? [];
@@ -854,7 +885,16 @@ export function useBridge(): UseBridge {
         updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
       }
       updateRuntime(sessionId, (state) => {
-        let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event) };
+        let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
+        if (event.type === 'session_resumed') {
+          next = {
+            ...next,
+            runtimeCenter: addRuntimeResources(
+              next.runtimeCenter,
+              resourcesFromRestoredMessages(sessionId, event.messages),
+            ),
+          };
+        }
         if (event.type === 'turn_started') next = { ...next, error: undefined };
         if (event.type === 'ask_user_question') {
           const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
@@ -977,7 +1017,11 @@ export function useBridge(): UseBridge {
         const next: RuntimeState = { ...current, connection: state };
         if (shouldResetBridgeRuntime(state)) {
           const reset = emptyRuntimeState(state);
-          return { ...reset, connection: state };
+          return {
+            ...reset,
+            connection: state,
+            runtimeCenter: { ...current.runtimeCenter, overviewOpen: false },
+          };
         }
         if (shouldClearPendingPermissions(state)) {
           next.permissionQueue = [];
@@ -1064,30 +1108,54 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'list_models' }),
       host.command(activeSessionId, { type: 'get_conversation_controls' }),
       requestTaskList(activeSessionId),
+      host.command(activeSessionId, { type: 'list_session_agents' }),
       host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
-  const sendPrompt = useCallback(async (text: string, images: ImageRefDto[] = []) => {
+  const sendPrompt = useCallback(async (
+    text: string,
+    images: ImageRefDto[] = [],
+    imageNames: string[] = [],
+    filePaths: string[] = [],
+  ) => {
     const trimmed = text.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return;
     const wasTurnActive = turnActiveRefs.current.get(sessionId) === true;
     turnActiveRefs.current.set(sessionId, true);
-    updateRuntime(sessionId, (state) => ({ ...state, conversation: appendPendingUserPrompt(state.conversation, trimmed, images) }));
+    runtimeResourceSendSequence.current += 1;
+    const sendToken = `${sessionId}:${runtimeResourceSendSequence.current}`;
+    const resources = promptRuntimeResources(sessionId, sendToken, images, imageNames, filePaths);
+    updateRuntime(sessionId, (state) => {
+      return {
+        ...state,
+        conversation: appendPendingUserPrompt(state.conversation, trimmed, images),
+        runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
+      };
+    });
     try {
       await host.sendPrompt(sessionId, trimmed, images);
+      if (!removedRuntimeIds.current.has(sessionId)) {
+        updateRuntime(sessionId, (state) => ({
+          ...state,
+          runtimeCenter: commitRuntimeResources(state.runtimeCenter, sendToken),
+        }));
+      }
     } catch (cause) {
       turnActiveRefs.current.set(sessionId, wasTurnActive);
-      updateRuntime(sessionId, (state) => ({
-        ...state,
-        conversation: {
-          ...reduceEvent(state.conversation, wasTurnActive
-            ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
-            : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
-          running: wasTurnActive,
-        },
-      }));
+      if (!removedRuntimeIds.current.has(sessionId)) {
+        updateRuntime(sessionId, (state) => ({
+          ...state,
+          conversation: {
+            ...reduceEvent(state.conversation, wasTurnActive
+              ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
+              : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
+            running: wasTurnActive,
+          },
+          runtimeCenter: rollbackRuntimeResources(state.runtimeCenter, sendToken),
+        }));
+      }
       capture(cause);
       throw cause;
     }
@@ -1430,6 +1498,7 @@ export function useBridge(): UseBridge {
       command({ type: 'list_models' }),
       command({ type: 'get_conversation_controls' }),
       requestTaskList(),
+      command({ type: 'list_session_agents' }),
       command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
       refreshDiagnostics(),
     ]);
@@ -1461,6 +1530,59 @@ export function useBridge(): UseBridge {
   const setFastMode = useCallback((enabled: boolean) => command({ type: 'set_fast_mode', enabled }), [command]);
   const setPermissionMode = useCallback((mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }), [command]);
   const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
+  const refreshSessionAgents = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId) return;
+    try {
+      await host.command(sessionId, { type: 'list_session_agents' });
+    } catch (cause) {
+      capture(cause);
+    }
+  }, [capture, host]);
+  const loadSessionAgentTranscript = useCallback(async (agentId: string) => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId || !agentId.trim()) return;
+    try {
+      await host.command(sessionId, { type: 'load_session_agent_transcript', agent_id: agentId });
+    } catch (cause) {
+      capture(cause);
+    }
+  }, [capture, host]);
+  const openRuntimeItem = useCallback((item: RuntimeCenterItemRef): void => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || sessionLoadingRef.current) return;
+    updateRuntime(sessionId, (state) => ({
+      ...state,
+      runtimeCenter: setRuntimeCenterOverviewOpen(openRuntimeCenterItem(state.runtimeCenter, item), false),
+    }));
+    if (item.kind === 'agent') void loadSessionAgentTranscript(item.id).catch(() => undefined);
+  }, [loadSessionAgentTranscript, updateRuntime]);
+  const closeRuntimeItem = useCallback((item: RuntimeCenterItemRef): void => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({ ...state, runtimeCenter: closeRuntimeCenterItem(state.runtimeCenter, item) }));
+  }, [updateRuntime]);
+  const setRuntimeInspectorOpenAction = useCallback((open: boolean): void => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({ ...state, runtimeCenter: setRuntimeInspectorOpen(state.runtimeCenter, open) }));
+  }, [updateRuntime]);
+  const setRuntimeCenterOverviewOpenAction = useCallback((open: boolean): void => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || sessionLoadingRef.current) return;
+    updateRuntime(sessionId, (state) => ({ ...state, runtimeCenter: setRuntimeCenterOverviewOpen(state.runtimeCenter, open) }));
+    if (open) void refreshSessionAgents().catch(() => undefined);
+  }, [refreshSessionAgents, updateRuntime]);
+  const toggleRuntimeCenterSectionAction = useCallback((section: RuntimeCenterSection): void => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({ ...state, runtimeCenter: toggleRuntimeCenterSection(state.runtimeCenter, section) }));
+  }, [updateRuntime]);
+  const previewWorkspaceFile = useCallback(async (path: string): Promise<WorkspaceFilePreview> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!host || !sessionId) throw new Error('Open a session before previewing a file.');
+    return host.previewWorkspaceFile(sessionId, path);
+  }, [host]);
   const taskOutput = useCallback((taskId: string) => command({ type: 'task_output', task_id: taskId, offset: 0 }), [command]);
   const stopTask = useCallback((taskId: string) => command({ type: 'task_stop', task_id: taskId }), [command]);
   const refreshSettingsSnapshot = useCallback(
@@ -1531,6 +1653,7 @@ export function useBridge(): UseBridge {
     connected: !sessionLoading && connection.status === 'connected',
     conversation,
     desktop,
+    runtimeCenter,
     usage: conversation.usage,
     running: conversation.running,
     isCancelling,
@@ -1585,6 +1708,14 @@ export function useBridge(): UseBridge {
     setFastMode,
     setPermissionMode,
     refreshTasks,
+    refreshSessionAgents,
+    loadSessionAgentTranscript,
+    openRuntimeItem,
+    closeRuntimeItem,
+    setRuntimeCenterOverviewOpen: setRuntimeCenterOverviewOpenAction,
+    setRuntimeInspectorOpen: setRuntimeInspectorOpenAction,
+    toggleRuntimeCenterSection: toggleRuntimeCenterSectionAction,
+    previewWorkspaceFile,
     taskOutput,
     stopTask,
     refreshSettingsSnapshot,

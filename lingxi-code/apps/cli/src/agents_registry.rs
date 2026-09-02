@@ -62,20 +62,33 @@ const LIVE_RECORD_JSON_KEYS: &[&str] = &[
     "permissionClass",
 ];
 
-fn persist_live_record(path: &Path, record: &LiveSessionRecord) {
-    let mut map: Map<String, Value> = std::fs::read_to_string(path)
+fn persist_live_record(path: &Path, record: &LiveSessionRecord, changed_keys: &[&str]) {
+    let Some(_record_lock) = lock_live_record(path) else {
+        return;
+    };
+    let existing: Option<Map<String, Value>> = std::fs::read_to_string(path)
         .ok()
-        .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default();
-    for key in LIVE_RECORD_JSON_KEYS {
-        map.remove(*key);
-    }
+        .and_then(|body| serde_json::from_str(&body).ok());
+    let replace_all = existing.is_none();
+    let mut map = existing.unwrap_or_default();
     let Ok(patch) = serde_json::to_value(record) else {
         return;
     };
-    if let Some(obj) = patch.as_object() {
-        for (key, value) in obj {
-            map.insert(key.clone(), value.clone());
+    let Some(obj) = patch.as_object() else {
+        return;
+    };
+    let keys = if replace_all {
+        LIVE_RECORD_JSON_KEYS
+    } else {
+        changed_keys
+    };
+    for key in keys {
+        if let Some(value) = obj.get(*key) {
+            map.insert((*key).to_string(), value.clone());
+        } else {
+            // Targeted `None` fields are omitted by serde and therefore clear
+            // their previous on-disk value (notably `waitingFor`).
+            map.remove(*key);
         }
     }
     let tmp = path.with_extension("json.tmp");
@@ -85,6 +98,44 @@ fn persist_live_record(path: &Path, record: &LiveSessionRecord) {
     {
         let _ = std::fs::rename(&tmp, path);
     }
+}
+
+fn record_still_belongs_to(path: &Path, record: &LiveSessionRecord) -> bool {
+    let Some(obj) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|value| value.as_object().cloned())
+    else {
+        return false;
+    };
+    let pid_matches = obj.get("pid").and_then(Value::as_i64) == Some(i64::from(record.pid));
+    let session_matches =
+        obj.get("sessionId").and_then(Value::as_str) == record.session_id.as_deref();
+    pid_matches && session_matches
+}
+
+/// Lock the platform-api live-session record corresponding to `path`.
+///
+/// Keep this derivation narrow: only canonical `<pid>.json` files immediately
+/// below a `sessions` directory are eligible, and the existing config root
+/// and sessions directory must already exist. Invalid paths fail closed.
+fn lock_live_record(path: &Path) -> Option<platform_api::rooted_fs::RootedFileLock> {
+    let file_name = path.file_name()?.to_str()?;
+    let pid_text = file_name.strip_suffix(".json")?;
+    let pid = pid_text.parse::<u32>().ok()?;
+    if pid == 0 || pid_text != pid.to_string() {
+        return None;
+    }
+    let sessions_dir = path.parent()?;
+    if sessions_dir.file_name()?.to_str()? != "sessions" || !sessions_dir.is_dir() {
+        return None;
+    }
+    let config_home = sessions_dir.parent()?.to_path_buf();
+    if !config_home.is_dir() {
+        return None;
+    }
+    let lock_relative = Path::new("sessions").join(format!(".{pid}.json.lock"));
+    platform_api::rooted_fs::lock_exclusive(&config_home, &lock_relative, 0o700, 0o600).ok()
 }
 
 /// `sessions/` under the config home — one `<pid>.json` per live process.
@@ -1396,9 +1447,11 @@ impl SessionRegistration {
         let dir = sessions_dir(config_home);
         let path = dir.join(format!("{pid}.json"));
         let ok = std::fs::create_dir_all(&dir).is_ok()
-            && serde_json::to_string(&record)
-                .ok()
-                .is_some_and(|s| std::fs::write(&path, s).is_ok());
+            && lock_live_record(&path).is_some_and(|_record_lock| {
+                serde_json::to_string(&record)
+                    .ok()
+                    .is_some_and(|s| std::fs::write(&path, s).is_ok())
+            });
         Self {
             inner: std::sync::Mutex::new(RegistrationInner {
                 path: ok.then_some(path),
@@ -1440,7 +1493,11 @@ impl SessionRegistration {
         record.waiting_for = waiting_for.map(str::to_string);
         record.updated_at = Some(now_ms);
         record.status_updated_at = Some(now_ms);
-        persist_live_record(path, record);
+        persist_live_record(
+            path,
+            record,
+            &["status", "waitingFor", "updatedAt", "statusUpdatedAt"],
+        );
         if !was_idle && status == "idle" {
             deliver_idle_notifications(path, record, false);
         }
@@ -1468,7 +1525,17 @@ impl SessionRegistration {
         record.name_source = Some(source.to_string());
         record.name_since = Some(now_ms);
         record.updated_at = Some(now_ms);
-        persist_live_record(path, record);
+        persist_live_record(
+            path,
+            record,
+            &[
+                "name",
+                "nameSource",
+                "nameSince",
+                "formerNames",
+                "updatedAt",
+            ],
+        );
     }
 
     /// Record the UDS inbox path (2.1.232 `messagingSocketPath`).
@@ -1485,7 +1552,7 @@ impl SessionRegistration {
         };
         record.messaging_socket_path = Some(sock.display().to_string());
         record.updated_at = Some(chrono::Utc::now().timestamp_millis());
-        persist_live_record(path, record);
+        persist_live_record(path, record, &["messagingSocketPath", "updatedAt"]);
     }
 
     /// Keep in-memory `permissionClass` in sync with disk so the next
@@ -1506,7 +1573,7 @@ impl SessionRegistration {
         };
         record.permission_class = Some(class.to_string());
         record.updated_at = Some(chrono::Utc::now().timestamp_millis());
-        persist_live_record(path, record);
+        persist_live_record(path, record, &["permissionClass", "updatedAt"]);
     }
 
     /// Retarget the advertised session id after an in-process `/resume` remount.
@@ -1526,7 +1593,7 @@ impl SessionRegistration {
         };
         record.session_id = Some(session_id.to_string());
         record.updated_at = Some(chrono::Utc::now().timestamp_millis());
-        persist_live_record(path, record);
+        persist_live_record(path, record, &["sessionId", "updatedAt"]);
     }
 
     /// Remove the registry record NOW (idempotent; `Drop` calls the same).
@@ -1536,8 +1603,15 @@ impl SessionRegistration {
     pub fn deregister(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             if let (Some(path), Some(record)) = (inner.path.take(), inner.record.as_ref()) {
-                deliver_idle_notifications(&path, record, true);
-                let _ = std::fs::remove_file(path);
+                if let Some(_record_lock) = lock_live_record(&path) {
+                    // The PID file can be retargeted between an earlier status
+                    // task and teardown. Never notify/delete a replacement
+                    // session selected through the stale in-memory record.
+                    if record_still_belongs_to(&path, record) {
+                        deliver_idle_notifications(&path, record, true);
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
             }
             inner.record = None;
         }
@@ -1599,6 +1673,9 @@ impl Drop for SessionRegistration {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
 
     fn job(state: &str, tempo: Option<&str>) -> JobState {
         JobState {
@@ -1839,6 +1916,84 @@ mod tests {
         assert_eq!(recs[0].session_id.as_deref(), Some("sid-1"));
         assert_eq!(recs[0].kind, "interactive");
         drop(reg);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cli_and_platform_record_writers_share_the_record_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registration = Arc::new(SessionRegistration::register(
+            tmp.path(),
+            Some("sid-1"),
+            Some("proj"),
+        ));
+        let pid = std::process::id();
+        let path = sessions_dir(tmp.path()).join(format!("{pid}.json"));
+        let live_dir = Arc::new(platform_api::live_sessions::LiveSessionDir::at(
+            sessions_dir(tmp.path()),
+        ));
+
+        // Release both implementations against the same held lock. Without
+        // the CLI lock, its fixed `.json.tmp` write can race the platform
+        // writer's rename or overwrite fields from the other writer.
+        let record_lock = lock_live_record(&path).expect("canonical live record lock");
+        let gate = Arc::new(Barrier::new(3));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let registration_worker = Arc::clone(&registration);
+        let gate_worker = Arc::clone(&gate);
+        let started_worker = started_tx.clone();
+        let done_worker = done_tx.clone();
+        let cli_worker = thread::spawn(move || {
+            started_worker.send(()).unwrap();
+            gate_worker.wait();
+            registration_worker.set_permission_class("bypass");
+            done_worker.send(Ok(())).unwrap();
+        });
+
+        let live_dir_worker = Arc::clone(&live_dir);
+        let gate_worker = Arc::clone(&gate);
+        let started_worker = started_tx.clone();
+        let done_worker = done_tx.clone();
+        let platform_worker = thread::spawn(move || {
+            started_worker.send(()).unwrap();
+            gate_worker.wait();
+            done_worker
+                .send(live_dir_worker.set_status(pid, "waiting", Some("permission prompt")))
+                .unwrap();
+        });
+
+        drop(started_tx);
+        drop(done_tx);
+        started_rx.recv().unwrap();
+        started_rx.recv().unwrap();
+        gate.wait();
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(record_lock);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("CLI writer should finish after lock release")
+            .unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("platform writer should finish after lock release")
+            .unwrap();
+        cli_worker.join().unwrap();
+        platform_worker.join().unwrap();
+
+        let record = live_dir
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("record should remain present");
+        assert_eq!(record.sid(), "sid-1");
+        assert_eq!(record.display_name(), "proj");
+        assert_eq!(record.permission_class.as_deref(), Some("bypass"));
+        assert_eq!(record.status.as_deref(), Some("waiting"));
+        assert_eq!(record.waiting_for.as_deref(), Some("permission prompt"));
+        registration.deregister();
         assert!(!path.exists());
     }
 

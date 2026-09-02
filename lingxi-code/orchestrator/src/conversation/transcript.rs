@@ -114,8 +114,31 @@ impl ConversationOrchestrator {
 
     /// Turn frame buffering on for the streaming driver, and off again.
     pub(crate) async fn set_tool_frame_buffering(&self, on: bool) {
-        let mut slot = self.transcript.tool_frames.lock().await;
-        *slot = on.then(std::collections::HashMap::new);
+        let abandoned = {
+            let mut slot = self.transcript.tool_frames.lock().await;
+            let old = std::mem::replace(&mut *slot, on.then(std::collections::HashMap::new));
+            old.into_iter()
+                .flat_map(|frames| frames.into_keys())
+                .collect::<Vec<_>>()
+        };
+        // A non-empty old buffer means the stream terminated before those
+        // results reached the received-order release/persist point. Discard
+        // their parallel metadata too so a failed iteration cannot leak it
+        // for the lifetime of the session.
+        if !abandoned.is_empty() {
+            let mut results = self.transcript.tool_use_results.lock().await;
+            let mut denials = self.transcript.tool_denial_kinds.lock().await;
+            let mut mcp_meta = self.transcript.tool_use_mcp_meta.lock().await;
+            let mut turn_end = self.transcript.pending_tool_result_turn_end.lock().await;
+            let mut sources = self.transcript.tool_source_assistant_uuids.lock().await;
+            for id in abandoned {
+                results.remove(&id);
+                denials.remove(&id);
+                mcp_meta.remove(&id);
+                turn_end.remove(&id);
+                sources.remove(&id);
+            }
+        }
     }
 
     /// Release one buffered frame, in the CALLER's order.
@@ -128,36 +151,52 @@ impl ConversationOrchestrator {
     pub(crate) async fn release_tool_frame(
         &self,
         id: &protocol::ToolUseId,
+        tool: &str,
         content: &str,
         is_error: bool,
     ) {
+        let id_key = id.to_string();
         let pending = self
             .transcript
             .tool_frames
             .lock()
             .await
             .as_mut()
-            .and_then(|b| b.remove(&id.to_string()));
-        let (tool, result, denial_kind) = match pending {
+            .and_then(|b| b.remove(&id_key));
+        let result_from_side_table = self
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .get(&id_key)
+            .cloned();
+        let denial_kind_from_side_table = self
+            .transcript
+            .tool_denial_kinds
+            .lock()
+            .await
+            .get(&id_key)
+            .cloned();
+        let substituted = pending.as_ref().is_some_and(|p| p.model_text != content);
+        let (tool, pending_result, pending_denial_kind) = match pending {
             // A substitution replaced the model-facing text, so the buffered
             // payload describes an outcome that was DISCARDED. claude-code's
             // synthetic carries a synthetic `toolUseResult` too, so the real
             // one must not reach the SDK.
-            Some(p) if p.model_text != content => (
-                p.tool,
-                serde_json::json!({ "error": content }),
-                p.denial_kind,
-            ),
-            Some(p) => (p.tool, p.result, p.denial_kind),
+            Some(p) => (p.tool, Some(p.result), p.denial_kind),
             // Never dispatched: synthesize the payload the dispatch would have
             // carried, matching the shape used by every other error result.
-            None => (String::new(), serde_json::json!({ "error": content }), None),
+            None => (tool.to_string(), None, None),
         };
+        let result = result_from_side_table
+            .or_else(|| if substituted { None } else { pending_result })
+            .unwrap_or_else(|| serde_json::json!({ "error": content }));
         let result = if is_error && !result.is_object() {
             serde_json::json!({ "error": content })
         } else {
             result
         };
+        let denial_kind = denial_kind_from_side_table.or(pending_denial_kind);
         match denial_kind {
             Some(kind) => {
                 self.output
@@ -246,6 +285,48 @@ impl ConversationOrchestrator {
             .insert(id.to_string(), meta);
     }
 
+    /// Record that a successful tool result should end the current turn once
+    /// its persisted/tool-hook boundary has completed.
+    pub(crate) async fn record_pending_tool_result_turn_end(
+        &self,
+        id: &protocol::ToolUseId,
+        turn_end: tool_api::tool_trait::ToolResultTurnEnd,
+    ) {
+        self.transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .insert(id.to_string(), turn_end);
+    }
+
+    /// Drop result metadata whose real tool outcome was replaced by a
+    /// streaming synthetic. The synthetic is an error result and therefore
+    /// carries neither the real MCP metadata nor its turn-end request.
+    pub(crate) async fn clear_discarded_tool_result_metadata(&self, id: &protocol::ToolUseId) {
+        let key = id.to_string();
+        self.transcript.tool_use_mcp_meta.lock().await.remove(&key);
+        self.transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .remove(&key);
+    }
+
+    /// Peek at the requesting assistant line for a result without consuming
+    /// the value that transcript serialization must still write as
+    /// `sourceToolAssistantUUID`.
+    pub(crate) async fn source_tool_assistant_uuid(
+        &self,
+        id: &protocol::ToolUseId,
+    ) -> Option<String> {
+        self.transcript
+            .tool_source_assistant_uuids
+            .lock()
+            .await
+            .get(id.as_str())
+            .cloned()
+    }
+
     /// Queue one hook `attachment` payload produced while dispatching `id`.
     ///
     /// Flushed by [`Self::flush_hook_attachments`] right after that tool's
@@ -282,6 +363,43 @@ impl ConversationOrchestrator {
     async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_use_mcp_meta.lock().await.remove(&only)
+    }
+
+    /// Whether this `tool_result` user message should persist `toolEndsTurn`.
+    /// MCP `_meta` termination is represented solely by `mcpMeta`; the oracle
+    /// writes this sibling only for a native `ToolResult.endsTurn`.
+    async fn tool_result_message_ends_turn(&self, msg: &ConversationMessage) -> bool {
+        let Some(only) = Self::sole_tool_result_id(msg) else {
+            return false;
+        };
+        self.transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .get(&only)
+            .is_some_and(|turn_end| {
+                turn_end.source == tool_api::tool_trait::ToolResultTurnEndSource::Tool
+            })
+    }
+
+    /// Drain pending tool-result turn-end requests for the supplied ids.
+    ///
+    /// Claude Code stores one `toolRequestedEndTurn` scalar and overwrites it
+    /// whenever a later result also requests termination. Returning the last
+    /// matching id therefore preserves both its source and the one-event
+    /// telemetry cardinality for concurrent batches.
+    pub(crate) async fn take_pending_tool_result_turn_ends(
+        &self,
+        ids: &[protocol::ToolUseId],
+    ) -> Option<tool_api::tool_trait::ToolResultTurnEnd> {
+        let mut pending = self.transcript.pending_tool_result_turn_end.lock().await;
+        let mut selected = None;
+        for id in ids {
+            if let Some(turn_end) = pending.remove(&id.to_string()) {
+                selected = Some(turn_end);
+            }
+        }
+        selected
     }
 
     pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
@@ -790,13 +908,12 @@ impl ConversationOrchestrator {
             .await;
     }
 
-    /// Record a best-effort transcript write failure and surface one sanitized
-    /// warning per session. The raw error remains confined to logs/telemetry;
-    /// it can contain host paths or backend details and must never cross the
-    /// user-facing output seam.
+    /// Record a best-effort transcript write failure. The raw error remains in
+    /// the local diagnostic log; the upstream telemetry event has an empty
+    /// payload and must not receive paths, session ids, or backend details.
     pub(super) async fn record_transcript_append_failure(
         &self,
-        session_id: &str,
+        _session_id: &str,
         operation: &'static str,
         error: &(impl std::fmt::Display + ?Sized),
     ) {
@@ -804,7 +921,7 @@ impl ConversationOrchestrator {
         // shows NO user-visible notice — the port's `TRANSCRIPT_PERSISTENCE_WARNING`
         // system notice was an invented surface. Keep the log + telemetry only.
         tracing::error!(error = %error, operation, "jsonl writer append failed");
-        telemetry::emit_session_corrupted(session_id, &error.to_string());
+        telemetry::emit_session_persistence_failed();
     }
 
     /// Persist ONE hook-run `attachment` transcript line.
@@ -975,6 +1092,14 @@ impl ConversationOrchestrator {
     ) {
         self.note_assistant_commit(msg).await;
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            // These side tables live only until the corresponding tool-result
+            // line is persisted. In in-memory/no-writer sessions there is no
+            // line to consume them below, so drain them here after callers have
+            // had their pre-persist audience-note read.
+            let _ = self.take_tool_use_result(msg).await;
+            let _ = self.take_tool_denial_kind(msg).await;
+            let _ = self.take_tool_use_mcp_meta(msg).await;
+            let _ = self.take_source_tool_assistant_uuid(msg).await;
             return;
         };
         let (session_id_str, plan_mode, parent_uuid) = {
@@ -1048,6 +1173,10 @@ impl ConversationOrchestrator {
         }
         if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
             jmsg.extra.insert("mcpMeta".to_string(), meta);
+        }
+        if self.tool_result_message_ends_turn(msg).await {
+            jmsg.extra
+                .insert("toolEndsTurn".to_string(), serde_json::Value::Bool(true));
         }
         if let Some(src) = self.take_source_tool_assistant_uuid(msg).await {
             jmsg.extra.insert(

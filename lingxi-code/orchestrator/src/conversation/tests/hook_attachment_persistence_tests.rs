@@ -74,8 +74,8 @@ mod tool_frame_ordering_tests {
         );
 
         // Released in RECEIVED order by the collection point.
-        orch.release_tool_frame(&first, "a", false).await;
-        orch.release_tool_frame(&second, "b", false).await;
+        orch.release_tool_frame(&first, "Read", "a", false).await;
+        orch.release_tool_frame(&second, "Bash", "b", false).await;
         assert_eq!(
             result_ids(&output.snapshot().await),
             vec![first.to_string(), second.to_string()],
@@ -93,7 +93,7 @@ mod tool_frame_ordering_tests {
         orch.set_tool_frame_buffering(true).await;
 
         let id = protocol::ToolUseId::new();
-        orch.release_tool_frame(&id, "The user doesn't want to proceed", true)
+        orch.release_tool_frame(&id, "Read", "The user doesn't want to proceed", true)
             .await;
         assert_eq!(
             result_ids(&output.snapshot().await),
@@ -120,7 +120,8 @@ mod tool_frame_ordering_tests {
             None,
         )
         .await;
-        orch.release_tool_frame(&id, "SYNTHETIC", true).await;
+        orch.release_tool_frame(&id, "Bash", "SYNTHETIC", true)
+            .await;
 
         let events = output.snapshot().await;
         let found = events.iter().any(|e| matches!(
@@ -132,6 +133,163 @@ mod tool_frame_ordering_tests {
             !format!("{events:?}").contains("REAL OUTPUT"),
             "the discarded real outcome must not reach the SDK: {events:?}"
         );
+    }
+
+    /// A substituted non-MCP synthetic must override the dispatch-side
+    /// `interrupted` denial kind with the final `user-rejected` provenance.
+    #[tokio::test]
+    async fn substituted_non_mcp_frame_uses_rewritten_denial_kind() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_for_frames(output.clone());
+        orch.set_tool_frame_buffering(true).await;
+
+        let id = protocol::ToolUseId::new();
+        orch.emit_tool_result_frame(
+            &id,
+            "Bash",
+            "REAL OUTPUT",
+            &serde_json::json!({ "error": "aborted" }),
+            Some("interrupted"),
+        )
+        .await;
+        orch.record_tool_denial_kind(&id, "user-rejected").await;
+        orch.record_tool_use_result(
+            &id,
+            serde_json::Value::String("User rejected tool use".into()),
+        )
+        .await;
+
+        orch.release_tool_frame(&id, "Bash", "SYNTHETIC", true)
+            .await;
+
+        assert_eq!(
+            output.denial_snapshot().await,
+            vec![(id.clone(), "user-rejected".to_string())]
+        );
+        assert!(
+            !format!("{:?}", output.snapshot().await).contains("REAL OUTPUT"),
+            "the discarded real outcome must not leak into the SDK frame"
+        );
+    }
+
+    /// A queued MCP cancellation never buffered a dispatch frame, but still
+    /// must emit the final `interrupted` provenance and keep the tool name.
+    #[tokio::test]
+    async fn undispatched_mcp_cancelled_tool_uses_recorded_metadata() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_for_frames(output.clone());
+        orch.set_tool_frame_buffering(true).await;
+
+        let id = protocol::ToolUseId::new();
+        orch.record_tool_denial_kind(&id, "interrupted").await;
+        orch.record_tool_use_result(&id, serde_json::Value::String("Error: interrupted".into()))
+            .await;
+
+        orch.release_tool_frame(&id, "McpCancelTool", "Error: interrupted", true)
+            .await;
+
+        assert_eq!(
+            output.denial_snapshot().await,
+            vec![(id.clone(), "interrupted".to_string())]
+        );
+        let events = output.snapshot().await;
+        assert!(matches!(
+            events.as_slice(),
+            [platform_api::orchestrator::OutputEvent::ToolResult { id: got_id, tool, .. }]
+                if got_id == &id && tool == "McpCancelTool"
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_writer_persist_consumes_frame_side_tables() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_for_frames(output);
+        orch.set_tool_frame_buffering(true).await;
+        let id = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&id, serde_json::json!({"ok": true}))
+            .await;
+        orch.record_tool_denial_kind(&id, "user-rejected").await;
+        orch.record_tool_use_mcp_meta(&id, serde_json::json!({"source": "test"}))
+            .await;
+        orch.record_source_tool_assistant_uuid(&id, "assistant-line".into())
+            .await;
+        orch.release_tool_frame(&id, "McpTool", "cancelled", true)
+            .await;
+
+        let message = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: "cancelled".into(),
+                is_error: true,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&message).await;
+
+        let key = id.to_string();
+        assert!(!orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(&key));
+        assert!(!orch
+            .transcript
+            .tool_denial_kinds
+            .lock()
+            .await
+            .contains_key(&key));
+        assert!(!orch
+            .transcript
+            .tool_use_mcp_meta
+            .lock()
+            .await
+            .contains_key(&key));
+        assert!(!orch
+            .transcript
+            .tool_source_assistant_uuids
+            .lock()
+            .await
+            .contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_buffered_frame_consumes_its_side_tables() {
+        let orch = orch_for_frames(Arc::new(MockOutputStream::new()));
+        orch.set_tool_frame_buffering(true).await;
+        let id = protocol::ToolUseId::new();
+        orch.emit_tool_result_frame(
+            &id,
+            "Bash",
+            "out",
+            &serde_json::json!({"stdout": "out"}),
+            Some("interrupted"),
+        )
+        .await;
+        orch.record_tool_use_result(&id, serde_json::json!({"stdout": "out"}))
+            .await;
+        orch.record_tool_denial_kind(&id, "interrupted").await;
+
+        orch.set_tool_frame_buffering(false).await;
+
+        let key = id.to_string();
+        assert!(!orch
+            .transcript
+            .tool_use_results
+            .lock()
+            .await
+            .contains_key(&key));
+        assert!(!orch
+            .transcript
+            .tool_denial_kinds
+            .lock()
+            .await
+            .contains_key(&key));
     }
 }
 

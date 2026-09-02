@@ -2778,11 +2778,9 @@ mod telemetry_tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::fs;
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, MutexGuard};
     use telemetry::{AnalyticsValue, InMemorySink};
     use tool_api::ToolRegistry;
-
-    static SEED_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn string_field<'a>(metadata: &'a telemetry::LogEventMetadata, key: &str) -> &'a str {
         match metadata.get(key) {
@@ -2807,30 +2805,39 @@ mod telemetry_tests {
 
     struct SeedEnvGuard {
         _guard: MutexGuard<'static, ()>,
-        previous: Option<OsString>,
+        previous_claude: Option<OsString>,
+        previous_lingxi: Option<OsString>,
     }
 
     impl SeedEnvGuard {
         fn set(seed: &Path) -> Self {
-            let guard = SEED_ENV_LOCK
-                .get_or_init(|| Mutex::new(()))
+            let guard = crate::plugin_seed_env_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous = std::env::var_os("LINGXI_PLUGIN_SEED_DIR");
+            let previous_claude = std::env::var_os("CLAUDE_CODE_PLUGIN_SEED_DIR");
+            let previous_lingxi = std::env::var_os("LINGXI_PLUGIN_SEED_DIR");
+            // Production intentionally gives the Claude alias precedence. Clear
+            // it only inside this test guard so the test deterministically
+            // exercises the LingXi alias it sets below.
+            std::env::remove_var("CLAUDE_CODE_PLUGIN_SEED_DIR");
             std::env::set_var("LINGXI_PLUGIN_SEED_DIR", seed);
             Self {
                 _guard: guard,
-                previous,
+                previous_claude,
+                previous_lingxi,
             }
         }
     }
 
     impl Drop for SeedEnvGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var("LINGXI_PLUGIN_SEED_DIR", previous);
-            } else {
-                std::env::remove_var("LINGXI_PLUGIN_SEED_DIR");
+            match self.previous_claude.as_ref() {
+                Some(value) => std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", value),
+                None => std::env::remove_var("CLAUDE_CODE_PLUGIN_SEED_DIR"),
+            }
+            match self.previous_lingxi.as_ref() {
+                Some(value) => std::env::set_var("LINGXI_PLUGIN_SEED_DIR", value),
+                None => std::env::remove_var("LINGXI_PLUGIN_SEED_DIR"),
             }
         }
     }

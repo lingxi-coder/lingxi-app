@@ -24,6 +24,102 @@ use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 use crate::initialize_params::InitializeParams;
 
+fn emit_list_paginated(
+    method: &'static str,
+    page_count: Option<usize>,
+    item_count: usize,
+    outcome: &'static str,
+    source: Option<&'static str>,
+) {
+    let payload = telemetry::tengu::mcp::ListPaginatedPayload {
+        method: telemetry::Verified::assert_safe(method.to_string()),
+        page_count: page_count.map(|count| u32::try_from(count).unwrap_or(u32::MAX)),
+        item_count: u32::try_from(item_count).unwrap_or(u32::MAX),
+        outcome: telemetry::Verified::assert_safe(outcome.to_string()),
+        source: source.map(|value| telemetry::Verified::assert_safe(value.to_string())),
+    };
+    tracing::info!(
+        event = telemetry::tengu::mcp::LIST_PAGINATED,
+        method = payload.method.as_str(),
+        pageCount = payload.page_count,
+        itemCount = payload.item_count,
+        outcome = payload.outcome.as_str(),
+        source = payload.source.as_ref().map(telemetry::Verified::as_str),
+    );
+    let mut attrs = BTreeMap::from([
+        (
+            "method".to_string(),
+            telemetry::otel::AttrValue::from(payload.method.as_str().to_string()),
+        ),
+        (
+            "itemCount".to_string(),
+            telemetry::otel::AttrValue::from(i64::from(payload.item_count)),
+        ),
+        (
+            "outcome".to_string(),
+            telemetry::otel::AttrValue::from(payload.outcome.as_str().to_string()),
+        ),
+    ]);
+    if let Some(page_count) = payload.page_count {
+        attrs.insert(
+            "pageCount".to_string(),
+            telemetry::otel::AttrValue::from(i64::from(page_count)),
+        );
+    }
+    if let Some(source) = payload.source.as_ref() {
+        attrs.insert(
+            "source".to_string(),
+            telemetry::otel::AttrValue::from(source.as_str().to_string()),
+        );
+    }
+    telemetry::otel::emit_named_log_event(telemetry::tengu::mcp::LIST_PAGINATED, &attrs);
+}
+
+const MCP_LIST_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_millis(1_000),
+];
+
+fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
+    if let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error {
+        if remote
+            .data
+            .as_ref()
+            .and_then(|data| data.get("httpStatus"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|status| (400..500).contains(&status))
+        {
+            return false;
+        }
+    }
+    if let Some(status) = error
+        .to_string()
+        .split("MCP_HTTP_STATUS=")
+        .nth(1)
+        .and_then(|metadata| metadata.split(';').next())
+        .and_then(|status| status.parse::<u16>().ok())
+    {
+        return !(400..500).contains(&status);
+    }
+    match error {
+        jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) => {
+            !matches!(remote.code, -32_001 | -32_602 | -32_601 | -32_600)
+                && !(400..500).contains(&remote.code)
+        }
+        jsonrpc::ConnectionError::Router(
+            jsonrpc::RouterError::Timeout(_) | jsonrpc::RouterError::Deserialize(_),
+        ) => false,
+        jsonrpc::ConnectionError::Router(
+            jsonrpc::RouterError::WriterClosed
+            | jsonrpc::RouterError::WrongResponseId { .. }
+            | jsonrpc::RouterError::Serialize(_),
+        )
+        | jsonrpc::ConnectionError::Codec(_)
+        | jsonrpc::ConnectionError::Broker(_) => true,
+    }
+}
+
 /// Maximum character length for free-form text fields sourced from MCP
 /// servers (tool/prompt descriptions, server `instructions`). Mirrors
 /// claude-code `services/mcp/client.ts:1163-1166`.
@@ -677,6 +773,140 @@ impl McpClient {
         self.server_capabilities.read().await.clone()
     }
 
+    async fn list_paginated<T>(
+        &self,
+        method: &'static str,
+        decode: fn(serde_json::Value) -> Result<(Vec<T>, Option<String>), McpClientError>,
+    ) -> Result<Vec<T>, McpClientError> {
+        // Claude Code's modern `client.listTools()` path reports one aggregate
+        // event, while legacy tools plus every prompts/resources traversal use
+        // the page-level helper. The distinction is observable: aggregate
+        // success is emitted even for one page and omits `pageCount`.
+        let aggregate_tools = method == "tools/list" && self.modern();
+        let mut emitted_error = false;
+        let mut retry_index = 0_usize;
+        'retry: loop {
+            let mut items = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut page_count = 0_usize;
+            loop {
+                let mut params = serde_json::json!({});
+                if let Some(cursor) = cursor.as_deref() {
+                    params["cursor"] = serde_json::Value::String(cursor.to_string());
+                }
+                let mut raw_value: serde_json::Value = match self
+                    .connection
+                    .call(method, self.request_params(method, params))
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if !aggregate_tools && page_count > 0 && !emitted_error {
+                            emit_list_paginated(
+                                method,
+                                Some(page_count),
+                                items.len(),
+                                "error",
+                                Some("pages"),
+                            );
+                            emitted_error = true;
+                        }
+                        if retryable_list_connection_error(&error) {
+                            if let Some(delay) = MCP_LIST_RETRY_DELAYS.get(retry_index).copied() {
+                                retry_index += 1;
+                                tracing::debug!(
+                                    target: "lingxi_mcp::client",
+                                    server = %self.server_name,
+                                    method,
+                                    delay_ms = delay.as_millis(),
+                                    "{method} failed ({error}); retrying",
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue 'retry;
+                            }
+                        }
+                        return Err(mcp_client_error_from_rpc(&error));
+                    }
+                };
+
+                // The oracle increments pageCount immediately after a response
+                // arrives, before schema decoding. A malformed second page is
+                // therefore reported as pageCount=2 with only page-one items.
+                page_count += 1;
+                if let Err(error) = self.validate_response(method, &mut raw_value) {
+                    if !aggregate_tools && !emitted_error {
+                        emit_list_paginated(
+                            method,
+                            Some(page_count),
+                            items.len(),
+                            "error",
+                            Some("pages"),
+                        );
+                    }
+                    return Err(error);
+                }
+                let (page_items, next_cursor) = match decode(raw_value) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        if !aggregate_tools && !emitted_error {
+                            emit_list_paginated(
+                                method,
+                                Some(page_count),
+                                items.len(),
+                                "error",
+                                Some("pages"),
+                            );
+                        }
+                        return Err(error);
+                    }
+                };
+                items.extend(page_items);
+                cursor = next_cursor;
+
+                let capped = cursor.is_some() && page_count >= MAX_MCP_LIST_PAGES;
+                if cursor.is_none() || capped {
+                    if aggregate_tools {
+                        if capped {
+                            emit_list_paginated(method, None, 0, "capped", Some("aggregate"));
+                            return Err(McpClientError::Rpc(format!(
+                                "{method} pagination exceeded {MAX_MCP_LIST_PAGES} pages"
+                            )));
+                        }
+                        emit_list_paginated(
+                            method,
+                            None,
+                            items.len(),
+                            "complete",
+                            Some("aggregate"),
+                        );
+                        return Ok(items);
+                    }
+                    // Ordinary one-page success is intentionally silent. The
+                    // oracle reports this `pages` source only after traversing
+                    // multiple pages; its aggregate tools helper is separate.
+                    if page_count > 1 {
+                        emit_list_paginated(
+                            method,
+                            Some(page_count),
+                            items.len(),
+                            if capped { "capped" } else { "complete" },
+                            Some("pages"),
+                        );
+                    }
+                    if capped {
+                        tracing::warn!(
+                            target: "lingxi_mcp::client",
+                            server = %self.server_name,
+                            "{method}: stopped at {} pages with more pending",
+                            MAX_MCP_LIST_PAGES,
+                        );
+                    }
+                    return Ok(items);
+                }
+            }
+        }
+    }
+
     /// Enumerate every tool advertised by the server.
     ///
     /// Sends `tools/list`, applies Unicode sanitization (see
@@ -692,25 +922,9 @@ impl McpClient {
     /// omitted so MCP tools can override builtins by name. Mirrors
     /// `client.ts:1762-1770`.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDto>, McpClientError> {
-        // Receive the raw JSON value so we can sanitize before typed decode.
-        let raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "tools/list",
-                self.request_params("tools/list", serde_json::json!({})),
-            )
-            .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-
-        let mut raw_value = raw_value;
-        self.validate_response("tools/list", &mut raw_value)?;
-
-        // Mirror `client.ts:1758`: `recursivelySanitizeUnicode(result.tools)`
-        // — sanitize the entire tools array in-place before processing.
-        let sanitized_value = recursively_sanitize_unicode(raw_value);
-
-        let resp: ToolsListResponse = serde_json::from_value(sanitized_value)
-            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
+        let raw_tools = self
+            .list_paginated("tools/list", decode_tools_list_page)
+            .await?;
 
         // Mirror `client.ts:1762-1770`: `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` env gate.
         // When this env var is truthy AND the transport type is "sdk", the tool
@@ -719,8 +933,7 @@ impl McpClient {
         let skip_prefix = self.skip_mcp_prefix();
 
         let normalized_server = crate::normalization::normalize_name_for_mcp(&self.server_name);
-        let mut tools: Vec<McpToolDto> = resp
-            .tools
+        let mut tools: Vec<McpToolDto> = raw_tools
             .into_iter()
             .filter_map(|t| {
                 // §20a — normalize or drop the tool's `inputSchema` before it
@@ -1097,7 +1310,7 @@ impl McpClient {
                         tool: tool_name,
                         secs,
                     }),
-                    Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
+                    Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
                     Ok(Ok(mut value)) => {
                         match self.validate_response("tools/call", &mut value) {
                             Err(error) => Err(error),
@@ -1121,7 +1334,7 @@ impl McpClient {
                     tool: tool_name,
                     secs,
                 }),
-                Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
+                Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
                 Ok(Ok(mut value)) => match self.validate_response("tools/call", &mut value) {
                     Err(error) => Err(error),
                     Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
@@ -1150,27 +1363,11 @@ impl McpClient {
     /// `client.ts:2051`: `recursivelySanitizeUnicode(result.prompts)`), then
     /// truncates oversized prompt descriptions through [`truncate_description`].
     pub async fn list_prompts(&self) -> Result<Vec<McpPromptDto>, McpClientError> {
-        // Receive raw JSON so we can sanitize before typed decode.
-        let raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "prompts/list",
-                self.request_params("prompts/list", serde_json::json!({})),
-            )
-            .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        let raw_prompts = self
+            .list_paginated("prompts/list", decode_prompts_list_page)
+            .await?;
 
-        let mut raw_value = raw_value;
-        self.validate_response("prompts/list", &mut raw_value)?;
-
-        // Mirror `client.ts:2051`: `recursivelySanitizeUnicode(result.prompts)`.
-        let sanitized_value = recursively_sanitize_unicode(raw_value);
-
-        let resp: PromptsListResponse = serde_json::from_value(sanitized_value)
-            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
-
-        Ok(resp
-            .prompts
+        Ok(raw_prompts
             .into_iter()
             .map(|p| McpPromptDto {
                 name: p.name,
@@ -1211,19 +1408,10 @@ impl McpClient {
     /// MCP spec lets `mimeType` be absent for opaque/unknown content; we
     /// surface that as `None`.
     pub async fn list_resources(&self) -> Result<Vec<McpResourceDto>, McpClientError> {
-        let mut raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "resources/list",
-                self.request_params("resources/list", serde_json::json!({})),
-            )
-            .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("resources/list", &mut raw_value)?;
-        let resp: ResourcesListResponse = serde_json::from_value(raw_value)
-            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
-        Ok(resp
-            .resources
+        let raw_resources = self
+            .list_paginated("resources/list", decode_resources_list_page)
+            .await?;
+        Ok(raw_resources
             .into_iter()
             .map(|r| McpResourceDto {
                 uri: r.uri,
@@ -1451,6 +1639,9 @@ pub type McpProgressCallback = Arc<dyn Fn(McpProgressEvent) + Send + Sync>;
 /// Wire-level shape of a `prompts/list` response body.
 #[derive(Debug, Deserialize)]
 struct PromptsListResponse {
+    #[serde(rename = "nextCursor", default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
     prompts: Vec<RawPrompt>,
 }
 
@@ -1477,8 +1668,16 @@ struct RawPromptArgument {
 /// Wire-level shape of a `resources/list` response body.
 #[derive(Debug, Deserialize)]
 struct ResourcesListResponse {
+    #[serde(rename = "nextCursor", default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
     resources: Vec<RawResource>,
 }
+
+/// Hard cap on paginated ordinary list methods (`tools/list`, `prompts/list`,
+/// `resources/list`). A pending cursor past this point logs and returns the
+/// partial aggregate rather than looping forever on a bad server.
+pub const MAX_MCP_LIST_PAGES: usize = 20;
 
 /// Wire-level shape for one resource entry inside `resources/list`.
 #[derive(Debug, Deserialize)]
@@ -1914,6 +2113,9 @@ fn parse_int_base10_prefix(s: &str) -> Option<u64> {
 /// Wire-level shape of a `tools/list` response body.
 #[derive(Debug, Deserialize)]
 struct ToolsListResponse {
+    #[serde(rename = "nextCursor", default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
     tools: Vec<RawTool>,
 }
 
@@ -1938,6 +2140,33 @@ struct RawTool {
     icons: Vec<platform_api::McpIconDto>,
     #[serde(default, rename = "_meta")]
     meta: Option<serde_json::Value>,
+}
+
+fn decode_tools_list_page(
+    raw: serde_json::Value,
+) -> Result<(Vec<RawTool>, Option<String>), McpClientError> {
+    // `recursivelySanitizeUnicode(result.tools)` is applied to the response
+    // before typed processing in the oracle.
+    let response: ToolsListResponse = serde_json::from_value(recursively_sanitize_unicode(raw))
+        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    Ok((response.tools, response.next_cursor))
+}
+
+fn decode_prompts_list_page(
+    raw: serde_json::Value,
+) -> Result<(Vec<RawPrompt>, Option<String>), McpClientError> {
+    let response: PromptsListResponse =
+        serde_json::from_value(recursively_sanitize_unicode(raw))
+            .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    Ok((response.prompts, response.next_cursor))
+}
+
+fn decode_resources_list_page(
+    raw: serde_json::Value,
+) -> Result<(Vec<RawResource>, Option<String>), McpClientError> {
+    let response: ResourcesListResponse = serde_json::from_value(raw)
+        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    Ok((response.resources, response.next_cursor))
 }
 
 fn tool_meta_search_hint(meta: &Option<serde_json::Value>) -> Option<String> {
@@ -2022,6 +2251,9 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
         status: u16,
         /// `WWW-Authenticate` response header.
         www_authenticate: Option<String>,
+        /// Original transport error text. Retained for the MCP SDK's narrow
+        /// HTTP-400 stale-session phrases; never emitted as telemetry.
+        message: String,
     },
     /// Server returned a syntactically valid response that did not match
     /// the expected DTO shape.
@@ -2044,18 +2276,95 @@ impl McpClientError {
             }
         )
     }
+
+    /// Whether this error matches the narrow HTTP MCP session-expired retry
+    /// shape: a session-scoped endpoint returning 404, or a future-compatible
+    /// remote `Connection closed` error after the transport tears itself down.
+    #[must_use]
+    pub fn is_session_expired(&self) -> bool {
+        matches!(
+            self,
+            Self::HttpResponse {
+                status: 404,
+                message,
+                ..
+            } if !message.contains("Failed to open SSE stream")
+        ) || matches!(
+            self,
+            Self::HttpResponse {
+                status: 400,
+                message,
+                ..
+            } if has_stale_session_phrase(message)
+        ) || matches!(
+            self,
+            Self::Rpc(message)
+                if (message.contains("code=-32000") && message.contains("Connection closed"))
+                    || ((message.contains("code=400") || message.contains("HTTP 400"))
+                        && has_stale_session_phrase(message))
+        )
+    }
+
+    /// Low-cardinality code for the session-expired retry telemetry path.
+    #[must_use]
+    pub fn session_expired_error_code(&self) -> Option<&'static str> {
+        if matches!(self, Self::HttpResponse { status: 404, .. }) {
+            return Some("404");
+        }
+        if matches!(self, Self::HttpResponse { status: 400, .. }) {
+            return Some("400");
+        }
+        None
+    }
 }
 
-fn mcp_client_error_from_rpc(message: &str) -> McpClientError {
+fn has_stale_session_phrase(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("server not initialized")
+        || message.contains("no valid session id")
+        || message.contains("mcp-session-id header is required")
+}
+
+fn mcp_client_error_from_rpc(error: &jsonrpc::ConnectionError) -> McpClientError {
+    if let jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) = error {
+        if let Some(data) = remote.data.as_ref() {
+            if let Some(status) = data
+                .get("httpStatus")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok())
+            {
+                let www_authenticate = data
+                    .get("wwwAuthenticate")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let body = data
+                    .get("body")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty());
+                let message = body.map_or_else(
+                    || remote.message.clone(),
+                    |body| format!("{}; {body}", remote.message),
+                );
+                return McpClientError::HttpResponse {
+                    status,
+                    www_authenticate,
+                    message,
+                };
+            }
+        }
+    }
+
+    let message = error.to_string();
     let Some(marker) = message.find("MCP_HTTP_STATUS=") else {
-        return McpClientError::Rpc(message.to_string());
+        return McpClientError::Rpc(message);
     };
     let metadata = &message[marker + "MCP_HTTP_STATUS=".len()..];
     let Some((status, rest)) = metadata.split_once(';') else {
-        return McpClientError::Rpc(message.to_string());
+        return McpClientError::Rpc(message);
     };
     let Ok(status) = status.parse::<u16>() else {
-        return McpClientError::Rpc(message.to_string());
+        return McpClientError::Rpc(message);
     };
     let www_authenticate = rest
         .strip_prefix("WWW_AUTHENTICATE=")
@@ -2065,6 +2374,7 @@ fn mcp_client_error_from_rpc(message: &str) -> McpClientError {
     McpClientError::HttpResponse {
         status,
         www_authenticate,
+        message,
     }
 }
 
@@ -2102,6 +2412,39 @@ mod constructor_tests {
             Mode::Lines,
         ));
         (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    #[test]
+    fn stale_session_classifier_uses_http_400_body_and_omits_connection_code() {
+        let error = jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(
+            jsonrpc::messages::ResponseError {
+                code: -32_001,
+                message: "MCP_HTTP_STATUS=400;WWW_AUTHENTICATE=".to_string(),
+                data: Some(serde_json::json!({
+                    "httpStatus": 400,
+                    "wwwAuthenticate": null,
+                    "body": "Server not initialized"
+                })),
+            },
+        ));
+        let classified = mcp_client_error_from_rpc(&error);
+        assert!(classified.is_session_expired());
+        assert_eq!(classified.session_expired_error_code(), Some("400"));
+
+        let connection_closed =
+            McpClientError::Rpc("remote error: code=-32000, message=Connection closed".to_string());
+        assert!(connection_closed.is_session_expired());
+        assert_eq!(connection_closed.session_expired_error_code(), None);
+    }
+
+    #[test]
+    fn failed_sse_open_is_not_a_stale_http_session() {
+        let error = McpClientError::HttpResponse {
+            status: 404,
+            www_authenticate: None,
+            message: "Failed to open SSE stream".to_string(),
+        };
+        assert!(!error.is_session_expired());
     }
 
     #[tokio::test]

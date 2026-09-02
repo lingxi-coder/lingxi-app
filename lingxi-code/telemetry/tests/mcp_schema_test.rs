@@ -1,18 +1,23 @@
 use telemetry::pii::Verified;
 use telemetry::tengu::mcp::{
-    self, AuthConfigAuthenticatePayload, AuthConfigClearPayload, ConfigInvalidSource,
-    DegradedPayload, DegradedReason, ListChangedPayload, ListChangedType, ListenReopenOutcome,
-    ListenReopenPayload, ListenReopenTrigger, OAuthBrowserOpenPayload, OAuthFlowErrorPayload,
-    OAuthFlowStartPayload, OAuthFlowSuccessPayload, OAuthIssuerEchoMismatchPayload,
-    OAuthIssuerEchoMode, OAuthIssuerEchoOutcome, OAuthIssuerEchoSite, OAuthIssuerOriginRelation,
-    OAuthRefreshFailurePayload, OAuthRefreshSuccessPayload, OAuthTokenPersistFailedPayload,
-    ResourceTemplatesFetchedPayload, ServerConfigInvalidPayload, ServerConnectionFailedPayload,
-    ServerConnectionSucceededPayload, ServerNeedsAuthPayload, StartPayload, ToolCallAuthErrorKind,
-    ToolCallAuthErrorPayload, ToolsListedPayload,
+    self, AddPayload, AuthConfigAuthenticatePayload, AuthConfigClearPayload, CommandInlinePayload,
+    ConfigInvalidSource, DegradedPayload, DegradedReason, DeletePayload, ElicitationMode,
+    ElicitationResponsePayload, ElicitationShownPayload, GetPayload, InputMissingRequiredPayload,
+    LargeResultHandledPayload, ListChangedPayload, ListChangedType, ListPaginatedPayload,
+    ListenReopenOutcome, ListenReopenPayload, ListenReopenTrigger, OAuthBrowserOpenPayload,
+    OAuthFlowErrorPayload, OAuthFlowFailurePayload, OAuthFlowStartPayload, OAuthFlowSuccessPayload,
+    OAuthIssuerEchoMismatchPayload, OAuthIssuerEchoMode, OAuthIssuerEchoOutcome,
+    OAuthIssuerEchoSite, OAuthIssuerOriginRelation, OAuthRefreshFailurePayload,
+    OAuthRefreshSuccessPayload, OAuthTokenPersistFailedPayload, OAuthXaaFlowSuccessPayload,
+    PendingCallPayload, ReconcilePayload, ResourceTemplatesFetchedPayload,
+    ServerConfigInvalidPayload, ServerConnectionFailedPayload, ServerConnectionSucceededPayload,
+    ServerNeedsAuthPayload, ServersPayload, SessionExpiredPayload, StartPayload,
+    ToolCallAuthErrorKind, ToolCallAuthErrorPayload, ToolResultEndedTurnPayload,
+    ToolsCommandsLoadedPayload, ToolsListedPayload, ToolsRefreshedMidTurnPayload,
 };
 
 #[test]
-fn all_twenty_four_mcp_event_names_are_locked() {
+fn all_forty_four_mcp_event_names_are_locked() {
     let names: &[&str] = &[
         mcp::SERVER_CONFIG_INVALID,
         mcp::SERVER_CONNECTION_SUCCEEDED,
@@ -40,8 +45,28 @@ fn all_twenty_four_mcp_event_names_are_locked() {
         mcp::OAUTH_ISSUER_ECHO_MISMATCH,
         mcp::SERVER_NEEDS_AUTH,
         mcp::TOOL_CALL_AUTH_ERROR,
+        mcp::ADD,
+        mcp::DELETE,
+        mcp::GET,
+        mcp::LIST,
+        mcp::LOGIN,
+        mcp::LOGOUT,
+        mcp::COMMAND_INLINE,
+        mcp::ELICITATION_SHOWN,
+        mcp::ELICITATION_RESPONSE,
+        mcp::INPUT_MISSING_REQUIRED,
+        mcp::LARGE_RESULT_HANDLED,
+        mcp::PENDING_CALL,
+        mcp::SERVERS,
+        mcp::TOOL_RESULT_ENDED_TURN,
+        mcp::TOOLS_COMMANDS_LOADED,
+        mcp::TOOLS_REFRESHED_MID_TURN,
+        mcp::OAUTH_FLOW_FAILURE,
+        mcp::SESSION_EXPIRED,
+        mcp::LIST_PAGINATED,
+        mcp::RECONCILE,
     ];
-    assert_eq!(names.len(), 24);
+    assert_eq!(names.len(), 44);
     for n in names {
         assert!(n.starts_with("tengu_mcp_"));
     }
@@ -97,6 +122,38 @@ fn all_twenty_four_mcp_event_names_are_locked() {
     );
     assert_eq!(mcp::SERVER_NEEDS_AUTH, "tengu_mcp_server_needs_auth");
     assert_eq!(mcp::TOOL_CALL_AUTH_ERROR, "tengu_mcp_tool_call_auth_error");
+    assert_eq!(mcp::ADD, "tengu_mcp_add");
+    assert_eq!(mcp::DELETE, "tengu_mcp_delete");
+    assert_eq!(mcp::GET, "tengu_mcp_get");
+    assert_eq!(mcp::LIST, "tengu_mcp_list");
+    assert_eq!(mcp::LOGIN, "tengu_mcp_login");
+    assert_eq!(mcp::LOGOUT, "tengu_mcp_logout");
+    assert_eq!(mcp::COMMAND_INLINE, "tengu_mcp_command_inline");
+    assert_eq!(mcp::ELICITATION_SHOWN, "tengu_mcp_elicitation_shown");
+    assert_eq!(mcp::ELICITATION_RESPONSE, "tengu_mcp_elicitation_response");
+    assert_eq!(
+        mcp::INPUT_MISSING_REQUIRED,
+        "tengu_mcp_input_missing_required"
+    );
+    assert_eq!(mcp::LARGE_RESULT_HANDLED, "tengu_mcp_large_result_handled");
+    assert_eq!(mcp::PENDING_CALL, "tengu_mcp_pending_call");
+    assert_eq!(mcp::SERVERS, "tengu_mcp_servers");
+    assert_eq!(
+        mcp::TOOL_RESULT_ENDED_TURN,
+        "tengu_mcp_tool_result_ended_turn"
+    );
+    assert_eq!(
+        mcp::TOOLS_COMMANDS_LOADED,
+        "tengu_mcp_tools_commands_loaded"
+    );
+    assert_eq!(
+        mcp::TOOLS_REFRESHED_MID_TURN,
+        "tengu_mcp_tools_refreshed_mid_turn"
+    );
+    assert_eq!(mcp::OAUTH_FLOW_FAILURE, "tengu_mcp_oauth_flow_failure");
+    assert_eq!(mcp::SESSION_EXPIRED, "tengu_mcp_session_expired");
+    assert_eq!(mcp::LIST_PAGINATED, "tengu_mcp_list_paginated");
+    assert_eq!(mcp::RECONCILE, "tengu_mcp_reconcile");
     assert_eq!(mcp::NAMES, names);
 }
 
@@ -105,26 +162,26 @@ fn auth_and_oauth_payloads_round_trip() {
     let authenticate = AuthConfigAuthenticatePayload {
         was_authenticated: true,
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&authenticate).unwrap(),
         serde_json::json!({
             "was_authenticated": true,
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 
     let clear = AuthConfigClearPayload {
         transport_type: Verified::assert_safe("sse".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("fedcba9876543210".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("fedcba987654".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&clear).unwrap(),
         serde_json::json!({
             "transport_type": "sse",
-            "mcp_server_key_hash": "fedcba9876543210",
+            "mcp_server_key_hash": "fedcba987654",
         })
     );
 
@@ -133,7 +190,7 @@ fn auth_and_oauth_payloads_round_trip() {
         headless: false,
         platform: Verified::assert_safe("macos".to_string()),
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&browser).unwrap(),
@@ -142,7 +199,7 @@ fn auth_and_oauth_payloads_round_trip() {
             "headless": false,
             "platform": "macos",
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 
@@ -150,7 +207,7 @@ fn auth_and_oauth_payloads_round_trip() {
         flow_attempt_id: Verified::assert_safe("abc123".to_string()),
         is_oauth_flow: true,
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&start).unwrap(),
@@ -158,21 +215,21 @@ fn auth_and_oauth_payloads_round_trip() {
             "flow_attempt_id": "abc123",
             "is_oauth_flow": true,
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 
     let success = OAuthFlowSuccessPayload {
         flow_attempt_id: Verified::assert_safe("abc123".to_string()),
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&success).unwrap(),
         serde_json::json!({
             "flow_attempt_id": "abc123",
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 
@@ -182,7 +239,7 @@ fn auth_and_oauth_payloads_round_trip() {
         error_code: Some(Verified::assert_safe("invalid_client".to_string())),
         http_status: Some(401),
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&error).unwrap(),
@@ -192,7 +249,7 @@ fn auth_and_oauth_payloads_round_trip() {
             "error_code": "invalid_client",
             "http_status": 401,
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 }
@@ -201,54 +258,54 @@ fn auth_and_oauth_payloads_round_trip() {
 fn oauth_refresh_and_auth_state_payloads_round_trip() {
     let refresh_success = OAuthRefreshSuccessPayload {
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&refresh_success).unwrap(),
         serde_json::json!({
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 
     let refresh_failure = OAuthRefreshFailurePayload {
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
         reason: Verified::assert_safe("invalid_grant".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&refresh_failure).unwrap(),
         serde_json::json!({
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
             "reason": "invalid_grant",
         })
     );
 
     let persist_failed = OAuthTokenPersistFailedPayload {
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
         reason: Verified::assert_safe("storage_write_failed".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&persist_failed).unwrap(),
         serde_json::json!({
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
             "reason": "storage_write_failed",
         })
     );
 
     let needs_auth = ServerNeedsAuthPayload {
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
         cause: Some(Verified::assert_safe("discovery_schema".to_string())),
     };
     assert_eq!(
         serde_json::to_value(&needs_auth).unwrap(),
         serde_json::json!({
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
             "cause": "discovery_schema",
         })
     );
@@ -257,7 +314,7 @@ fn oauth_refresh_and_auth_state_payloads_round_trip() {
         error_code: Verified::assert_safe("401".to_string()),
         transport_type: Verified::assert_safe("http".to_string()),
         auth_error_kind: ToolCallAuthErrorKind::TokenExpired,
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&tool_call).unwrap(),
@@ -265,7 +322,7 @@ fn oauth_refresh_and_auth_state_payloads_round_trip() {
             "error_code": "401",
             "transport_type": "http",
             "auth_error_kind": "token_expired",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 }
@@ -281,7 +338,7 @@ fn issuer_echo_payload_and_enums_round_trip() {
         expected_issuer_hash: Verified::assert_safe("aaaabbbbccccdddd".to_string()),
         received_issuer_hash: Some(Verified::assert_safe("1111222233334444".to_string())),
         transport_type: Verified::assert_safe("http".to_string()),
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
     };
     assert_eq!(
         serde_json::to_value(&payload).unwrap(),
@@ -294,7 +351,7 @@ fn issuer_echo_payload_and_enums_round_trip() {
             "expected_issuer_hash": "aaaabbbbccccdddd",
             "received_issuer_hash": "1111222233334444",
             "transport_type": "http",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
         })
     );
 }
@@ -457,7 +514,7 @@ fn tools_listed_payload_rejects_unknown_fields() {
 fn list_changed_payload_round_trips() {
     let payload = ListChangedPayload {
         kind: ListChangedType::Tools,
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
         cause: Verified::assert_safe("notification".to_string()),
         previous_count: Some(2),
         new_count: Some(3),
@@ -467,7 +524,7 @@ fn list_changed_payload_round_trips() {
         json,
         serde_json::json!({
             "kind": "tools",
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
             "cause": "notification",
             "previous_count": 2,
             "new_count": 3,
@@ -499,7 +556,7 @@ fn resource_templates_fetched_payload_round_trips() {
 #[test]
 fn listen_reopen_payload_round_trips() {
     let payload = ListenReopenPayload {
-        mcp_server_key_hash: Verified::assert_safe("0123456789abcdef".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
         outcome: ListenReopenOutcome::Reopened,
         attempts: 3,
         trigger: ListenReopenTrigger::Graceful,
@@ -508,7 +565,7 @@ fn listen_reopen_payload_round_trips() {
     assert_eq!(
         json,
         serde_json::json!({
-            "mcp_server_key_hash": "0123456789abcdef",
+            "mcp_server_key_hash": "0123456789ab",
             "outcome": "reopened",
             "attempts": 3,
             "trigger": "graceful",
@@ -542,6 +599,355 @@ fn listen_reopen_enums_use_snake_case() {
         );
         assert_eq!(trigger.wire_str(), expected);
     }
+}
+
+#[test]
+fn command_and_elicitation_payloads_round_trip() {
+    let add = AddPayload {
+        scope: Verified::assert_safe("project".to_string()),
+        source: Verified::assert_safe("command".to_string()),
+        server_type: Some(Verified::assert_safe("http".to_string())),
+        transport: Some(Verified::assert_safe("http".to_string())),
+        transport_explicit: Some(true),
+        looks_like_url: Some(true),
+        platform: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&add).unwrap(),
+        serde_json::json!({
+            "scope": "project",
+            "source": "command",
+            "type": "http",
+            "transport": "http",
+            "transportExplicit": true,
+            "looksLikeUrl": true,
+        })
+    );
+
+    let delete = DeletePayload {
+        name: Verified::assert_safe("sample".to_string()),
+        scope: Verified::assert_safe("user".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&delete).unwrap(),
+        serde_json::json!({
+            "name": "sample",
+            "scope": "user",
+        })
+    );
+
+    let get = GetPayload {
+        name: Verified::assert_safe("sample".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&get).unwrap(),
+        serde_json::json!({ "name": "sample" })
+    );
+
+    let inline = CommandInlinePayload {
+        action: Verified::assert_safe("reconnect".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&inline).unwrap(),
+        serde_json::json!({ "action": "reconnect" })
+    );
+
+    assert_eq!(ElicitationMode::Form.wire_str(), "form");
+    assert_eq!(ElicitationMode::Url.wire_str(), "url");
+    assert_eq!(
+        serde_json::to_value(ElicitationMode::Url).unwrap(),
+        serde_json::json!("url")
+    );
+
+    let shown = ElicitationShownPayload {
+        mode: ElicitationMode::Form,
+    };
+    assert_eq!(
+        serde_json::to_value(&shown).unwrap(),
+        serde_json::json!({ "mode": "form" })
+    );
+
+    let response = ElicitationResponsePayload {
+        mode: ElicitationMode::Url,
+        action: Verified::assert_safe("accept".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        serde_json::json!({
+            "mode": "url",
+            "action": "accept",
+        })
+    );
+}
+
+#[test]
+fn mcp_runtime_payloads_round_trip() {
+    let input_missing = InputMissingRequiredPayload {
+        tool_name: Verified::assert_safe("mcp_tool".to_string()),
+        is_mcp: true,
+        tool_use_id: Some(Verified::assert_safe("toolu_123".to_string())),
+        message_id: Verified::assert_safe("123e4567-e89b-12d3-a456-426614174000".to_string()),
+        tool_input_size_bytes: 128,
+        required_count: 3,
+        missing_count: 1,
+        present_key_count: 2,
+        max_string_value_len: 64,
+        has_pseudo_tag_debris: false,
+        query_chain_id: Some(Verified::assert_safe("chain-1".to_string())),
+        query_depth: Some(2),
+        mcp_server_type: Some(Verified::assert_safe("http".to_string())),
+        mcp_server_base_url: Some(Verified::assert_safe("https://example.com".to_string())),
+        request_id: Some(Verified::assert_safe("req_123".to_string())),
+    };
+    assert_eq!(
+        serde_json::to_value(&input_missing).unwrap(),
+        serde_json::json!({
+            "toolName": "mcp_tool",
+            "isMcp": true,
+            "toolUseID": "toolu_123",
+            "messageID": "123e4567-e89b-12d3-a456-426614174000",
+            "toolInputSizeBytes": 128,
+            "requiredCount": 3,
+            "missingCount": 1,
+            "presentKeyCount": 2,
+            "maxStringValueLen": 64,
+            "hasPseudoTagDebris": false,
+            "queryChainId": "chain-1",
+            "queryDepth": 2,
+            "mcpServerType": "http",
+            "mcpServerBaseUrl": "https://example.com",
+            "requestId": "req_123",
+        })
+    );
+
+    let unavailable_ids = InputMissingRequiredPayload {
+        tool_name: Verified::assert_safe("mcp_tool".to_string()),
+        is_mcp: true,
+        tool_use_id: None,
+        message_id: Verified::assert_safe("123e4567-e89b-12d3-a456-426614174001".to_string()),
+        tool_input_size_bytes: 2,
+        required_count: 1,
+        missing_count: 1,
+        present_key_count: 0,
+        max_string_value_len: 0,
+        has_pseudo_tag_debris: false,
+        query_chain_id: None,
+        query_depth: None,
+        mcp_server_type: None,
+        mcp_server_base_url: None,
+        request_id: None,
+    };
+    let unavailable_ids = serde_json::to_value(unavailable_ids).unwrap();
+    assert!(unavailable_ids.get("toolUseID").is_none());
+    assert_eq!(
+        unavailable_ids.get("messageID"),
+        Some(&serde_json::json!("123e4567-e89b-12d3-a456-426614174001"))
+    );
+
+    let large = LargeResultHandledPayload {
+        outcome: Verified::assert_safe("persisted".to_string()),
+        reason: Verified::assert_safe("file_saved".to_string()),
+        size_estimate_tokens: 2048,
+        persisted_size_chars: Some(8192),
+        result_type: Some(Verified::assert_safe("content_array".to_string())),
+        block_count: Some(4),
+        persisted_as: Some(Verified::assert_safe("json".to_string())),
+    };
+    assert_eq!(
+        serde_json::to_value(&large).unwrap(),
+        serde_json::json!({
+            "outcome": "persisted",
+            "reason": "file_saved",
+            "sizeEstimateTokens": 2048,
+            "persistedSizeChars": 8192,
+            "resultType": "content_array",
+            "blockCount": 4,
+            "persistedAs": "json",
+        })
+    );
+
+    let pending = PendingCallPayload {
+        requested_count: 5,
+        connected_count: 2,
+        cached_count: 1,
+        failed_count: 0,
+        pending_count: 1,
+        needs_auth_count: 1,
+        disabled_count: 0,
+        unconfigured_count: 0,
+        unknown_count: 0,
+        wait_ms: 500,
+        matched: true,
+        match_type: Verified::assert_safe("wait".to_string()),
+        success: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&pending).unwrap(),
+        serde_json::json!({
+            "requestedCount": 5,
+            "connectedCount": 2,
+            "cachedCount": 1,
+            "failedCount": 0,
+            "pendingCount": 1,
+            "needsAuthCount": 1,
+            "disabledCount": 0,
+            "unconfiguredCount": 0,
+            "unknownCount": 0,
+            "waitMs": 500,
+            "matched": true,
+            "matchType": "wait",
+            "success": true,
+        })
+    );
+
+    let servers = ServersPayload {
+        enterprise: 1,
+        global: 2,
+        project: 3,
+        user: 4,
+        plugin: 5,
+        agent: 6,
+        claudeai: 7,
+    };
+    assert_eq!(
+        serde_json::to_value(&servers).unwrap(),
+        serde_json::json!({
+            "enterprise": 1,
+            "global": 2,
+            "project": 3,
+            "user": 4,
+            "plugin": 5,
+            "agent": 6,
+            "claudeai": 7,
+        })
+    );
+
+    let turn_end = ToolResultEndedTurnPayload {
+        query_chain_id: Verified::assert_safe("chain-1".to_string()),
+        query_depth: 0,
+        source: Verified::assert_safe("mcp_meta".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&turn_end).unwrap(),
+        serde_json::json!({
+            "queryChainId": "chain-1",
+            "queryDepth": 0,
+            "source": "mcp_meta",
+        })
+    );
+
+    let loaded = ToolsCommandsLoadedPayload {
+        tools_count: 12,
+        commands_count: 3,
+        commands_metadata_length: 144,
+    };
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap(),
+        serde_json::json!({
+            "tools_count": 12,
+            "commands_count": 3,
+            "commands_metadata_length": 144,
+        })
+    );
+
+    let refreshed = ToolsRefreshedMidTurnPayload {
+        old_mcp_count: 0,
+        new_mcp_count: 2,
+        recovered: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&refreshed).unwrap(),
+        serde_json::json!({
+            "oldMcpCount": 0,
+            "newMcpCount": 2,
+            "recovered": true,
+        })
+    );
+}
+
+#[test]
+fn mcp_oauth_and_reconcile_payloads_round_trip() {
+    let failure = OAuthFlowFailurePayload {
+        auth_method: Verified::assert_safe("xaa".to_string()),
+        xaa_failure_stage: Verified::assert_safe("discovery".to_string()),
+        id_token_cache_hit: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap(),
+        serde_json::json!({
+            "authMethod": "xaa",
+            "xaaFailureStage": "discovery",
+            "idTokenCacheHit": true,
+        })
+    );
+
+    let xaa_success = OAuthXaaFlowSuccessPayload {
+        auth_method: Verified::assert_safe("xaa".to_string()),
+        id_token_cache_hit: false,
+    };
+    assert_eq!(
+        serde_json::to_string(&xaa_success).unwrap(),
+        r#"{"authMethod":"xaa","idTokenCacheHit":false}"#
+    );
+
+    let expired = SessionExpiredPayload {
+        error_code: Some(Verified::assert_safe("404".to_string())),
+        transport_type: Verified::assert_safe("http".to_string()),
+        mcp_server_key_hash: Verified::assert_safe("0123456789ab".to_string()),
+        mcp_server_base_url: Some(Verified::assert_safe("abcdef012345".to_string())),
+    };
+    assert_eq!(
+        serde_json::to_value(&expired).unwrap(),
+        serde_json::json!({
+            "errorCode": "404",
+            "transportType": "http",
+            "mcpServerKeyHash": "0123456789ab",
+            "mcpServerBaseUrl": "abcdef012345",
+        })
+    );
+    assert_eq!(
+        serde_json::to_string(&expired).unwrap(),
+        r#"{"errorCode":"404","transportType":"http","mcpServerBaseUrl":"abcdef012345","mcpServerKeyHash":"0123456789ab"}"#
+    );
+
+    let paginated = ListPaginatedPayload {
+        method: Verified::assert_safe("tools/list".to_string()),
+        page_count: None,
+        item_count: 25,
+        outcome: Verified::assert_safe("complete".to_string()),
+        source: Some(Verified::assert_safe("aggregate".to_string())),
+    };
+    assert_eq!(
+        serde_json::to_value(&paginated).unwrap(),
+        serde_json::json!({
+            "method": "tools/list",
+            "itemCount": 25,
+            "outcome": "complete",
+            "source": "aggregate",
+        })
+    );
+
+    let reconcile = ReconcilePayload {
+        caller: Verified::assert_safe("reload_plugins".to_string()),
+        desired_count: 4,
+        current_count: 3,
+        to_remove_count: 1,
+        to_add_count: 2,
+        to_replace_count: 0,
+        retained_plugin_count: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(&reconcile).unwrap(),
+        serde_json::json!({
+            "caller": "reload_plugins",
+            "desiredCount": 4,
+            "currentCount": 3,
+            "toRemoveCount": 1,
+            "toAddCount": 2,
+            "toReplaceCount": 0,
+            "retainedPluginCount": 2,
+        })
+    );
 }
 
 #[test]

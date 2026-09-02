@@ -21,10 +21,7 @@ use permission::gate::{
     PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
     PermissionRequest, PermissionResponse, PromptWorker,
 };
-use permission::{
-    persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
-    PermissionUpdateDestination,
-};
+use permission::{persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// One in-flight permission round-trip between the orchestrator and TUI.
@@ -93,7 +90,7 @@ impl PermissionGate for TuiPermissionGate {
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
-            .check_with_context_impl(name, input, worker, false, None)
+            .check_with_context_impl(name, input, worker, false, None, None)
             .await
         {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
@@ -121,6 +118,12 @@ impl PermissionGate for TuiPermissionGate {
                 input,
                 ctx.worker.clone(),
                 ctx.suppress_always_allow_rule || ctx.requires_user_interaction,
+                ctx.permission_suggestions.as_ref().and_then(|suggestions| {
+                    permission::allow_suggestion::permission_persistence_suggestion(
+                        name,
+                        suggestions,
+                    )
+                }),
                 ctx.auto_mode_prompt,
             )
             .await
@@ -141,6 +144,9 @@ impl TuiPermissionGate {
         input: &serde_json::Value,
         worker: Option<PromptWorker>,
         suppress_always_allow_rule: bool,
+        permission_persistence: Option<
+            permission::allow_suggestion::PermissionPersistenceSuggestion,
+        >,
         auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
     ) -> PermissionOutcome {
         let auto_mode_prompt = match auto_mode_prompt {
@@ -151,6 +157,19 @@ impl TuiPermissionGate {
                 Some(permission::gate::AutoModePrompt::WorkflowBash)
             }
             _ => None,
+        };
+        let permission_persistence = self
+            .persistence_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then_some(permission_persistence)
+            .flatten()
+            .filter(|_| !suppress_always_allow_rule && auto_mode_prompt.is_none());
+        let allow_always_offered = if name == "ExitPlanMode" {
+            !suppress_always_allow_rule
+        } else {
+            !suppress_always_allow_rule
+                && auto_mode_prompt.is_none()
+                && permission_persistence.is_some()
         };
         // Step 1: consult session rules (content-aware: a narrowed AllowAlways
         // rule only short-circuits a matching command/path/domain). A tool that
@@ -205,6 +224,7 @@ impl TuiPermissionGate {
             resp_tx: tx,
             worker: worker_info,
             suppress_always_allow_rule,
+            permission_persistence: permission_persistence.clone(),
             auto_mode_prompt,
         };
         if self.event_tx.send(exchange).await.is_err() {
@@ -223,15 +243,25 @@ impl TuiPermissionGate {
         // command / path / domain the call used (claude-code `ruleSuggestions`),
         // not a bare tool-wide allow — so "always allow" scopes the grant.
         //
-        // §27b: `suppress_always_allow_rule` means the dialog was built with
-        // the "Yes, allow always" row OMITTED, so a well-behaved view can
-        // never answer `AllowAlways` here. The `&& !suppress_always_allow_rule`
-        // guard is defense in depth — a persistent grant must never be
-        // recorded for a tool that needs fresh interaction on every call,
-        // even if some future view got the omission wrong.
-        if matches!(response, PermissionResponse::AllowAlways) && !suppress_always_allow_rule {
-            let rule = permission::allow_suggestion(name, input);
-            self.session_allow_rules.lock().await.push(rule.clone());
+        // `allow_always_offered` encodes the only cases where the transport
+        // rendered a second persistent-approval row. Any other AllowAlways
+        // response is stale/malicious input and must not record a rule.
+        let selected_persistence = matches!(response, PermissionResponse::AllowAlways)
+            .then_some(permission_persistence.as_ref())
+            .flatten()
+            .filter(|_| {
+                allow_always_offered
+                    && self
+                        .persistence_enabled
+                        .load(std::sync::atomic::Ordering::Acquire)
+            });
+        if let Some(suggestion) = selected_persistence {
+            let rule = suggestion.rule.clone();
+            let mut session_rules = self.session_allow_rules.lock().await;
+            if !session_rules.iter().any(|existing| existing == &rule) {
+                session_rules.push(rule.clone());
+            }
+            drop(session_rules);
             // (3c) Durably record the choice when a persist target is wired.
             // Best-effort: a write failure must not fail the check. Skip a
             // degenerate empty tool name so we never persist `allow: [""]`.
@@ -243,7 +273,7 @@ impl TuiPermissionGate {
             }) {
                 let update = PermissionUpdate {
                     rule,
-                    destination: PermissionUpdateDestination::LocalSettings,
+                    destination: suggestion.destination,
                 };
                 if let Err(e) = persist_permission_update(&update, paths).await {
                     tracing::warn!(error = %e, tool = name, "failed to persist AllowAlways permission rule");
@@ -253,13 +283,26 @@ impl TuiPermissionGate {
 
         // Step 5: map to decision.
         match response {
-            PermissionResponse::AllowOnce | PermissionResponse::AllowAlways => {
-                PermissionOutcome::Allow {
-                    updated_input: None,
-                    permission_updates: Vec::new(),
-                    decision_classification: None,
-                }
-            }
+            PermissionResponse::AllowOnce => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+            PermissionResponse::AllowAlways if allow_always_offered => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: selected_persistence
+                    .map(|suggestion| vec![suggestion.update.clone()])
+                    .unwrap_or_default(),
+                decision_classification: None,
+            },
+            // A stale or malicious responder cannot select "don't ask again"
+            // unless the engine supplied a real persistence suggestion. Preserve
+            // the approval as a one-shot grant without recording a rule.
+            PermissionResponse::AllowAlways => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
             PermissionResponse::AllowAuto
                 if auto_mode_prompt.is_some() && !suppress_always_allow_rule =>
             {
@@ -360,27 +403,54 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
         let rules = Arc::new(Mutex::new(Vec::new()));
         let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let ctx = PermissionCheckContext {
+            permission_suggestions: Some(json!([
+                {
+                    "type": "addRules",
+                    "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
+                    "behavior": "allow",
+                    "destination": "session"
+                }
+            ])),
+            ..Default::default()
+        };
 
         let tui_task = tokio::spawn(async move {
             let ex = event_rx.recv().await.unwrap();
+            assert_eq!(
+                ex.permission_persistence
+                    .as_ref()
+                    .map(|suggestion| suggestion.label.as_str()),
+                Some("Yes, and don't ask again for git diff *")
+            );
             let _ = ex.resp_tx.send(PermissionResponse::AllowAlways);
         });
-        let decision = gate.check("Bash", &json!({})).await;
-        assert_eq!(decision, PermissionDecision::Allow);
+        let outcome = gate
+            .check_with_context("Bash", &json!({"command": "git status"}), &ctx)
+            .await;
+        let PermissionOutcome::Allow {
+            permission_updates, ..
+        } = outcome
+        else {
+            panic!("expected allow outcome");
+        };
+        assert_eq!(
+            permission_updates,
+            vec![ctx.permission_suggestions.unwrap()[0].clone()]
+        );
         tui_task.await.unwrap();
 
         let stored = rules.lock().await;
         assert_eq!(stored.len(), 1);
-        assert!(stored[0].matches_tool("Bash"));
+        assert_eq!(stored[0].value.rule_content.as_deref(), Some("git diff *"));
     }
 
     // ===== §27b: `check_with_context` / `suppress_always_allow_rule` =====
 
     #[tokio::test]
     async fn check_with_context_ignores_ctx_by_default_on_check_with_worker() {
-        // `check`/`check_with_worker` never see a `PermissionCheckContext`, so
-        // the dialog they build must ALWAYS offer "allow always"
-        // (`suppress_always_allow_rule: false`) — unchanged from before §27b.
+        // `check`/`check_with_worker` never see `permission_suggestions`, so
+        // the transport must fail closed and omit the persistence row.
         let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
         let rules = Arc::new(Mutex::new(Vec::new()));
         let gate = TuiPermissionGate::new(event_tx, rules);
@@ -393,6 +463,7 @@ mod tests {
                 } => assert!(!suppress_always_allow_rule),
                 _ => panic!("unexpected variant"),
             }
+            assert_eq!(ex.permission_persistence, None);
             let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
         });
         let _ = gate.check_with_worker("Bash", &json!({}), None).await;
@@ -447,10 +518,17 @@ mod tests {
         let gate = TuiPermissionGate::new(event_tx, rules.clone());
         let tui_task = tokio::spawn(async move {
             let ex = event_rx.recv().await.unwrap();
+            assert_eq!(ex.permission_persistence, None);
             let _ = ex.resp_tx.send(PermissionResponse::AllowAlways);
         });
         let ctx = permission::gate::PermissionCheckContext {
             requires_user_interaction: true,
+            permission_suggestions: Some(json!([{
+                "type": "addRules",
+                "rules": [{"toolName": "mcp__server__tool"}],
+                "behavior": "allow",
+                "destination": "session"
+            }])),
             ..Default::default()
         };
         let outcome = gate
@@ -461,6 +539,68 @@ mod tests {
         assert!(
             rules.lock().await.is_empty(),
             "a suppressed AllowAlways must never be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_only_mode_suppresses_permission_persistence() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        gate.set_permission_persistence_enabled(false);
+        let task = tokio::spawn(async move {
+            let exchange = event_rx.recv().await.unwrap();
+            assert_eq!(exchange.permission_persistence, None);
+            exchange
+                .resp_tx
+                .send(PermissionResponse::AllowAlways)
+                .unwrap();
+        });
+        let ctx = PermissionCheckContext {
+            permission_suggestions: Some(json!([{
+                "type": "addRules",
+                "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
+                "behavior": "allow",
+                "destination": "localSettings"
+            }])),
+            ..Default::default()
+        };
+        let outcome = gate
+            .check_with_context("Bash", &json!({"command": "git diff"}), &ctx)
+            .await;
+        task.await.unwrap();
+        assert!(rules.lock().await.is_empty());
+        assert!(matches!(
+            outcome,
+            PermissionOutcome::Allow {
+                permission_updates,
+                ..
+            } if permission_updates.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_with_context_omits_allow_always_when_no_suggestion_exists() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let tui_task = tokio::spawn(async move {
+            let ex = event_rx.recv().await.unwrap();
+            assert_eq!(ex.permission_persistence, None);
+            let _ = ex.resp_tx.send(PermissionResponse::AllowAlways);
+        });
+        let outcome = gate
+            .check_with_context(
+                "Bash",
+                &json!({"command": "git status"}),
+                &Default::default(),
+            )
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+        tui_task.await.unwrap();
+        assert!(
+            rules.lock().await.is_empty(),
+            "AllowAlways without a suggestion must not persist a rule"
         );
     }
 

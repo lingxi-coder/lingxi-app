@@ -1,8 +1,7 @@
 //! E2E: a forced `StructuredOutput` tool call captures the model's result into
-//! the shared slot, and the 1-turn cap (which `build()` sets for `--json-schema`)
-//! keeps the forced tool from looping — the orchestrator consumes exactly ONE
-//! model response. This verifies the runtime half of the structured-output
-//! mechanism that the print-path `run_structured_output` loop drives.
+//! the shared slot and returns `endsTurn`, so the orchestrator consumes exactly
+//! one model response without relying on the defensive 1-turn cap. This verifies
+//! the runtime half of the structured-output mechanism that the print path drives.
 #![allow(clippy::field_reassign_with_default)]
 
 use async_trait::async_trait;
@@ -12,7 +11,7 @@ use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use protocol::ToolUseId;
@@ -95,9 +94,8 @@ impl Tool for InspectTool {
 async fn forced_structured_output_call_captures_and_does_not_loop() {
     let slot: StructuredOutputSlot = Arc::new(Mutex::new(None));
     // The model (forced via tool_choice in production) calls StructuredOutput with
-    // its final result. ONLY ONE response is scripted: if the 1-turn cap failed
-    // and the loop continued, run_turn would demand a 2nd response from the now
-    // empty MockApiClient queue — so a clean single-call capture proves the cap.
+    // its final result. ONLY ONE response is scripted: a clean single-call capture
+    // proves the result itself ends the turn rather than requiring a follow-up.
     let r1 = mock_message_response(
         vec![LlmContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
@@ -107,6 +105,9 @@ async fn forced_structured_output_call_captures_and_does_not_loop() {
         Some("tool_use"),
     );
     let api = Arc::new(MockApiClient::new(vec![r1]));
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    bus.attach_sink(sink.clone()).await;
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(StructuredOutputTool::new(
         json!({ "type": "object", "required": ["answer"] }),
@@ -125,17 +126,29 @@ async fn forced_structured_output_call_captures_and_does_not_loop() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    )
+    .with_analytics_bus(bus);
 
-    // The 1-turn cap ends the turn after the forced call; run_turn may return the
-    // MaxTurns stop, but the tool already captured — that IS the contract.
-    let _ = orch.run_turn("answer the question").await;
+    let outcome = orch
+        .run_turn("answer the question")
+        .await
+        .expect("StructuredOutput ends the turn directly");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
     assert_eq!(
         slot.lock().unwrap().as_ref(),
         Some(&json!({ "answer": 4 })),
         "the forced StructuredOutput call must capture the model's result into the slot"
     );
+    let events = sink.events().await;
+    let ended = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN)
+        .expect("tool-result end telemetry");
+    assert!(matches!(
+        ended.metadata.get("source"),
+        Some(telemetry::AnalyticsValue::String(value)) if value == "tool"
+    ));
 }
 
 #[tokio::test]
@@ -196,10 +209,7 @@ async fn prompt_only_fallback_can_retry_after_another_tool() {
             "You must call the StructuredOutput tool exactly once with the final result. Do not call any other tool.",
         )
         .await;
-    assert!(matches!(
-        second,
-        Err(orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 })
-    ));
+    assert!(matches!(second, Ok(ConversationOutcome::EndTurn { .. })));
     assert_eq!(slot.lock().unwrap().as_ref(), Some(&json!({"answer": 4})));
     assert_eq!(api.captured_msgs().await.len(), 2);
 }

@@ -931,6 +931,28 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Fire Stop hooks for a turn ended by `ToolResult.endsTurn` or MCP
+    /// `claude/endTurn`, discarding every block/prevent disposition.
+    ///
+    /// Claude Code's forced end path deliberately runs the hooks for their
+    /// messages and side effects, then logs any attempted block and completes
+    /// without another model call. It never appends stop-hook feedback, applies
+    /// the block cap, or returns `StopHookPrevented` on this path.
+    pub(super) async fn fire_tool_result_end_stop_hooks(
+        &self,
+        stop_reason: &str,
+        stop_hook_active: bool,
+    ) {
+        let disposition = self.fire_stop_hooks(stop_reason, stop_hook_active).await;
+        if !matches!(disposition, StopHookDisposition::Pass) {
+            tracing::debug!(
+                event = "hook_stop_disposition_discarded",
+                reason = stop_reason,
+                "Stop hook disposition discarded because a tool result ended the turn"
+            );
+        }
+    }
+
     /// Fire the `tengu_stop_hook_block_count` analytics event (hooks B4, binary
     /// `bin/claude.exe` offset ~208046100). Emitted in three forms: on the
     /// block-cap end (`hit_cap:true`), on the max-turns-via-stop-hook end

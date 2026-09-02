@@ -189,8 +189,24 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
 /// server must be called with the RAW wire name `a.b` (claude-code's
 /// `mcpInfo.toolName`). Proves the `resolve_wire_tool_name` dispatch round-trip
 /// end-to-end: model-facing normalized FQN ⇒ raw wire name on `tools/call`.
-#[tokio::test]
-async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn() {
+#[test]
+fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn() {
+    std::thread::Builder::new()
+        .name("mcp-invocation-normalized".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("MCP invocation runtime")
+                .block_on(dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner());
+        })
+        .expect("spawn MCP invocation test thread")
+        .join()
+        .expect("MCP invocation test thread");
+}
+
+async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner() {
     let (tools, mcp_registry, mock) = seed(&["a.b"]).await;
 
     let api = Arc::new(MockApiClient::new(vec![
@@ -229,8 +245,24 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn() {
 /// A model `tool_use` named `mcp__mock__a` is routed through `find_by_name`
 /// into the per-tool `MCPTool`, reaches the mock server's `call_tool`, and the
 /// result round-trips back as a non-error `ToolResult`.
-#[tokio::test]
-async fn dispatch_routes_fqn_tool_use_to_server_call_tool() {
+#[test]
+fn dispatch_routes_fqn_tool_use_to_server_call_tool() {
+    std::thread::Builder::new()
+        .name("mcp-invocation-dispatch".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("MCP invocation runtime")
+                .block_on(dispatch_routes_fqn_tool_use_to_server_call_tool_inner());
+        })
+        .expect("spawn MCP invocation test thread")
+        .join()
+        .expect("MCP invocation test thread");
+}
+
+async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
     let (tools, mcp_registry, mock) = seed(&["a", "b"]).await;
 
     // Turn 1: model invokes mcp__mock__a. Turn 2: model ends.

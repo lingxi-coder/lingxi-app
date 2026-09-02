@@ -2688,6 +2688,10 @@ fn mobile_mcp_reload_generation_is_current(
         == Some(generation)
 }
 
+fn is_plugin_owned_mcp_config(config: &McpServerConfig) -> bool {
+    config.metadata.agent_source == Some(mcp::McpAgentSource::Plugin)
+}
+
 fn mobile_mcp_reload_guard(
     generations: &Arc<StdMutex<HashMap<String, MobileMcpReloadIntent>>>,
     name: &str,
@@ -4137,7 +4141,10 @@ async fn build_mobile_inner_with_ask(
             as Arc<dyn platform_api::RuntimeSpawner>,
         platform_api::subagent_spawn::max_concurrent_subagents(),
     ));
-    let subagent_hook_session_id = protocol::SessionId::new();
+    // Use the owning boot session for hook/checkpoint identity. Hot-resume
+    // rebinding still requires the deferred dynamic session-context substrate,
+    // but a fresh mobile session must not checkpoint under an unrelated id.
+    let subagent_hook_session_id = main_session_id;
     let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
         &cfg.lingxi_home,
         &cwd.to_string_lossy(),
@@ -5474,7 +5481,7 @@ fn mobile_builtin_plugin_enabled(
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(manifest_default_enabled)
+            return Ok(manifest_default_enabled);
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -5513,7 +5520,7 @@ fn mobile_typescript_lsp_mode(
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(lsp::LspActivationMode::Auto)
+            return Ok(lsp::LspActivationMode::Auto);
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -5689,6 +5696,7 @@ struct BoundSessionAgentMeta {
     agent_type: String,
     model: String,
     model_profile: Option<String>,
+    persistent: bool,
 }
 
 struct MobileSessionAgentObserver {
@@ -5744,6 +5752,8 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                 name,
                 model,
                 model_profile,
+                persistent,
+                initial_message_index,
             } => {
                 let session_id = self.allocated_session_id();
                 let name = name.unwrap_or_else(|| agent_type.clone());
@@ -5755,8 +5765,13 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                         agent_type: agent_type.clone(),
                         model: model.clone(),
                         model_profile: model_profile.clone(),
+                        persistent,
                     },
                 );
+                self.message_indexes
+                    .lock()
+                    .await
+                    .insert(agent_id.to_string(), initial_message_index);
                 self.event_sink
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id,
@@ -5822,6 +5837,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
                 };
+                let terminal = !bound.persistent;
                 self.event_sink
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id: bound.session_id,
@@ -5831,13 +5847,15 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                             agent_type: bound.agent_type,
                             model: Some(bound.model),
                             model_profile: bound.model_profile,
-                            status: "completed".to_string(),
+                            status: if terminal { "completed" } else { "idle" }.to_string(),
                             latest_activity: None,
                             updated_at_ms: Some(unix_time_ms()),
                         },
                     })
                     .await;
-                self.clear_agent_state(&agent_key).await;
+                if terminal {
+                    self.clear_agent_state(&agent_key).await;
+                }
             }
             platform_api::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
                 let agent_key = agent_id.to_string();
@@ -7225,7 +7243,7 @@ impl MobileEngineHandle {
                                     message:
                                         "mobile builtin plugin is not in a stable activation state"
                                             .to_string(),
-                                })
+                                });
                             }
                         },
                         manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
@@ -7256,7 +7274,7 @@ impl MobileEngineHandle {
             _ => {
                 return Err(ClientError::Internal {
                     message: "mobile builtin plugin is not in a stable activation state".into(),
-                })
+                });
             }
         };
         let inventory = crate::builtin_bundle::COMPILED_PLUGIN_INVENTORY;
@@ -10219,7 +10237,33 @@ impl MobileEngineHandle {
             .map(|config| (config.name.clone(), config))
             .collect();
         let generations = self.inner.mcp_reload_generations.clone();
-        let registry_names = self.inner.mcp_registry.server_names().await;
+        let current_states: std::collections::HashMap<_, _> = self
+            .inner
+            .mcp_registry
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter(|(name, _)| name.as_str() != LOCAL_APPS_REGISTRY_KEY)
+            .map(|(name, state)| (name.clone(), state.clone()))
+            .collect();
+        let current_names: std::collections::HashSet<String> =
+            current_states.keys().cloned().collect();
+        let retained_plugin_names: std::collections::HashSet<String> = current_states
+            .iter()
+            // `reconcileMcpServers` retains only plugin-sourced CURRENT configs
+            // that disappeared from desired state. A desired name collision is
+            // an overlap/replacement, not a retained plugin.
+            .filter(|(name, state)| {
+                !desired.contains_key(*name) && is_plugin_owned_mcp_config(state.config())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let desired_count = desired
+            .keys()
+            .filter(|name| name.as_str() != LOCAL_APPS_REGISTRY_KEY)
+            .count();
+        let current_count = current_names.len();
         let tracked_names: Vec<String> = generations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -10228,39 +10272,43 @@ impl MobileEngineHandle {
             .collect();
         let mut reconcile_names = std::collections::HashSet::new();
         reconcile_names.extend(
-            registry_names
+            current_names
                 .into_iter()
-                .filter(|name| name != LOCAL_APPS_REGISTRY_KEY),
+                .filter(|name| !retained_plugin_names.contains(name)),
         );
-        reconcile_names.extend(
-            tracked_names
-                .into_iter()
-                .filter(|name| name != LOCAL_APPS_REGISTRY_KEY),
-        );
+        reconcile_names.extend(tracked_names.into_iter().filter(|name| {
+            name != LOCAL_APPS_REGISTRY_KEY && !retained_plugin_names.contains(name)
+        }));
         reconcile_names.extend(
             desired
                 .keys()
                 .filter(|name| name.as_str() != LOCAL_APPS_REGISTRY_KEY)
                 .cloned(),
         );
+        let mut to_add_count = 0_usize;
+        let mut to_remove_count = 0_usize;
+        let mut to_replace_count = 0_usize;
         let mut jobs = Vec::new();
         for name in reconcile_names {
-            let desired_config = desired.get(&name);
-            let Some(current_state) = self
-                .inner
-                .mcp_registry
-                .connections
-                .read()
-                .await
-                .get(&name)
-                .cloned()
-            else {
-                let (generation, _) =
-                    mobile_mcp_record_reload_intent(&generations, &name, desired_config);
-                if desired_config.is_none() {
-                    continue;
+            let current_state = current_states.get(&name).cloned();
+            let mut desired_config = desired.get(&name).cloned();
+            if let (Some(current), Some(desired)) =
+                (current_state.as_ref(), desired_config.as_mut())
+            {
+                // Oracle retention carries plugin provenance across a desired
+                // collision even though the transport config is replaced.
+                if is_plugin_owned_mcp_config(current.config()) {
+                    desired.metadata.agent_source = Some(mcp::McpAgentSource::Plugin);
                 }
-                let config = desired_config.expect("desired MCP config").clone();
+            }
+            let desired_config_ref = desired_config.as_ref();
+            let Some(current_state) = current_state else {
+                let (generation, _) =
+                    mobile_mcp_record_reload_intent(&generations, &name, desired_config_ref);
+                let Some(config) = desired_config else {
+                    continue;
+                };
+                to_add_count += 1;
                 jobs.push(MobileMcpReloadJob::Connect {
                     name,
                     generation,
@@ -10271,21 +10319,24 @@ impl MobileEngineHandle {
             };
             let expected = current_state.config().clone();
             let (generation, intent_changed) =
-                mobile_mcp_record_reload_intent(&generations, &name, desired_config);
+                mobile_mcp_record_reload_intent(&generations, &name, desired_config_ref);
             if let Some(config) = desired_config {
-                if !mobile_mcp_reload_requires_replacement(&current_state, config, intent_changed) {
+                if !mobile_mcp_reload_requires_replacement(&current_state, &config, intent_changed)
+                {
                     // Preserve live/cached/failed state exactly as-is. In
                     // particular, do not redial, purge discovery, or touch
                     // OAuth storage merely because the listing was refreshed.
                     continue;
                 }
+                to_replace_count += 1;
                 jobs.push(MobileMcpReloadJob::Connect {
                     name,
                     generation,
-                    desired: config.clone(),
+                    desired: config,
                     previous: Some(expected),
                 });
             } else {
+                to_remove_count += 1;
                 jobs.push(MobileMcpReloadJob::Remove {
                     name,
                     generation,
@@ -10293,6 +10344,20 @@ impl MobileEngineHandle {
                 });
             }
         }
+        telemetry::emit_mcp_reconcile(&telemetry::tengu::mcp::ReconcilePayload {
+            // This mobile listing-triggered refresh has no Claude Code caller
+            // equivalent. `reconcileMcpServers` defaults an omitted caller to
+            // the exact low-cardinality value `unknown`.
+            caller: telemetry::Verified::assert_safe("unknown".to_string()),
+            desired_count: u32::try_from(desired_count).expect("desired MCP count fits in u32"),
+            current_count: u32::try_from(current_count).expect("current MCP count fits in u32"),
+            to_remove_count: u32::try_from(to_remove_count).expect("remove MCP count fits in u32"),
+            to_add_count: u32::try_from(to_add_count).expect("add MCP count fits in u32"),
+            to_replace_count: u32::try_from(to_replace_count)
+                .expect("replace MCP count fits in u32"),
+            retained_plugin_count: u32::try_from(retained_plugin_names.len())
+                .expect("retained plugin MCP count fits in u32"),
+        });
         if !jobs.is_empty() {
             // A settings listing must never wait for a server's transport
             // teardown, network handshake, or interactive OAuth. Every job
@@ -12379,6 +12444,8 @@ mod tests {
                 name: Some("Design".to_string()),
                 model: "deepseek-v4-flash".to_string(),
                 model_profile: Some("deepseek".to_string()),
+                persistent: false,
+                initial_message_index: 0,
             })
             .await;
         *session_uuid.lock().unwrap() = "session-b".to_string();
@@ -12462,6 +12529,8 @@ mod tests {
                     name: Some("Design".to_string()),
                     model: "deepseek-v4-flash".to_string(),
                     model_profile: Some("deepseek".to_string()),
+                    persistent: false,
+                    initial_message_index: 0,
                 })
                 .await;
         })
@@ -14965,6 +15034,67 @@ mod tests {
                 }
                 other => panic!("unchanged MCP entry was reconciled: {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn mobile_mcp_reload_retains_plugin_scoped_servers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(tmp.path());
+        std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
+        std::fs::write(
+            cfg.lingxi_home.join("settings.json"),
+            r#"{"mcpServers":{}}"#,
+        )
+        .expect("write empty MCP settings");
+        let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+        let plugin_name = "mobile-fixture";
+        let plugin_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(plugin_dir.join(plugin_name).join(".lingxi-plugin"))
+            .expect("plugin manifest dir");
+        std::fs::write(
+            plugin_dir
+                .join(plugin_name)
+                .join(".lingxi-plugin")
+                .join("plugin.json"),
+            r#"{"name":"mobile-fixture","version":"1.0.0","mcpServers":{"srv":{"type":"stdio","command":"echo"}}}"#,
+        )
+        .expect("write plugin manifest");
+        let discovered = handle
+            .runtime()
+            .block_on(async { plugin::discovery::discover_installed_plugins(&plugin_dir).await });
+        let (id, manifest, install_dir) = discovered
+            .into_iter()
+            .find(|(_, manifest, _)| manifest.name == plugin_name)
+            .expect("fixture plugin discovered");
+        handle.runtime().block_on(async {
+            handle
+                .inner
+                .wired_plugin_manager
+                .enable(&id, manifest, install_dir)
+                .await
+                .expect("enable fixture plugin");
+            assert!(
+                handle
+                    .inner
+                    .mcp_registry
+                    .connections
+                    .read()
+                    .await
+                    .contains_key("plugin:mobile-fixture:srv"),
+                "fixture plugin must materialize an MCP server before reload"
+            );
+            handle.reload_configured_mcp().await;
+            assert!(
+                handle
+                    .inner
+                    .mcp_registry
+                    .connections
+                    .read()
+                    .await
+                    .contains_key("plugin:mobile-fixture:srv"),
+                "settings reload must retain plugin-scoped MCP servers"
+            );
         });
     }
 

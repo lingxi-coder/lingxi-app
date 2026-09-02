@@ -954,6 +954,7 @@ mod read_file_state_tests {
     /// pass-through test assert the gate did NOT short-circuit a valid input.
     struct SchemaCallTrackerTool {
         called: Arc<std::sync::atomic::AtomicBool>,
+        rejected_message_id: Option<Arc<std::sync::Mutex<Option<String>>>>,
     }
 
     #[async_trait]
@@ -990,6 +991,16 @@ mod read_file_state_tests {
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
+        }
+        async fn on_input_schema_rejected(
+            &self,
+            _input: &serde_json::Value,
+            _tool_use_id: Option<&str>,
+            assistant_message_id: Option<&protocol::MessageId>,
+        ) {
+            if let Some(slot) = &self.rejected_message_id {
+                *slot.lock().unwrap() = assistant_message_id.map(ToString::to_string);
+            }
         }
         async fn check_permissions(
             &self,
@@ -1043,6 +1054,7 @@ mod read_file_state_tests {
             PathBuf::from("/tmp"),
             vec![Arc::new(SchemaCallTrackerTool {
                 called: called.clone(),
+                rejected_message_id: None,
             })],
         );
         let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
@@ -1069,6 +1081,7 @@ mod read_file_state_tests {
             PathBuf::from("/tmp"),
             vec![Arc::new(SchemaCallTrackerTool {
                 called: called.clone(),
+                rejected_message_id: None,
             })],
         );
         let uses = vec![(
@@ -1087,6 +1100,58 @@ mod read_file_state_tests {
         assert!(
             called.load(std::sync::atomic::Ordering::SeqCst),
             "call() must run for schema-valid input"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_gate_threads_current_assistant_message_id_to_rejection_hook() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejected_message_id = Arc::new(std::sync::Mutex::new(None));
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "Schemic".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        )]));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SchemaCallTrackerTool {
+            called: called.clone(),
+            rejected_message_id: Some(rejected_message_id.clone()),
+        }) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+
+        assert!(matches!(
+            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::TurnStepOutcome::Continue
+        ));
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "schema gate must still short-circuit before call()"
+        );
+
+        let assistant_message_id = {
+            let session_handle = orch.session();
+            let session = session_handle.lock().await;
+            match session.history.first() {
+                Some(protocol::ConversationMessage::Assistant { id, .. }) => id.to_string(),
+                other => panic!("expected assistant message first, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            rejected_message_id.lock().unwrap().clone(),
+            Some(assistant_message_id),
+            "schema-rejection hook must receive the current assistant message id"
         );
     }
 
@@ -1958,6 +2023,7 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Ended {
                 stop_reason,
                 final_message_id,
+                ..
             } => {
                 assert_eq!(stop_reason, "max_tokens");
                 final_message_id
@@ -2080,6 +2146,7 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Ended {
                 stop_reason,
                 final_message_id,
+                ..
             } => {
                 assert_eq!(stop_reason, "refusal");
                 final_message_id
@@ -2415,6 +2482,7 @@ mod malformed_and_thinking_only_tests {
             TurnStepOutcome::Ended {
                 stop_reason,
                 final_message_id,
+                ..
             } => {
                 assert_eq!(stop_reason, "end_turn");
                 final_message_id
@@ -2737,8 +2805,11 @@ mod pre_tool_hook_tests {
         mock_message_response, MockApiClient, MockOutputStream, PermissionDecision,
         PermissionDecisionSource, PermissionGate, PermissionResolution, StaticMemoryProvider,
     };
-    use crate::turn_loop::{dispatch_tool_uses_tracked, execute_one_turn, TurnStepOutcome};
-    use crate::OrchestratorConfig;
+    use crate::turn_loop::{
+        dispatch_tool_uses_tracked, dispatch_tool_uses_tracked_deferred, execute_one_turn,
+        run_post_tool_batch_hooks, run_post_tool_batch_hooks_after_turn_end, TurnStepOutcome,
+    };
+    use crate::{ConversationOutcome, OrchestratorConfig};
     use async_trait::async_trait;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::{HookEvent, HookEventType};
@@ -3441,6 +3512,245 @@ mod pre_tool_hook_tests {
         }
     }
 
+    /// Successful MCP-shaped result that asks the turn loop to stop after the
+    /// tool_result boundary instead of re-invoking the model.
+    struct McpEndTurnTool {
+        is_error: bool,
+    }
+    #[async_trait]
+    impl Tool for McpEndTurnTool {
+        fn name(&self) -> &str {
+            "McpEndTurn"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "mcp-end-turn".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!([{ "type": "text", "text": "ENDED" }]),
+                model_content: Some("ENDED".into()),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: self.is_error,
+                mcp_meta: Some(json!({ "_meta": { "claude/endTurn": true } })),
+            })
+        }
+    }
+
+    struct RefreshMcpToolsTool {
+        registry: Arc<std::sync::Mutex<Option<Arc<ToolRegistry>>>>,
+        conn_id: protocol::McpConnectionId,
+        replacement_count: usize,
+    }
+    #[async_trait]
+    impl Tool for RefreshMcpToolsTool {
+        fn name(&self) -> &str {
+            "RefreshMcpTools"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "refresh-mcp-tools".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let tools = (0..self.replacement_count)
+                .map(|index| {
+                    Arc::new(FakeMcpTool {
+                        name: format!("mcp__srv__tool_{index}"),
+                    }) as Arc<dyn Tool>
+                })
+                .collect();
+            self.registry
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("shared tool registry wired")
+                .register_mcp_tools(self.conn_id, tools);
+            Ok(ToolCallResult {
+                data: json!({ "content": "refreshed" }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    struct FakeMcpTool {
+        name: String,
+    }
+    #[async_trait]
+    impl Tool for FakeMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn is_mcp(&self) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.name.clone()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "noop" }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
     /// FORK (codex #5 follow-up): a tool that records the
     /// `fork_parent_system_prompt` from the `ToolUseContext` it is dispatched
     /// with, so a test can assert `dispatch_tool_uses_tracked` threads the
@@ -3696,6 +4006,67 @@ mod pre_tool_hook_tests {
 
     fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
         vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+    }
+
+    fn orch_with_mcp_end_turn(
+        api: Arc<MockApiClient>,
+        output: Arc<MockOutputStream>,
+        bus: Arc<telemetry::AnalyticsBus>,
+        is_error: bool,
+    ) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(McpEndTurnTool { is_error }) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_analytics_bus(bus)
+    }
+
+    fn orch_with_refreshing_mcp_tool(
+        api: Arc<MockApiClient>,
+        bus: Arc<telemetry::AnalyticsBus>,
+        initial_mcp_count: usize,
+        replacement_mcp_count: usize,
+    ) -> ConversationOrchestrator {
+        let registry_slot = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        let replacement_conn = protocol::McpConnectionId::new();
+        registry.register_builtin(Arc::new(RefreshMcpToolsTool {
+            registry: registry_slot.clone(),
+            conn_id: replacement_conn,
+            replacement_count: replacement_mcp_count,
+        }) as Arc<dyn Tool>);
+        let registry = Arc::new(registry);
+        *registry_slot.lock().unwrap() = Some(registry.clone());
+        let existing_conn = protocol::McpConnectionId::new();
+        if initial_mcp_count > 0 {
+            let existing = (0..initial_mcp_count)
+                .map(|index| {
+                    Arc::new(FakeMcpTool {
+                        name: format!("mcp__before__tool_{index}"),
+                    }) as Arc<dyn Tool>
+                })
+                .collect();
+            registry.register_mcp_tools(existing_conn, existing);
+        }
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            registry,
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_analytics_bus(bus)
     }
 
     fn tool_result(block: &ContentBlock) -> (&str, bool) {
@@ -4234,6 +4605,250 @@ mod pre_tool_hook_tests {
             execute_one_turn(&orch, None).await.expect("turn step"),
             TurnStepOutcome::Continue
         ));
+    }
+
+    #[tokio::test]
+    async fn mcp_end_turn_result_ends_the_step_without_a_follow_up_call() {
+        let tu = ToolUseId::new();
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.to_string(),
+                name: "McpEndTurn".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        )]));
+        let output = Arc::new(MockOutputStream::new());
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_mcp_end_turn(api.clone(), output, bus, false);
+
+        match execute_one_turn(&orch, None).await.expect("turn step") {
+            TurnStepOutcome::Ended {
+                stop_reason,
+                allow_budget_continuation,
+                ..
+            } => {
+                assert_eq!(stop_reason, "end_turn");
+                assert!(
+                    !allow_budget_continuation,
+                    "tool-requested end_turn must bypass budget continuation"
+                );
+            }
+            TurnStepOutcome::Continue => panic!("expected tool-requested end_turn, got Continue"),
+        }
+
+        assert_eq!(
+            api.captured_msgs().await.len(),
+            1,
+            "no follow-up model call"
+        );
+        let history = orch.session().lock().await.history.clone();
+        assert_eq!(
+            history.len(),
+            2,
+            "assistant tool_use + user tool_result only"
+        );
+        assert!(matches!(
+            history.last(),
+            Some(ConversationMessage::User { content, .. })
+                if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        ));
+
+        let events = sink.events().await;
+        let event = events
+            .iter()
+            .find(|event| event.name == telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN)
+            .expect("MCP end-turn telemetry emitted");
+        assert!(matches!(
+            event.metadata.get("queryChainId"),
+            Some(telemetry::AnalyticsValue::String(value)) if !value.is_empty()
+        ));
+        assert!(matches!(
+            event.metadata.get("queryDepth"),
+            Some(telemetry::AnalyticsValue::Int(0))
+        ));
+        assert!(matches!(
+            event.metadata.get("source"),
+            Some(telemetry::AnalyticsValue::String(value)) if value == "mcp_meta"
+        ));
+    }
+
+    #[tokio::test]
+    async fn errored_mcp_result_cannot_end_the_turn() {
+        let tu = ToolUseId::new();
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.to_string(),
+                name: "McpEndTurn".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        )]));
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_mcp_end_turn(api, Arc::new(MockOutputStream::new()), bus, true);
+
+        assert!(matches!(
+            execute_one_turn(&orch, None).await.expect("turn step"),
+            TurnStepOutcome::Continue
+        ));
+        assert!(
+            sink.events()
+                .await
+                .iter()
+                .all(|event| event.name != telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN),
+            "isError:true suppresses both termination and its telemetry"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_mcp_end_turn_results_emit_one_event() {
+        let calls = (0..2)
+            .map(|_| llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "McpEndTurn".into(),
+                input: json!({}),
+            })
+            .collect();
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            calls,
+            Some("tool_use"),
+        )]));
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_mcp_end_turn(api, Arc::new(MockOutputStream::new()), bus, false);
+
+        assert!(matches!(
+            execute_one_turn(&orch, None).await.expect("turn step"),
+            TurnStepOutcome::Ended {
+                tool_requested_end: true,
+                ..
+            }
+        ));
+        let result_messages: Vec<_> = orch
+            .session()
+            .lock()
+            .await
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                ConversationMessage::User { content, .. }
+                    if content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
+                {
+                    Some(content.len())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            result_messages,
+            vec![1, 1],
+            "parallel results persist as individual user messages so message-level metadata stays attributable"
+        );
+        let count = sink
+            .events()
+            .await
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::mcp::TOOL_RESULT_ENDED_TURN)
+            .count();
+        assert_eq!(count, 1, "one turn end emits exactly one analytics event");
+    }
+
+    #[tokio::test]
+    async fn post_tool_batch_emits_tools_refreshed_mid_turn_when_mcp_count_changes() {
+        let tu = ToolUseId::new();
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.to_string(),
+                name: "RefreshMcpTools".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        )]));
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_refreshing_mcp_tool(api, bus, 0, 2);
+
+        assert!(matches!(
+            execute_one_turn(&orch, None).await.expect("turn step"),
+            TurnStepOutcome::Continue
+        ));
+
+        let event = sink
+            .events()
+            .await
+            .into_iter()
+            .find(|event| event.name == telemetry::tengu::mcp::TOOLS_REFRESHED_MID_TURN)
+            .expect("mid-turn MCP refresh telemetry emitted");
+        assert!(matches!(
+            event.metadata.get("oldMcpCount"),
+            Some(telemetry::AnalyticsValue::Int(0))
+        ));
+        assert!(matches!(
+            event.metadata.get("newMcpCount"),
+            Some(telemetry::AnalyticsValue::Int(2))
+        ));
+        assert!(matches!(
+            event.metadata.get("recovered"),
+            Some(telemetry::AnalyticsValue::Bool(true))
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_requested_end_runs_but_cannot_be_blocked_by_stop_hook() {
+        let tu = ToolUseId::new();
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.to_string(),
+                name: "McpEndTurn".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        )]));
+        let hooks = event_hook_executor(
+            HookEventType::Stop,
+            HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some("keep working".into()),
+                ..HookResponse::default()
+            },
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(McpEndTurnTool { is_error: false }) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(registry),
+            hooks,
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+
+        let outcome = orch.run_turn("stop from tool").await.expect("turn ends");
+        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+        assert_eq!(
+            api.captured_msgs().await.len(),
+            1,
+            "a blocking Stop hook cannot cause a post-endTurn model call"
+        );
+        assert!(
+            orch.session()
+                .lock()
+                .await
+                .history
+                .iter()
+                .all(|message| !message.text_content().contains("Stop hook feedback:")),
+            "discarded Stop-hook blocks do not inject continuation feedback"
+        );
     }
 
     // ----- HOOK.3: allow bypasses / deny denies / ask falls through ---------
@@ -5052,6 +5667,131 @@ mod pre_tool_hook_tests {
             captured,
             vec![2],
             "PostToolBatch fires exactly once with the full 2-tool batch"
+        );
+    }
+
+    /// The streaming executor invokes the dispatch core once per tool. Those
+    /// calls must remain hook-silent until the driver combines their deferred
+    /// entries into the one model-response batch.
+    #[tokio::test]
+    async fn per_tool_deferred_dispatch_coalesces_one_full_post_tool_batch() {
+        use std::sync::Mutex as StdMutex;
+
+        struct CaptureBatch {
+            seen: Arc<StdMutex<Vec<usize>>>,
+        }
+        #[async_trait]
+        impl BuiltinHookHandler for CaptureBatch {
+            async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                if let HookEvent::PostToolBatch { tool_calls } = event {
+                    self.seen.lock().unwrap().push(tool_calls.len());
+                }
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    response: Some(HookResponse::default()),
+                }
+            }
+            fn id(&self) -> &str {
+                "capture-deferred-batch"
+            }
+        }
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "capture-deferred-batch".into(),
+            events: vec![HookEventType::PostToolBatch],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "capture-deferred-batch".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut hooks =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        hooks.register_builtin(Arc::new(CaptureBatch { seen: seen.clone() }));
+        let orch = orch_with(Arc::new(hooks), Arc::new(AllowAllGate), vec![]);
+
+        let first = dispatch_tool_uses_tracked_deferred(
+            &orch,
+            &[(ToolUseId::new(), "Echo".into(), json!({}), None)],
+            None,
+            None,
+        )
+        .await
+        .expect("first dispatch");
+        let second = dispatch_tool_uses_tracked_deferred(
+            &orch,
+            &[(ToolUseId::new(), "Echo".into(), json!({}), None)],
+            None,
+            None,
+        )
+        .await
+        .expect("second dispatch");
+        assert_eq!(
+            first.post_tool_batch_calls[0].tool_response,
+            Some(json!("ECHOED-OUTPUT")),
+            "PostToolBatch sees the yielded tool_result content, not raw ToolCallResult.data"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "per-tool dispatch must not fire PostToolBatch"
+        );
+
+        let mut calls = first.post_tool_batch_calls;
+        calls.extend(second.post_tool_batch_calls);
+        let (prevent, injected) = run_post_tool_batch_hooks(&orch, calls).await;
+        assert!(!prevent);
+        assert!(injected.is_empty());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![2],
+            "one hook fire must carry both resolved tool calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_end_post_tool_batch_discards_disposition_and_additional_context() {
+        let hooks = event_hook_executor(
+            HookEventType::PostToolBatch,
+            HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some("batch says keep working".into()),
+                additional_context: Some("ignored after result end".into()),
+                prevent_continuation: true,
+                ..HookResponse::default()
+            },
+        );
+        let orch = orch_with(hooks, Arc::new(AllowAllGate), vec![]);
+        let id = ToolUseId::new();
+        let messages = run_post_tool_batch_hooks_after_turn_end(
+            &orch,
+            vec![hooks::events::PostToolBatchCall {
+                tool_name: "Echo".into(),
+                tool_input: json!({}),
+                tool_use_id: id,
+                tool_response: Some(json!("ok")),
+            }],
+        )
+        .await;
+
+        assert!(
+            messages.is_empty(),
+            "forced endTurn logs PostToolBatch dispositions but does not synthesize model messages"
         );
     }
 

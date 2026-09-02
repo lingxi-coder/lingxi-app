@@ -4911,9 +4911,8 @@ fn anthropic_models_for(
         "claude-sonnet-4-6".to_string(),
         "claude-sonnet-4-5-20250929".to_string(),
         "claude-haiku-4-5".to_string(),
-        // Fable 5 — the latest fast Claude; surfaced in the curated `/model`
-        // picker's Anthropic group alongside Sonnet/Opus/Haiku.
-        "claude-fable-5".to_string(),
+        // Fable 5.1 replaces Fable 5 in the curated Anthropic picker.
+        "claude-fable-5-1".to_string(),
     ];
     // Register the configured default/fallback under the ANTHROPIC profile ONLY
     // when it actually ROUTES to anthropic (a `claude-*` id, an unqualified
@@ -5013,7 +5012,7 @@ struct DefaultModelFallback {
     /// Provider profile the fallback routes to — ALWAYS set (anthropic
     /// included), so the `switch_model` seeding at the end of `build()` scopes
     /// the session and a wire id that exists under several providers (e.g.
-    /// `claude-fable-5` on anthropic AND github-copilot) resolves
+    /// `claude-sonnet-5` on anthropic AND github-copilot) resolves
     /// unambiguously instead of failing every turn with "ambiguous across
     /// profiles".
     profile: String,

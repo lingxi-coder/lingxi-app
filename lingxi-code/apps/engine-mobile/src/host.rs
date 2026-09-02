@@ -2261,7 +2261,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         "claude-sonnet-5".to_string(),
         "claude-sonnet-4-6".to_string(),
         "claude-haiku-4-5".to_string(),
-        "claude-fable-5".to_string(),
+        "claude-fable-5-1".to_string(),
     ];
     // The configured default, when it routes here — see `anthropic_route_id`.
     ids.extend(anthropic_route_id(default_model));
@@ -20191,7 +20191,7 @@ mod anthropic_model_registry_tests {
         for curated in [
             "claude-sonnet-5",
             "claude-opus-5",
-            "claude-fable-5",
+            "claude-fable-5-1",
             "claude-haiku-4-5",
         ] {
             assert!(
@@ -20342,8 +20342,8 @@ mod default_model_resolution_tests {
     #[test]
     fn a_bare_id_served_by_two_profiles_stays_unscoped() {
         let listing = |provider: &str| platform_api::ModelListing {
-            display_model: "claude-fable-5".to_string(),
-            request_model: "claude-fable-5".to_string(),
+            display_model: "claude-fable-5-1".to_string(),
+            request_model: "claude-fable-5-1".to_string(),
             provider_id: provider.to_string(),
             provider_label: provider.to_string(),
             description: None,
@@ -20354,8 +20354,8 @@ mod default_model_resolution_tests {
         };
         let listings = vec![listing("anthropic"), listing("github-copilot")];
         assert_eq!(
-            resolve_default_model_ref("claude-fable-5", &listings),
-            ("claude-fable-5".to_string(), None)
+            resolve_default_model_ref("claude-fable-5-1", &listings),
+            ("claude-fable-5-1".to_string(), None)
         );
     }
 

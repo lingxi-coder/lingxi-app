@@ -165,7 +165,7 @@ impl ProviderSideQueryClient {
 ///
 /// Side queries use "claude-haiku-4-5" (memory selector) and
 /// "claude-opus-4-6" (compaction), plus the current session defaults
-/// (claude-sonnet-5 / claude-opus-4-8 / claude-fable-5) that compaction forks
+/// (claude-sonnet-5 / claude-opus-4-8 / claude-fable-5-1) that compaction forks
 /// inherit. All entries get the same capability set: streaming=false (side
 /// queries are always non-streaming), tools, vision, documents, reasoning
 /// (the cc 2.1.198 thinking-inheritance seam).
@@ -205,12 +205,12 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
         model("claude-opus-4-6", "claude-opus-4-6", &[]),
         model("claude-opus-4-7", "claude-opus-4-7", &[]),
         // Current-generation defaults (2.1.197/198, M1b): a compaction fork on
-        // the session default (claude-sonnet-5) — or an opus-4-8/fable-5
+        // the session default (claude-sonnet-5) — or an opus-4-8/fable-5.1
         // session — must resolve here instead of dying with ModelUnavailable.
         // All three support (adaptive) thinking; `reasoning: true` above.
         model("claude-sonnet-5", "claude-sonnet-5", &[]),
         model("claude-opus-4-8", "claude-opus-4-8", &[]),
-        model("claude-fable-5", "claude-fable-5", &[]),
+        model("claude-fable-5-1", "claude-fable-5-1", &[]),
         // Broad Sonnet/Opus/Haiku coverage for callers using any model string
         model("claude-sonnet-4-6", "claude-sonnet-4-6", &[]),
         model(
@@ -1204,11 +1204,11 @@ mod tests {
 
     /// M1b regression (found in M10): the model table MUST cover the current
     /// session defaults — a production compaction fork on `claude-sonnet-5`
-    /// (the 2.1.197/198 default), `claude-opus-4-8` or `claude-fable-5` used
+    /// (the 2.1.197/198 default), `claude-opus-4-8` or `claude-fable-5-1` used
     /// to die with `LlmError::ModelUnavailable` before any request was sent.
     #[tokio::test]
     async fn current_default_models_resolve_for_compaction_forks() {
-        for m in ["claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"] {
+        for m in ["claude-sonnet-5", "claude-opus-4-8", "claude-fable-5-1"] {
             let body = serde_json::json!({
                 "id": "msg_cur", "model": m,
                 "content": [{ "type": "text", "text": "SUMMARY" }],

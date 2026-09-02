@@ -1042,7 +1042,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "anthropic" }))
         let curated: Set<String> = [
             "claude-opus-5",
-            "claude-fable-5",
+            "claude-fable-5-1",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ]

@@ -187,7 +187,7 @@ pub fn infer_api_provider(base_url: &str) -> ApiProvider {
 /// Whether WebSearch is enabled for `provider` + `model` — 1:1 with claude-code
 /// `WebSearchTool.isEnabled` (`WebSearchTool.ts:168-193`):
 /// - `firstParty` ⇒ always enabled;
-/// - `vertex` ⇒ enabled only for `claude-fable-5` or Claude 4.x
+/// - `vertex` ⇒ enabled only for `claude-fable-5-1` or Claude 4.x
 ///   (`claude-opus-4` / `claude-sonnet-4` / `claude-haiku-4` substring);
 /// - `foundry` ⇒ always enabled (Foundry only ships web-search-capable models);
 /// - anything else ⇒ disabled.
@@ -199,7 +199,7 @@ pub fn web_search_is_enabled(provider: ApiProvider, model: &str) -> bool {
         // `if` branches both returning `true` — merged here, same behavior).
         ApiProvider::FirstParty | ApiProvider::Foundry => true,
         ApiProvider::Vertex => {
-            model.contains("claude-fable-5")
+            model.contains("claude-fable-5-1")
                 || model.contains("claude-opus-4")
                 || model.contains("claude-sonnet-4")
                 || model.contains("claude-haiku-4")
@@ -1666,11 +1666,11 @@ mod tests {
             web_search_description_concise()
         );
         assert_eq!(
-            select_web_search_prompt(Some("claude-fable-5")),
+            select_web_search_prompt(Some("claude-fable-5-1")),
             web_search_description_concise()
         );
         assert_eq!(
-            select_web_search_prompt(Some("claude-mythos-5")),
+            select_web_search_prompt(Some("claude-mythos-5-1")),
             web_search_description_concise()
         );
         // Classic models (UWu=true ⇒ Dh false) ⇒ VERBOSE.
@@ -1763,10 +1763,13 @@ mod tests {
     #[test]
     fn is_enabled_vertex_only_claude_4x() {
         // `claude-fable-5` is the first disjunct upstream (binary @202215129).
-        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-fable-5"));
         assert!(web_search_is_enabled(
             ApiProvider::Vertex,
-            "claude-fable-5-20260101"
+            "claude-fable-5-1"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-fable-5-1-20260901"
         ));
         assert!(web_search_is_enabled(
             ApiProvider::Vertex,

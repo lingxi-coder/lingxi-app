@@ -1,4 +1,5 @@
-//! Serde schema for a single models.dev provider slice (`data/models-dev/*.json`).
+//! Serde schema for a models.dev-shaped provider slice (`data/models-dev/*.json`).
+//! OpenRouter is generated from its official Models API into this shared shape.
 //!
 //! Tolerant of unknown/added fields: upstream evolves, so only the fields we map
 //! are declared and everything else is ignored. Optional fields default so a

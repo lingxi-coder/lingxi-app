@@ -42,8 +42,8 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
     ),
     (
         "anthropic",
-        "claude-fable-5",
-        q(75, FusionLatencyClass::Fast, FusionCostClass::Medium, false),
+        "claude-fable-5-1",
+        q(105, FusionLatencyClass::Slow, FusionCostClass::High, true),
     ),
     (
         "anthropic",
@@ -299,8 +299,8 @@ const TABLE: &[(&str, &str, FusionModelHints)] = &[
     ),
     (
         "openrouter",
-        "anthropic/claude-fable-5",
-        q(75, FusionLatencyClass::Fast, FusionCostClass::Medium, false),
+        "anthropic/claude-fable-5.1",
+        q(105, FusionLatencyClass::Slow, FusionCostClass::High, true),
     ),
     (
         "openrouter",

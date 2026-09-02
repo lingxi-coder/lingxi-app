@@ -917,7 +917,7 @@ async fn system_prompt_model_identity_follows_switch_model() {
 
     <ConversationOrchestrator as platform_api::OrchestratorHandle>::switch_model(
         &orch,
-        "claude-fable-5",
+        "claude-fable-5-1",
         None,
     )
     .await
@@ -925,7 +925,9 @@ async fn system_prompt_model_identity_follows_switch_model() {
 
     let after = orch.build_system_prompt().await;
     assert!(
-        after.contains("powered by the model named Fable 5. The exact model ID is claude-fable-5"),
+        after.contains(
+            "powered by the model named Fable 5.1. The exact model ID is claude-fable-5-1"
+        ),
         "identity follows the switch: {after}"
     );
     // The stale identity LINE must be gone. (The static "most recent Claude
@@ -976,7 +978,7 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
     );
     // The prior fix: no Claude model-catalog line for a non-Claude model.
     assert!(
-        !sp.contains("claude-fable-5"),
+        !sp.contains("claude-fable-5-1"),
         "no Claude catalog contamination for a non-Claude model: {sp}"
     );
 }

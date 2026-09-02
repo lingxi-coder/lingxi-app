@@ -4252,7 +4252,7 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         // A fable/mythos-class session model (names none of haiku/sonnet/opus)
         // on firstParty → GAe "opus" → the opus family default id.
-        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-fable-5");
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-fable-5-1");
         let def = spawner.resolve_definition("Explore", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-8"));
     }
@@ -4288,7 +4288,7 @@ mod tests {
         let catalog = Arc::new(RwLock::new(vec![custom]));
         let spawner = PoolSubagentSpawner::new(pool)
             .with_agent_catalog(catalog)
-            .with_default_model("claude-fable-5");
+            .with_default_model("claude-fable-5-1");
         let def = spawner.resolve_definition("Explore", None).await;
         // haiku alias, parent fable (no tier match) → the haiku default id —
         // NOT the opus cap.
@@ -4413,7 +4413,7 @@ mod tests {
             .with_session_provider_first_party(false)
             .with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
-                    model: "claude-fable-5".to_string(),
+                    model: "claude-fable-5-1".to_string(),
                     model_profile: Some("anthropic_user".to_string()),
                     provider_first_party: true,
                 })
@@ -4421,7 +4421,7 @@ mod tests {
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "Explore",
             "prompt": "inspect",
-            "parent_model_override": "claude-fable-5",
+            "parent_model_override": "claude-fable-5-1",
             "model_profile": "anthropic_user"
         }))
         .expect("provider-qualified parent request");
@@ -4464,7 +4464,7 @@ mod tests {
         let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
             "subagent_type": "Explore",
             "prompt": "inspect",
-            "parent_model_override": "claude-fable-5",
+            "parent_model_override": "claude-fable-5-1",
             "model_profile": "anthropic_user"
         }))
         .expect("nested provider-qualified request");
@@ -4645,7 +4645,7 @@ mod tests {
             .with_session_provider_first_party(true)
             .with_default_model_selection_provider(Arc::new(|| {
                 Some(DefaultModelSelection {
-                    model: "claude-fable-5".to_string(),
+                    model: "claude-fable-5-1".to_string(),
                     model_profile: None,
                     provider_first_party: false,
                 })
@@ -4669,7 +4669,7 @@ mod tests {
             .expect("live provider selection")
             .0;
 
-        assert_eq!(crate::runner::resolve_model(&context), "claude-fable-5");
+        assert_eq!(crate::runner::resolve_model(&context), "claude-fable-5-1");
         assert_eq!(context.model_profile, None);
     }
 

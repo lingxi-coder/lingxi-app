@@ -1183,7 +1183,7 @@ mod tests {
             None,
             Some("claude-opus-5[1m]"),
             Some("claude-opus-4-8"),
-            Some("claude-fable-5"),
+            Some("claude-fable-5-1"),
         ] {
             let p = simple_prompt_concise(&disabled_sandbox(), model);
             assert!(p.contains(bullet), "missing for model {model:?}");

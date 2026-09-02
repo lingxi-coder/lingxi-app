@@ -5268,7 +5268,7 @@ mod tests {
             );
         }
         // sonnet-5 / fable-5: full ladder + adaptive + auto, no fast.
-        for m in ["claude-sonnet-5", "claude-fable-5"] {
+        for m in ["claude-sonnet-5", "claude-fable-5-1"] {
             assert_eq!(
                 model_capabilities(m),
                 (true, all.clone(), true, false, true),
@@ -5278,7 +5278,7 @@ mod tests {
         // Mythos 5 is present in the 2.1.220 table with no registry
         // capabilities; auto mode is derived separately for modern Claude.
         assert_eq!(
-            model_capabilities("claude-mythos-5"),
+            model_capabilities("claude-mythos-5-1"),
             (false, vec![], false, false, true)
         );
         // sonnet-4-6 / opus-4-6: no xhigh (binary `Zne` excludes them by name).

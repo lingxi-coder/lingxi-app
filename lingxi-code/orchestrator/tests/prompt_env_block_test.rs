@@ -43,7 +43,7 @@ fn env_block_full_byte_lock() {
         " - You are powered by the model named Opus 4.7. The exact model ID is claude-opus-4-7.",
         " - Assistant knowledge cutoff is January 2026.",
         " - The most recent Claude models are the Claude 5 family and Haiku 4.5. \
-Model IDs \u{2014} Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', \
+Model IDs \u{2014} Fable 5.1: 'claude-fable-5-1', Opus 5: 'claude-opus-5', \
 Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. \
 When building AI applications, default to the latest and most capable Claude models.",
         " - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \

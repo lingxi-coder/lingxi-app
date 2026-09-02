@@ -660,8 +660,8 @@ mod tests {
     #[test]
     fn mid_conversation_system_is_model_gated() {
         assert!(mid_conversation_system("claude-opus-4-8"));
-        assert!(mid_conversation_system("claude-fable-5"));
-        assert!(mid_conversation_system("claude-mythos-5"));
+        assert!(mid_conversation_system("claude-fable-5-1"));
+        assert!(mid_conversation_system("claude-mythos-5-1"));
         // 2.1.201 gate: claude-sonnet-5 is in the OLDER return-false branch
         // (`n==="claude-sonnet-5"||n==="claude-haiku-4-5")return!1`), so the
         // beta does NOT ride. Contains-hazard lock: the "sonnet-5" exclude must

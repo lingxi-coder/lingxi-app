@@ -740,8 +740,9 @@ fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
     use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 
     let rates = match model {
-        "claude-sonnet-5" => Some((3.0, 15.0, 0.3, 3.75)),
-        "claude-fable-5" => Some((10.0, 50.0, 1.0, 12.5)),
+        "claude-sonnet-5" => Some((2.0, 10.0, 0.2, 2.5)),
+        "claude-opus-5" => Some((5.0, 25.0, 0.5, 6.25)),
+        "claude-fable-5-1" | "claude-mythos-5-1" => Some((10.0, 50.0, 0.25, 12.5)),
         "claude-haiku-4-5" => Some((1.0, 5.0, 0.1, 1.25)),
         "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => Some((5.0, 25.0, 0.5, 6.25)),
         "claude-sonnet-4-6" => Some((3.0, 15.0, 0.3, 3.75)),
@@ -751,7 +752,18 @@ fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
         input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
         output_modalities: vec!["text".to_string()],
         context_window_tokens: Some(context_window_for_model(model, &[])),
-        max_output_tokens: Some(max_output_tokens_for_model(model)),
+        max_output_tokens: Some(
+            if matches!(
+                model,
+                "claude-fable-5-1" | "claude-mythos-5-1" | "claude-opus-5" | "claude-sonnet-5"
+            ) {
+                128_000
+            } else if model == "claude-haiku-4-5" {
+                64_000
+            } else {
+                max_output_tokens_for_model(model)
+            },
+        ),
         pricing: rates.map(
             |(input, output, cache_read, cache_write)| platform_api::ModelPricing {
                 billing_mode: platform_api::ModelBillingMode::PerToken,
@@ -841,13 +853,11 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
             true,
         ),
         model("claude-haiku-4-5", "claude-haiku-4-5", &[], true),
-        // Fable 5 — the latest fast Claude. Routable everywhere else already
-        // (service.rs token defaults, thinking.rs reasoning set); it was just
-        // missing from the profile list, so it never reached the /model picker.
-        model("claude-fable-5", "claude-fable-5", &[], true),
-        // Mythos 5 — 2.1.201 catalog entry (provider_ids.first_party =
-        // "claude-mythos-5").
-        model("claude-mythos-5", "claude-mythos-5", &[], true),
+        // Fable 5.1 — Anthropic's latest long-horizon reasoning model. Fable 5
+        // is intentionally not retained as an alias or compatibility entry.
+        model("claude-fable-5-1", "claude-fable-5-1", &[], true),
+        // Mythos 5.1 shares Fable 5.1's model and remains invite-only.
+        model("claude-mythos-5-1", "claude-mythos-5-1", &[], true),
     ]
 }
 
@@ -932,27 +942,38 @@ mod tests {
         providers
     }
 
-    /// 2.1.201 catalog carries Mythos 5 (provider_ids.first_party =
-    /// "claude-mythos-5"), sitting after Fable 5 in the profile list.
+    /// The current catalog carries Mythos 5.1 immediately after Fable 5.1.
     #[test]
-    fn anthropic_catalog_includes_mythos_5() {
+    fn anthropic_catalog_uses_fable_and_mythos_5_1() {
         let profiles = anthropic_model_profiles();
+        let fable = profiles
+            .iter()
+            .find(|p| p.display_model == "claude-fable-5-1")
+            .expect("fable-5.1 present in catalog");
+        assert_eq!(fable.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(fable.metadata.max_output_tokens, Some(128_000));
+        let pricing = fable.metadata.pricing.as_ref().expect("official pricing");
+        assert_eq!(pricing.input_per_million, Some(10.0));
+        assert_eq!(pricing.output_per_million, Some(50.0));
+        assert_eq!(pricing.cache_read_per_million, Some(0.25));
+        assert!(!profiles.iter().any(|p| p.display_model == "claude-fable-5"));
+
         let mythos = profiles
             .iter()
-            .find(|p| p.display_model == "claude-mythos-5")
-            .expect("mythos-5 present in catalog");
-        assert_eq!(mythos.billing_model, "claude-mythos-5");
+            .find(|p| p.display_model == "claude-mythos-5-1")
+            .expect("mythos-5.1 present in catalog");
+        assert_eq!(mythos.billing_model, "claude-mythos-5-1");
         assert!(mythos.aliases.is_empty());
         assert!(mythos.capabilities.reasoning);
-        // Ordered immediately after fable-5.
+        // Ordered immediately after fable-5.1.
         let fable_idx = profiles
             .iter()
-            .position(|p| p.display_model == "claude-fable-5")
-            .expect("fable-5 present");
+            .position(|p| p.display_model == "claude-fable-5-1")
+            .expect("fable-5.1 present");
         let mythos_idx = profiles
             .iter()
-            .position(|p| p.display_model == "claude-mythos-5")
-            .expect("mythos-5 present");
+            .position(|p| p.display_model == "claude-mythos-5-1")
+            .expect("mythos-5.1 present");
         assert_eq!(mythos_idx, fable_idx + 1);
     }
 
@@ -1356,7 +1377,7 @@ mod tests {
         );
 
         assert_eq!(profile.profile_name, "anthropic");
-        // 14 entries after claude-mythos-5 joined the table (2.1.201).
+        // Fifteen first-party entries, including current Fable/Mythos 5.1.
         assert_eq!(profile.models.len(), 15);
         assert!(profile
             .models

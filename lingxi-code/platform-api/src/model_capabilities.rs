@@ -8,7 +8,7 @@
 //! claude-opus-4-8 => [effort, max_effort, xhigh_effort, adaptive_thinking,
 //!                     mid_conv_system, context_management, fast_mode, lean_prompt]
 //! claude-opus-5   => [... , lean_prompt, refusal_fallback, opus_5_prompt_bundle]
-//! claude-fable-5  => [... , lean_prompt, fable_5_mitigations, refusal_fallback]
+//! claude-fable-5-1 => [... , lean_prompt, fable_5_mitigations, refusal_fallback]
 //! ```
 //!
 //! WHY THIS EXISTS. The port decided "does this model take the lean system
@@ -140,7 +140,7 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "refusal_fallback",
             "opus_5_prompt_bundle",
         ],
-        "claude-fable-5" => &[
+        "claude-fable-5-1" | "claude-mythos-5-1" => &[
             "effort",
             "max_effort",
             "xhigh_effort",
@@ -152,11 +152,6 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "fable_5_mitigations",
             "refusal_fallback",
         ],
-        // Present in the table with NO capabilities. The oracle's lean-prompt
-        // consumer special-cases it BY NAME (`|| t === "claude-mythos-5"`)
-        // precisely because it lacks the capability but must still take the
-        // non-standard branch — so do not "fix" this to include lean_prompt.
-        "claude-mythos-5" => &[],
         _ => &[],
     }
 }
@@ -169,8 +164,8 @@ const KNOWN_MODEL_IDS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
-    "claude-fable-5",
-    "claude-mythos-5",
+    "claude-fable-5-1",
+    "claude-mythos-5-1",
 ];
 
 fn known_wrapper_suffix(suffix: &str) -> bool {
@@ -283,7 +278,7 @@ pub fn prompt_profile_for(model_id: &str) -> PromptProfile {
     if !canonical.starts_with("claude-") {
         return PromptProfile::FullHarness;
     }
-    if has_capability(&canonical, ModelCapability::LeanPrompt) || canonical == "claude-mythos-5" {
+    if has_capability(&canonical, ModelCapability::LeanPrompt) {
         PromptProfile::ClaudeLean
     } else {
         PromptProfile::ClaudeStandard
@@ -333,8 +328,8 @@ pub fn initialization_capabilities_for(model_id: &str) -> ModelInitializationCap
             | "claude-opus-4-7"
             | "claude-opus-4-8"
             | "claude-opus-5"
-            | "claude-fable-5"
-            | "claude-mythos-5"
+            | "claude-fable-5-1"
+            | "claude-mythos-5-1"
     );
     ModelInitializationCapabilities {
         supports_effort,
@@ -350,19 +345,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lean_prompt_models_match_the_oracle_table() {
-        for id in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+    fn current_lean_prompt_models_match_the_capability_table() {
+        for id in [
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+        ] {
             assert!(
                 has_capability(id, ModelCapability::LeanPrompt),
                 "{id} must have lean_prompt"
             );
         }
-        for id in [
-            "claude-opus-4-5",
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-mythos-5",
-        ] {
+        for id in ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"] {
             assert!(
                 !has_capability(id, ModelCapability::LeanPrompt),
                 "{id} must NOT have lean_prompt"
@@ -394,7 +389,7 @@ mod tests {
     #[test]
     fn fable_5_carries_its_mitigations() {
         assert!(has_capability(
-            "claude-fable-5",
+            "claude-fable-5-1",
             ModelCapability::Fable5Mitigations
         ));
         assert!(!has_capability(
@@ -456,7 +451,10 @@ mod tests {
         assert!(has_capability("claude-opus-4-8", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-5", ModelCapability::FastMode));
         // fable-5's list deliberately omits fast_mode.
-        assert!(!has_capability("claude-fable-5", ModelCapability::FastMode));
+        assert!(!has_capability(
+            "claude-fable-5-1",
+            ModelCapability::FastMode
+        ));
     }
 
     #[test]
@@ -502,7 +500,7 @@ mod tests {
             );
             assert!(has_capability(id, ModelCapability::FastMode), "{id}");
         }
-        for id in ["claude-sonnet-5", "claude-fable-5", "gpt-5.5"] {
+        for id in ["claude-sonnet-5", "claude-fable-5-1", "gpt-5.5"] {
             assert!(
                 !initialization_capabilities_for(id).supports_fast_mode,
                 "{id}"

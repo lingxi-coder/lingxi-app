@@ -1483,8 +1483,8 @@ mod tests {
         // fable/mythos-class session models name none of haiku/sonnet/opus →
         // obm true → the "opus" alias (Yyl).
         for session in [
-            "claude-fable-5",
-            "claude-mythos-5-20260101",
+            "claude-fable-5-1",
+            "claude-mythos-5-1-20260901",
             "CLAUDE-FABLE-5[1m]",
         ] {
             assert!(
@@ -1534,7 +1534,7 @@ mod tests {
             let _p = EnvGuard::set(var, "1");
             assert!(
                 matches!(
-                    resolve_builtin_explore_model(&def, "claude-fable-5", true),
+                    resolve_builtin_explore_model(&def, "claude-fable-5-1", true),
                     AgentModel::Inherit
                 ),
                 "{var} → inherit"
@@ -1565,7 +1565,7 @@ mod tests {
             .find(|d| d.agent_type == "Plan")
             .unwrap();
         assert!(matches!(
-            resolve_builtin_explore_model(&plan, "claude-fable-5", true),
+            resolve_builtin_explore_model(&plan, "claude-fable-5-1", true),
             AgentModel::Inherit
         ));
         let statusline = crate::builtins::builtin_agent_definitions()
@@ -1573,7 +1573,7 @@ mod tests {
             .find(|d| d.agent_type == "statusline-setup")
             .unwrap();
         assert!(matches!(
-            resolve_builtin_explore_model(&statusline, "claude-fable-5", true),
+            resolve_builtin_explore_model(&statusline, "claude-fable-5-1", true),
             AgentModel::Alias(ref a) if a == "sonnet"
         ));
         // A USER-DEFINED agent literally named "Explore": source != built-in →
@@ -1582,7 +1582,7 @@ mod tests {
         user_explore.source = AgentSource::UserDefined;
         user_explore.model = AgentModel::Alias("sonnet".to_string());
         assert!(matches!(
-            resolve_builtin_explore_model(&user_explore, "claude-fable-5", true),
+            resolve_builtin_explore_model(&user_explore, "claude-fable-5-1", true),
             AgentModel::Alias(ref a) if a == "sonnet"
         ));
     }

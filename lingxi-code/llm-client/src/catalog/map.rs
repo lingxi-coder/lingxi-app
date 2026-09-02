@@ -54,7 +54,11 @@ pub fn to_metadata(model: &Model) -> ModelMetadata {
         attachments: model.attachment,
         temperature_control: model.temperature,
         pricing: model.cost.as_ref().map(|cost| ModelPricing {
-            billing_mode: ModelBillingMode::PerToken,
+            billing_mode: if cost.input == 0.0 && cost.output == 0.0 {
+                ModelBillingMode::Free
+            } else {
+                ModelBillingMode::PerToken
+            },
             input_per_million: Some(cost.input),
             output_per_million: Some(cost.output),
             cache_read_per_million: cost.cache_read,
@@ -92,7 +96,7 @@ pub fn to_capabilities(model: &Model) -> Capabilities {
         streaming: true,
         tools: model.tool_call,
         vision: has("image"),
-        documents: has("pdf"),
+        documents: has("pdf") || has("file"),
         reasoning: model.reasoning,
         structured_output: model.structured_output,
     }
@@ -179,6 +183,34 @@ mod tests {
         let cost = model.cost.as_ref().unwrap();
         assert!((pricing.input_per_million - cost.input).abs() < f64::EPSILON);
         assert!((pricing.output_per_million - cost.output).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zero_priced_model_is_labeled_free() {
+        let slice: ProviderSlice =
+            serde_json::from_str(include_str!("../../data/models-dev/openrouter.json")).unwrap();
+        let model = slice
+            .models
+            .get("openrouter/free")
+            .expect("official free router is present");
+
+        let metadata = to_metadata(model);
+        assert_eq!(
+            metadata.pricing.expect("published zero price").billing_mode,
+            ModelBillingMode::Free
+        );
+    }
+
+    #[test]
+    fn openrouter_file_input_maps_to_document_capability() {
+        let slice: ProviderSlice =
+            serde_json::from_str(include_str!("../../data/models-dev/openrouter.json")).unwrap();
+        let model = slice
+            .models
+            .get("anthropic/claude-fable-5.1")
+            .expect("latest Fable model is present");
+
+        assert!(to_capabilities(model).documents);
     }
 
     #[test]

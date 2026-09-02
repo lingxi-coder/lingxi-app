@@ -230,7 +230,12 @@ pub fn builtin_presets() -> BuiltinCatalog {
                     source: Some("official".to_string()),
                     ..ModelPricing::default()
                 });
-            display_pricing.billing_mode = preset.billing_mode;
+            if preset.billing_mode == ModelBillingMode::Subscription {
+                display_pricing.billing_mode = ModelBillingMode::Subscription;
+            }
+            if preset.profile_name == "openrouter" {
+                display_pricing.source = Some("official".to_string());
+            }
             if preset.billing_mode == ModelBillingMode::Subscription
                 || (preset.profile_name == "openai" && model.id.starts_with("gpt-5.6-"))
             {
@@ -345,7 +350,7 @@ mod tests {
                 .map_or(0, |p| p.models.len())
         };
         // Exact counts guard against a truncated/partial re-vendor of a slice.
-        assert_eq!(count("openrouter"), 398);
+        assert_eq!(count("openrouter"), 421);
         assert_eq!(count("deepseek"), 3);
         let deepseek = catalog
             .providers
@@ -358,15 +363,15 @@ mod tests {
         )));
         assert_eq!(count("kimi"), 10);
         assert_eq!(count("kimi-code"), 4);
-        assert_eq!(count("glm-coding"), 9);
+        assert_eq!(count("glm-coding"), 10);
         assert_eq!(count("zai"), 16);
         // OpenAI API and ChatGPT OAuth profiles intentionally share the latest
         // GPT-5.6 ids; callers qualify the profile when choosing a route.
-        assert_eq!(count("openai"), 55);
+        assert_eq!(count("openai"), 47);
         assert_eq!(count("openai-chatgpt"), 3);
-        assert_eq!(count("github-copilot"), 36);
+        assert_eq!(count("github-copilot"), 33);
         // Gemini slice vendored verbatim from models.dev (google provider).
-        assert_eq!(count("gemini"), 42);
+        assert_eq!(count("gemini"), 38);
         let openai = catalog
             .providers
             .iter()
@@ -412,6 +417,44 @@ mod tests {
                 assert_eq!(pricing.output_per_million, None);
             }
         }
+    }
+
+    #[test]
+    fn openrouter_uses_official_latest_and_free_metadata() {
+        let catalog = builtin_presets();
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.profile_name == "openrouter")
+            .expect("openrouter preset");
+        let fable = provider
+            .models
+            .iter()
+            .find(|model| model.request_model == "anthropic/claude-fable-5.1")
+            .expect("Fable 5.1 in official OpenRouter catalog");
+        assert_eq!(fable.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(fable.metadata.max_output_tokens, Some(128_000));
+        assert_eq!(
+            fable
+                .metadata
+                .pricing
+                .as_ref()
+                .and_then(|price| price.source.as_deref()),
+            Some("official")
+        );
+
+        let free = provider
+            .models
+            .iter()
+            .find(|model| model.request_model == "openrouter/free")
+            .expect("free router in official catalog");
+        assert_eq!(
+            free.metadata
+                .pricing
+                .as_ref()
+                .map(|price| price.billing_mode),
+            Some(ModelBillingMode::Free)
+        );
     }
 
     #[test]

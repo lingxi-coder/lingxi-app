@@ -994,14 +994,16 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport); // default ThinkingConfig::Adaptive
 
-        // (model, expected model-max-output-tokens) — binary YCe (v2.1.183):
-        // opus-4-8 / fable-5 → 64k default; sonnet-4-6 → 32k default.
-        // 2.1.198 pIe: sonnet-5 → 64k default (adaptive via registry capability).
+        // (model, expected model-max-output-tokens). Existing 4.x defaults stay
+        // unchanged; the current 5-series lineup exposes 128k output.
         for (model, expected_max) in [
-            ("claude-opus-4-8", 64_000u32),
+            ("claude-opus-4-6", 64_000u32),
+            ("claude-opus-4-8", 64_000),
+            ("claude-opus-5", 128_000),
             ("claude-sonnet-4-6", 32_000),
-            ("claude-sonnet-5", 64_000),
-            ("claude-fable-5", 64_000),
+            ("claude-sonnet-5", 128_000),
+            ("claude-fable-5-1", 128_000),
+            ("claude-mythos-5-1", 128_000),
         ] {
             let req = adapter
                 .build_request(model, None, None, vec![], vec![], false, None)
@@ -1178,7 +1180,7 @@ mod tests {
             req.temperature.is_none(),
             "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
-        // max_tokens still the model value (binary YCe: opus-4-8 → 64k).
+        // max_tokens still uses the model limit even when thinking is disabled.
         assert_eq!(req.max_tokens, Some(64_000));
         clear_thinking_env();
     }

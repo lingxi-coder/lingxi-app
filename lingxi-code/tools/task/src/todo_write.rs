@@ -35,7 +35,7 @@ pub const TOOL_NAME: &str = "TodoWrite";
 
 /// claude-code v2.1.183 `FWd` (binary offset 199291572): the SHORT
 /// TodoWrite tool prompt selected by the `Dh` gate for new models
-/// (claude-opus-4-8 / claude-fable-5 / claude-mythos-5) and whenever
+/// (claude-opus-4-8 / claude-fable-5-1 / claude-mythos-5-1) and whenever
 /// `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy. Byte-exact.
 pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n- Send the full list each call; it replaces the previous one.\n- Keep one item `in_progress` at a time and mark it `completed` when done.";
 
@@ -1111,7 +1111,7 @@ mod tests {
                 );
             }
             // UWu == false ⇒ short FWd. opus-4-8 is OUTSIDE UWu's 4-0..4-7 list.
-            for new_model in ["claude-opus-4-8", "claude-fable-5", "claude-mythos-5"] {
+            for new_model in ["claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5-1"] {
                 assert_eq!(
                     tool.prompt(&with_model(new_model)).await,
                     TODO_WRITE_PROMPT_SIMPLE,

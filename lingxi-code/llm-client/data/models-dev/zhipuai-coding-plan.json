@@ -1,222 +1,32 @@
 {
-  "api": "https://open.bigmodel.cn/api/coding/paas/v4",
-  "doc": "https://docs.bigmodel.cn/cn/coding-plan/overview",
+  "id": "zhipuai-coding-plan",
   "env": [
     "ZHIPU_API_KEY"
   ],
-  "id": "zhipuai-coding-plan",
+  "npm": "@ai-sdk/openai-compatible",
+  "api": "https://open.bigmodel.cn/api/coding/paas/v4",
+  "name": "Zhipu AI Coding Plan",
+  "doc": "https://docs.bigmodel.cn/cn/coding-plan/overview",
   "models": {
-    "glm-4.5-air": {
-      "attachment": false,
-      "cost": {
-        "cache_read": 0,
-        "cache_write": 0,
-        "input": 0,
-        "output": 0
-      },
-      "family": "glm-air",
-      "id": "glm-4.5-air",
-      "knowledge": "2025-04",
-      "last_updated": "2025-07-28",
-      "limit": {
-        "context": 131072,
-        "output": 98304
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "GLM-4.5-Air",
-      "open_weights": true,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2025-07-28",
-      "temperature": true,
-      "tool_call": true
-    },
-    "glm-4.6v": {
-      "attachment": true,
-      "cost": {
-        "input": 0.3,
-        "output": 0.9
-      },
-      "family": "glm",
-      "id": "glm-4.6v",
-      "knowledge": "2025-04",
-      "last_updated": "2025-12-08",
-      "limit": {
-        "context": 128000,
-        "output": 32768
-      },
-      "modalities": {
-        "input": [
-          "text",
-          "image",
-          "video"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "GLM-4.6V",
-      "open_weights": true,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2025-12-08",
-      "temperature": true,
-      "tool_call": true,
-      "description": "GLM vision model for visual reasoning, documents, and multimodal agents"
-    },
-    "glm-4.7": {
-      "attachment": false,
-      "cost": {
-        "cache_read": 0,
-        "cache_write": 0,
-        "input": 0,
-        "output": 0
-      },
-      "family": "glm",
-      "id": "glm-4.7",
-      "interleaved": {
-        "field": "reasoning_content"
-      },
-      "knowledge": "2025-04",
-      "last_updated": "2025-12-22",
-      "limit": {
-        "context": 204800,
-        "output": 131072
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "GLM-4.7",
-      "open_weights": true,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2025-12-22",
-      "temperature": true,
-      "tool_call": true,
-      "description": "Flagship GLM model for hybrid reasoning, coding, and agentic engineering"
-    },
-    "glm-5-turbo": {
-      "attachment": false,
-      "cost": {
-        "cache_read": 0,
-        "cache_write": 0,
-        "input": 0,
-        "output": 0
-      },
-      "family": "glm",
-      "id": "glm-5-turbo",
-      "interleaved": {
-        "field": "reasoning_content"
-      },
-      "last_updated": "2026-03-16",
-      "limit": {
-        "context": 200000,
-        "output": 131072
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "GLM-5-Turbo",
-      "open_weights": false,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2026-03-16",
-      "structured_output": true,
-      "temperature": true,
-      "tool_call": true,
-      "description": "Efficient GLM model for fast reasoning, coding, and agent workflows"
-    },
-    "glm-5.1": {
-      "attachment": false,
-      "cost": {
-        "cache_read": 0,
-        "cache_write": 0,
-        "input": 0,
-        "output": 0
-      },
-      "family": "glm",
-      "id": "glm-5.1",
-      "interleaved": {
-        "field": "reasoning_content"
-      },
-      "last_updated": "2026-03-27",
-      "limit": {
-        "context": 200000,
-        "output": 131072
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "GLM-5.1",
-      "open_weights": false,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2026-03-27",
-      "structured_output": true,
-      "temperature": true,
-      "tool_call": true,
-      "description": "Flagship GLM model for hybrid reasoning, coding, and agentic engineering"
-    },
     "glm-5v-turbo": {
-      "attachment": true,
-      "cost": {
-        "cache_read": 0,
-        "cache_write": 0,
-        "input": 0,
-        "output": 0
-      },
-      "family": "glm",
       "id": "glm-5v-turbo",
+      "name": "GLM-5V-Turbo",
+      "description": "GLM vision model for visual reasoning, documents, and multimodal agents",
+      "family": "glm",
+      "attachment": true,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        }
+      ],
+      "tool_call": true,
       "interleaved": {
         "field": "reasoning_content"
       },
+      "temperature": true,
+      "release_date": "2026-04-01",
       "last_updated": "2026-04-01",
-      "limit": {
-        "context": 200000,
-        "output": 131072
-      },
       "modalities": {
         "input": [
           "text",
@@ -228,18 +38,17 @@
           "text"
         ]
       },
-      "name": "GLM-5V-Turbo",
       "open_weights": false,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        }
-      ],
-      "release_date": "2026-04-01",
-      "temperature": true,
-      "tool_call": true,
-      "description": "GLM vision model for visual reasoning, documents, and multimodal agents"
+      "limit": {
+        "context": 200000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
     },
     "glm-5.3": {
       "id": "glm-5.3",
@@ -274,7 +83,7 @@
           "text"
         ]
       },
-      "open_weights": false,
+      "open_weights": true,
       "limit": {
         "context": 1000000,
         "output": 131072
@@ -286,10 +95,50 @@
         "cache_write": 0
       }
     },
-    "glm-5.2": {
-      "id": "glm-5.2",
-      "name": "GLM-5.2",
-      "description": "Open flagship GLM for long-horizon coding agents and million-token context work",
+    "glm-5.1": {
+      "id": "glm-5.1",
+      "name": "GLM-5.1",
+      "description": "Flagship GLM model for hybrid reasoning, coding, and agentic engineering",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "structured_output": true,
+      "temperature": true,
+      "release_date": "2026-03-27",
+      "last_updated": "2026-03-27",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": false,
+      "limit": {
+        "context": 200000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
+    },
+    "glm-5.3-highspeed": {
+      "id": "glm-5.3-highspeed",
+      "name": "GLM-5.3 Highspeed",
+      "description": "Flagship GLM model for long-horizon coding, agents, and complex project delivery",
       "family": "glm",
       "attachment": false,
       "reasoning": true,
@@ -297,6 +146,7 @@
         {
           "type": "effort",
           "values": [
+            "low",
             "high",
             "max"
           ]
@@ -308,8 +158,8 @@
       },
       "structured_output": true,
       "temperature": true,
-      "release_date": "2026-06-13",
-      "last_updated": "2026-06-13",
+      "release_date": "2026-08-14",
+      "last_updated": "2026-08-14",
       "modalities": {
         "input": [
           "text"
@@ -319,6 +169,54 @@
         ]
       },
       "open_weights": true,
+      "limit": {
+        "context": 1000000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
+    },
+    "glm-5.3-flash": {
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3-Flash",
+      "description": "Native multimodal GLM model for efficient coding and long-horizon agent tasks",
+      "family": "glm",
+      "attachment": true,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "low",
+            "high",
+            "max"
+          ]
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "structured_output": true,
+      "temperature": true,
+      "release_date": "2026-08-26",
+      "last_updated": "2026-08-26",
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "video",
+          "pdf"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": false,
       "limit": {
         "context": 1000000,
         "output": 131072
@@ -373,8 +271,167 @@
         "cache_read": 0,
         "cache_write": 0
       }
+    },
+    "glm-4.6v": {
+      "id": "glm-4.6v",
+      "name": "GLM-4.6V",
+      "description": "GLM vision model for visual reasoning, documents, and multimodal agents",
+      "family": "glm",
+      "attachment": true,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        }
+      ],
+      "tool_call": true,
+      "temperature": true,
+      "knowledge": "2025-04",
+      "release_date": "2025-12-08",
+      "last_updated": "2025-12-08",
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": true,
+      "limit": {
+        "context": 128000,
+        "output": 32768
+      },
+      "cost": {
+        "input": 0.3,
+        "output": 0.9
+      }
+    },
+    "glm-5.2": {
+      "id": "glm-5.2",
+      "name": "GLM-5.2",
+      "description": "Open flagship GLM for long-horizon coding agents and million-token context work",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "high",
+            "max"
+          ]
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "structured_output": true,
+      "temperature": true,
+      "release_date": "2026-06-13",
+      "last_updated": "2026-06-13",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": true,
+      "limit": {
+        "context": 1000000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
+    },
+    "glm-5-turbo": {
+      "id": "glm-5-turbo",
+      "name": "GLM-5-Turbo",
+      "description": "Efficient GLM model for fast reasoning, coding, and agent workflows",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "structured_output": true,
+      "temperature": true,
+      "release_date": "2026-03-16",
+      "last_updated": "2026-03-16",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": false,
+      "limit": {
+        "context": 200000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
+    },
+    "glm-4.7": {
+      "id": "glm-4.7",
+      "name": "GLM-4.7",
+      "description": "Flagship GLM model for hybrid reasoning, coding, and agentic engineering",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "temperature": true,
+      "knowledge": "2025-04",
+      "release_date": "2025-12-22",
+      "last_updated": "2025-12-22",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": true,
+      "limit": {
+        "context": 204800,
+        "output": 131072
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      }
     }
-  },
-  "name": "Zhipu AI Coding Plan",
-  "npm": "@ai-sdk/openai-compatible"
+  }
 }

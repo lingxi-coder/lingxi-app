@@ -1172,7 +1172,7 @@ pub fn reasoning_control_spec_for_model(
             } else if model.contains("sonnet-5")
                 || model.contains("opus-4-8")
                 || model.contains("opus-5")
-                || model.contains("fable-5")
+                || model.contains("fable-5-1")
             {
                 vec![
                     ReasoningSelection::Automatic,
@@ -1475,7 +1475,7 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
     match provider_id {
         "anthropic" | "builtin" => matches!(
             request_model,
-            "claude-opus-5" | "claude-fable-5" | "claude-sonnet-5" | "claude-haiku-4-5"
+            "claude-opus-5" | "claude-fable-5-1" | "claude-sonnet-5" | "claude-haiku-4-5"
         ),
         "openai" => matches!(
             request_model,
@@ -1508,14 +1508,24 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         // The profile name is "glm-coding" (catalog presets); "zhipuai-coding-plan"
         // is only the vendored slice's filename.
         "glm-coding" => request_model == "glm-5.3",
-        "openrouter" => matches!(
-            request_model,
-            "openrouter/auto"
-                | "~anthropic/claude-sonnet-latest"
-                | "~openai/gpt-latest"
-                | "~openai/gpt-mini-latest"
-                | "~google/gemini-flash-latest"
-        ),
+        "openrouter" => {
+            request_model == "openrouter/auto"
+                || request_model == "openrouter/free"
+                || request_model.starts_with('~')
+                || matches!(
+                    request_model,
+                    "cohere/north-mini-code:free"
+                        | "z-ai/glm-5.2:free"
+                        | "thinkingmachines/inkling:free"
+                        | "thinkingmachines/inkling-small:free"
+                        | "minimax/minimax-m3:free"
+                        | "minimax/minimax-m2.7:free"
+                        | "poolside/laguna-s-2.1:free"
+                        | "inclusionai/ling-3.0-flash-fin:free"
+                        | "nvidia/nemotron-3.5-lightning:free"
+                        | "nvidia/nemotron-3-ultra-550b-a55b:free"
+                )
+        }
         _ => false,
     }
 }

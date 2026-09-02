@@ -1022,7 +1022,7 @@ pub fn overage_consent_required() -> bool {
 
 /// Minimal faithful port of `Ns(so(id))` model-id normalization used by `ZA`:
 /// lowercases, drops a trailing `[1m]` context suffix, and strips any
-/// provider-prefix path segment (`anthropic/claude-fable-5` → `claude-fable-5`).
+/// provider-prefix path segment (`anthropic/claude-fable-5-1` → `claude-fable-5-1`).
 fn normalize_model_id(model_id: &str) -> String {
     let lower = model_id.trim().to_lowercase();
     let no_suffix = lower.strip_suffix("[1m]").unwrap_or(&lower);
@@ -1034,7 +1034,7 @@ fn normalize_model_id(model_id: &str) -> String {
 }
 
 /// `ZA(t)` (2.1.206 binary @213182958:
-/// `Ns(so(e))==="claude-fable-5" || KQ(e)`) — is the model the Fable model.
+/// `Ns(so(e))==="claude-fable-5-1" || KQ(e)`) — is the model the Fable model.
 /// `KQ` (binary @213182868) compares the normalized id to
 /// `ANTHROPIC_DEFAULT_FABLE_MODEL`. In THIS task's `Ucg` first guard, `ZA(t)`
 /// is ANDed with [`overage_consent_required`] (`WBe`, documented `false`), so
@@ -1043,7 +1043,7 @@ fn normalize_model_id(model_id: &str) -> String {
 #[must_use]
 pub fn is_fable_model(model_id: &str) -> bool {
     let norm = normalize_model_id(model_id);
-    if norm == "claude-fable-5" {
+    if norm == "claude-fable-5-1" {
         return true;
     }
     // KQ(e): `t = ANTHROPIC_DEFAULT_FABLE_MODEL; if(!t) return false;
@@ -2540,12 +2540,12 @@ mod tests {
 
     #[test]
     fn is_fable_model_matches_normalized_fable_id() {
-        assert!(is_fable_model("claude-fable-5"));
+        assert!(is_fable_model("claude-fable-5-1"));
         assert!(is_fable_model("Claude-Fable-5"));
-        assert!(is_fable_model("anthropic/claude-fable-5"));
-        assert!(is_fable_model("claude-fable-5[1m]"));
+        assert!(is_fable_model("anthropic/claude-fable-5-1"));
+        assert!(is_fable_model("claude-fable-5-1[1m]"));
         assert!(!is_fable_model("claude-sonnet-4-5"));
-        assert!(!is_fable_model("claude-mythos-5"));
+        assert!(!is_fable_model("claude-mythos-5-1"));
     }
 
     #[test]

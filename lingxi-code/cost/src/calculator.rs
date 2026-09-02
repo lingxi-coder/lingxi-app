@@ -456,12 +456,12 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_bills_10_50() {
-        // fable-5 uses Ypn ($10/$50) standard (no fast tier).
+    fn fable_5_1_bills_10_50() {
+        // Fable 5.1 uses $10/$50 standard pricing (no fast tier).
         let c = PricingCatalog::builtin_reference();
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
-            model: "claude-fable-5".into(),
+            model: "claude-fable-5-1".into(),
         };
         let (p, _) = c.resolve(&mr).unwrap();
         let usage = Usage {
@@ -478,12 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_fast_flag_does_not_escalate() {
-        // fable-5 has no fast tier — speed=fast must NOT rebill at $30/$150.
+    fn fable_5_1_fast_flag_does_not_escalate() {
+        // Fable 5.1 has no fast tier — speed=fast must NOT rebill at $30/$150.
         let c = PricingCatalog::builtin_reference();
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
-            model: "claude-fable-5".into(),
+            model: "claude-fable-5-1".into(),
         };
         let (p, _) = c.resolve(&mr).unwrap();
         let usage = Usage {
@@ -502,11 +502,11 @@ mod tests {
     }
 
     #[test]
-    fn mythos_5_bills_10_50() {
+    fn mythos_5_1_bills_10_50() {
         let c = PricingCatalog::builtin_reference();
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
-            model: "claude-mythos-5".into(),
+            model: "claude-mythos-5-1".into(),
         };
         let (p, _) = c.resolve(&mr).unwrap();
         let usage = Usage {

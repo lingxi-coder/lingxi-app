@@ -1486,7 +1486,7 @@ final class MockConversationSource: ConversationSource {
             "anthropic/claude-sonnet-5",
             "anthropic/claude-opus-4-8",
             "anthropic/claude-haiku-4-5",
-            "anthropic/claude-fable-5",
+            "anthropic/claude-fable-5-1",
             "openai/gpt-5.5",
             "openai/gpt-5.4",
             "deepseek/deepseek-v4-flash",

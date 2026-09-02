@@ -109,7 +109,7 @@ In code: default to writing no comments. Never write multi-paragraph docstrings 
 /// `UJh(e)` in the pinned 2.1.220 build.
 ///
 /// The final selector is profile-sensitive:
-/// - Fable 5 / Mythos 5 use `# Communicating with the user`.
+/// - Fable 5.1 / Mythos 5.1 use `# Communicating with the user`.
 /// - Opus 5 / Opus 4.8 use the single code-style sentence.
 /// - standard Claude models and LingXi's non-Claude FullHarness use
 ///   [`TEXT_OUTPUT_SECTION`].
@@ -163,7 +163,7 @@ fn anti_verbosity_section(model: &str) -> String {
 pub(crate) fn is_communicating_model(model: &str) -> bool {
     matches!(
         platform_api::model_capabilities::normalize_model_id(model).as_str(),
-        "claude-fable-5" | "claude-mythos-5"
+        "claude-fable-5-1" | "claude-mythos-5-1"
     )
 }
 
@@ -373,7 +373,7 @@ fn has_opus_5_prompt_bundle(model: &str) -> bool {
 const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
 
 /// The Fable-only identity paragraph in the pinned 2.1.220 prompt.
-const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5, the first model in Anthropic's new Claude 5 family and part of a new Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5 and Claude Mythos 5 share the same underlying model. Claude Fable 5 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5 is available without those measures to only approved organizations. Fable 5 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/news/claude-fable-5-mythos-5 for more information.";
+const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5.1, the newest model in Anthropic's Claude 5 family and part of the Mythos-class tier. Claude Fable 5.1 and Claude Mythos 5.1 share the same capabilities. Claude Fable 5.1 is the most advanced generally available Claude model, while Claude Mythos 5.1 is available only to approved Project Glasswing organizations. For more information, see https://platform.claude.com/docs/en/models/fable-5-1/overview.";
 
 /// SP-10 — `k9T` @**297083649** (also in 2.1.220 as `lMy` @237498803, so this is
 /// a long-standing port gap, not 2.1.238 drift): the `tool_param_json` slot.
@@ -441,7 +441,7 @@ fn act_dont_rederive_enabled() -> bool {
 /// `# Using your tools`, `# Tone and style`, and the long opening.
 ///
 /// This port previously implemented only the long arm, so a session on
-/// `claude-opus-5` / `claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`
+/// `claude-opus-5` / `claude-opus-4-8` / `claude-fable-5-1` / `claude-mythos-5-1`
 /// received a materially different system prompt from the oracle's.
 fn lean_body(output_style_active: bool, model: &str) -> String {
     let clause = if output_style_active {
@@ -692,7 +692,7 @@ pub fn post_context_sections(model: &str, output_style_active: bool) -> Vec<Stri
         ));
     } else if matches!(
         platform_api::model_capabilities::normalize_model_id(model).as_str(),
-        "claude-fable-5" | "claude-mythos-5"
+        "claude-fable-5-1" | "claude-mythos-5-1"
     ) {
         sections.push(FABLE_MYTHOS_MITIGATIONS.to_string());
     }
@@ -788,7 +788,7 @@ mod tests {
     /// this list is the registry's, not a name pattern.
     #[test]
     fn all_lean_capability_models_take_the_lean_arm() {
-        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5-1"] {
             let p = format(false, true, &[], true, false, false, m, false);
             assert!(p.contains("# Harness"), "{m} must take the lean arm");
         }
@@ -814,7 +814,7 @@ mod tests {
             true,
             false,
             false,
-            "claude-fable-5",
+            "claude-fable-5-1",
             false,
         );
         assert!(
@@ -830,7 +830,7 @@ mod tests {
             true,
             false,
             false,
-            "claude-fable-5",
+            "claude-fable-5-1",
             false,
         );
         std::env::remove_var("LINGXI_TOOL_PARAM_STRICTNESS");
@@ -853,9 +853,9 @@ mod tests {
     fn the_silent_harbor_arm_needs_the_flag_and_the_model() {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(!tool_param_json_enabled("claude-fable-5"), "flag unset");
+        assert!(!tool_param_json_enabled("claude-fable-5-1"), "flag unset");
         std::env::set_var("LINGXI_SILENT_HARBOR", "1");
-        let fable = tool_param_json_enabled("claude-fable-5");
+        let fable = tool_param_json_enabled("claude-fable-5-1");
         let opus47 = tool_param_json_enabled("claude-opus-4-7");
         std::env::remove_var("LINGXI_SILENT_HARBOR");
         assert!(fable, "a Fable-mitigations model takes the arm");
@@ -892,7 +892,7 @@ mod tests {
         assert!(o5.contains("# Delivering work"), "opus-5 must get it");
         assert!(o5.contains("# Corrections"), "opus-5 must get it");
         // Lean, but WITHOUT the opus-5 bundle:
-        for m in ["claude-opus-4-8", "claude-fable-5"] {
+        for m in ["claude-opus-4-8", "claude-fable-5-1"] {
             let p = post_context_sections(m, false).join("\n\n");
             assert!(!p.contains("# Delivering work"), "{m} must NOT get it");
             assert!(!p.contains("# Corrections"), "{m} must NOT get it");
@@ -913,7 +913,7 @@ mod tests {
         let tail = "If what you find contradicts how it was described";
         let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
         assert!(!o5.contains(tail), "opus-5 gets the SHORT form:\n{o5}");
-        for m in ["claude-opus-4-8", "claude-fable-5"] {
+        for m in ["claude-opus-4-8", "claude-fable-5-1"] {
             let p = format(false, true, &[], true, false, false, m, false);
             assert!(p.contains(tail), "{m} must KEEP the clause");
         }
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn communicating_model_gate_is_the_fable_mythos_lean_pair() {
-        for m in ["claude-fable-5", "claude-mythos-5"] {
+        for m in ["claude-fable-5-1", "claude-mythos-5-1"] {
             assert!(is_communicating_model(m), "communicating: {m}");
         }
         for m in [
@@ -1283,7 +1283,7 @@ mod tests {
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
             "gpt-4o",
-            "vendor-compat-claude-fable-5",
+            "vendor-compat-claude-fable-5-1",
         ] {
             assert!(!is_communicating_model(m), "not communicating: {m}");
         }
@@ -1293,7 +1293,7 @@ mod tests {
     fn communicating_section_r_variant_byte_lock() {
         // Fable-5 → r = true: short first sentence + the extra final-message
         // paragraph. Heading followed by a BLANK line.
-        let s = anti_verbosity_section("claude-fable-5");
+        let s = anti_verbosity_section("claude-fable-5-1");
         assert!(s.starts_with("# Communicating with the user\n\nYour text output is what the user reads; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away"));
         // r-only paragraph present; 2.1.238 spells the list with commas, not
         // em-dashes.

@@ -244,7 +244,7 @@ enum Presets {
     /// `traits::is_curated_model`'s "anthropic" arm, `provider_default_model`
     /// first.
     static let llm: [ProviderPreset] = [
-        .init(id: "anthropic",  name: "Anthropic",  sub: "Claude API",     color: Color(srgb: 0.9351, 0.5079, 0.4015), defaultUrl: "https://api.anthropic.com",                       keyPrefix: "sk-ant-",  models: ["claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5"]),
+        .init(id: "anthropic",  name: "Anthropic",  sub: "Claude API",     color: Color(srgb: 0.9351, 0.5079, 0.4015), defaultUrl: "https://api.anthropic.com",                       keyPrefix: "sk-ant-",  models: ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"]),
         .init(id: "openai",     name: "OpenAI",     sub: "ChatGPT API",    color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://api.openai.com/v1",                       keyPrefix: "sk-proj-", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
         .init(id: "openai-chatgpt", name: "ChatGPT", sub: "ChatGPT OAuth", color: Color(srgb: 0.1326, 0.7261, 0.5350), defaultUrl: "https://chatgpt.com/backend-api/codex", keyPrefix: "", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
         .init(id: "google",     name: "Google",     sub: "Gemini API",     color: Color(srgb: 0.3503, 0.6649, 0.9741), defaultUrl: "https://generativelanguage.googleapis.com/v1",    keyPrefix: "AIza",     models: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview"]),
@@ -252,7 +252,28 @@ enum Presets {
         .init(id: "kimi",       name: "Kimi",       sub: "Moonshot AI",    color: Color(srgb: 0.4340, 0.5865, 1.0000), defaultUrl: "https://api.moonshot.cn/v1",                    keyPrefix: "sk-",      models: ["kimi-k3"]),
         .init(id: "kimi-code",  name: "Kimi Code",  sub: String(localized: "settings_provider_preset_kimi_code_sub"),      color: Color(srgb: 0.2784, 0.6980, 0.9490), defaultUrl: "https://api.kimi.com/coding/v1",                 keyPrefix: "sk-",      models: ["k3"]),
         .init(id: "qwen",       name: String(localized: "settings_provider_preset_qwen_name"),     sub: "DashScope",      color: Color(srgb: 0.8826, 0.6256, 0.2074), defaultUrl: "https://dashscope.aliyuncs.com/v1",               keyPrefix: "sk-",      models: ["qwen-max", "qwen-plus", "qwen-turbo"]),
-        .init(id: "openrouter", name: "OpenRouter", sub: String(localized: "settings_provider_preset_openrouter_sub"),      color: Color(srgb: 0.0000, 0.7441, 0.7802), defaultUrl: "https://openrouter.ai/api/v1",                    keyPrefix: "sk-or-",   models: ["openrouter/auto", "~anthropic/claude-sonnet-latest", "~openai/gpt-latest", "~openai/gpt-mini-latest", "~google/gemini-flash-latest"]),
+        .init(
+            id: "openrouter",
+            name: "OpenRouter",
+            sub: String(localized: "settings_provider_preset_openrouter_sub"),
+            color: Color(srgb: 0.0000, 0.7441, 0.7802),
+            defaultUrl: "https://openrouter.ai/api/v1",
+            keyPrefix: "sk-or-",
+            models: [
+                "openrouter/auto", "openrouter/free",
+                "~anthropic/claude-fable-latest", "~anthropic/claude-opus-latest",
+                "~anthropic/claude-sonnet-latest", "~openai/gpt-latest",
+                "~openai/gpt-mini-latest", "~google/gemini-pro-latest",
+                "~google/gemini-flash-latest", "~deepseek/deepseek-v4-flash-latest",
+                "~moonshotai/kimi-latest", "~z-ai/glm-latest", "~z-ai/glm-flash-latest",
+                "~x-ai/grok-latest",
+                "nvidia/nemotron-3-ultra-550b-a55b:free", "minimax/minimax-m3:free",
+                "poolside/laguna-s-2.1:free", "nvidia/nemotron-3.5-lightning:free",
+                "inclusionai/ling-3.0-flash-fin:free", "cohere/north-mini-code:free",
+                "z-ai/glm-5.2:free", "thinkingmachines/inkling:free",
+                "thinkingmachines/inkling-small:free", "minimax/minimax-m2.7:free",
+            ]
+        ),
         .init(id: "custom",     name: String(localized: "settings_provider_preset_custom_name"),       sub: String(localized: "settings_provider_preset_custom_sub"), color: Color(srgb: 0.5728, 0.6177, 0.7466), defaultUrl: "https://",                                       keyPrefix: "",         models: []),
     ]
 

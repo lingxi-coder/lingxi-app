@@ -722,6 +722,24 @@ mod next_step_tests {
     }
 
     #[test]
+    fn openrouter_overflow_message_adjusts_max_tokens() {
+        let mut state = RetryState::default();
+        let ctl = ctl_default();
+        let msg = "This endpoint's maximum context length is 256000 tokens. However, you requested about 260085 tokens (10691 of text input, 24791 of tool input, 224603 in the output). Please reduce the length of either one.";
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::InvalidRequest {
+                message: msg.to_string(),
+            },
+            0,
+        );
+
+        assert_eq!(step, DriveStep::AdjustMaxTokens(219_518));
+        assert_eq!(state.attempt, 0);
+    }
+
+    #[test]
     fn invalid_request_non_overflow_is_terminal() {
         let mut state = RetryState::default();
         let ctl = ctl_default();

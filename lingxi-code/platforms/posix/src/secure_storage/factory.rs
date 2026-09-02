@@ -1,9 +1,10 @@
 //! Platform-default [`SecureStorage`] factory.
 //!
-//! On macOS, tries [`super::macos::MacOsKeychainStorage`] first. On any
-//! Keychain Services runtime availability error (for example a locked login
-//! keychain or denied authorization), logs a
-//! warning and falls back to [`super::plaintext::PlainTextSecureStorage`].
+//! On macOS, requires the bundled credential broker app and does not fall back
+//! automatically. Unsigned/mispackaged persistent clients fail closed rather
+//! than writing secrets to plaintext or fallback memory. The explicitly
+//! isolated packaged bridge policy remains process-local by design and has no
+//! persistent broker authority.
 //!
 //! On Linux, tries [`super::linux::LinuxSecretStorage`] (the `libsecret`
 //! `secret-tool` CLI) first, falling back to plaintext on init or runtime
@@ -444,16 +445,9 @@ pub async fn plaintext_secure_storage(
 ///
 /// `user` is the native keychain account name. `config_dir` is the `LingXi`
 /// configuration directory and `plaintext_path` is its existing OAuth JSON
-/// path. The owner-only provider-key fallback is deliberately stored in a
-/// sibling directory ending in `.d`, so it never overwrites the OAuth JSON.
-///
-/// Native storage remains preferred. Availability failures that happen while
-/// reading or writing (not just while constructing the native backend) switch
-/// this handle to the same file-backed fallback every host can reopen.
-///
-/// Fallback initialization is lazy: a healthy native store never requires the
-/// sidecar directory to be writable. Any later sidecar access failure is
-/// returned by the corresponding storage operation.
+/// path. On macOS the bundled credential broker is mandatory; only the
+/// explicit [`CredentialStoragePolicy::PlainTextFixture`] test path may bypass
+/// it. Linux keeps the existing lazy fallback behavior.
 pub async fn secure_storage_for_policy(
     user: String,
     config_dir: PathBuf,
@@ -463,6 +457,24 @@ pub async fn secure_storage_for_policy(
     if policy == CredentialStoragePolicy::PlainTextFixture {
         return plaintext_secure_storage(plaintext_path).await;
     }
+    #[cfg(target_os = "macos")]
+    {
+        if policy == CredentialStoragePolicy::NativeOrMemory {
+            // Packaged bridge-server uses this explicit isolation policy. Its
+            // active provider credential arrives once over stdin and remains
+            // process-local; the sidecar never receives broker authority.
+            return Ok(Arc::new(InMemorySecureStorage::new()));
+        }
+        let default_dir = default_lingxi_dir();
+        return super::macos::MacOsKeychainStorage::new(
+            user.clone(),
+            config_dir.clone(),
+            default_dir,
+            String::new(),
+        )
+        .map(|keychain| Arc::new(keychain) as Arc<dyn SecureStorage>);
+    }
+    #[cfg(not(target_os = "macos"))]
     let fallback: Arc<dyn SecureStorage> = match policy {
         CredentialStoragePolicy::NativePreferred => Arc::new(DeferredPlainTextStorage::new(
             fallback_directory(&plaintext_path),
@@ -470,31 +482,6 @@ pub async fn secure_storage_for_policy(
         CredentialStoragePolicy::NativeOrMemory => Arc::new(InMemorySecureStorage::new()),
         CredentialStoragePolicy::PlainTextFixture => unreachable!("handled above"),
     };
-    #[cfg(target_os = "macos")]
-    {
-        let default_dir = default_lingxi_dir();
-        match super::macos::MacOsKeychainStorage::new(
-            user.clone(),
-            config_dir.clone(),
-            default_dir,
-            String::new(),
-        ) {
-            Ok(keychain) => {
-                return Ok(Arc::new(RuntimeFallbackStorage::new(
-                    Arc::new(keychain),
-                    fallback,
-                )));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "lingxi::secure_storage",
-                    error = %e,
-                    policy = ?policy,
-                    "Warning: native credential storage unavailable during init."
-                );
-            }
-        }
-    }
     #[cfg(target_os = "linux")]
     {
         // Realizes claude-code's `// TODO: add libsecret support for Linux`:
@@ -537,7 +524,10 @@ pub async fn secure_storage_for_policy(
         let _ = &user;
         let _ = &config_dir;
     }
-    Ok(fallback)
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(fallback)
+    }
 }
 
 /// Build the shared POSIX credential store with the production
@@ -739,12 +729,30 @@ mod tests {
     async fn factory_returns_storage_handle() {
         let dir = tempdir().expect("tempdir");
         let plain = dir.path().join("creds-base");
-        let storage = secure_storage_for_platform("test".into(), dir.path().to_path_buf(), plain)
-            .await
-            .expect("factory");
-        // is_encrypted is true on macOS keychain, false on plaintext — we
-        // only check that the trait method dispatches.
+        let result = secure_storage_for_policy(
+            "test".into(),
+            dir.path().to_path_buf(),
+            plain,
+            CredentialStoragePolicy::PlainTextFixture,
+        )
+        .await;
+        let storage = result.expect("factory");
         let _ = storage.is_encrypted();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn packaged_bridge_policy_is_explicitly_process_local() {
+        let dir = tempdir().expect("tempdir");
+        let storage = secure_storage_for_policy(
+            "test".into(),
+            dir.path().to_path_buf(),
+            dir.path().join("creds-base"),
+            CredentialStoragePolicy::NativeOrMemory,
+        )
+        .await
+        .expect("isolated bridge storage");
+        assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
     }
 
     #[test]

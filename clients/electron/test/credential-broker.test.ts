@@ -1,0 +1,201 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import {
+  createMacCredentialBrokerClient,
+  resolveProviderTestCredential,
+  resolveSessionLaunchCredentials,
+} from '../src/main/credential-broker';
+
+test('session launch resolves only the current provider from the broker', async () => {
+  const resolved: string[] = [];
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async (request) => {
+        if ((request as { op: string }).op === 'health') {
+          return { ok: true, protocol_version: 1, build_version: 'test' };
+        }
+        if ((request as { op: string }).op === 'retrieve') {
+          resolved.push((request as { account: string }).account);
+          return {
+            ok: true,
+            protocol_version: 1,
+            present: true,
+            payload: 'or-secret',
+          };
+        }
+        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+      },
+    },
+  });
+
+  const launch = await resolveSessionLaunchCredentials('openrouter/openai/gpt-5.4', {
+    credentialBroker: broker,
+    environment: {
+      OPENAI_API_KEY: 'must-not-be-read',
+      OPENROUTER_API_KEY: '',
+    },
+  });
+
+  assert.deepEqual(resolved, ['openrouter']);
+  assert.deepEqual(launch, {
+    providerCredentials: { openrouter: 'or-secret' },
+  });
+});
+
+test('session launch resolves a normalized custom provider prefix', async () => {
+  const resolved: string[] = [];
+  const launch = await resolveSessionLaunchCredentials('my-provider/model-a', {
+    environment: {},
+    credentialBroker: {
+      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+      listStatus: async () => [],
+      preview: async () => ({ providerId: 'my-provider', configured: true, maskedValue: '••••cret' }),
+      resolve: async (providerId) => { resolved.push(providerId); return 'custom-secret'; },
+      set: async () => ({ providerId: 'my-provider', configured: true }),
+      delete: async () => undefined,
+    },
+  });
+  assert.deepEqual(resolved, ['my-provider']);
+  assert.deepEqual(launch, { providerCredentials: { 'my-provider': 'custom-secret' } });
+});
+
+test('session launch prefers environment credentials and maps Claude references to Anthropic', async () => {
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async (request) => {
+        if ((request as { op: string }).op === 'health') {
+          return { ok: true, protocol_version: 1, build_version: 'test' };
+        }
+        if ((request as { op: string }).op === 'retrieve') {
+          throw new Error('broker resolve should not run when the env already provides the key');
+        }
+        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+      },
+    },
+  });
+
+  const builtIn = await resolveSessionLaunchCredentials('builtin/claude-sonnet-5', {
+    credentialBroker: broker,
+    environment: { ANTHROPIC_API_KEY: 'env-anthropic' },
+  });
+  const unqualified = await resolveSessionLaunchCredentials('claude-opus-5', {
+    credentialBroker: broker,
+    environment: { ANTHROPIC_API_KEY: 'env-anthropic' },
+  });
+
+  assert.deepEqual(builtIn, { apiKey: 'env-anthropic' });
+  assert.deepEqual(unqualified, { apiKey: 'env-anthropic' });
+});
+
+test('provider connection tests resolve only the selected broker credential', async () => {
+  const resolved: string[] = [];
+  const broker = {
+    health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+    listStatus: async () => [],
+    preview: async (providerId: string) => ({ providerId, configured: true }),
+    resolve: async (providerId: string) => {
+      resolved.push(providerId);
+      return 'stored-test-key';
+    },
+    set: async (providerId: string) => ({ providerId, configured: true }),
+    delete: async () => undefined,
+  };
+
+  assert.equal(
+    await resolveProviderTestCredential('deepseek', undefined, broker),
+    'stored-test-key',
+  );
+  assert.deepEqual(resolved, ['deepseek']);
+  assert.equal(
+    await resolveProviderTestCredential('deepseek', 'draft-test-key', broker),
+    'draft-test-key',
+  );
+  assert.deepEqual(resolved, ['deepseek']);
+});
+
+test('provider status and preview use the channel-scoped generic broker protocol', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = createMacCredentialBrokerClient({
+    isPackaged: true,
+    transport: {
+      request: async (request) => {
+        requests.push(request);
+        if (request.op === 'health') {
+          return { ok: true, protocol_version: 1, build_version: 'test' };
+        }
+        if (request.op === 'list') {
+          return { ok: true, protocol_version: 1, accounts: ['deepseek'] };
+        }
+        if (request.op === 'preview') {
+          return { ok: true, protocol_version: 1, present: true, payload: '••••abcd' };
+        }
+        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+      },
+    },
+  });
+
+  assert.deepEqual(await broker!.listStatus(['deepseek', 'openai']), [
+    { providerId: 'deepseek', configured: true },
+    { providerId: 'openai', configured: false },
+  ]);
+  assert.deepEqual(await broker!.preview('deepseek'), {
+    providerId: 'deepseek',
+    configured: true,
+    maskedValue: '••••abcd',
+  });
+  assert.equal(requests[1]?.['service'], 'com.lingxi.provider-credentials.v1');
+  assert.equal(requests[2]?.['service'], 'com.lingxi.provider-credentials.v1');
+  assert.equal(requests[2]?.['account'], 'deepseek');
+});
+
+test('broker protocol mismatch fails with an upgrade instruction', async () => {
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async () => ({ ok: true, protocol_version: 2, build_version: 'future' }),
+    },
+  });
+  await assert.rejects(
+    broker!.health(),
+    /protocol mismatch.*upgrade LingXi Desktop/i,
+  );
+});
+
+test('every broker response is checked for protocol compatibility', async () => {
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async (request) => request.op === 'health'
+        ? { ok: true, protocol_version: 1, build_version: 'test' }
+        : { ok: true, protocol_version: 2, accounts: [] },
+    },
+  });
+
+  await assert.rejects(
+    () => broker!.listStatus(['openai']),
+    /protocol mismatch.*upgrade LingXi Desktop/i,
+  );
+});
+
+test('preview rejects an unmasked broker payload before it can reach the renderer', async () => {
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async (request) => request.op === 'health'
+        ? { ok: true, protocol_version: 1, build_version: 'test' }
+        : { ok: true, protocol_version: 1, present: true, payload: 'sk-full-secret' },
+    },
+  });
+
+  await assert.rejects(
+    () => broker!.preview('openai'),
+    /invalid masked preview/i,
+  );
+});
+
+test('unpackaged macOS refuses to execute an unverified helper path', async () => {
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin',
+    isPackaged: false,
+    binaryPath: '/tmp/untrusted/lingxi-credential-client',
+  });
+  await assert.rejects(broker!.health(), /Apple Development signed package/);
+});

@@ -18,6 +18,11 @@
 # 消失，那处真读取就变得完全不可见**——而门只会打印「baseline 少了一条」，
 # 一个看起来像「修好了」的信号。改 uds_inbox.rs 的测试时，请一并确认 :123
 # 那处读取仍被某条规则看着。
+G1	.github/workflows/desktop-packages.yml	LINGXI
+G1	.github/workflows/desktop-packages.yml	LingXi
+G1	.github/workflows/lingxi-release.yml	LINGXI
+G1	.github/workflows/lingxi-release.yml	LingXi
+G1	.github/workflows/lingxi-release.yml	\.lingxi
 G1	assets/brand/lingxi-app-icon-mobius.svg	LingXi
 G1	clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c	LINGXI_
 G1	clients/android/app/src/main/cpp/proot_lingxi_network_policy.c	LINGXI_
@@ -39,6 +44,7 @@ G1	clients/electron/scripts/packaged-app-smoke.mjs	LINGXI_
 G1	clients/electron/scripts/packaged-app-smoke.mjs	\.claude(?![A-Za-z0-9_.\-])
 G1	clients/electron/scripts/packaged-app-smoke.mjs	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/electron/scripts/packaged-sidecar-smoke.mjs	LINGXI_
+G1	clients/electron/scripts/verify-package.mjs	LINGXI_
 G1	clients/electron/src/main/bridge.ts	LINGXI_
 G1	clients/electron/src/main/file-search.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/electron/src/main/host-utils.ts	CLAUDE\.local\.md
@@ -530,6 +536,12 @@ G1	lingxi-code/platforms/common/src/worktree_create_guard.rs	\.lingxi
 G1	lingxi-code/platforms/common/src/worktree_include.rs	\.lingxi
 G1	lingxi-code/platforms/common/tests/mcp_sse_test.rs	LingXi
 G1	lingxi-code/platforms/ios-ish-runtime/src/lib.rs	\.lingxi
+G1	lingxi-code/platforms/macos-credential-broker/BrokerCommon.swift	LingXi
+G1	lingxi-code/platforms/macos-credential-broker/BrokerCommon.swift	\.lingxi
+G1	lingxi-code/platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift	LingXi
+G1	lingxi-code/platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift	\.lingxi
+G1	lingxi-code/platforms/macos-credential-broker/CredentialBrokerMain.swift	\.lingxi
+G1	lingxi-code/platforms/macos-credential-broker/CredentialClientMain.swift	LingXi
 G1	lingxi-code/platforms/posix/src/mcp.rs	LingXi
 G1	lingxi-code/platforms/posix/src/process/runner.rs	LINGXI
 G1	lingxi-code/platforms/posix/src/process/wrap.rs	LINGXI
@@ -919,6 +931,7 @@ G3	clients/electron/test/fixtures/audio-request-main.tsx	.lingxi
 G3	clients/electron/test/fixtures/microphone-permission-main.tsx	.lingxi
 G3	clients/electron/test/host-utils.test.ts	.lingxi
 G3	clients/electron/test/host-utils.test.ts	LINGXI.md
+G3	clients/electron/test/packaging.test.mjs	.lingxi
 G3	clients/electron/test/settings-coding-pages.test.ts	.lingxi
 G3	clients/electron/test/settings-raw-json.test.ts	.lingxi
 G3	clients/ios/Sources/LocalApps/LocalAppCodeBrowser.swift	.lingxi

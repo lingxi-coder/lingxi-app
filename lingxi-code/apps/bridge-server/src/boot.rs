@@ -377,10 +377,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
         api_key: String::new(),
-        // Production: consult the real keychain. The comment above governs the
-        // PARENT-supplied secret; the shared login keychain is still a
-        // legitimate source here (see `needs_credential_driver`, which treats a
-        // stored provider key as "connected").
+        // The packaged bridge gets an explicit process-local store. Desktop,
+        // CLI, and TUI own persistent broker access; this sidecar receives only
+        // its current session credential over stdin.
         isolated_credential_storage: false,
         credential_storage_policy: if args.packaged_credential_stdin_only {
             CredentialStoragePolicy::NativeOrMemory
@@ -953,11 +952,9 @@ pub async fn assemble_with_provider_keys(
             .await;
     }
 
-    // A packaged Electron parent normally supplies no secret at launch. That
-    // does not mean the user is disconnected: CLI/TUI may already have stored
-    // the selected provider key in the shared login keychain. Runtime build
-    // computes this map from `CredentialManager`, so consult it before binding
-    // the fail-fast driver.
+    // The parent-source fact is authoritative for packaged Electron sessions.
+    // Unpackaged CLI/TUI-oriented hosts may still derive availability from
+    // their own persistent storage before binding the fail-fast driver.
     let credential_required =
         needs_credential_driver(parent_credential_supplied, &runtime.provider_availability);
 
@@ -1465,6 +1462,11 @@ mod tests {
         assert!(cfg.api_key_helper.is_none());
         assert!(cfg.provider_profiles.is_none());
         assert!(has_no_credential_source(&cfg));
+        assert_eq!(
+            cfg.credential_storage_policy,
+            CredentialStoragePolicy::NativeOrMemory,
+            "packaged bridge credentials must remain process-local"
+        );
     }
 
     #[test]

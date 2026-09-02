@@ -9,7 +9,6 @@ import { execFileSync } from 'node:child_process';
 
 import {
   APP_NAME,
-  BUNDLE_ID,
   NS_MICROPHONE_USAGE_DESCRIPTION,
   artifactPaths,
   assertArm64Executable,
@@ -21,6 +20,12 @@ import {
   sha256File,
   validateZipEntries,
 } from './package-support.mjs';
+import {
+  BROKER_RESOURCE_DIRNAME,
+  brokerIdentifiers,
+  verifyIdentifier,
+  verifySignedEntitlements,
+} from './credential-broker.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -68,6 +73,10 @@ export function verifyPackage(root = packageRoot) {
     join(contents, 'Info.plist'),
     join(contents, 'MacOS', APP_NAME),
     join(resources, 'bin', 'bridge-server'),
+    join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'),
+    join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.launchd.plist'),
+    join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'),
+    join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'),
     join(resources, 'icon.icns'),
     join(resources, 'INTERNAL_BETA.md'),
     join(extractedApp, 'package.json'),
@@ -80,15 +89,25 @@ export function verifyPackage(root = packageRoot) {
   ];
   try {
   for (const path of expected) requirePath(path);
+  const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
+  const identifiers = brokerIdentifiers(manifest.channel);
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
+  assertArm64Executable(
+    join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'),
+    'packaged credential broker client',
+  );
+  assertArm64Executable(
+    join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app', 'Contents', 'MacOS', 'LingXiCredentialBroker'),
+    'packaged credential broker app',
+  );
 
   const plistPath = join(contents, 'Info.plist');
   const expectedPlist = {
     CFBundleDisplayName: APP_NAME,
     CFBundleExecutable: APP_NAME,
-    CFBundleIdentifier: BUNDLE_ID,
+    CFBundleIdentifier: identifiers.desktopBundleId,
     CFBundleName: APP_NAME,
     CFBundleShortVersionString: metadata.version,
     CFBundleVersion: metadata.version,
@@ -141,6 +160,10 @@ export function verifyPackage(root = packageRoot) {
     `${APP_NAME}.app/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/MacOS/${APP_NAME}`,
     `${APP_NAME}.app/Contents/Resources/bin/bridge-server`,
+    `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/broker-manifest.json`,
+    `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/LingXiCredentialBroker.launchd.plist`,
+    `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/bin/lingxi-credential-client`,
+    `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/LingXiCredentialBroker.app/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/Resources/INTERNAL_BETA.md`,
     `${APP_NAME}.app/Contents/Resources/app.asar`,
   ]) {
@@ -153,7 +176,19 @@ export function verifyPackage(root = packageRoot) {
   if (checksumLine !== expectedChecksumLine) throw new Error('SHA-256 file does not match ZIP artifact');
 
   if (commandAvailable('/usr/bin/codesign')) {
-    execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', paths.appPath], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', paths.appPath], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bridge-server')], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client')], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app')], { stdio: 'pipe' });
+    const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
+    if (teamId) {
+      verifyIdentifier(paths.appPath, identifiers.desktopBundleId, teamId);
+      verifyIdentifier(join(resources, 'bin', 'bridge-server'), identifiers.bridgeServerIdentifier, teamId);
+      verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
+      verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
+      verifySignedEntitlements(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
+      verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId);
+    }
   }
 
   return {

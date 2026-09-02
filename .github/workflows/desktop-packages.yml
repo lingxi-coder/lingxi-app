@@ -103,6 +103,11 @@ jobs:
         shell: bash
         working-directory: clients/electron
         run: node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+        env:
+          # Explicitly test package layout without pretending an ad-hoc build
+          # can access Data Protection Keychain. Release packaging uses the
+          # profile-gated package-mac path.
+          LINGXI_CREDENTIAL_BROKER_TEST_MOCK: ${{ matrix.platform == 'darwin' && '1' || '' }}
 
       - name: Static audit and packaged runtime smoke
         shell: bash
@@ -121,3 +126,81 @@ jobs:
           path: |
             clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.*
             clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.build-metadata.json
+
+  signed-credential-broker:
+    name: signed-development-credential-broker
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      LINGXI_DEV_IDENTITY: ${{ secrets.LINGXI_MAC_DEVELOPMENT_IDENTITY }}
+      LINGXI_DEV_TEAM_ID: ${{ secrets.LINGXI_MAC_TEAM_ID }}
+      LINGXI_DEV_P12_BASE64: ${{ secrets.LINGXI_MAC_DEVELOPMENT_P12_BASE64 }}
+      LINGXI_DEV_P12_PASSWORD: ${{ secrets.LINGXI_MAC_DEVELOPMENT_P12_PASSWORD }}
+      LINGXI_DEV_BROKER_PROFILE_BASE64: ${{ secrets.LINGXI_MAC_DEVELOPMENT_BROKER_PROFILE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run signed development Keychain integration
+        shell: bash
+        run: |
+          if [ -z "$LINGXI_DEV_IDENTITY" ] || [ -z "$LINGXI_DEV_TEAM_ID" ] \
+            || [ -z "$LINGXI_DEV_P12_BASE64" ] || [ -z "$LINGXI_DEV_P12_PASSWORD" ] \
+            || [ -z "$LINGXI_DEV_BROKER_PROFILE_BASE64" ]; then
+            echo "Signed development broker secrets are not configured; unsigned mock coverage ran in the package matrix."
+            exit 0
+          fi
+          certificate_path="$RUNNER_TEMP/lingxi-development.p12"
+          broker_profile_path="$RUNNER_TEMP/lingxi-development-broker.provisionprofile"
+          signing_keychain="$RUNNER_TEMP/lingxi-development.keychain-db"
+          signing_keychain_password="$(/usr/bin/openssl rand -hex 32)"
+          printf '%s' "$LINGXI_DEV_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$LINGXI_DEV_BROKER_PROFILE_BASE64" | /usr/bin/base64 -D > "$broker_profile_path"
+          /usr/bin/security create-keychain -p "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security set-keychain-settings -lut 21600 "$signing_keychain"
+          /usr/bin/security unlock-keychain -p "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security import "$certificate_path" -k "$signing_keychain" \
+            -P "$LINGXI_DEV_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security list-keychains -d user -s "$signing_keychain"
+          export BROKER_OUTPUT="$RUNNER_TEMP/credential-broker"
+          export BROKER_PROFILE="$broker_profile_path"
+          node --input-type=module <<'EOF'
+          import { join } from 'node:path';
+          import {
+            brokerIdentifiers,
+            buildCredentialBrokerResources,
+            signAppBundle,
+            signBinary,
+            validateProvisioningProfile,
+            verifyIdentifier,
+            verifySignedEntitlements,
+            writeEntitlements,
+          } from './clients/electron/scripts/credential-broker.mjs';
+          const ids = brokerIdentifiers('development');
+          const root = process.env.BROKER_OUTPUT;
+          const profile = process.env.BROKER_PROFILE;
+          const identity = process.env.LINGXI_DEV_IDENTITY;
+          const team = process.env.LINGXI_DEV_TEAM_ID;
+          buildCredentialBrokerResources(root, {
+            channel: 'development', profilePath: profile, version: '0.0.0',
+            targetTriple: 'aarch64-apple-darwin',
+          });
+          validateProvisioningProfile(profile, team, ids.brokerBundleId);
+          const entitlements = join(root, 'broker.entitlements.plist');
+          writeEntitlements(entitlements, { teamId: team, bundleId: ids.brokerBundleId });
+          signBinary(join(root, 'bin', 'lingxi-credential-client'), identity, ids.clientIdentifier);
+          signAppBundle(join(root, 'LingXiCredentialBroker.app'), identity, entitlements);
+          verifyIdentifier(join(root, 'bin', 'lingxi-credential-client'), ids.clientIdentifier, team);
+          verifyIdentifier(join(root, 'LingXiCredentialBroker.app'), ids.brokerBundleId, team);
+          verifySignedEntitlements(join(root, 'LingXiCredentialBroker.app'), team, ids.brokerBundleId);
+          EOF
+          harness="$RUNNER_TEMP/lingxi-development-broker-integration"
+          xcrun swiftc -O -parse-as-library -target arm64-apple-macos13.0 \
+            lingxi-code/platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift \
+            -o "$harness"
+          /usr/bin/codesign --force --sign "$LINGXI_DEV_IDENTITY" --options runtime \
+            --timestamp -i com.lingxi.code.cli.development "$harness"
+          "$harness" "$BROKER_OUTPUT/bin/lingxi-credential-client" development
+          /usr/bin/codesign --force --sign "$LINGXI_DEV_IDENTITY" --options runtime \
+            --timestamp -i com.lingxi.code.unknown.development "$harness"
+          "$harness" "$BROKER_OUTPUT/bin/lingxi-credential-client" development --expect-rejected

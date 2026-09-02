@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { SessionRuntimeManager, type SessionRef } from './bridge.js';
+import { createMacCredentialBrokerClient, resolveSessionLaunchCredentials } from './credential-broker.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -74,26 +75,6 @@ function isHttpsUrl(raw: string): boolean {
   } catch { return false; }
 }
 
-const providerEnvironmentVariables: Readonly<Record<string, string>> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  kimi: 'MOONSHOT_API_KEY',
-  'kimi-code': 'KIMI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  zai: 'ZAI_API_KEY',
-  'glm-coding': 'GLM_API_KEY',
-  'github-copilot': 'GITHUB_TOKEN',
-};
-
-/** Developer opt-in fallback for a locked/missing Keychain item. */
-function readEnvironmentCredential(providerId: string): string | undefined {
-  const variable = providerEnvironmentVariables[providerId];
-  const value = variable ? process.env[variable] : undefined;
-  return typeof value === 'string' && value.length > 0 && value.length <= 16_384 ? value : undefined;
-}
-
 function createWindow(): BrowserWindow {
   const target = rendererTarget();
   const mainWindow = new BrowserWindow({
@@ -146,7 +127,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
-  diagnostics.add('info', 'host', 'credential store: shared engine secure storage');
+  const credentialBroker = createMacCredentialBrokerClient({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+  diagnostics.add('info', 'host', credentialBroker
+    ? 'credential store: macOS credential broker'
+    : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
   const sessionCatalog = new ProjectSessionCatalog({
     isPackaged: app.isPackaged,
@@ -210,21 +197,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
     launchConfig: async (ref: SessionRef) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const credentials: Record<string, string> = {};
-      for (const providerId of PROVIDER_IDS) {
-        const environmentCredential = readEnvironmentCredential(providerId);
-        if (environmentCredential !== undefined) {
-          credentials[providerId] = environmentCredential;
-        }
-      }
+      const credentials = await resolveSessionLaunchCredentials(configured.model, {
+        credentialBroker,
+      });
       return {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
-        apiKey: credentials['anthropic'],
-        providerCredentials: Object.fromEntries(
-          Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
-        ),
+        ...credentials,
         model: configured.model,
         apiBaseUrl: configured.apiBaseUrl,
       };
@@ -235,6 +215,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
     bridge,
     diagnostics,
     sessionCatalog,
+    undefined,
+    undefined,
+    credentialBroker,
   );
   host.registerIpc();
   createWindow();

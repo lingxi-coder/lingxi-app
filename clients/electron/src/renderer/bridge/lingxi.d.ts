@@ -63,7 +63,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; storageError?: string }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
@@ -81,6 +81,8 @@ export interface BootstrapState {
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];
+  /** Whether credentials can be queried without a connected engine. */
+  credentialBrokerAvailable?: boolean;
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];

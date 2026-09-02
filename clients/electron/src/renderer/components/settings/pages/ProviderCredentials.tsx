@@ -24,7 +24,7 @@ export function initialProviderSelection(initialProviderId?: string): string {
   return providerById(initialProviderId ?? '') ? initialProviderId! : 'anthropic';
 }
 
-export type CredentialStatusKind = 'runtime' | 'secure' | 'fallback-configured' | 'fallback-unconfigured' | 'none';
+export type CredentialStatusKind = 'runtime' | 'secure' | 'fallback-configured' | 'fallback-unconfigured' | 'unavailable' | 'none';
 export type ProviderConnectionKind = 'connected' | 'runtime' | 'disconnected' | 'unavailable' | 'unknown';
 
 export interface ProviderConnectionStatus {
@@ -33,17 +33,13 @@ export interface ProviderConnectionStatus {
 }
 
 /**
- * Which of the four Keychain-availability/runtime-source status paragraphs
- * the old settings modal showed for the selected provider — pure so each of the four
- * states (plus "none of the above") can be asserted by name without
- * mounting anything. The four conditions and their order are copied
- * verbatim from `BetaDesktop.tsx`'s `beta-provider-form` block: `runtimeOnly`
- * wins over everything else (an external runtime source pre-configured this
- * provider — LingXi never persisted it), then configured+encrypted, then
- * configured+fallback, then not-configured+fallback-would-be-used.
+ * Selected-provider storage status. Broker/signing failures win so the user
+ * gets an actionable configuration error; runtime-only and legacy non-macOS
+ * fallback states remain distinguishable from Data Protection Keychain.
  */
-export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata, 'configured' | 'encryptionAvailable' | 'runtimeOnly'>): CredentialStatusKind {
+export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata, 'configured' | 'encryptionAvailable' | 'runtimeOnly' | 'storageError'>): CredentialStatusKind {
   if (!metadata) return 'none';
+  if (metadata.storageError) return 'unavailable';
   if (metadata.runtimeOnly) return 'runtime';
   if (metadata.configured && metadata.encryptionAvailable) return 'secure';
   if (metadata.configured && !metadata.encryptionAvailable) return 'fallback-configured';
@@ -53,11 +49,12 @@ export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata,
 
 /** The list reports engine-authoritative credential state, never edit selection. */
 export function providerConnectionStatus(
-  metadata: Pick<ProviderCredentialMetadata, 'configured' | 'runtimeOnly'> | undefined,
+  metadata: Pick<ProviderCredentialMetadata, 'configured' | 'runtimeOnly' | 'storageError'> | undefined,
   engineConnected: boolean,
   providerAvailable: boolean,
 ): ProviderConnectionStatus {
   if (!providerAvailable) return { kind: 'unavailable', label: 'CLI / TUI' };
+  if (metadata?.storageError) return { kind: 'unavailable', label: '安全存储不可用' };
   if (!engineConnected) return { kind: 'unknown', label: '状态不可用' };
   if (metadata?.runtimeOnly) return { kind: 'runtime', label: '运行时连接' };
   if (metadata?.configured) return { kind: 'connected', label: '已连接' };
@@ -83,6 +80,20 @@ export function connectButtonLabel(state: { connecting: boolean; modelApplying: 
 export function apiBaseUrlPatch(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+export function shouldRequestCredentialPreview(
+  providerId: string | null,
+  metadata: Pick<ProviderCredentialMetadata, 'configured' | 'credentialPreview' | 'storageError'> | undefined,
+  requestedProviderIds: ReadonlySet<string>,
+  credentialSourceAvailable: boolean,
+): providerId is string {
+  return providerId !== null
+    && credentialSourceAvailable
+    && metadata?.configured === true
+    && !metadata.credentialPreview
+    && !metadata.storageError
+    && !requestedProviderIds.has(providerId);
 }
 
 /**
@@ -157,7 +168,11 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
   const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
-  const statusKind = bridge.connected ? credentialStatusKind(selectedMetadata) : 'none';
+  const statusKind = selectedMetadata?.storageError
+    ? 'unavailable'
+    : bridge.connected
+      ? credentialStatusKind(selectedMetadata)
+      : 'none';
 
   const mountedRef = useRef(true);
   const transactionGenerationRef = useRef(0);
@@ -201,18 +216,19 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     ));
   }, [apiBaseUrlSaving, bridge.bootstrap?.settings.apiBaseUrl]);
 
-  // The provider list only asks Keychain for item existence. Fetch secret
-  // bytes for a masked suffix lazily after the person opens one provider, so
-  // macOS never presents an authorization-dialog cascade for every saved key.
+  // The provider list asks only for account attributes. Fetch one masked
+  // preview lazily after selection; masking happens inside the native broker,
+  // so the renderer never receives the complete credential.
   useEffect(() => {
-    if (!selectedProviderId
-      || !bridge.connected
-      || !selectedMetadata?.configured
-      || selectedMetadata.credentialPreview
-      || requestedPreviewProvidersRef.current.has(selectedProviderId)) return;
+    if (!shouldRequestCredentialPreview(
+      selectedProviderId,
+      selectedMetadata,
+      requestedPreviewProvidersRef.current,
+      bridge.connected || snapshot?.credentialBrokerAvailable === true,
+    )) return;
     requestedPreviewProvidersRef.current.add(selectedProviderId);
     void bridge.refreshProviderCredential(selectedProviderId);
-  }, [bridge, selectedMetadata, selectedProviderId]);
+  }, [bridge, selectedMetadata, selectedProviderId, snapshot?.credentialBrokerAvailable]);
 
   const applyPendingModel = async (
     allowWhileConnecting = false,
@@ -458,7 +474,13 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
             const status = providerConnectionStatus(metadata, bridge.connected, provider.available);
             const connected = status.kind === 'connected' || status.kind === 'runtime';
-            const statusColor = connected ? t.ok : status.kind === 'unknown' ? t.warn : t.text3;
+            const statusColor = connected
+              ? t.ok
+              : metadata?.storageError
+                ? t.danger
+                : status.kind === 'unknown'
+                  ? t.warn
+                  : t.text3;
             return (
               <button
                 key={provider.id}
@@ -528,7 +550,12 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
           <Row title="来源" desc="正在运行的引擎从外部运行时来源接收了该凭据；LingXi 未存储它。" align="center"><span /></Row>
         )}
         {statusKind === 'secure' && (
-          <Row title="存储方式" desc="已安全保存在 macOS 登录钥匙串中。" align="center"><span /></Row>
+          <Row title="存储方式" desc="已安全保存在 macOS Data Protection Keychain 中，由签名凭据代理统一管理。" align="center"><span /></Row>
+        )}
+        {statusKind === 'unavailable' && (
+          <Row title="安全存储不可用" desc={selectedMetadata?.storageError} align="center">
+            <Icon name="shieldAlert" size={15} color={t.danger} />
+          </Row>
         )}
         {statusKind === 'fallback-configured' && (
           <Row title="存储方式" desc="当前凭据来自仅所有者可读的本地回退存储；引擎会在钥匙串可用时自动迁移。" align="center"><span /></Row>

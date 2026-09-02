@@ -17,6 +17,14 @@ import {
   scanTreeForForbiddenContent,
   validateZipEntries,
 } from '../scripts/package-support.mjs';
+import {
+  BROKER_ALLOWED_CALLERS,
+  brokerIdentifiers,
+  brokerManifest,
+  renderLaunchAgentTemplate,
+  resolveSwiftTarget,
+  validateSignedEntitlements,
+} from '../scripts/credential-broker.mjs';
 
 /**
  * A minimal but structurally real Info.plist — the same shape Electron's own
@@ -112,6 +120,59 @@ test('architecture validation accepts arm64 and rejects x86-only binaries', () =
     () => assertArm64Architecture(['x86_64'], 'fixture'),
     /arm64 is required/,
   );
+});
+
+test('credential broker packaging resolves Swift targets for both macOS CLI triples', () => {
+  assert.equal(resolveSwiftTarget('aarch64-apple-darwin'), 'arm64-apple-macos13.0');
+  assert.equal(resolveSwiftTarget('x86_64-apple-darwin'), 'x86_64-apple-macos13.0');
+  assert.equal(resolveSwiftTarget('x86_64-unknown-linux-musl'), null);
+});
+
+test('credential broker manifest stays metadata-only and caller allowlist stays narrow', () => {
+  assert.deepEqual(brokerManifest('1.2.3'), {
+    version: '1.2.3',
+    protocol_version: 1,
+    channel: 'production',
+  });
+  assert.deepEqual(BROKER_ALLOWED_CALLERS, [
+    'com.lingxi.code',
+    'com.lingxi.code.cli',
+  ]);
+  assert.deepEqual(brokerIdentifiers('development'), {
+    brokerBundleId: 'com.lingxi.code.credential-broker.development',
+    clientIdentifier: 'com.lingxi.code.credential-client.development',
+    bridgeServerIdentifier: 'com.lingxi.code.bridge-server.development',
+    desktopBundleId: 'com.lingxi.code.development',
+    machService: 'com.lingxi.code.credential-broker.development',
+    allowedCallers: [
+      'com.lingxi.code.development',
+      'com.lingxi.code.cli.development',
+    ],
+  });
+});
+
+test('credential broker launch agent template keeps an install-time executable placeholder', () => {
+  const plist = renderLaunchAgentTemplate();
+  assert.match(plist, /com\.lingxi\.code\.credential-broker/);
+  assert.match(plist, /@BROKER_EXECUTABLE_PATH@/);
+  assert.doesNotMatch(plist, /Application Support/);
+});
+
+test('signed entitlement validation requires the exact team and application identifier', () => {
+  const entitlements = {
+    'com.apple.application-identifier': 'ABCDEFGHIJ.com.lingxi.code.credential-broker',
+    'com.apple.developer.team-identifier': 'ABCDEFGHIJ',
+  };
+  assert.doesNotThrow(() => validateSignedEntitlements(
+    entitlements,
+    'ABCDEFGHIJ',
+    'com.lingxi.code.credential-broker',
+  ));
+  assert.throws(() => validateSignedEntitlements(
+    entitlements,
+    'ZZZZZZZZZZ',
+    'com.lingxi.code.credential-broker',
+  ), /signed entitlements/);
 });
 
 test('ZIP validation rejects traversal and entries outside the app', () => {

@@ -19,18 +19,48 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      LINGXI_CODESIGN_IDENTITY: ${{ secrets.LINGXI_CODESIGN_IDENTITY }}
+      LINGXI_MAC_TEAM_ID: ${{ secrets.LINGXI_MAC_TEAM_ID }}
+      LINGXI_MAC_CERTIFICATE_P12_BASE64: ${{ secrets.LINGXI_MAC_CERTIFICATE_P12_BASE64 }}
+      LINGXI_MAC_CERTIFICATE_PASSWORD: ${{ secrets.LINGXI_MAC_CERTIFICATE_PASSWORD }}
+      LINGXI_MAC_BROKER_PROFILE_BASE64: ${{ secrets.LINGXI_MAC_BROKER_PROVISIONING_PROFILE }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-darwin,       os: macos-latest,   cross: false }
-          - { target: x86_64-apple-darwin,        os: macos-latest,   cross: false }
+          - { target: aarch64-apple-darwin,       os: macos-15,       cross: false }
+          - { target: x86_64-apple-darwin,        os: macos-15-intel, cross: false }
           - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,  cross: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest,  cross: true }
           - { target: x86_64-pc-windows-msvc,     os: windows-latest, cross: false }
           - { target: aarch64-pc-windows-msvc,    os: windows-latest, cross: false }
     steps:
       - uses: actions/checkout@v4
+      - name: Configure macOS code signing
+        if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
+        shell: bash
+        run: |
+          test -n "$LINGXI_CODESIGN_IDENTITY" || { echo "LINGXI_CODESIGN_IDENTITY is required"; exit 1; }
+          test -n "$LINGXI_MAC_TEAM_ID" || { echo "LINGXI_MAC_TEAM_ID is required"; exit 1; }
+          test -n "$LINGXI_MAC_CERTIFICATE_P12_BASE64" || { echo "LINGXI_MAC_CERTIFICATE_P12_BASE64 is required"; exit 1; }
+          test -n "$LINGXI_MAC_CERTIFICATE_PASSWORD" || { echo "LINGXI_MAC_CERTIFICATE_PASSWORD is required"; exit 1; }
+          test -n "$LINGXI_MAC_BROKER_PROFILE_BASE64" || { echo "LINGXI_MAC_BROKER_PROVISIONING_PROFILE is required"; exit 1; }
+          certificate_path="$RUNNER_TEMP/lingxi-signing.p12"
+          broker_profile_path="$RUNNER_TEMP/lingxi-broker.provisionprofile"
+          signing_keychain="$RUNNER_TEMP/lingxi-signing.keychain-db"
+          signing_keychain_password="$(/usr/bin/openssl rand -hex 32)"
+          printf '%s' "$LINGXI_MAC_CERTIFICATE_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$LINGXI_MAC_BROKER_PROFILE_BASE64" | /usr/bin/base64 -D > "$broker_profile_path"
+          /usr/bin/security create-keychain -p "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security set-keychain-settings -lut 21600 "$signing_keychain"
+          /usr/bin/security unlock-keychain -p "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security import "$certificate_path" -k "$signing_keychain" \
+            -P "$LINGXI_MAC_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$signing_keychain_password" "$signing_keychain"
+          /usr/bin/security list-keychains -d user -s "$signing_keychain"
+          echo "LINGXI_MAC_BROKER_PROVISIONING_PROFILE=$broker_profile_path" >> "$GITHUB_ENV"
       - name: Install Rust 1.82 + target
         shell: bash
         run: |
@@ -49,17 +79,87 @@ jobs:
         working-directory: lingxi-code
         shell: bash
         run: cargo build --release -p cli --target ${{ matrix.target }}
+      - name: Build macOS credential broker resources
+        if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
+        shell: bash
+        run: |
+          test -n "${LINGXI_CODESIGN_IDENTITY}" || { echo "LINGXI_CODESIGN_IDENTITY is required for macOS releases"; exit 1; }
+          test -n "${LINGXI_MAC_TEAM_ID}" || { echo "LINGXI_MAC_TEAM_ID is required for macOS releases"; exit 1; }
+          test -n "${LINGXI_MAC_BROKER_PROVISIONING_PROFILE}" || { echo "LINGXI_MAC_BROKER_PROVISIONING_PROFILE is required for macOS releases"; exit 1; }
+          export RELEASE_VERSION="${RELEASE_VERSION#v}"
+          node --input-type=module <<'EOF'
+          import { join, resolve } from 'node:path';
+          import { buildCredentialBrokerResources, signAppBundle, signBinary, validateProvisioningProfile, verifyIdentifier, verifySignedEntitlements, writeEntitlements, BROKER_BUNDLE_ID, BROKER_CLIENT_IDENTIFIER } from './clients/electron/scripts/credential-broker.mjs';
+
+          const target = process.env['TARGET_TRIPLE'];
+          const identity = process.env['LINGXI_CODESIGN_IDENTITY'];
+          const teamId = process.env['LINGXI_MAC_TEAM_ID'];
+          const profilePath = resolve(process.env['LINGXI_MAC_BROKER_PROVISIONING_PROFILE']);
+          const outputRoot = resolve('lingxi-code', 'target', target, 'credential-broker');
+          buildCredentialBrokerResources(outputRoot, {
+            teamId,
+            profilePath,
+            version: process.env['RELEASE_VERSION'] || '0.0.0-dev',
+            targetTriple: target,
+          });
+          validateProvisioningProfile(profilePath, teamId, BROKER_BUNDLE_ID);
+          const entitlementsPath = join(outputRoot, 'LingXiCredentialBroker.entitlements.plist');
+          writeEntitlements(entitlementsPath, { teamId, bundleId: BROKER_BUNDLE_ID });
+          signBinary(join(outputRoot, 'bin', 'lingxi-credential-client'), identity, BROKER_CLIENT_IDENTIFIER);
+          signAppBundle(join(outputRoot, 'LingXiCredentialBroker.app'), identity, entitlementsPath);
+          verifyIdentifier(join(outputRoot, 'bin', 'lingxi-credential-client'), BROKER_CLIENT_IDENTIFIER, teamId);
+          verifyIdentifier(join(outputRoot, 'LingXiCredentialBroker.app'), BROKER_BUNDLE_ID, teamId);
+          verifySignedEntitlements(join(outputRoot, 'LingXiCredentialBroker.app'), teamId, BROKER_BUNDLE_ID);
+          EOF
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+      - name: Sign macOS CLI binary
+        if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
+        working-directory: lingxi-code
+        shell: bash
+        run: |
+          test -n "${LINGXI_CODESIGN_IDENTITY}" || { echo "LINGXI_CODESIGN_IDENTITY is required for macOS releases"; exit 1; }
+          test -n "${LINGXI_MAC_TEAM_ID}" || { echo "LINGXI_MAC_TEAM_ID is required for macOS releases"; exit 1; }
+          bin="target/${{ matrix.target }}/release/lingxi-cli"
+          /usr/bin/codesign --force --sign "${LINGXI_CODESIGN_IDENTITY}" --options runtime --timestamp -i com.lingxi.code.cli "$bin"
+          /usr/bin/codesign --verify --strict "$bin"
+          /usr/bin/codesign --display --verbose=4 "$bin" 2>&1 | grep "Identifier=com.lingxi.code.cli" >/dev/null
+          /usr/bin/codesign --display --verbose=4 "$bin" 2>&1 | grep "TeamIdentifier=${LINGXI_MAC_TEAM_ID}" >/dev/null
+      - name: Test signed Data Protection Keychain broker
+        if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
+        working-directory: lingxi-code
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) swift_target="arm64-apple-macos13.0" ;;
+            x86_64-apple-darwin) swift_target="x86_64-apple-macos13.0" ;;
+            *) exit 1 ;;
+          esac
+          harness="$RUNNER_TEMP/lingxi-credential-broker-integration"
+          xcrun swiftc -O -parse-as-library -target "$swift_target" \
+            platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift \
+            -o "$harness"
+          /usr/bin/codesign --force --sign "${LINGXI_CODESIGN_IDENTITY}" \
+            --options runtime --timestamp -i com.lingxi.code.cli "$harness"
+          "$harness" "target/${{ matrix.target }}/credential-broker/bin/lingxi-credential-client"
+          /usr/bin/codesign --force --sign "${LINGXI_CODESIGN_IDENTITY}" \
+            --options runtime --timestamp -i com.lingxi.code.unknown "$harness"
+          "$harness" "target/${{ matrix.target }}/credential-broker/bin/lingxi-credential-client" production --expect-rejected
       - name: Collect binary
         working-directory: lingxi-code
         shell: bash
         run: |
-          mkdir -p out
+          mkdir -p "out/${{ matrix.target }}/release"
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
-          cp "target/${{ matrix.target }}/release/lingxi-cli$ext" "out/lingxi-cli$ext"
+          cp "target/${{ matrix.target }}/release/lingxi-cli$ext" "out/${{ matrix.target }}/release/lingxi-cli$ext"
+          if [ -d "target/${{ matrix.target }}/credential-broker" ]; then
+            cp -R "target/${{ matrix.target }}/credential-broker" "out/${{ matrix.target }}/credential-broker"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: lingxi-code/out/*
+          path: lingxi-code/out/${{ matrix.target }}/
 
   package-and-publish:
     needs: build
@@ -80,9 +180,8 @@ jobs:
           cd lingxi-code
           for d in ../artifacts/bin-*; do
             t="$(basename "$d" | sed 's/^bin-//')"
-            mkdir -p "target/$t/release"
-            f="$(ls "$d")"
-            cp "$d/$f" "target/$t/release/$f"
+            mkdir -p "target/$t"
+            cp -R "$d/." "target/$t/"
           done
       - uses: actions/setup-node@v4
         with:
@@ -121,7 +220,11 @@ jobs:
           for t in "${!TAGS[@]}"; do
             ext=""; [[ "$t" == *windows* ]] && ext=".exe"
             rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
+            rm -rf src/lingxi_cli_bin/credential-broker
             cp "../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
+            if [ -d "../target/$t/credential-broker" ]; then
+              cp -R "../target/$t/credential-broker" "src/lingxi_cli_bin/credential-broker"
+            fi
             printf '{"target":"%s"}' "$t" > src/lingxi_cli_bin/lingxi-package.json
             for tag in ${TAGS[$t]}; do
               LINGXI_CLI_BIN_PLATFORM_TAG="$tag" uv build --wheel --out-dir dist

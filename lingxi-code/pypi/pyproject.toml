@@ -26,6 +26,7 @@ packages = ["src/lingxi_cli_bin"]
 include = [
   "src/lingxi_cli_bin/lingxi-package.json",
   "src/lingxi_cli_bin/bin/**",
+  "src/lingxi_cli_bin/credential-broker/**",
   "src/lingxi_cli_bin/lingxi-path/**",
 ]
 

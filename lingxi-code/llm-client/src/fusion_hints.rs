@@ -420,4 +420,58 @@ mod tests {
             .expect("openai slice has models outside the hint table");
         assert!(hints_for("openai", &unlisted.request_model).is_none());
     }
+
+    /// F011: a `judge_eligible: true` hint row promises the model can serve
+    /// as Fusion analyst, but `resolve_analyst`'s `with_schema` filter ALSO
+    /// requires the live catalog's `Capabilities::structured_output` — so a
+    /// row that is `judge_eligible` yet whose real model capability is
+    /// `structured_output: false` can never actually be picked, silently
+    /// shrinking the judge pool below what the hint table advertises.
+    ///
+    /// This is knowingly loose (`<= 5`, not `== 0`): the checked-in
+    /// `anthropic_model_profiles()` hard-codes `structured_output: false`
+    /// for EVERY Anthropic model (llm-client/src/provider_settings.rs:787),
+    /// which is a signal for a narrower guarantee than "can receive
+    /// `stream_json_schema_with_thinking`" (the sidequery layer routes every
+    /// provider through that call unconditionally — see
+    /// `ProviderSideQueryBackend::Session` in
+    /// sidequery/src/provider_side_query.rs). Reconciling that flag's
+    /// semantics with `resolve_analyst`'s filter is a separate, broader
+    /// change than this hint-table test; ratchet this back to `== 0` once
+    /// it lands. Today's known offenders: anthropic/claude-opus-5,
+    /// anthropic/claude-sonnet-5, openai-chatgpt/gpt-5.6-sol,
+    /// openai-chatgpt/gpt-5.6-terra, github-copilot/claude-sonnet-5.
+    #[test]
+    fn judge_eligible_rows_mostly_have_a_structured_output_capable_model() {
+        let catalog = builtin_presets();
+        let anthropic = anthropic_model_profiles();
+        let mut mismatches = Vec::new();
+        for (profile, model, hints) in TABLE {
+            if !hints.judge_eligible {
+                continue;
+            }
+            let structured = if *profile == "anthropic" {
+                anthropic
+                    .iter()
+                    .find(|m| m.request_model == *model)
+                    .map(|m| m.capabilities.structured_output)
+            } else {
+                catalog
+                    .providers
+                    .iter()
+                    .find(|p| p.profile_name == *profile)
+                    .and_then(|p| p.models.iter().find(|m| m.request_model == *model))
+                    .map(|m| m.capabilities.structured_output)
+            };
+            if structured != Some(true) {
+                mismatches.push(format!("{profile}/{model}"));
+            }
+        }
+        assert!(
+            mismatches.len() <= 5,
+            "new judge_eligible/structured_output mismatches beyond the known 5 \
+             (mismatches: {mismatches:?}) — either the hint row or the model's \
+             structured_output capability needs a look"
+        );
+    }
 }

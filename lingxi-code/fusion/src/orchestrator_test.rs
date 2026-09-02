@@ -611,7 +611,7 @@ impl SideQueryClient for ScriptedAnalyst {
 }
 
 fn orch_scripted(spawner: Arc<FakeSpawner>, side: Arc<ScriptedAnalyst>) -> FusionOrchestrator {
-    FusionOrchestrator::new(spawner, side, test_config(), Arc::new(catalog()))
+    FusionOrchestrator::new(spawner, side, Arc::new(test_config()), Arc::new(catalog()))
 }
 
 #[test]
@@ -641,7 +641,7 @@ fn parent_profile_resolution_prefers_session_identity_then_catalog_fallback() {
     let ambiguous = FusionOrchestrator::new(
         FakeSpawner::new(HashMap::new()),
         ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
-        test_config(),
+        Arc::new(test_config()),
         Arc::new(ambiguous_catalog),
     );
     assert_eq!(ambiguous.resolve_parent_profile("gpt-5.6-terra", None), None);
@@ -656,7 +656,7 @@ async fn orch_with_telemetry(
     let bus = Arc::new(AnalyticsBus::new());
     bus.attach_sink(sink.clone()).await;
     (
-        FusionOrchestrator::new(spawner, side, config, Arc::new(catalog())).with_bus(bus),
+        FusionOrchestrator::new(spawner, side, Arc::new(config), Arc::new(catalog())).with_bus(bus),
         sink,
     )
 }
@@ -1412,6 +1412,45 @@ async fn reserve_failure_makes_zero_panel_spawns() {
     );
 }
 
+/// F011 item 1/7: simulates the desktop's catalog filter (managed
+/// `enforceAvailableModels` + `provider_availability`) having already
+/// dropped every eligible model but one — `resolve()`'s preflight must fail
+/// BEFORE any panel spawn, with `TooFewModels` carrying the shrunk eligible
+/// count, never a bare provider-call failure after burning turns.
+#[tokio::test]
+async fn allowlist_shrunk_catalog_fails_preflight_with_zero_spawns() {
+    let spawner = FakeSpawner::new(HashMap::new());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let filtered_catalog = vec![CatalogModel {
+        profile: "anthropic".into(),
+        model: "claude-sonnet-5".into(),
+        hints: FusionModelHints {
+            eligible: true,
+            quality_rank: 90,
+            judge_eligible: true,
+            ..FusionModelHints::default()
+        },
+        structured_output: true,
+    }];
+    let orch = FusionOrchestrator::new(
+        spawner.clone(),
+        side,
+        Arc::new(test_config()),
+        Arc::new(filtered_catalog),
+    );
+    let mut auto_request = request("task");
+    auto_request.models = None; // exercise the automatic preset path
+    let err = orch.run(auto_request, inherit(), None).await.unwrap_err();
+    assert!(
+        matches!(err, FusionError::TooFewModels { eligible: 1, .. }),
+        "got {err:?}"
+    );
+    assert!(
+        spawner.prompts().is_empty(),
+        "a preflight failure must reach zero panel spawns"
+    );
+}
+
 /// Records every `reserve_nano_usd` / `commit_reservation` / `release_reservation`
 /// call so the six-terminal-state tests below can assert the reservation
 /// lifecycle happened exactly once per run, with nothing left held.
@@ -1757,7 +1796,7 @@ async fn budget_reservation_releases_on_total_timeout() {
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     let mut config = test_config();
     config.total_timeout_ms = 25;
-    let orch = FusionOrchestrator::new(spawner, side, config, Arc::new(catalog()))
+    let orch = FusionOrchestrator::new(spawner, side, Arc::new(config), Arc::new(catalog()))
         .with_price_book(Arc::new(priced_book()));
     let err = orch
         .run(request("task"), inherit_recording(budget.clone()), None)
@@ -1959,4 +1998,197 @@ async fn analyst_and_synth_inputs_never_contain_panel_profile_or_model_ids() {
             "synth input leaked panel identity `{identity}`: {synth_user}"
         );
     }
+}
+
+/// F007: `FusionOrchestrator` must reload its config on every call rather
+/// than serving one frozen at construction — a settings-file edit or the
+/// design's §11 kill switch (`fusion.enabled=false`) takes effect on the
+/// NEXT run, not the next process restart. `agent_surface()` (the surface
+/// the Agent tool and workflow bridge read `enabled`/`default_preset` from)
+/// must reflect a config-source mutation with no orchestrator rebuild.
+#[test]
+fn agent_surface_reloads_the_config_source_on_every_call() {
+    let shared = Arc::new(Mutex::new(test_config()));
+    let for_source = Arc::clone(&shared);
+    let config_source: Arc<dyn crate::config::FusionConfigSource> =
+        Arc::new(move || Ok(for_source.lock().unwrap().clone()));
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(HashMap::new()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(catalog()),
+    );
+    assert!(
+        !orch.agent_surface().enabled,
+        "test_config() leaves enabled at its documented default (false)"
+    );
+    shared.lock().unwrap().enabled = true;
+    assert!(
+        orch.agent_surface().enabled,
+        "agent_surface() must reload the live config source, not a value frozen at construction"
+    );
+}
+
+/// F007: the SAME behavior via `run()` — a `max_panel` lowered between two
+/// runs on the SAME orchestrator instance must be honored by the SECOND run
+/// without rebuilding the orchestrator. The first run (max_panel=8, the
+/// default) accepts the request's 3 explicit panel refs; after the config
+/// source is mutated to `max_panel: 2`, the identical request on the SAME
+/// orchestrator must now reject as over-cap (F011 item 5) — proof the
+/// second `run()` read the NEW value, not the one captured at construction.
+#[tokio::test]
+async fn run_reloads_the_config_source_between_consecutive_runs() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let shared = Arc::new(Mutex::new(test_config()));
+    let for_source = Arc::clone(&shared);
+    let config_source: Arc<dyn crate::config::FusionConfigSource> =
+        Arc::new(move || Ok(for_source.lock().unwrap().clone()));
+    let orch = FusionOrchestrator::new(spawner, side, config_source, Arc::new(catalog()));
+
+    let first = orch.run(request("task"), inherit(), None).await;
+    assert!(
+        first.is_ok(),
+        "first run under the default max_panel=8 must accept 3 explicit refs: {first:?}"
+    );
+
+    shared.lock().unwrap().max_panel = 2;
+    let second = orch.run(request("task"), inherit(), None).await;
+    assert!(
+        matches!(second, Err(FusionError::InvalidCustomModels(_))),
+        "second run must read the NEW max_panel=2 and reject the same 3-ref request; got {second:?}"
+    );
+}
+
+/// F011 round-2 blocking issue #2: `analyst_overlaps_panel` STARTED
+/// telemetry must agree with `resolve_analyst`'s selection rule by using the
+/// CANONICAL model key, not an exact (profile, model) pair — otherwise the
+/// flag lies in exactly the case it exists to catch (the analyst is the
+/// identical underlying model behind a second gateway).
+///
+/// "sol" is deliberately listed BARE under both "openai" and
+/// "openai-chatgpt" (no `vendor/` prefix), the same shape the checked-in
+/// hint table uses; the duplicate's cost_class is set to `Subscription`
+/// (cheapest) so it always wins the analyst tie-break regardless of whether
+/// the `is_panelist` selection fix (blocking issue #1 / a separate
+/// model_resolver test) is present — this test isolates the TELEMETRY bug
+/// specifically.
+#[tokio::test]
+async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
+    let panel_catalog = vec![
+        CatalogModel {
+            profile: "openai".into(),
+            model: "sol".into(),
+            hints: FusionModelHints {
+                eligible: true,
+                quality_rank: 90,
+                judge_eligible: true,
+                cost_class: platform_api::FusionCostClass::High,
+                ..FusionModelHints::default()
+            },
+            structured_output: true,
+        },
+        CatalogModel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+            hints: FusionModelHints {
+                eligible: true,
+                quality_rank: 90,
+                judge_eligible: true,
+                cost_class: platform_api::FusionCostClass::Medium,
+                ..FusionModelHints::default()
+            },
+            structured_output: true,
+        },
+        CatalogModel {
+            profile: "deepseek".into(),
+            model: "deepseek-v4-pro".into(),
+            hints: FusionModelHints {
+                eligible: true,
+                quality_rank: 90,
+                judge_eligible: true,
+                cost_class: platform_api::FusionCostClass::Medium,
+                ..FusionModelHints::default()
+            },
+            structured_output: true,
+        },
+        // Leftover gateway copy of the FIRST row's model: same wire model
+        // ("sol"), different profile, cheapest cost_class.
+        CatalogModel {
+            profile: "openai-chatgpt".into(),
+            model: "sol".into(),
+            hints: FusionModelHints {
+                eligible: true,
+                quality_rank: 90,
+                judge_eligible: true,
+                cost_class: platform_api::FusionCostClass::Subscription,
+                ..FusionModelHints::default()
+            },
+            structured_output: true,
+        },
+    ];
+    let explicit_request = FusionRequest {
+        schema_version: 1,
+        origin: FusionOrigin::Slash,
+        prompt: "task".into(),
+        preset: FusionPreset::Quality,
+        models: Some(vec![
+            FusionModelRef {
+                profile: Some("openai".into()),
+                model: "sol".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "claude-sonnet-5".into(),
+            },
+            FusionModelRef {
+                profile: Some("deepseek".into()),
+                model: "deepseek-v4-pro".into(),
+            },
+        ]),
+        dimensions: DEFAULT_FUSION_DIMENSIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        partial_ok: true,
+        max_panel: None,
+        cross_provider: true,
+        // Deliberately NOT any catalog profile so the parent-profile
+        // tie-break key never discriminates among the analyst candidates.
+        parent_profile: "somewhere-else".into(),
+        parent_model: "unused".into(),
+        conversation_id: None,
+        workflow_run_id: None,
+    };
+    let spawner = FakeSpawner::new(HashMap::new());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let sink = Arc::new(InMemorySink::new());
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    let orch = FusionOrchestrator::new(
+        spawner,
+        side,
+        Arc::new(test_config()),
+        Arc::new(panel_catalog),
+    )
+    .with_bus(bus);
+    // The panels all fail (empty FakeSpawner map) so the run itself errors
+    // out downstream — irrelevant here, since STARTED telemetry (which
+    // carries `analyst_overlaps_panel`) is logged BEFORE any panel spawn.
+    let _ = orch.run(explicit_request, inherit(), None).await;
+
+    let events = sink.events().await;
+    let started = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::fusion::STARTED)
+        .expect("STARTED telemetry must be logged once model resolution succeeds");
+    assert!(
+        matches!(
+            started.metadata.get("analyst_overlaps_panel"),
+            Some(AnalyticsValue::Bool(true))
+        ),
+        "analyst is the leftover gateway copy of a panel model (canonical \
+         model key \"sol\"); analyst_overlaps_panel must be true, got {:?}",
+        started.metadata.get("analyst_overlaps_panel")
+    );
 }

@@ -537,18 +537,43 @@ pub enum FusionError {
     /// Request failed validation.
     #[error("invalid fusion request: {0}")]
     InvalidRequest(String),
-    /// Fewer than two usable models.
-    #[error("too few fusion models")]
-    TooFewModels,
+    /// Fewer than two usable models. Carries enough to point at the setting
+    /// that would fix it (F011): credentials, `fusion.allowedProfiles`, or
+    /// `cross_provider`.
+    #[error(
+        "too few fusion models: {eligible} eligible, {required} required (parent profile `{parent_profile}`, same_provider_only={same_provider_only}); check provider credentials, fusion.allowedProfiles, or pass cross_provider: true"
+    )]
+    TooFewModels {
+        /// Models that passed hint/allowlist/provider filtering.
+        eligible: usize,
+        /// Minimum panel count that triggered this error.
+        required: u8,
+        /// Whether the request was restricted to the parent's provider.
+        same_provider_only: bool,
+        /// Requesting session's parent provider profile.
+        parent_profile: String,
+    },
     /// Explicit `models` list is unusable.
     #[error("invalid custom fusion models: {0}")]
     InvalidCustomModels(String),
     /// Cross-provider was requested but not allowed.
     #[error("cross-provider fusion is not allowed")]
     CrossProviderDenied,
-    /// No judge-eligible model with strict JSON schema.
-    #[error("no fusion analyst model is available")]
-    NoJudgeModel,
+    /// No judge-eligible model with strict JSON schema. Same data shape as
+    /// [`FusionError::TooFewModels`] (F011).
+    #[error(
+        "no fusion analyst model is available: {eligible} eligible, {required} required (parent profile `{parent_profile}`, same_provider_only={same_provider_only}); check provider credentials, fusion.allowedProfiles, or pass cross_provider: true"
+    )]
+    NoJudgeModel {
+        /// Judge-eligible models that passed allowlist/provider filtering.
+        eligible: usize,
+        /// Minimum judge count (always 1) that triggered this error.
+        required: u8,
+        /// Whether the request was restricted to the parent's provider.
+        same_provider_only: bool,
+        /// Requesting session's parent provider profile.
+        parent_profile: String,
+    },
     /// Analyst route cannot emit constrained JSON.
     #[error("structured output is unsupported for the fusion analyst")]
     StructuredOutputUnsupported,
@@ -617,21 +642,54 @@ pub enum FusionLatencyClass {
     Slow,
 }
 
-/// Coarse cost band. Ord is cheaper-first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+/// Coarse cost band.
+///
+/// Deliberately does NOT derive `Ord`/`PartialOrd` (F011/G001-adjacent review
+/// finding): declaration order `Low < Medium < High < Subscription < Unknown`
+/// contradicts this type's own "cheaper-first" intent — a $0-marginal
+/// subscription route would lose a tie-break to a per-token `High` route.
+/// Use [`FusionCostClass::rank`] for cheapest-first comparisons instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FusionCostClass {
-    /// Cheapest.
+    /// Subscription (dollar reserve may be 0) — cheapest by construction.
+    Subscription,
+    /// Cheapest token-billed band.
     Low,
     /// Mid.
     #[default]
     Medium,
     /// Expensive token pricing.
     High,
-    /// Subscription (dollar reserve may be 0).
-    Subscription,
     /// Unknown pricing.
     Unknown,
+}
+
+impl FusionCostClass {
+    /// Explicit cheapest-first rank. Lower sorts first. `Subscription` is 0
+    /// (cheapest) regardless of declaration/serde order.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Subscription => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Unknown => 4,
+        }
+    }
+}
+
+impl PartialOrd for FusionCostClass {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FusionCostClass {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
 }
 
 /// Snapshot the Agent tool needs to list / authorize Fusion without depending
@@ -857,6 +915,23 @@ impl PanelReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F011: `Subscription` (a $0-marginal route) must rank cheapest,
+    /// contradicting the OLD derived-`Ord` declaration order
+    /// `Low < Medium < High < Subscription < Unknown`, which sorted a
+    /// per-token `High` route ahead of a free subscription tie-break.
+    #[test]
+    fn cost_class_rank_is_cheaper_first_with_subscription_at_zero() {
+        assert_eq!(FusionCostClass::Subscription.rank(), 0);
+        assert!(FusionCostClass::Subscription.rank() < FusionCostClass::Low.rank());
+        assert!(FusionCostClass::Low.rank() < FusionCostClass::Medium.rank());
+        assert!(FusionCostClass::Medium.rank() < FusionCostClass::High.rank());
+        assert!(FusionCostClass::High.rank() < FusionCostClass::Unknown.rank());
+        // `Ord` must agree with `rank()` (it's implemented via rank()) — this
+        // is the actual regression guard for any `.cmp()`/`.sort_by()` call
+        // site that still relies on derived-looking `Ord` semantics.
+        assert!(FusionCostClass::Subscription < FusionCostClass::High);
+    }
 
     #[test]
     fn schema_version_defaults_on_request() {

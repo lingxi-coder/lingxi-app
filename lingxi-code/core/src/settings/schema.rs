@@ -920,23 +920,64 @@ impl FusionSettingsJson {
         // retry loop and the synthesizer, summed with the panel stage, can
         // exceed the end-to-end deadline. Defaults here mirror
         // `fusion::FusionRuntimeConfig::defaults`.
-        let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
-        let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
-        let synthesizer = self.synthesizer_timeout_ms.unwrap_or(180_000);
-        let retries = u64::from(self.analysis_protocol_retries.unwrap_or(1));
-        let stage_sum = panel_total
-            .saturating_add(analyst.saturating_mul(1 + retries))
-            .saturating_add(synthesizer);
-        if stage_sum > total {
-            return Err(SchemaViolation(format!(
-                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
-            )));
+        //
+        // Same per-file hazard as the `minSuccessfulPanels` check above: only
+        // run this comparison when at least one of the three stage fields is
+        // actually present IN THIS FILE. A tier that sets none of them has no
+        // opinion on the stage sum — filling in restrictive defaults for all
+        // three would reject a file whose merged view is fine.
+        if self.panel_total_timeout_ms.is_some()
+            || self.analyst_timeout_ms.is_some()
+            || self.synthesizer_timeout_ms.is_some()
+        {
+            let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
+            let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
+            let synthesizer = self.synthesizer_timeout_ms.unwrap_or(180_000);
+            let retries = u64::from(self.analysis_protocol_retries.unwrap_or(1));
+            let stage_sum = panel_total
+                .saturating_add(analyst.saturating_mul(1 + retries))
+                .saturating_add(synthesizer);
+            if stage_sum > total {
+                return Err(SchemaViolation(format!(
+                    "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
+                )));
+            }
         }
         if let Some(cap) = self.workflow_fusion_call_cap {
             if cap == 0 || cap > 20 {
                 return Err(SchemaViolation(
                     "fusion.workflowFusionCallCap must be in 1..=20".into(),
                 ));
+            }
+        }
+        // F011 item 6: `minSuccessfulPanels` above BOTH preset panel counts
+        // can never be met by an automatic run — the runtime would silently
+        // clamp it at spawn time instead of ever meeting the documented bar.
+        //
+        // This is a per-FILE validator (`read_settings_file` calls it on
+        // each settings tier individually, before merging), so unlike the
+        // other checks in this function it must NOT fill in defaults for an
+        // absent counterpart field: a project-tier file that sets only
+        // `minSuccessfulPanels` has no opinion on `qualityPanelCount` /
+        // `fastPanelCount` — those may come from a different tier — and
+        // defaulting them here would reject a file whose MERGED view is
+        // perfectly valid, silently dropping that file's permissions/hooks/
+        // model settings along with it (see `read_layer_or_skip`). Only
+        // compare when at least one of the two counts is present IN THIS
+        // SAME FILE; take `min` over whichever of them actually appear.
+        if let Some(min_successful) = self.min_successful_panels {
+            let smallest_present_preset = match (self.quality_panel_count, self.fast_panel_count) {
+                (Some(quality), Some(fast)) => Some(quality.min(fast)),
+                (Some(quality), None) => Some(quality),
+                (None, Some(fast)) => Some(fast),
+                (None, None) => None,
+            };
+            if let Some(smallest_preset) = smallest_present_preset {
+                if min_successful > smallest_preset {
+                    return Err(SchemaViolation(format!(
+                        "fusion.minSuccessfulPanels ({min_successful}) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) ({smallest_preset})"
+                    )));
+                }
             }
         }
         Ok(())
@@ -1066,6 +1107,67 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusion_min_successful_above_both_preset_counts_is_rejected() {
+        // F011 item 6: minSuccessfulPanels above BOTH quality and fast preset
+        // counts can never be met by an automatic run.
+        let settings = FusionSettingsJson {
+            quality_panel_count: Some(3),
+            fast_panel_count: Some(2),
+            min_successful_panels: Some(3),
+            ..FusionSettingsJson::default()
+        };
+        let err = settings.validate().unwrap_err();
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("minSuccessfulPanels")),
+            "expected a minSuccessfulPanels violation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_min_successful_at_the_smaller_preset_count_is_accepted() {
+        let settings = FusionSettingsJson {
+            quality_panel_count: Some(3),
+            fast_panel_count: Some(2),
+            min_successful_panels: Some(2),
+            ..FusionSettingsJson::default()
+        };
+        settings.validate().expect("2 <= min(3, 2) must pass");
+    }
+
+    #[test]
+    fn fusion_min_successful_alone_in_a_file_does_not_trip_the_preset_check() {
+        // Regression for a false rejection: `validate()` runs PER SETTINGS
+        // FILE (see `read_settings_file` / `read_layer_or_skip`), so a
+        // project-tier file that sets only `minSuccessfulPanels` has no
+        // opinion on `qualityPanelCount` / `fastPanelCount` — those may live
+        // in a different tier. Filling them in with the runtime's
+        // RESTRICTIVE defaults (3 and 2) here would reject
+        // `{"fusion":{"minSuccessfulPanels":3}}` even though the merged
+        // config (e.g. a user tier setting qualityPanelCount=5,
+        // fastPanelCount=4) is perfectly valid, and the whole file — not
+        // just the fusion block — would then be silently dropped.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no preset count present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_total_timeout_alone_in_a_file_does_not_trip_the_stage_sum_check() {
+        // Same per-file hazard as above, for the stage-sum check: a tier
+        // that only lowers `totalTimeoutMs` has no opinion on
+        // `panelTotalTimeoutMs` / `analystTimeoutMs` / `synthesizerTimeoutMs`
+        // — defaulting all three against this file's total alone would
+        // reject a file that sets nothing else (1_020_000 > 500_000).
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":500000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no stage field present in this file — must not be rejected");
+    }
 
     #[test]
     fn agent_push_notification_setting_parses() {

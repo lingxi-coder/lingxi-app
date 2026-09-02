@@ -2,7 +2,7 @@
 
 use crate::analyst::{analyze, AnalystError};
 use crate::budget::{self, FusionPriceBook};
-use crate::config::FusionRuntimeConfig;
+use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
 use crate::model_resolver::{self, ModelSource, ResolvedPanel};
 use crate::panel::{self, PanelInternal};
@@ -53,7 +53,7 @@ const FINALIZE_GRACE_MS: u64 = 250;
 pub struct FusionOrchestrator {
     spawner: Arc<dyn SubagentSpawner>,
     side_query: Arc<dyn SideQueryClient>,
-    config: FusionRuntimeConfig,
+    config_source: Arc<dyn FusionConfigSource>,
     catalog: Arc<dyn ModelSource>,
     prices: Arc<dyn FusionPriceBook>,
     bus: Arc<AnalyticsBus>,
@@ -61,17 +61,23 @@ pub struct FusionOrchestrator {
 
 impl FusionOrchestrator {
     /// Build an orchestrator from composition-root handles.
+    ///
+    /// `config_source` is consulted fresh on every [`Self::run`] and every
+    /// `agent_surface()`/`resolve_parent_profile()`/`workflow_fusion_call_cap()`
+    /// call (F007) — pass a bare [`FusionRuntimeConfig`] (which implements
+    /// [`FusionConfigSource`] as a fixed value) for a config that never
+    /// reloads, or a closure/struct backed by a live settings loader.
     #[must_use]
     pub fn new(
         spawner: Arc<dyn SubagentSpawner>,
         side_query: Arc<dyn SideQueryClient>,
-        config: FusionRuntimeConfig,
+        config_source: Arc<dyn FusionConfigSource>,
         catalog: Arc<dyn ModelSource>,
     ) -> Self {
         Self {
             spawner,
             side_query,
-            config,
+            config_source,
             catalog,
             prices: Arc::new(()),
             bus: Arc::new(AnalyticsBus::new()),
@@ -92,16 +98,18 @@ impl FusionOrchestrator {
         self
     }
 
-    /// Time left until `self.config.total_timeout_ms` from `started` (F004).
+    /// Time left until `config.total_timeout_ms` from `started` (F004).
     /// Never negative — once the deadline has passed this returns
     /// [`Duration::ZERO`], which `tokio::time::timeout` treats as an
     /// immediate elapse rather than panicking.
-    fn remaining(&self, started: Instant) -> Duration {
-        Duration::from_millis(self.config.total_timeout_ms.saturating_sub(millis_since(started)))
+    fn remaining(config: &FusionRuntimeConfig, started: Instant) -> Duration {
+        Duration::from_millis(config.total_timeout_ms.saturating_sub(millis_since(started)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
+        config: &FusionRuntimeConfig,
         request: FusionRequest,
         inherit: FusionInheritance,
         progress: Option<Sender<FusionProgress>>,
@@ -128,7 +136,7 @@ impl FusionOrchestrator {
             "resolving fusion panel models",
         )
         .await;
-        let resolved = match model_resolver::resolve(&request, &self.config, self.catalog.as_ref())
+        let resolved = match model_resolver::resolve(&request, config, self.catalog.as_ref())
         {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -152,6 +160,21 @@ impl FusionOrchestrator {
                 "analyst_profile".into(),
                 AnalyticsValue::String(resolved.analyst.profile.clone()),
             );
+            // F011 item 3: surface whether `resolve_analyst` had to fall back
+            // to a panelist judge (no non-panelist alternative existed) so
+            // operators can see how often the self-preference-bias avoidance
+            // actually applies. Round-2 fix: compare the CANONICAL model key
+            // (same helper `resolve_analyst`'s `is_panelist` uses), not the
+            // exact (profile, model) pair — otherwise this flag disagrees
+            // with the selection rule and reports `false` for exactly the
+            // leftover-gateway-duplicate case it exists to catch.
+            md.insert(
+                "analyst_overlaps_panel".into(),
+                AnalyticsValue::Bool(resolved.panels.iter().any(|panel| {
+                    model_resolver::canonical_key(&panel.model)
+                        == model_resolver::canonical_key(&resolved.analyst.model)
+                })),
+            );
             self.bus
                 .log_event(telemetry::tengu::fusion::STARTED, md)
                 .await;
@@ -164,7 +187,7 @@ impl FusionOrchestrator {
         )
         .await;
         let lease = match budget::acquire(
-            &self.config,
+            config,
             &resolved,
             &request,
             self.catalog.as_ref(),
@@ -224,11 +247,11 @@ impl FusionOrchestrator {
         let mut panels = match panel::run_panels(
             Arc::clone(&self.spawner),
             &inherit,
-            &self.config,
+            config,
             &request.prompt,
             &resolved.panels,
             &run_id,
-            self.remaining(started),
+            Self::remaining(config, started),
         )
         .await
         {
@@ -294,7 +317,7 @@ impl FusionOrchestrator {
             };
             self.bus.log_event(event, md).await;
         }
-        if let Err(error) = check_panel_bar(&panels, &request, &self.config) {
+        if let Err(error) = check_panel_bar(&panels, &request, config) {
             let mut md = fusion_event_metadata(&request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
             add_panel_counts(&mut md, &panels);
@@ -320,12 +343,12 @@ impl FusionOrchestrator {
         // Reusing `AnalystError::Failed("timeout")` here folds this into the
         // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
         // below.
-        let remaining_for_analyst = self.remaining(started);
+        let remaining_for_analyst = Self::remaining(config, started);
         let analysis_outcome = match tokio::time::timeout(
             remaining_for_analyst,
             analyze(
                 Arc::clone(&self.side_query),
-                &self.config,
+                config,
                 &request,
                 &resolved.analyst,
                 &panels,
@@ -484,12 +507,12 @@ impl FusionOrchestrator {
                         // exists) rather than letting the run blow past
                         // `total_timeout_ms` and lose everything to the outer
                         // `TimedOutEmpty`.
-                        let remaining_for_synth = self.remaining(started);
+                        let remaining_for_synth = Self::remaining(config, started);
                         let synth = match tokio::time::timeout(
                             remaining_for_synth,
                             synthesize(
                                 Arc::clone(&self.side_query),
-                                &self.config,
+                                config,
                                 &request,
                                 &analysis,
                                 &panels,
@@ -695,11 +718,29 @@ impl FusionExecutor for FusionOrchestrator {
         let run_id = new_run_id();
         let request_for_terminal = request.clone();
         let cancel = inherit.cancel.clone();
+        // F007: reload the effective config for THIS run rather than reading
+        // a config frozen at construction — a settings edit or the §11 kill
+        // switch (`fusion.enabled=false`) must take effect on the next run,
+        // not the next process restart.
+        let config = match self.config_source.load() {
+            Ok(config) => config,
+            Err(error) => {
+                let mut md = fusion_event_metadata(&request_for_terminal);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id));
+                add_fusion_error_metadata(&mut md, &error);
+                self.bus
+                    .log_event(telemetry::tengu::fusion::FAILED, md)
+                    .await;
+                progress::emit(&progress, FusionStage::Failed, None, "fusion failed").await;
+                return Err(error);
+            }
+        };
         // FINALIZE_GRACE_MS: this outer timeout must never fire BEFORE an inner
-        // per-stage deadline (built from `self.remaining(started)`) — see the
-        // constant's doc comment for why a zero-margin outer deadline is flaky.
+        // per-stage deadline (built from `Self::remaining(&config, started)`) —
+        // see the constant's doc comment for why a zero-margin outer deadline
+        // is flaky.
         let total = std::time::Duration::from_millis(
-            self.config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS),
+            config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS),
         );
         let outcome = tokio::select! {
             biased;
@@ -718,6 +759,7 @@ impl FusionExecutor for FusionOrchestrator {
             result = tokio::time::timeout(
                 total,
                 self.run_inner(
+                    &config,
                     request,
                     inherit,
                     progress.clone(),
@@ -756,15 +798,22 @@ impl FusionExecutor for FusionOrchestrator {
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {
+        // F007: reload per call. A config that fails to (re)load — a
+        // settings file edit that now fails validation — fails CLOSED to the
+        // disabled default rather than serving the last-known-good surface,
+        // consistent with `RejectedFusionExecutor`'s boot-time behavior.
+        let Ok(config) = self.config_source.load() else {
+            return FusionAgentSurface::default();
+        };
         FusionAgentSurface {
-            enabled: self.config.enabled,
-            allow_cross_provider: self.config.allow_cross_provider_for_agent,
-            default_preset: self.config.default_preset,
-            default_partial_ok: self.config.partial_ok,
-            quality_panel_count: self.config.quality_panel_count,
-            fast_panel_count: self.config.fast_panel_count,
-            max_panel: self.config.max_panel,
-            slash_cross_provider_default: self.config.slash_cross_provider_default,
+            enabled: config.enabled,
+            allow_cross_provider: config.allow_cross_provider_for_agent,
+            default_preset: config.default_preset,
+            default_partial_ok: config.partial_ok,
+            quality_panel_count: config.quality_panel_count,
+            fast_panel_count: config.fast_panel_count,
+            max_panel: config.max_panel,
+            slash_cross_provider_default: config.slash_cross_provider_default,
         }
     }
 
@@ -792,7 +841,11 @@ impl FusionExecutor for FusionOrchestrator {
     }
 
     fn workflow_fusion_call_cap(&self) -> u32 {
-        self.config.workflow_fusion_call_cap
+        // F007: reload per call; fail closed to the trait default (20, the
+        // global hard ceiling — see the trait doc) on a reload error.
+        self.config_source
+            .load()
+            .map_or(20, |config| config.workflow_fusion_call_cap)
     }
 }
 
@@ -1113,10 +1166,10 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::UnavailableOnPlatform => "unavailable_on_platform",
         FusionError::InvalidConfiguration(_) => "invalid_configuration",
         FusionError::InvalidRequest(_) => "invalid_request",
-        FusionError::TooFewModels => "too_few_models",
+        FusionError::TooFewModels { .. } => "too_few_models",
         FusionError::InvalidCustomModels(_) => "invalid_custom_models",
         FusionError::CrossProviderDenied => "cross_provider_denied",
-        FusionError::NoJudgeModel => "no_judge_model",
+        FusionError::NoJudgeModel { .. } => "no_judge_model",
         FusionError::StructuredOutputUnsupported => "structured_output_unsupported",
         FusionError::BudgetReservationUnavailable => "budget_reservation_unavailable",
         FusionError::BudgetExceeded => "budget_exceeded",

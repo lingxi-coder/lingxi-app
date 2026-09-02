@@ -72,10 +72,21 @@ pub fn resolve(
         resolve_preset(request, config, &available, max_panel)?
     };
     if panels.len() < usize::from(FUSION_MIN_PANEL) {
-        return Err(FusionError::TooFewModels);
+        return Err(too_few_models(request, panels.len(), FUSION_MIN_PANEL));
     }
-    let analyst = resolve_analyst(request, config, &available)?;
+    let analyst = resolve_analyst(request, config, &panels, &available)?;
     Ok(ResolvedSet { panels, analyst })
+}
+
+/// Build a data-carrying [`FusionError::TooFewModels`] (F011) so the caller
+/// can point at the setting that would fix it instead of a bare "too few".
+fn too_few_models(request: &FusionRequest, eligible: usize, required: u8) -> FusionError {
+    FusionError::TooFewModels {
+        eligible,
+        required,
+        same_provider_only: !request.cross_provider,
+        parent_profile: request.parent_profile.clone(),
+    }
 }
 
 fn deny_cross_provider_if_needed(
@@ -109,8 +120,17 @@ fn resolve_custom(
             "explicit models must contain at least 2 entries".into(),
         ));
     }
+    // F011 item 5: an explicit list longer than max_panel is a caller error,
+    // not a silent truncation — a caller who asked for 5 named models has no
+    // way to learn only 3 actually ran.
+    if refs.len() > usize::from(max_panel) {
+        return Err(FusionError::InvalidCustomModels(format!(
+            "explicit models has {} entries, exceeding the {max_panel} panel cap",
+            refs.len()
+        )));
+    }
     let mut out = Vec::new();
-    for model_ref in refs.iter().take(usize::from(max_panel)) {
+    for model_ref in refs {
         let profile = model_ref
             .profile
             .clone()
@@ -168,7 +188,7 @@ fn resolve_preset(
         .filter(|row| request.cross_provider || row.profile == request.parent_profile)
         .collect();
     if eligible.len() < usize::from(FUSION_MIN_PANEL) {
-        return Err(FusionError::TooFewModels);
+        return Err(too_few_models(request, eligible.len(), FUSION_MIN_PANEL));
     }
 
     let selected = match request.preset {
@@ -184,19 +204,91 @@ fn resolve_preset(
         .collect())
 }
 
+/// Canonical underlying-model key for cross-gateway dedup (F011): an
+/// OpenRouter row's `request_model` carries a `vendor/` prefix
+/// (`"openai/gpt-5.6-sol"`) that the SAME model's direct-profile row
+/// (`"openai" -> "gpt-5.6-sol"`) does not, so a bare string compare misses the
+/// duplicate. Stripping to the last `/`-segment aligns both spellings.
+///
+/// `pub(crate)` so `orchestrator.rs`'s `analyst_overlaps_panel` telemetry can
+/// key off the SAME canonical identity `resolve_analyst`'s `is_panelist` uses
+/// below — otherwise the flag and the selection rule can disagree about
+/// whether two rows are "the same model" (F011 round-2 blocking issue #2).
+pub(crate) fn canonical_key(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+fn canonical_model_key(row: &CatalogModel) -> &str {
+    canonical_key(&row.model)
+}
+
 fn select_quality<'a>(eligible: &mut [&'a CatalogModel], wanted: usize) -> Vec<&'a CatalogModel> {
     eligible.sort_by(|a, b| quality_order(a, b));
-    let mut picked = Vec::new();
+    select_deduped(eligible, wanted, true)
+}
+
+fn select_fast<'a>(eligible: &mut [&'a CatalogModel], wanted: usize) -> Vec<&'a CatalogModel> {
+    eligible.sort_by(|a, b| fast_order(a, b));
+    select_deduped(eligible, wanted, false)
+}
+
+/// Shared selection pass over an already-sorted eligible list (F011): the
+/// hint table deliberately lists ONE underlying model under several profiles
+/// (different gateways), so a naive `take(wanted)` or profile-only dedup can
+/// fill a panel with the identical model behind two providers, defeating the
+/// ">=2 distinct refs" ensemble premise. Distinct-underlying-model dedup is
+/// relaxed only when there truly are not enough distinct models to fill
+/// `wanted` — never silently under-fill.
+fn select_deduped<'a>(
+    sorted: &[&'a CatalogModel],
+    wanted: usize,
+    dedup_profile_first: bool,
+) -> Vec<&'a CatalogModel> {
+    let mut picked: Vec<&CatalogModel> = Vec::new();
     let mut seen_profiles = std::collections::BTreeSet::new();
-    for row in eligible.iter().copied() {
-        if seen_profiles.insert(row.profile.as_str()) {
+    let mut seen_models = std::collections::BTreeSet::new();
+    // Pass 1: one distinct underlying model per profile (quality preset) or
+    // just one per underlying model in rank order (fast preset).
+    for row in sorted.iter().copied() {
+        let model_key = canonical_model_key(row);
+        if seen_models.contains(model_key) {
+            continue;
+        }
+        if dedup_profile_first && seen_profiles.contains(row.profile.as_str()) {
+            continue;
+        }
+        seen_profiles.insert(row.profile.as_str());
+        seen_models.insert(model_key);
+        picked.push(row);
+        if picked.len() == wanted {
+            return picked;
+        }
+    }
+    // Pass 2 (quality only): relax the one-per-profile rule but keep
+    // dedup-by-underlying-model, so a profile with 2 eligible distinct models
+    // can contribute a second panelist before any model repeats.
+    if dedup_profile_first {
+        for row in sorted.iter().copied() {
+            if picked
+                .iter()
+                .any(|p| p.profile == row.profile && p.model == row.model)
+            {
+                continue;
+            }
+            let model_key = canonical_model_key(row);
+            if seen_models.contains(model_key) {
+                continue;
+            }
+            seen_models.insert(model_key);
             picked.push(row);
             if picked.len() == wanted {
                 return picked;
             }
         }
     }
-    for row in eligible.iter().copied() {
+    // Final relax: fewer distinct underlying models than `wanted` — allow the
+    // same model behind a second gateway rather than under-filling the panel.
+    for row in sorted.iter().copied() {
         if picked
             .iter()
             .any(|p| p.profile == row.profile && p.model == row.model)
@@ -209,11 +301,6 @@ fn select_quality<'a>(eligible: &mut [&'a CatalogModel], wanted: usize) -> Vec<&
         }
     }
     picked
-}
-
-fn select_fast<'a>(eligible: &mut [&'a CatalogModel], wanted: usize) -> Vec<&'a CatalogModel> {
-    eligible.sort_by(|a, b| fast_order(a, b));
-    eligible.iter().copied().take(wanted).collect()
 }
 
 fn quality_order(a: &CatalogModel, b: &CatalogModel) -> std::cmp::Ordering {
@@ -239,6 +326,7 @@ fn fast_order(a: &CatalogModel, b: &CatalogModel) -> std::cmp::Ordering {
 fn resolve_analyst(
     request: &FusionRequest,
     config: &FusionRuntimeConfig,
+    panels: &[ResolvedPanel],
     available: &[CatalogModel],
 ) -> Result<ResolvedPanel, FusionError> {
     let judges: Vec<&CatalogModel> = available
@@ -248,7 +336,12 @@ fn resolve_analyst(
         .filter(|row| request.cross_provider || row.profile == request.parent_profile)
         .collect();
     if judges.is_empty() {
-        return Err(FusionError::NoJudgeModel);
+        return Err(FusionError::NoJudgeModel {
+            eligible: 0,
+            required: 1,
+            same_provider_only: !request.cross_provider,
+            parent_profile: request.parent_profile.clone(),
+        });
     }
     let mut with_schema: Vec<&CatalogModel> = judges
         .iter()
@@ -258,13 +351,42 @@ fn resolve_analyst(
     if with_schema.is_empty() {
         return Err(FusionError::StructuredOutputUnsupported);
     }
+    // F011 round-2 blocking issue #2: compare CANONICAL model identity, not
+    // the exact (profile, model) pair. The panel dedup in `select_deduped`
+    // above already guarantees at most one gateway copy of any given
+    // underlying model sits on the panel; the sibling gateway copy is still
+    // in `judges` here and would tie on `quality_rank` with the panelist
+    // (identical hint row), so an exact-pair comparator classifies it as a
+    // NON-panelist and actively steers the analyst onto the model already on
+    // the panel. Bias is a property of the MODEL, not the gateway it was
+    // requested through.
+    let is_panelist = |row: &CatalogModel| {
+        panels
+            .iter()
+            .any(|p| canonical_key(&p.model) == canonical_key(&row.model))
+    };
+    // F011 item 3: prefer a judge that is NOT already a panelist (LLM
+    // self-preference bias survives id anonymisation). In the checked-in
+    // hint table every profile's top-ranked model is simultaneously panel #1
+    // and the top-ranked judge, so a key that only breaks TIES at
+    // `quality_rank` never fires for that shape and the analyst stays
+    // `panels[0]` — the exact defect F011 names. This key therefore sits
+    // BEFORE `quality_rank` (right after the parent-profile key): among
+    // schema-capable judges, a non-panelist always wins over a panelist, even
+    // at a lower quality tier. Judge quality stays bounded by the
+    // `judge_eligible` (and `structured_output`) gate above, so this cannot
+    // drop the analyst onto an unqualified model; a panelist is picked only
+    // when every eligible schema-capable judge is a panelist (no alternative
+    // exists at all).
     with_schema.sort_by(|a, b| {
         let a_parent = u8::from(a.profile == request.parent_profile);
         let b_parent = u8::from(b.profile == request.parent_profile);
         b_parent
             .cmp(&a_parent)
+            .then(u8::from(is_panelist(a)).cmp(&u8::from(is_panelist(b))))
             .then(b.hints.quality_rank.cmp(&a.hints.quality_rank))
             .then(a.hints.cost_class.cmp(&b.hints.cost_class))
+            .then(a.hints.latency_class.cmp(&b.hints.latency_class))
             .then(a.profile.cmp(&b.profile))
             .then(a.model.cmp(&b.model))
     });
@@ -376,7 +498,19 @@ mod tests {
         assert_eq!(set.panels[0].model, "opus");
         assert_eq!(set.panels[1].model, "sol");
         assert_eq!(set.panels[2].model, "pro");
-        assert_eq!(set.analyst.model, "opus");
+        // F011 item 3 (round-2 fix): `is_panelist` now sits BEFORE
+        // `quality_rank`, so among the two anthropic-profile candidates
+        // (opus, rank 100, on the panel; sonnet, rank 90, NOT on the panel)
+        // the non-panelist "sonnet" is preferred over the higher-ranked
+        // panelist "opus" — this is precisely the F011 defect: the
+        // pre-fix comparator pinned analyst == panels[0] == "opus" for
+        // every same-provider-parent run because the top-ranked model is
+        // always simultaneously the top panelist and the top judge.
+        assert_eq!(
+            set.analyst.model, "sonnet",
+            "the analyst must be the non-panelist judge, not panels[0]: {:?}",
+            set
+        );
     }
 
     #[test]
@@ -390,7 +524,7 @@ mod tests {
             true,
         )];
         let err = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap_err();
-        assert!(matches!(err, FusionError::TooFewModels));
+        assert!(matches!(err, FusionError::TooFewModels { .. }));
     }
 
     #[test]
@@ -430,5 +564,419 @@ mod tests {
         let set = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog).unwrap();
         assert_eq!(set.panels.len(), 2);
         assert_eq!(set.panels[1].model, "hidden");
+    }
+
+    #[test]
+    fn too_few_models_error_carries_diagnostic_data() {
+        let catalog = vec![hinted(
+            "anthropic",
+            "opus",
+            100,
+            FusionLatencyClass::Slow,
+            FusionCostClass::High,
+            true,
+        )];
+        let err = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap_err();
+        match err {
+            FusionError::TooFewModels {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => {
+                assert_eq!(eligible, 1);
+                assert_eq!(required, FUSION_MIN_PANEL);
+                assert!(!same_provider_only, "req() sets cross_provider: true");
+                assert_eq!(parent_profile, "anthropic");
+            }
+            other => panic!("expected TooFewModels, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_judge_model_carries_diagnostic_data() {
+        // Eligible enough for panels, but neither row is judge_eligible.
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "opus",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                false,
+            ),
+            hinted(
+                "anthropic",
+                "sonnet",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                false,
+            ),
+        ];
+        let err = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap_err();
+        match err {
+            FusionError::NoJudgeModel {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => {
+                assert_eq!(eligible, 0);
+                assert_eq!(required, 1);
+                assert!(!same_provider_only);
+                assert_eq!(parent_profile, "anthropic");
+            }
+            other => panic!("expected NoJudgeModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_provider_denied_for_agent_origin_by_default() {
+        let mut request = req();
+        request.origin = FusionOrigin::Agent;
+        request.cross_provider = true;
+        let catalog = vec![hinted(
+            "anthropic",
+            "opus",
+            100,
+            FusionLatencyClass::Slow,
+            FusionCostClass::High,
+            true,
+        )];
+        let err = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog).unwrap_err();
+        assert!(matches!(err, FusionError::CrossProviderDenied));
+    }
+
+    #[test]
+    fn allowed_profiles_excludes_other_profiles_from_panels_and_analyst() {
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "opus",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "anthropic",
+                "sonnet",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+            hinted(
+                "openai",
+                "sol",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+        ];
+        let mut config = FusionRuntimeConfig::defaults();
+        config.allowed_profiles = vec!["anthropic".into()];
+        let set = resolve(&req(), &config, &catalog).unwrap();
+        assert!(
+            set.panels.iter().all(|p| p.profile == "anthropic"),
+            "an unlisted profile must never be selected: {:?}",
+            set.panels
+        );
+        assert_eq!(set.analyst.profile, "anthropic");
+    }
+
+    #[test]
+    fn explicit_models_over_max_panel_is_rejected_not_truncated() {
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "opus",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "anthropic",
+                "sonnet",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+            hinted(
+                "anthropic",
+                "haiku",
+                60,
+                FusionLatencyClass::Fast,
+                FusionCostClass::Low,
+                false,
+            ),
+        ];
+        let mut request = req();
+        request.cross_provider = false;
+        request.max_panel = Some(2);
+        request.models = Some(vec![
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "opus".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "sonnet".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "haiku".into(),
+            },
+        ]);
+        let err = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog).unwrap_err();
+        match err {
+            FusionError::InvalidCustomModels(msg) => {
+                assert!(
+                    msg.contains("exceeding"),
+                    "expected an over-cap message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidCustomModels, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quality_preset_dedups_same_model_across_two_gateways() {
+        // "sol" is the SAME underlying model listed under two profiles
+        // (different gateways) — the same shape as the checked-in hint
+        // table's openai/openai-chatgpt rows. Naive per-profile dedup alone
+        // would pick it twice and never reach the 4th, distinct, model.
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "opus",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "openai",
+                "sol",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "openai-chatgpt",
+                "sol",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "deepseek",
+                "pro",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+        ];
+        let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();
+        assert_eq!(set.panels.len(), 3);
+        let sol_count = set.panels.iter().filter(|p| p.model == "sol").count();
+        assert_eq!(
+            sol_count, 1,
+            "the same underlying model must not be picked twice across gateways: {:?}",
+            set.panels
+        );
+        assert!(
+            set.panels.iter().any(|p| p.model == "pro"),
+            "a 3rd DISTINCT model must fill the panel instead of a duplicate: {:?}",
+            set.panels
+        );
+    }
+
+    #[test]
+    fn resolve_analyst_prefers_non_panelist_at_tied_quality() {
+        // Fixture is deliberately built so the PRE-FIX comparator (which has
+        // no `is_panelist` key and falls through to `a.model.cmp(&b.model)`
+        // as its final tie-break) would pick the WRONG row: the panelist
+        // "aaa-judge" sorts alphabetically before the non-panelist
+        // "zzz-judge", so without the `is_panelist` key this test goes red
+        // (see resolve_analyst's comparator; the mutation
+        // `is_panelist(a) && false` / `is_panelist(b) && false` reproduces
+        // that exact regression and was confirmed to turn this test red).
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "aaa-judge",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "anthropic",
+                "zzz-judge",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+        ];
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "aaa-judge".into(),
+        }];
+        let analyst =
+            resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &panels, &catalog).unwrap();
+        assert_eq!(
+            analyst.model, "zzz-judge",
+            "a non-panelist judge must be preferred at tied quality even though \
+             the panelist would win the alphabetical tie-break"
+        );
+    }
+
+    #[test]
+    fn resolve_analyst_prefers_non_panelist_even_over_a_higher_ranked_panelist() {
+        // Pins the `is_panelist` key's POSITION (round-2 fix, inverted from
+        // this test's pre-fix form): it must sit BEFORE `quality_rank`, not
+        // after it. Real production hint rows pin every profile's top
+        // quality_rank to also be its top judge, so a tie-only tie-break
+        // never fires there — a strictly LOWER-quality non-panelist must
+        // still win over a higher-ranked panelist, bounded only by the
+        // `judge_eligible`/`structured_output` gate (never an unqualified
+        // model).
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "panelist-judge",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "anthropic",
+                "outsider-judge",
+                50,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+        ];
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "panelist-judge".into(),
+        }];
+        let analyst =
+            resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &panels, &catalog).unwrap();
+        assert_eq!(
+            analyst.model, "outsider-judge",
+            "a non-panelist judge must be preferred even at a lower quality_rank"
+        );
+    }
+
+    #[test]
+    fn resolve_analyst_falls_back_to_a_panelist_when_no_alternative_exists() {
+        let catalog = vec![hinted(
+            "anthropic",
+            "opus",
+            100,
+            FusionLatencyClass::Slow,
+            FusionCostClass::High,
+            true,
+        )];
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "opus".into(),
+        }];
+        let analyst =
+            resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &panels, &catalog).unwrap();
+        assert_eq!(analyst.model, "opus");
+    }
+
+    #[test]
+    fn resolve_analyst_never_picks_the_leftover_gateway_copy_of_a_panel_model() {
+        // F011 round-2 blocking issue #2: `is_panelist` must compare
+        // CANONICAL model keys, not exact (profile, model) pairs. Without
+        // that, the leftover "openai/sol" copy of the panel's
+        // "openai-chatgpt/sol" (the same shape as the checked-in hint
+        // table's openai/openai-chatgpt rows, listed bare with no `vendor/`
+        // prefix) reads as a NON-panelist and, being higher quality_rank
+        // than the genuinely distinct alternative, would win the analyst
+        // slot -- steering the judge onto the identical underlying model
+        // that is already on the panel, in the very configuration
+        // `canonical_model_key` dedup exists to handle.
+        let catalog = vec![
+            hinted(
+                "openai-chatgpt",
+                "sol",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::Subscription,
+                true,
+            ),
+            hinted(
+                "openai",
+                "sol",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "deepseek",
+                "nova",
+                95,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+            hinted(
+                "mistral",
+                "pro",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+            // Genuinely distinct 5th model: lower quality_rank than the
+            // "sol" duplicate, so only the `is_panelist` fix (not quality)
+            // can make this the winner.
+            hinted(
+                "xai",
+                "gpt4o",
+                80,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+        ];
+        // req()'s parent_profile "anthropic" matches none of these profiles,
+        // so the parent-profile tie-break key never discriminates here.
+        let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();
+        assert_eq!(set.panels.len(), 3);
+        let panel_keys: Vec<&str> = set
+            .panels
+            .iter()
+            .map(|p| canonical_key(&p.model))
+            .collect();
+        assert!(
+            !panel_keys.contains(&canonical_key(&set.analyst.model)),
+            "analyst must not be the leftover gateway copy of a panel model: \
+             panels={:?} analyst={:?}",
+            set.panels,
+            set.analyst
+        );
+        assert_eq!(
+            set.analyst.model, "gpt4o",
+            "the genuinely distinct 5th model must win, not the higher-ranked \
+             leftover gateway duplicate: {:?}",
+            set
+        );
     }
 }

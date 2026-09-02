@@ -86,7 +86,10 @@ impl FusionRuntimeConfig {
             // 1_020_000 > the previous 900_000 default). Raised rather than
             // shrinking the stage defaults, which are independently
             // documented budgets. `FusionSettingsJson::validate` enforces the
-            // same inequality on any settings override.
+            // same inequality per-file when a file itself sets any of the
+            // three stage fields; `from_settings` below re-enforces it on the
+            // fully merged, concrete view, since a merge of files that each
+            // individually pass validation is not guaranteed to.
             total_timeout_ms: 1_200_000,
             analysis_protocol_retries: 1,
             slash_cross_provider_default: true,
@@ -182,6 +185,38 @@ impl FusionRuntimeConfig {
         if let Some(n) = settings.workflow_fusion_call_cap {
             cfg.workflow_fusion_call_cap = n;
         }
+
+        // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
+        // above only checked THIS settings snapshot's own fields — and, per its
+        // per-file relaxations, deliberately stays silent about the stage-sum
+        // and min-successful-vs-preset invariants whenever a single tier sets
+        // only one side of the comparison. That is correct for validating one
+        // file in isolation (`read_layer_or_skip` must not drop a whole tier
+        // just because it doesn't happen to also restate an unrelated field),
+        // but `cfg` here is the fully MERGED, concrete view across every tier,
+        // and nothing else re-checks these two invariants on it. Enforce both
+        // here, after every field above has taken its default or override.
+        let stage_sum = cfg
+            .panel_total_timeout_ms
+            .saturating_add(
+                cfg.analyst_timeout_ms
+                    .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
+            )
+            .saturating_add(cfg.synthesizer_timeout_ms);
+        if stage_sum > cfg.total_timeout_ms {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
+                total = cfg.total_timeout_ms
+            )));
+        }
+        let smallest_preset = cfg.quality_panel_count.min(cfg.fast_panel_count);
+        if cfg.min_successful_panels > smallest_preset {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion.minSuccessfulPanels ({min_successful}) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) ({smallest_preset})",
+                min_successful = cfg.min_successful_panels
+            )));
+        }
+
         Ok(cfg)
     }
 }
@@ -189,6 +224,47 @@ impl FusionRuntimeConfig {
 impl Default for FusionRuntimeConfig {
     fn default() -> Self {
         Self::defaults()
+    }
+}
+
+/// Reload point for [`FusionRuntimeConfig`] (F007).
+///
+/// `FusionOrchestrator` used to receive a `FusionRuntimeConfig` by value at
+/// construction and never re-read it: a settings-file edit, a managed-policy
+/// change, or `fusion.enabled=false` (the design's §11 kill switch) had no
+/// effect on the session's already-built orchestrator until a restart. A
+/// `FusionConfigSource` is consulted at the start of every `run()` and every
+/// `agent_surface()`/`workflow_fusion_call_cap()` call instead, so the next
+/// call — not the next restart — sees a settings change.
+pub trait FusionConfigSource: Send + Sync {
+    /// Reload the current effective config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FusionError::InvalidConfiguration`] when the underlying
+    /// settings snapshot fails to load or fails
+    /// [`FusionSettingsJson::validate`].
+    fn load(&self) -> Result<FusionRuntimeConfig, FusionError>;
+}
+
+/// A fixed config never reloads — the pre-F007 behavior, kept as the
+/// zero-ceremony source for tests and any host that has not wired live
+/// settings reload.
+impl FusionConfigSource for FusionRuntimeConfig {
+    fn load(&self) -> Result<FusionRuntimeConfig, FusionError> {
+        Ok(self.clone())
+    }
+}
+
+/// Any `Fn() -> Result<FusionRuntimeConfig, FusionError>` closure is a valid
+/// source — the composition root can wrap a revision-cached settings loader
+/// without a bespoke struct.
+impl<F> FusionConfigSource for F
+where
+    F: Fn() -> Result<FusionRuntimeConfig, FusionError> + Send + Sync,
+{
+    fn load(&self) -> Result<FusionRuntimeConfig, FusionError> {
+        self()
     }
 }
 
@@ -216,5 +292,66 @@ mod tests {
         };
         let cfg = FusionRuntimeConfig::from_settings(&settings).expect("valid settings");
         assert_eq!(cfg.default_preset, FusionPreset::Fast);
+    }
+
+    /// F004 regression (round-3 review): a merged settings snapshot that sets
+    /// only `totalTimeoutMs` passes `FusionSettingsJson::validate` (the
+    /// stage-sum check there is a per-FILE relaxation, deliberately silent
+    /// when none of the three stage fields are present in the same file) but
+    /// must still be rejected by `from_settings`, which sees the fully
+    /// merged, concrete stage values and must enforce the stage-sum
+    /// invariant there instead.
+    #[test]
+    fn from_settings_rejects_a_merged_total_timeout_that_cannot_fit_the_default_stages() {
+        let settings = FusionSettingsJson {
+            total_timeout_ms: Some(500_000),
+            ..FusionSettingsJson::default()
+        };
+        // The per-file relaxation must still accept this file standalone —
+        // proving the file itself is not being dropped.
+        settings.validate().expect("single-field file stays valid");
+        let err = FusionRuntimeConfig::from_settings(&settings)
+            .expect_err("merged stage sum (1_020_000) exceeds totalTimeoutMs (500_000)");
+        match err {
+            FusionError::InvalidConfiguration(msg) => {
+                assert!(
+                    msg.contains("panelTotalTimeoutMs")
+                        && msg.contains("analystTimeoutMs")
+                        && msg.contains("synthesizerTimeoutMs")
+                        && msg.contains("totalTimeoutMs"),
+                    "error must name the offending fields, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidConfiguration, got {other:?}"),
+        }
+    }
+
+    /// F011 item 6 regression (round-3 review): a merged settings snapshot
+    /// that sets only `minSuccessfulPanels` passes
+    /// `FusionSettingsJson::validate` (same per-file relaxation) but must
+    /// still be rejected by `from_settings` once merged against the
+    /// concrete, default panel counts — otherwise `check_panel_bar` silently
+    /// clamps a bar the operator explicitly asked for.
+    #[test]
+    fn from_settings_rejects_a_merged_min_successful_above_both_default_presets() {
+        let settings = FusionSettingsJson {
+            min_successful_panels: Some(3),
+            ..FusionSettingsJson::default()
+        };
+        settings.validate().expect("single-field file stays valid");
+        let err = FusionRuntimeConfig::from_settings(&settings).expect_err(
+            "merged min_successful_panels (3) exceeds min(quality=3, fast=2) = 2",
+        );
+        match err {
+            FusionError::InvalidConfiguration(msg) => {
+                assert!(
+                    msg.contains("minSuccessfulPanels")
+                        && msg.contains("qualityPanelCount")
+                        && msg.contains("fastPanelCount"),
+                    "error must name the offending fields, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidConfiguration, got {other:?}"),
+        }
     }
 }

@@ -2618,6 +2618,39 @@ fn desktop_fusion_catalog_row(
     }
 }
 
+/// F011 item 1: drop every catalog row a Fusion panel cannot actually reach —
+/// an uncredentialed provider profile, or a model a managed
+/// `enforceAvailableModels` policy has barred — BEFORE it can ever reach
+/// `model_resolver::resolve`. Without this, an automatic preset can select a
+/// provider with no credential (or a managed-barred model), and a panel
+/// burns turns before failing at request time (`LlmError::Authentication`)
+/// instead of failing the §4 preflight with zero provider calls.
+fn filter_fusion_catalog(
+    catalog: Vec<fusion::CatalogModel>,
+    provider_availability: &std::collections::BTreeMap<String, bool>,
+    session_model_restriction: Option<&(
+        llm_client::model::allowlist::ModelEnforcement,
+        Vec<String>,
+    )>,
+) -> Vec<fusion::CatalogModel> {
+    catalog
+        .into_iter()
+        .filter(|row| {
+            provider_availability
+                .get(&row.profile)
+                .copied()
+                .unwrap_or(false)
+        })
+        .filter(|row| match session_model_restriction {
+            None => true,
+            Some((enforcement, _)) => {
+                llm_client::model::allowlist::model_allowed_under(enforcement, &row.model)
+                    != Some(false)
+            }
+        })
+        .collect()
+}
+
 /// `fusion::FusionPriceBook` over the session's `cost::PricingCatalog` — the
 /// SAME catalog `CostTracker` bills from (see the WP1/F001/G003 comment at
 /// its construction site). Before this adapter existed, `FusionOrchestrator`
@@ -2695,17 +2728,21 @@ mod desktop_fusion_price_book_test {
     }
 }
 
+/// Resolve the effective Fusion settings for one snapshot (F007).
+///
+/// Routes through [`load_effective_settings_for_config`] — the SAME
+/// managed/CLI/scoped-source-aware loader `build()` uses for every other
+/// setting — instead of a bare `Settings::load`, so a managed-policy
+/// `fusion.enabled=false`/`allowedProfiles`/`allowCrossProviderForAgent=false`
+/// and `--settings '{"fusion":…}'` are honored (previously ignored: see the
+/// F007 finding).
 fn desktop_fusion_runtime_config(
-    project_dir: &Path,
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
 ) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
-    let env: BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = lingxi_core::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: lingxi_core::settings::schema::SettingsJson::default(),
-    };
-    let effective = lingxi_core::settings::Settings::load(inputs)
-        .map_err(|error| platform_api::FusionError::InvalidConfiguration(error.to_string()))?;
+    let effective = load_effective_settings_for_config(cfg, managed_raw_tiers).ok_or_else(|| {
+        platform_api::FusionError::InvalidConfiguration("settings failed to load".into())
+    })?;
     match effective.settings.fusion {
         Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
         None => Ok(fusion::FusionRuntimeConfig::defaults()),
@@ -2728,20 +2765,45 @@ impl platform_api::FusionExecutor for RejectedFusionExecutor {
     }
 }
 
+/// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves
+/// the effective settings on every call instead of a config frozen at
+/// construction, so a settings-file edit or the design's §11 kill switch
+/// (`fusion.enabled=false`) takes effect on the NEXT run, not the next
+/// process restart.
+struct DesktopFusionConfigSource {
+    cfg: DesktopConfig,
+    managed_raw_tiers: Vec<String>,
+}
+
+impl fusion::FusionConfigSource for DesktopFusionConfigSource {
+    fn load(&self) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+        desktop_fusion_runtime_config(&self.cfg, &self.managed_raw_tiers)
+    }
+}
+
 fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
-    project_dir: &Path,
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
     catalog: Vec<fusion::CatalogModel>,
     bus: Arc<telemetry::AnalyticsBus>,
     pricing: Arc<cost::PricingCatalog>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
-    let config = match desktop_fusion_runtime_config(project_dir) {
-        Ok(config) => config,
-        Err(error) => return Arc::new(RejectedFusionExecutor { error }),
-    };
+    // Boot-time validation: an invalid `fusion.*` value pins a
+    // `RejectedFusionExecutor` for this executor's lifetime, same as before
+    // F007 — the LIVE source below still re-validates on every subsequent
+    // call, so a fix-then-save recovers without a restart.
+    if let Err(error) = desktop_fusion_runtime_config(cfg, managed_raw_tiers) {
+        return Arc::new(RejectedFusionExecutor { error });
+    }
+    let config_source: Arc<dyn fusion::FusionConfigSource> =
+        Arc::new(DesktopFusionConfigSource {
+            cfg: cfg.clone(),
+            managed_raw_tiers: managed_raw_tiers.to_vec(),
+        });
     Arc::new(
-        fusion::FusionOrchestrator::new(spawner, side_query, config, Arc::new(catalog))
+        fusion::FusionOrchestrator::new(spawner, side_query, config_source, Arc::new(catalog))
             .with_bus(bus)
             .with_price_book(Arc::new(DesktopFusionPriceBook { catalog: pricing })),
     )
@@ -7562,6 +7624,20 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
     };
 
+    // F011 item 1: the fusion catalog must reflect what a panel can ACTUALLY
+    // reach. Filtered HERE (the earliest point `provider_availability` AND
+    // `session_model_restriction` are both final) rather than left as "every
+    // provider's every model" — otherwise `model_resolver::resolve` treats an
+    // uncredentialed or managed-barred model as available, §4's "fewer than
+    // required models -> TooFewModels before any panel call" preflight
+    // guarantee is false, and a panel can burn up to 12 turns before failing
+    // on `LlmError::Authentication`.
+    let fusion_catalog = filter_fusion_catalog(
+        fusion_catalog,
+        &provider_availability,
+        session_model_restriction.as_ref(),
+    );
+
     Ok(LlmStack {
         http,
         clock,
@@ -9778,7 +9854,8 @@ pub async fn build(
         Arc::new(sidequery::ProviderSideQueryClient::from_service(
             api_service.clone(),
         )),
-        &cwd,
+        &cfg,
+        &managed_settings_for_strict,
         fusion_catalog.clone(),
         analytics_bus.clone(),
         pricing.clone(),
@@ -12242,11 +12319,12 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_memory_feature_gates, resolve_workflow_session_enabled,
-        resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
-        DesktopConfig, DesktopSessionComposition, WorktreeSlashAction,
-        QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
+        build, desktop_fusion_runtime_config, desktop_tool_registry, filter_fusion_catalog,
+        model_deprecation_warning, parse_worktree_slash_action, resolve_memory_feature_gates,
+        resolve_workflow_session_enabled, resolve_workflow_size_guideline,
+        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig,
+        DesktopSessionComposition, WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD,
+        QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
     };
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15120,6 +15198,159 @@ mod tests {
                 .map(Vec::as_slice),
             Some(&["llama-3.3-70b-versatile".to_string()][..]),
             "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
+        );
+    }
+
+    fn fusion_catalog_row(profile: &str, model: &str) -> fusion::CatalogModel {
+        fusion::CatalogModel {
+            profile: profile.to_string(),
+            model: model.to_string(),
+            hints: platform_api::FusionModelHints::default(),
+            structured_output: false,
+        }
+    }
+
+    /// F011 item 1: an uncredentialed provider's rows never reach
+    /// `model_resolver::resolve` — a panel must not be able to select a
+    /// provider it cannot actually call. Before this filter existed,
+    /// `fusion_catalog` was every assembled provider's every model with no
+    /// `provider_availability` check.
+    #[test]
+    fn filter_fusion_catalog_drops_uncredentialed_providers() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        availability.insert("openai".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].profile, "anthropic");
+    }
+
+    /// F011 item 1: a row missing from the availability map entirely (not
+    /// merely `false`) must ALSO be dropped — absence is not availability.
+    #[test]
+    fn filter_fusion_catalog_drops_rows_missing_from_availability_map() {
+        let catalog = vec![fusion_catalog_row("groq", "llama-3.3-70b-versatile")];
+        let availability = std::collections::BTreeMap::new();
+        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        assert!(filtered.is_empty(), "got: {filtered:?}");
+    }
+
+    /// F011 item 1 (managed allowlist half, G009-adjacent): a managed
+    /// `enforceAvailableModels` policy that bars a model keeps it out of the
+    /// catalog even though its provider is otherwise available — a panel
+    /// must never be able to resolve onto a model the managed policy just
+    /// refused.
+    #[test]
+    fn filter_fusion_catalog_drops_managed_allowlist_barred_models() {
+        use llm_client::model::allowlist::ModelEnforcement;
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        let enforcement = ModelEnforcement::Active {
+            allowlist: vec!["claude-sonnet-4-6".to_string()],
+            overrides: std::collections::BTreeMap::new(),
+        };
+        let restriction = (enforcement, vec!["claude-sonnet-4-6".to_string()]);
+        let filtered = filter_fusion_catalog(catalog, &availability, Some(&restriction));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model, "claude-sonnet-4-6");
+    }
+
+    /// `None` (no managed policy) must be a no-op on top of availability.
+    #[test]
+    fn filter_fusion_catalog_with_no_restriction_keeps_every_available_row() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// F007: `desktop_fusion_runtime_config` must route through
+    /// `load_effective_settings_for_config` — the SAME managed/CLI/scoped
+    /// loader every other setting uses — not a bare `Settings::load` that
+    /// never even looks at a managed tier (`SupplementalLayers::default()`).
+    /// A managed-only `fusion.enabled=true` (no project/user file at all)
+    /// must be honored; the pre-fix bare loader would have returned the
+    /// documented default (`enabled: false`) regardless.
+    #[tokio::test]
+    async fn desktop_fusion_runtime_config_honors_a_managed_only_tier() {
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let (_tmp, cfg) = test_config(true);
+        let managed_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            managed_tmp.path().join("managed-settings.json"),
+            r#"{"fusion":{"enabled":true,"allowCrossProviderForAgent":false}}"#,
+        )
+        .expect("write managed settings");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+        let managed_tiers = super::settings_watch::managed_settings_raw_tiers().await;
+
+        let config =
+            desktop_fusion_runtime_config(&cfg, &managed_tiers).expect("valid fusion config");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+
+        assert!(
+            config.enabled,
+            "a managed-only fusion.enabled=true must be honored"
+        );
+        assert!(!config.allow_cross_provider_for_agent);
+    }
+
+    /// F007: a managed `fusion.allowCrossProviderForAgent=false` must beat a
+    /// PROJECT-tier `true` — precisely the precedence the bare `Settings::load`
+    /// (no `managed_layers`, no `cli_layer`) could never enforce.
+    #[tokio::test]
+    async fn desktop_fusion_runtime_config_managed_tier_beats_project_tier() {
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let (_tmp, mut cfg) = test_config(true);
+        // Give "user" settings a separate home so writing PROJECT settings
+        // below does not collide with it (both default under `cwd/.lingxi`
+        // in `test_config`).
+        let user_home_tmp = tempfile::tempdir().expect("tempdir");
+        cfg.lingxi_home = user_home_tmp.path().to_path_buf();
+
+        let project_settings_path = lingxi_core::settings::loader::project_settings_path(&cfg.cwd);
+        std::fs::create_dir_all(
+            project_settings_path
+                .parent()
+                .expect("project settings path has a parent"),
+        )
+        .expect("create project .lingxi dir");
+        std::fs::write(
+            &project_settings_path,
+            r#"{"fusion":{"allowCrossProviderForAgent":true}}"#,
+        )
+        .expect("write project settings");
+
+        let managed_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            managed_tmp.path().join("managed-settings.json"),
+            r#"{"fusion":{"allowCrossProviderForAgent":false}}"#,
+        )
+        .expect("write managed settings");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+        let managed_tiers = super::settings_watch::managed_settings_raw_tiers().await;
+
+        let config =
+            desktop_fusion_runtime_config(&cfg, &managed_tiers).expect("valid fusion config");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+
+        assert!(
+            !config.allow_cross_provider_for_agent,
+            "managed fusion.allowCrossProviderForAgent=false must beat project's true"
         );
     }
 

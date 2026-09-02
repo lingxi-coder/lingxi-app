@@ -315,12 +315,12 @@ export function renameElectronExecutable(appPath) {
   return newPath;
 }
 
-export function rewriteInfoPlist(plistPath, version) {
+export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
   const replacements = {
     CFBundleDisplayName: APP_NAME,
     CFBundleExecutable: APP_NAME,
     CFBundleIconFile: 'icon.icns',
-    CFBundleIdentifier: BUNDLE_ID,
+    CFBundleIdentifier: bundleId,
     CFBundleName: APP_NAME,
     CFBundleShortVersionString: version,
     CFBundleVersion: version,

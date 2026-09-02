@@ -6676,6 +6676,17 @@ pub async fn build_shared_credential_stack_with_policy(
     })
 }
 
+async fn build_shared_credential_stack_for_config(
+    cfg: &DesktopConfig,
+) -> Result<SharedCredentialStack, BuildError> {
+    build_shared_credential_stack_with_policy(
+        &cfg.lingxi_home,
+        cfg.isolated_credential_storage,
+        cfg.credential_storage_policy,
+    )
+    .await
+}
+
 async fn build_platform_plaintext_secure_storage(
     credentials_path: PathBuf,
 ) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
@@ -6735,7 +6746,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         clock,
         storage: mcp_oauth_storage,
         credentials,
-    } = build_shared_credential_stack(&cfg.lingxi_home, cfg.isolated_credential_storage).await?;
+    } = build_shared_credential_stack_for_config(&cfg).await?;
 
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
@@ -12198,15 +12209,33 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_memory_feature_gates, resolve_workflow_session_enabled,
-        resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
-        DesktopConfig, DesktopSessionComposition, WorktreeSlashAction,
-        QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
+        build, build_shared_credential_stack_for_config, desktop_tool_registry,
+        model_deprecation_warning, parse_worktree_slash_action, resolve_memory_feature_gates,
+        resolve_workflow_session_enabled, resolve_workflow_size_guideline,
+        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig, DesktopSessionComposition,
+        WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
     };
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn desktop_config_forwards_process_local_credential_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut cfg = DesktopConfig::default();
+        cfg.lingxi_home = home.path().to_path_buf();
+        cfg.isolated_credential_storage = false;
+        cfg.credential_storage_policy = platform_api::CredentialStoragePolicy::NativeOrMemory;
+
+        let stack = build_shared_credential_stack_for_config(&cfg)
+            .await
+            .expect("credential stack");
+        assert_eq!(
+            stack.storage.backend(),
+            platform_api::SecureStorageBackend::MemorySession
+        );
+    }
 
     /// §14 — a WIRING gate, not a behaviour test.
     ///
@@ -13711,6 +13740,7 @@ mod tests {
         let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
             isolated_credential_storage: false,
+            credential_storage_policy: platform_api::CredentialStoragePolicy::NativeOrMemory,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,

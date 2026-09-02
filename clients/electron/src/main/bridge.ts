@@ -753,9 +753,8 @@ export class SessionRuntime {
         bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
       );
       this.setState({ status: 'connected' });
-      // Status refreshes use attribute-only Keychain existence queries, so
-      // startup never decrypts every saved credential or triggers an ACL
-      // authorization-dialog cascade.
+      // Status refreshes use attribute-only broker queries; they do not
+      // decrypt every saved credential or expose secret bytes to the renderer.
       void this.refreshProviderCredentials();
     } catch (error) {
       if (generation === this.generation) {

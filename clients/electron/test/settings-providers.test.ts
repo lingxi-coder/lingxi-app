@@ -18,6 +18,7 @@ import {
   initialProviderSelection,
   providerConnectionStatus,
   ProviderCredentials,
+  shouldRequestCredentialPreview,
 } from '../src/renderer/components/settings/pages/ProviderCredentials';
 import { rowState, type SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -174,6 +175,14 @@ test('credential status: configured + encrypted is the securely-persisted state'
   assert.equal(credentialStatusKind({ configured: true, encryptionAvailable: true }), 'secure');
 });
 
+test('credential status: signed broker configuration failures are explicit', () => {
+  assert.equal(credentialStatusKind({
+    configured: false,
+    encryptionAvailable: false,
+    storageError: '签名配置错误',
+  }), 'unavailable');
+});
+
 test('credential status: configured without Keychain encryption is the fallback-configured warning', () => {
   assert.equal(credentialStatusKind({ configured: true, encryptionAvailable: false }), 'fallback-configured');
 });
@@ -193,6 +202,10 @@ test('provider list status reflects authoritative connection state instead of ed
   assert.deepEqual(providerConnectionStatus({ configured: false, runtimeOnly: false }, true, true), { kind: 'disconnected', label: '未连接' });
   assert.deepEqual(providerConnectionStatus({ configured: true, runtimeOnly: false }, false, true), { kind: 'unknown', label: '状态不可用' });
   assert.deepEqual(providerConnectionStatus(undefined, true, false), { kind: 'unavailable', label: 'CLI / TUI' });
+  assert.deepEqual(
+    providerConnectionStatus({ configured: false, storageError: '签名配置错误' }, true, true),
+    { kind: 'unavailable', label: '安全存储不可用' },
+  );
 });
 
 test('connect button label follows the busy > runtimeOnly > configured priority BetaSettings used', () => {
@@ -381,6 +394,27 @@ test('configured provider detail shows only the masked suffix returned by the en
   assert.match(markup, /href="https:\/\/platform\.deepseek\.com\/api_keys"/);
   assert.match(markup, /获取或管理 API Key/);
   assert.doesNotMatch(markup, /sk-test-secret|sk-shared-secret/);
+});
+
+test('configured credentials request a disconnected preview only when the broker is available', () => {
+  assert.equal(shouldRequestCredentialPreview(
+    'deepseek',
+    { configured: true, credentialPreview: undefined, storageError: undefined },
+    new Set(),
+    true,
+  ), true);
+  assert.equal(shouldRequestCredentialPreview(
+    'deepseek',
+    { configured: true, credentialPreview: '••••abcd', storageError: undefined },
+    new Set(),
+    true,
+  ), false);
+  assert.equal(shouldRequestCredentialPreview(
+    'deepseek',
+    { configured: true, credentialPreview: undefined, storageError: undefined },
+    new Set(),
+    false,
+  ), false);
 });
 
 // The runtime half of the same finding: `clients/electron/test/` is not part

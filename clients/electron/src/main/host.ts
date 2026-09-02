@@ -17,6 +17,11 @@ import { isSessionId } from './bridge.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
+  resolveProviderTestCredential,
+  type CredentialBrokerStatus,
+  type ProviderCredentialBroker,
+} from './credential-broker.js';
+import {
   canonicalWorkspace,
   DiagnosticBuffer,
   sanitizeDiagnostic,
@@ -36,6 +41,8 @@ export interface CredentialMetadata {
   credentialPreview?: string;
   /** The running engine received a credential from an external runtime source. */
   runtimeOnly?: true;
+  /** Display-safe reason why the signed credential broker is unavailable. */
+  storageError?: string;
 }
 
 export interface ProviderCredentialMetadata extends CredentialMetadata {
@@ -76,6 +83,16 @@ export interface WorkspaceFilePreview {
 }
 
 const MAX_WORKSPACE_FILE_PREVIEW_BYTES = 512 * 1024;
+
+function credentialBrokerDisplayError(diagnostic: string): string {
+  if (/ENOENT|not found|code signature|TeamIdentifier|authorize broker caller/i.test(diagnostic)) {
+    return '凭据代理未正确签名或未随应用安装。macOS 开发构建需要 Apple Development 签名和有效的 provisioning profile。';
+  }
+  if (/protocol mismatch|protocol version|incompatible/i.test(diagnostic)) {
+    return '凭据代理版本与当前应用不兼容，请升级 LingXi Desktop、CLI 和 TUI。';
+  }
+  return `macOS 安全凭据存储不可用：${diagnostic}`;
+}
 
 function pathEscapes(root: string, candidate: string): boolean {
   const value = relative(root, candidate);
@@ -271,6 +288,9 @@ export class HostController {
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
+  private readonly brokerConfiguredProviders = new Set<string>();
+  private readonly brokerCredentialPreviews = new Map<string, string>();
+  private brokerStorageError: string | undefined;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -285,6 +305,7 @@ export class HostController {
      * class ever holding a second, drift-prone copy of that wiring.
      */
     private readonly mediaAccess?: MediaAccessReader,
+    private readonly credentialBroker?: ProviderCredentialBroker,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -303,7 +324,10 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
-    this.ipc.handle(CH_BOOTSTRAP, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.bootstrap(); });
+    this.ipc.handle(CH_BOOTSTRAP, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return this.bootstrap();
+    });
     this.ipc.handle(CH_SETTINGS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.getPublic(); });
     this.ipc.handle(CH_SETTINGS_UPDATE, async (event: IpcMainInvokeEvent, patch: unknown) => {
       this.assertSender(event);
@@ -421,10 +445,16 @@ export class HostController {
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, async (event: IpcMainInvokeEvent, providerId?: unknown) => {
       this.assertSender(event);
-      if (providerId !== undefined) {
+      if (this.credentialBroker) {
+        await this.refreshCredentialBrokerStatus(
+          providerId !== undefined ? this.requireProvider(providerId).id : undefined,
+        );
+      } else if (providerId !== undefined) {
         const provider = this.requireProvider(providerId);
-        this.requireWorkspace();
-        await this.requireCurrentRuntime().listProviderCredentials([provider.id], [provider.id]);
+        const runtime = this.currentRuntime();
+        if (runtime?.connectionState.status === 'connected') {
+          await runtime.listProviderCredentials([provider.id], [provider.id]);
+        }
       }
       return this.providerCredentialSnapshot();
     });
@@ -433,31 +463,21 @@ export class HostController {
       const provider = this.requireProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
-      this.requireWorkspace();
-      const runtime = this.requireCurrentRuntime();
-      const stored = await runtime.setProviderCredential(provider.id, credential);
-      if (!stored.configured_provider_ids.includes(provider.id)) {
-        throw new Error(`provider credential was not persisted (${provider.id})`);
-      }
-      const credentialMetadata: ProviderCredentialMetadata = {
-        providerId: provider.id,
-        configured: true,
-        encryptionAvailable: stored.storage_encrypted,
-        ...(stored.credential_previews?.[provider.id]
-          ? { credentialPreview: stored.credential_previews[provider.id] }
-          : {}),
-      };
+      const credentialMetadata = this.credentialBroker
+        ? await this.setCredentialThroughBroker(provider.id, credential)
+        : await this.setCredentialThroughRuntime(provider.id, credential);
       if (provider.defaultModel) this.updateProviderDefaultModel(provider.defaultModel);
-      // Persistence is the boundary of this IPC operation. Restart is owned by
-      // the renderer so it can clear the secret before handling recovery.
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       this.assertNoActiveTurn();
-      this.requireWorkspace();
-      await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+      if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
+      else {
+        this.requireWorkspace();
+        await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+      }
       await this.restartIfConfigured();
       return this.providerCredentialMetadata(provider.id);
     });
@@ -479,11 +499,16 @@ export class HostController {
       const reference = provider.defaultModel ?? '';
       const slash = reference.indexOf('/');
       const model = slash >= 0 ? reference.slice(slash + 1) : reference;
+      const testCredential = await resolveProviderTestCredential(
+        provider.id,
+        credentialOverride,
+        this.credentialBroker,
+      );
       return this.requireCurrentRuntime().testProviderConnection(
         provider.id,
         configuredBase ?? provider.defaultApiBase,
         model,
-        credentialOverride,
+        testCredential,
       );
     });
     this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
@@ -560,7 +585,18 @@ export class HostController {
     }
   }
 
-  private bootstrap(): BootstrapState {
+  private async bootstrap(): Promise<BootstrapState> {
+    if (this.credentialBroker) {
+      try {
+        await this.refreshCredentialBrokerStatus();
+      } catch (error) {
+        const diagnostic = sanitizeDiagnostic(error);
+        this.brokerStorageError = credentialBrokerDisplayError(diagnostic);
+        this.brokerConfiguredProviders.clear();
+        this.brokerCredentialPreviews.clear();
+        this.diagnostics.add('warn', 'host', `credential broker status refresh failed: ${diagnostic}`);
+      }
+    }
     const revision = ++this.bootstrapRevision;
     const activeSession = this.settings.getPublic().activeSession;
     const activeRuntime = this.currentRuntime();
@@ -586,6 +622,9 @@ export class HostController {
         ...(state.error ? { error: state.error } : {}),
       }])),
       providerCredentials: this.providerCredentialSnapshot(),
+      ...(this.credentialBroker
+        ? { credentialBrokerAvailable: this.brokerStorageError === undefined }
+        : {}),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: activeRuntime?.connectionState ?? legacy.connectionState ?? { status: 'idle' },
       versions: {
@@ -670,9 +709,15 @@ export class HostController {
         ? runtime?.activeCredentialProviderIds ?? legacy.activeCredentialProviderIds ?? []
         : [],
     );
-    const persistedProviders = new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
-    const engineStorageEncrypted = runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
-    const credentialPreviews = runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
+    const persistedProviders = this.credentialBroker
+      ? new Set(this.brokerConfiguredProviders)
+      : new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
+    const engineStorageEncrypted = this.credentialBroker
+      ? this.brokerStorageError === undefined
+      : runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
+    const credentialPreviews = this.credentialBroker
+      ? Object.fromEntries(this.brokerCredentialPreviews)
+      : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
     return PROVIDER_IDS.map((providerId) => {
       if (persistedProviders.has(providerId)) {
         return {
@@ -695,13 +740,81 @@ export class HostController {
           runtimeOnly: true,
         };
       }
-      return { providerId, configured: false, encryptionAvailable: engineStorageEncrypted };
+      return {
+        providerId,
+        configured: false,
+        encryptionAvailable: engineStorageEncrypted,
+        ...(this.brokerStorageError ? { storageError: this.brokerStorageError } : {}),
+      };
     });
   }
 
   private providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
     return this.providerCredentialSnapshot().find((metadata) => metadata.providerId === providerId)
       ?? { providerId, configured: false, encryptionAvailable: false };
+  }
+
+  private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
+    if (!this.credentialBroker) return;
+    const nextConfigured = new Set(
+      (await this.credentialBroker.listStatus(PROVIDER_IDS))
+        .filter((entry: CredentialBrokerStatus) => entry.configured)
+        .map((entry: CredentialBrokerStatus) => entry.providerId),
+    );
+    this.brokerStorageError = undefined;
+    this.brokerConfiguredProviders.clear();
+    for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
+    for (const providerId of PROVIDER_IDS) {
+      if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
+    }
+    if (!previewProviderId) return;
+    const preview = await this.credentialBroker.preview(previewProviderId);
+    if (!preview.configured) {
+      this.brokerConfiguredProviders.delete(previewProviderId);
+      this.brokerCredentialPreviews.delete(previewProviderId);
+      return;
+    }
+    this.brokerConfiguredProviders.add(previewProviderId);
+    if (preview.maskedValue) this.brokerCredentialPreviews.set(previewProviderId, preview.maskedValue);
+    else this.brokerCredentialPreviews.delete(previewProviderId);
+  }
+
+  private async setCredentialThroughRuntime(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
+    this.requireWorkspace();
+    const stored = await this.requireCurrentRuntime().setProviderCredential(providerId, credential);
+    if (!stored.configured_provider_ids.includes(providerId)) {
+      throw new Error(`provider credential was not persisted (${providerId})`);
+    }
+    return {
+      providerId,
+      configured: true,
+      encryptionAvailable: stored.storage_encrypted,
+      ...(stored.credential_previews?.[providerId]
+        ? { credentialPreview: stored.credential_previews[providerId] }
+        : {}),
+    };
+  }
+
+  private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
+    const stored = await this.credentialBroker!.set(providerId, credential);
+    if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
+    this.brokerStorageError = undefined;
+    this.brokerConfiguredProviders.add(providerId);
+    if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
+    else this.brokerCredentialPreviews.delete(providerId);
+    return {
+      providerId,
+      configured: true,
+      encryptionAvailable: true,
+      ...(stored.maskedValue ? { credentialPreview: stored.maskedValue } : {}),
+    };
+  }
+
+  private async clearCredentialThroughBroker(providerId: string): Promise<void> {
+    await this.credentialBroker!.delete(providerId);
+    this.brokerConfiguredProviders.delete(providerId);
+    this.brokerCredentialPreviews.delete(providerId);
+    this.brokerStorageError = undefined;
   }
 
   private requireProvider(providerId: unknown) {

@@ -63,6 +63,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // credential-required Error. Without this the credential assertions
         // below pass only on a machine that has never logged in.
         isolated_credential_storage: true,
+        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),

@@ -90,10 +90,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
     }
     if boot::has_no_credential_source(&cfg) && provider_keys.is_empty() {
-        // The Rust runtime checks the shared CLI/TUI secure store during
-        // assembly. Absence from the Electron stdin envelope is therefore not
-        // itself an error or warning.
-        tracing::info!("no parent credential supplied; checking shared secure storage");
+        tracing::info!("no parent credential supplied for this bridge session");
     }
     tracing::info!(
         cwd = %cfg.cwd.display(),

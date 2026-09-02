@@ -38,11 +38,17 @@ task commands.
 
 Provider credentials are stored as per-provider generic-password items in the
 macOS Data Protection Keychain (`SecItem` with
-`kSecUseDataProtectionKeychain`). They are written once to bridge stdin as a
-bounded envelope and remain absent from arguments and environment variables.
-An ad-hoc build has no provisioned keychain access group, so it keeps a key in
-main-process memory for that app session instead of writing plaintext or using
-the deprecated file-based login keychain. The bridge receives an
+`kSecUseDataProtectionKeychain`) by the signed, launchd-managed
+`LingXiCredentialBroker.app`. Desktop, CLI, and TUI reach that broker through a
+separately signed one-shot client; the broker verifies the XPC peer requirement
+and the client verifies its signed parent. `bridge-server` has no broker
+authority and receives only the selected session credential over stdin. Development
+and production use separate bundle/service identifiers. The selected
+provider's key is written once to bridge stdin as a bounded envelope and
+remains absent from arguments, child environment variables, renderer state,
+and configuration files. Missing or invalid signing fails closed and is shown
+in Provider settings; there is no plaintext, memory, or legacy login-keychain
+fallback. The bridge receives an
 allowlisted environment, publishes discovery data inside a private per-launch
 directory, requires protocol hello before commands, and accepts one
 authenticated client. OAuth/device sign-in remains a CLI/TUI-only flow in this
@@ -109,20 +115,27 @@ The gitignored `dist/` directory receives:
 - `LingXi-Code-<version>-mac-arm64.zip.sha256`
 
 The in-repo packager uses Electron's official application skeleton, builds the
-native Data Protection Keychain module, bundles the
+credential broker app and signed client shim, bundles the
 release Rust sidecar at `Contents/Resources/bin/bridge-server`, removes
 development metadata, checks both binaries are arm64, scans for credentials and
-developer paths, applies an ad-hoc signature, and emits a SHA-256 checksum.
+developer paths, signs nested code from the inside out, validates identifiers
+and final entitlements, and emits a SHA-256 checksum.
 
 Provisioned builds can persist credentials by setting
 `LINGXI_CODESIGN_IDENTITY`, `LINGXI_MAC_TEAM_ID`, and
-`LINGXI_MAC_PROVISIONING_PROFILE` before `npm run package:mac`. The profile must
-authorize `com.lingxi.code`; the packager embeds it and signs the app with the
-matching private keychain access group.
+`LINGXI_MAC_PROVISIONING_PROFILE` before `npm run package:mac`. Set
+`LINGXI_MAC_BROKER_PROVISIONING_PROFILE` when the Desktop profile does not also
+authorize `com.lingxi.code.credential-broker`. Profiles must be current and
+match the signing Team ID. Local development uses an Apple Development identity
+and corresponding profiles plus `LINGXI_CREDENTIAL_BROKER_CHANNEL=development`;
+release builds use the distribution identity and the default `production`
+channel. Development identifiers receive a `.development` suffix and cannot
+address production broker services or credentials.
 
-The ad-hoc signature is intended only for approved internal distribution. A
-public or wider external release still requires Developer ID signing,
-notarization, stapling, and a separate release approval.
+Ad-hoc signing exists only behind the explicit CI packaging-fixture switch and
+cannot access persistent credentials. Distributable builds require the
+profile-gated signing path; public releases additionally require notarization,
+stapling, and release approval.
 
 ## Install, update, and roll back
 

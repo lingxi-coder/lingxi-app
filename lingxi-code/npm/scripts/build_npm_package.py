@@ -319,6 +319,11 @@ def copy_native_binary(
     if not is_windows:
         dst_path.chmod(dst_path.stat().st_mode | 0o111)
 
+    broker_src = vendor_src / target_triple / "credential-broker"
+    if broker_src.exists():
+        broker_dst = staging_dir / "vendor" / target_triple / "credential-broker"
+        shutil.copytree(broker_src, broker_dst, dirs_exist_ok=True)
+
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> None:
     print("+", " ".join(cmd), flush=True)

@@ -763,32 +763,43 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
     // An empty collection produces NO message (messages.ts:4118 early return).
     // We match those bytes exactly: one message, the `SubagentStart hook
     // additional context: ` prefix, the `\n`-join of all contexts.
+    // G008: a Fusion panel is not an ordinary `Agent` tool spawn — it is one of
+    // N concurrent provider round-trips the orchestrator's own subagent-hook
+    // chokepoint (turn_loop.rs) already accounts for as a SINGLE `fusion` node
+    // (see `fusion_tool_result`'s `subagentHooksFired` marker below). Firing a
+    // real per-panel `SubagentStart` here — with no matching `SubagentStop`,
+    // since a panel definition carries no frontmatter `Stop` hook — would leave
+    // N starts and zero stops for every Fusion run. Skip it for this
+    // `agent_type` on EVERY entrypoint (Agent tool, `/fusion`, workflow), so a
+    // Fusion run's hook activity is exactly the chokepoint's one pair.
     if let Some(hooks) = &ctx.hook_executor {
-        let hook_ctx = hooks::registry::HookContext {
-            session_id: ctx.hook_session_id,
-            agent_id: Some(ctx.agent_id),
-            cwd: ctx.hook_cwd.clone(),
-            agent_type: Some(agent_type.clone()),
-            ..Default::default()
-        };
-        let agg = hooks
-            .execute(
-                hooks::events::HookEvent::SubagentStart {
-                    agent_id: ctx.agent_id,
-                    agent_type: agent_type.clone(),
-                    parent_agent_id: ctx.parent_agent_id,
-                },
-                hook_ctx,
-            )
-            .await;
-        if !agg.additional_contexts.is_empty() {
-            let joined = agg.additional_contexts.join("\n");
-            out.push(ConversationMessage::user(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
-                ),
-            ));
+        if agent_type != platform_api::FUSION_PANEL_TYPE {
+            let hook_ctx = hooks::registry::HookContext {
+                session_id: ctx.hook_session_id,
+                agent_id: Some(ctx.agent_id),
+                cwd: ctx.hook_cwd.clone(),
+                agent_type: Some(agent_type.clone()),
+                ..Default::default()
+            };
+            let agg = hooks
+                .execute(
+                    hooks::events::HookEvent::SubagentStart {
+                        agent_id: ctx.agent_id,
+                        agent_type: agent_type.clone(),
+                        parent_agent_id: ctx.parent_agent_id,
+                    },
+                    hook_ctx,
+                )
+                .await;
+            if !agg.additional_contexts.is_empty() {
+                let joined = agg.additional_contexts.join("\n");
+                out.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
+                    ),
+                ));
+            }
         }
     }
 
@@ -1110,6 +1121,16 @@ async fn run_subagent_loop(
     let mut structured_failed_count: u32 = 0;
     let mut structured_nudge_count: u32 = 0;
     let structured_retry_cap = structured_output_retry_cap();
+    // `StructuredOutputMode::WhenDone` (Fusion panels — WP2a item 1): counts
+    // CONSECUTIVE turns that produced no tool_use block at all (not even a
+    // `StructuredOutput` call). Reset to 0 the moment any tool is called.
+    // Reaching 2 forces `StructuredOutput` on the very next turn, same as
+    // being on the run's last turn — see `force_this_turn` below.
+    let mut whendone_idle_turns: u32 = 0;
+    let force_every_turn = matches!(
+        ctx.structured_output_mode,
+        platform_api::subagent_spawn::StructuredOutputMode::Forced
+    );
     // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
     // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
     // This is the dispatch-time guard the advertised set relies on: the
@@ -1249,7 +1270,7 @@ async fn run_subagent_loop(
         // already emitted its `Completed`). Stays `false` if the loop instead falls
         // through by exhausting `max_turns`, which needs the max-turns `Completed`.
         let mut terminated_cleanly = false;
-        for _turn in 0..max_turns {
+        for turn_idx in 0..max_turns {
             // Per-turn budget gate. This is the achievable analog of
             // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
             // the same frozen seam `AgentTool`'s pre-spawn gate uses
@@ -1321,6 +1342,18 @@ async fn run_subagent_loop(
                 .effort
                 .as_ref()
                 .map(crate::definition::AgentEffort::to_wire);
+            // `StructuredOutputMode::WhenDone` (Fusion panels, WP2a item 1): let
+            // the model use its other tools with normal (auto) `tool_choice`
+            // while turns remain; force `StructuredOutput` only on the run's
+            // LAST turn, or once it has produced two consecutive turns with no
+            // tool call at all (`whendone_idle_turns`, updated after the
+            // round-trip below). `StructuredOutputMode::Forced` (the default,
+            // byte-parity with pre-WP2a behavior) forces every turn
+            // unconditionally. Computed once per turn (stable across any
+            // watchdog retry of the SAME turn below).
+            let is_last_turn = turn_idx + 1 == max_turns;
+            let force_this_turn = force_structured_tool.is_some()
+                && (force_every_turn || is_last_turn || whendone_idle_turns >= 2);
             // (M9 cc2.1.198 wake-on-message) Captured by the wake arm in the
             // select below and appended to `history` HERE, before the next
             // `api_call` is built, because the in-flight future immutably
@@ -1369,7 +1402,7 @@ async fn run_subagent_loop(
                         query_source_label: ctx.query_source_label.clone(),
                     };
                     let open_stream = async {
-                        if let Some(forced) = force_structured_tool {
+                        if force_this_turn {
                             api_client
                                 .messages_create_stream_forced_in_opts(
                                     &current_model,
@@ -1377,7 +1410,7 @@ async fn run_subagent_loop(
                                     system.as_deref(),
                                     messages_for_api,
                                     tool_schemas.clone(),
-                                    Some(forced),
+                                    force_structured_tool,
                                     effort_wire.clone(),
                                     call_opts,
                                 )
@@ -1594,11 +1627,14 @@ async fn run_subagent_loop(
             // Keep the FINAL response usage for the terminal `Completed` rollup
             // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
             // overwrite, never accumulate, to stay byte-faithful).
+            //
+            // WP2a item 2 (F002 sub-claim 3): `max_output_tokens_per_turn` is a
+            // WIRE ceiling forwarded to the provider via
+            // `SubagentApiCallOpts::max_output_tokens` (below) — it is NOT a
+            // clamp on the REPORTED usage. Reporting min(real, ceiling) here
+            // hid a provider overrun from `cumulative_usage`/settlement instead
+            // of surfacing it; report the provider's real usage verbatim.
             last_usage = response.usage.clone();
-            if let Some(max) = ctx.max_output_tokens_per_turn {
-                last_usage.billable_tokens.output =
-                    last_usage.billable_tokens.output.min(u64::from(max));
-            }
             accumulate_usage(&mut cumulative_usage, &last_usage);
             emit_progress(
                 &out_tx,
@@ -1655,6 +1691,17 @@ async fn run_subagent_loop(
 
             // Accumulate the run-wide tool-use count (claude `totalToolUseCount`).
             total_tool_use_count = total_tool_use_count.saturating_add(tool_uses.len() as u64);
+
+            // `StructuredOutputMode::WhenDone`: reset the idle streak the moment
+            // ANY tool is called (including a `StructuredOutput` attempt — a
+            // failed validation still means the model tried); otherwise count
+            // this as one more consecutive no-tool turn. No-op under `Forced`
+            // (every turn is already forced, so `whendone_idle_turns` is unread).
+            if tool_uses.is_empty() {
+                whendone_idle_turns = whendone_idle_turns.saturating_add(1);
+            } else {
+                whendone_idle_turns = 0;
+            }
 
             // Dispatch any tool_use blocks FIRST, then decide loop disposition by
             // stop_reason — mirroring the orchestrator references. `execute_one_turn`
@@ -1954,6 +2001,36 @@ async fn run_subagent_loop(
                 // stop keeps `should_continue` true, so the model retries until the
                 // retry cap above fires.)
                 if force_structured_tool.is_some() && structured_result.is_none() {
+                    // `StructuredOutputMode::WhenDone`: a text-only turn that
+                    // wasn't forced is not an anomaly — the model is still free
+                    // to use its other tools on a later turn. Loop back WITHOUT
+                    // the nudge-then-fail escalation below, which exists to
+                    // catch a FORCED turn the provider still answered with no
+                    // tool call (a genuine anomaly under either mode). The
+                    // `whendone_idle_turns` counter (updated above) forces the
+                    // next turn once it reaches 2, guaranteeing termination
+                    // without relying on this escalation at all.
+                    //
+                    // The next round-trip's request is built straight from
+                    // `history` (`cap_input_bytes(&history, ..)` at the top of
+                    // the turn loop) — every OTHER exit from this arm, and
+                    // every tool-dispatch continuation, appends a user message
+                    // (the nudge below, or the pushed tool_results) before
+                    // looping, so the request's last message is always
+                    // user-authored. This is the one path that did not: append
+                    // a lightweight wrap-up reminder now so the WhenDone idle
+                    // path keeps that invariant too, WITHOUT spending a
+                    // `structured_nudge_count` slot (that budget is reserved
+                    // for the FORCED-turn anomaly below; this is routine).
+                    if !force_this_turn {
+                        let wrap_up = ConversationMessage::user(
+                            MessageId::new(),
+                            "Continue working, or call StructuredOutput now if you have your answer.".to_string(),
+                        );
+                        history.push(wrap_up.clone());
+                        emit_message(&out_tx, agent_id, &wrap_up).await;
+                        continue;
+                    }
                     if structured_nudge_count < 2 {
                         structured_nudge_count = structured_nudge_count.saturating_add(1);
                         let nudge = ConversationMessage::user(

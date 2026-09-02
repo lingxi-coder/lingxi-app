@@ -191,6 +191,11 @@ pub struct SubagentContext {
     /// runner injects a forced `StructuredOutput` tool and returns the model's
     /// tool input as the result. `None` ⇒ free-form text output.
     pub schema: Option<String>,
+    /// Per-turn `tool_choice` policy applied while [`Self::schema`] is `Some`,
+    /// forwarded from
+    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
+    /// Ignored when [`Self::schema`] is `None`.
+    pub structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.

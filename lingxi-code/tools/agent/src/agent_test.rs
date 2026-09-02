@@ -626,6 +626,39 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    /// G008: `fusion_tool_result`'s `data["subagentHooksFired"]` is the
+    /// marker the orchestrator's subagent-hook chokepoint
+    /// (`turn_loop.rs`'s `is_fusion_result` — see its
+    /// `runner_fired_start && real_agent_id.is_none()` check) reads to tell
+    /// a Fusion result apart from an ordinary Agent-tool result and skip
+    /// BOTH the phantom `SubagentStart` and `SubagentStop` it would
+    /// otherwise fire. Both halves of that discriminator are pinned here
+    /// directly on the producer, not just on the orchestrator-side
+    /// `FakeFusionTool` fixture that duplicates this shape: the field must
+    /// be `true`, and `agentId` — the field an ordinary Agent-tool result
+    /// always carries (see the sibling `"agentId": agent_id_str` literal a
+    /// few thousand lines up in `agent.rs`) — must be ABSENT, since its
+    /// presence is what makes the chokepoint treat a result as attributable
+    /// to one real child agent.
+    #[test]
+    fn fusion_tool_result_marks_subagent_hooks_fired_with_no_agent_id() {
+        let result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let call_result = fusion_tool_result(result);
+        assert_eq!(
+            call_result.data["subagentHooksFired"],
+            serde_json::json!(true),
+            "fusion_tool_result must mark subagentHooksFired=true: {:?}",
+            call_result.data
+        );
+        assert!(
+            call_result.data.get("agentId").is_none(),
+            "fusion_tool_result must NOT carry an agentId (that presence is what tells \
+             turn_loop.rs's chokepoint apart a real single-child Agent result from a Fusion \
+             result): {:?}",
+            call_result.data
+        );
+    }
+
     struct ScriptedFusion {
         enabled: bool,
         result: platform_api::FusionResult,

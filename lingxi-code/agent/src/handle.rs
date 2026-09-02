@@ -1377,6 +1377,8 @@ impl PoolSubagentSpawner {
             tool_schemas: vec![],
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
             schema: None,
+            // Overwritten by `build_subagent_context` from `request.structured_output_mode`.
+            structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
             budget: None,
             // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
@@ -1697,6 +1699,7 @@ impl PoolSubagentSpawner {
                         .map(Arc::from)
                 });
         ctx.schema = request.schema.clone();
+        ctx.structured_output_mode = request.structured_output_mode;
         // Preserve the spawn's human identity on every dispatched tool call.
         // Claude's per-agent async-local context exposes `getAgentName()` and
         // `getTeammateContext()?.teamName`; SendMessage and the V2 task tools
@@ -2981,6 +2984,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -4718,6 +4722,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -4780,6 +4785,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5356,6 +5362,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5481,6 +5488,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5598,6 +5606,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5673,6 +5682,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5738,6 +5748,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5861,6 +5872,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -5969,6 +5981,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -6063,6 +6076,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -6478,6 +6492,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,

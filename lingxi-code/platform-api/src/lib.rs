@@ -214,9 +214,9 @@ pub use share::{ShareError, SharePayload, ShareResult, SharingService};
 pub use skill_loader::{SkillLoad, SkillLoader};
 pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 pub use subagent_spawn::{
-    SubagentInheritance, SubagentObservation, SubagentResult, SubagentSpawnError,
-    SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
-    WorkflowQueryWatchdog,
+    StructuredOutputMode, SubagentInheritance, SubagentObservation, SubagentResult,
+    SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
+    SubagentUsage, WorkflowQueryWatchdog,
 };
 pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 pub use task_registry::{

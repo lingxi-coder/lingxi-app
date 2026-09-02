@@ -802,6 +802,67 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
             .stream_forced(model, profile, system, messages, tools, forced_tool, effort)
             .await
     }
+
+    // ── Fusion / COGS opts-aware variants (WP2a item 2, F002 sub-claim 3) ──
+    // The default trait impls silently drop `opts` and fall back to the
+    // profile-routed methods above (`max_output_tokens` never reaches the
+    // wire, `query_source_label` never tags telemetry). These overrides are
+    // the only place a `SubagentApiCallOpts`-aware caller (Fusion panels)
+    // becomes wire-faithful: `opts.max_output_tokens` → the request's
+    // `max_tokens`, `opts.query_source_label` → `QuerySource` (the label is
+    // already the `sidequery::QuerySource::as_str()` wire form — see
+    // `SubagentSpawnRequest::query_source_label`'s own doc — so it is threaded
+    // through verbatim without re-depending on `sidequery` here).
+
+    async fn messages_create_stream_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        opts: agent::api::SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.service
+            .stream_with_opts(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                effort,
+                opts.max_output_tokens,
+                opts.query_source_label.as_deref(),
+            )
+            .await
+    }
+
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        opts: agent::api::SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.service
+            .stream_forced_with_opts(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                forced_tool,
+                effort,
+                opts.max_output_tokens,
+                opts.query_source_label.as_deref(),
+            )
+            .await
+    }
 }
 
 #[async_trait]
@@ -917,11 +978,29 @@ mod tests {
 
         fn open_stream<'a>(
             &'a self,
-            _request: &'a ProviderRequest,
+            request: &'a ProviderRequest,
         ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            // Record the WIRE request (post-codec `body_json`) so tests can
+            // inspect exactly what a streaming call sent — e.g. WP2a item 2's
+            // `stream_with_opts`/`stream_forced_with_opts` max_tokens
+            // assertion — even though this fake never returns a real stream.
+            self.seen.lock().unwrap().push(request.clone());
             Box::pin(async move {
-                Err(LlmError::Transport {
-                    message: "open_stream not scripted".to_string(),
+                // `InvalidRequest` (not `Transport`): `ApiService::drive_stream`'s
+                // retry classifier (`next_step_with_backoff`,
+                // `llm-client/src/model/retry.rs`) treats `Transport` as
+                // retry-worthy and backs off + retries up to the configured cap
+                // — for a caller that never scripts a `StreamingResponse` (every
+                // test that only inspects `seen` / the wire request, e.g. this
+                // one) that turned one assertion into a multi-hundred-second
+                // real-time backoff loop for no reason the assertion cares
+                // about. `InvalidRequest` hits the "overflow check, else
+                // Terminal" arm — a message that doesn't parse as an overflow
+                // report (this one doesn't) is `DriveStep::Terminal` — so the
+                // call returns after exactly ONE `open_stream` per attempt,
+                // with the request still recorded in `seen` first.
+                Err(LlmError::InvalidRequest {
+                    message: "open_stream not scripted (FakeTransport)".to_string(),
                 })
             })
         }
@@ -1100,6 +1179,75 @@ mod tests {
         // May succeed or fail with UnsupportedCapability if stream not configured,
         // but must not panic.
         let _ = result;
+    }
+
+    /// WP2a item 2 (F002 sub-claim 3): `messages_create_stream_in_opts` /
+    /// `messages_create_stream_forced_in_opts` must thread
+    /// `SubagentApiCallOpts::max_output_tokens` onto the WIRE request's
+    /// `max_tokens` — the trait DEFAULTS silently drop `opts` and fall back to
+    /// the profile-routed methods, which never touch it. `FakeTransport`'s
+    /// `open_stream` records the request even though it always errors (no
+    /// scripted `StreamingResponse`), so this asserts purely on what reached
+    /// the transport, not on a successful round-trip.
+    #[tokio::test]
+    async fn opts_variants_thread_max_output_tokens_onto_the_wire() {
+        let auto_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let auto_seam: Arc<dyn agent::SubagentApiClient> =
+            Arc::new(make_adapter(auto_transport.clone()));
+        let _ = auto_seam
+            .messages_create_stream_in_opts(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                agent::api::SubagentApiCallOpts {
+                    max_output_tokens: Some(777),
+                    query_source_label: Some("fusion_panel".to_string()),
+                },
+            )
+            .await;
+        let auto_seen = auto_transport.seen.lock().unwrap();
+        let auto_request = auto_seen
+            .last()
+            .expect("the auto opts-aware call reached the transport");
+        assert_eq!(
+            auto_request.body_json.get("max_tokens").and_then(serde_json::Value::as_u64),
+            Some(777),
+            "wire max_tokens must equal the requested ceiling, not the model's auto default; body: {}",
+            auto_request.body_json
+        );
+        drop(auto_seen);
+
+        let forced_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let forced_seam: Arc<dyn agent::SubagentApiClient> =
+            Arc::new(make_adapter(forced_transport.clone()));
+        let _ = forced_seam
+            .messages_create_stream_forced_in_opts(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Some("StructuredOutput"),
+                None,
+                agent::api::SubagentApiCallOpts {
+                    max_output_tokens: Some(321),
+                    query_source_label: Some("fusion_panel".to_string()),
+                },
+            )
+            .await;
+        let forced_seen = forced_transport.seen.lock().unwrap();
+        let forced_request = forced_seen
+            .last()
+            .expect("the forced opts-aware call reached the transport");
+        assert_eq!(
+            forced_request.body_json.get("max_tokens").and_then(serde_json::Value::as_u64),
+            Some(321),
+            "forced opts-aware wire max_tokens must equal the requested ceiling; body: {}",
+            forced_request.body_json
+        );
     }
 
     /// The trait default (used by mocks / non-routing impls) is the byte/4

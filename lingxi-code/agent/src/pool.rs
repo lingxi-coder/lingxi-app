@@ -279,6 +279,7 @@ mod tests {
             new_diagnostics_source: None,
             tool_schemas: vec![],
             schema: None,
+            structured_output_mode: Default::default(),
             budget: None,
             hook_executor: None,
             strict_plugin_only_hooks: false,

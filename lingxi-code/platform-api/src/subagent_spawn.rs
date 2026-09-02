@@ -59,6 +59,26 @@ impl ObserverSpec {
     }
 }
 
+/// Per-turn `tool_choice` policy for a schema'd subagent spawn (see
+/// [`SubagentSpawnRequest::structured_output_mode`]).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StructuredOutputMode {
+    /// Force `tool_choice: {type:"tool", name:"StructuredOutput"}` on every
+    /// round-trip of the run. Matches the pre-existing (pre-Fusion) runner
+    /// behavior: the child cannot use any other tool and must answer from
+    /// turn 1. The default, so every caller that predates this field keeps
+    /// byte-identical behavior.
+    #[default]
+    Forced,
+    /// Use the model's normal (auto) `tool_choice` while turns remain, so the
+    /// child can call its other tools (Read/Grep/Glob/WebFetch/…) across
+    /// multiple turns. `StructuredOutput` is forced only on the run's LAST
+    /// turn, or once the model has produced two consecutive turns with no
+    /// tool call and no `StructuredOutput` call — whichever comes first.
+    WhenDone,
+}
+
 /// Locked subagent input passed to [`SubagentSpawner::spawn`].
 ///
 /// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
@@ -194,6 +214,15 @@ pub struct SubagentSpawnRequest {
     /// — validation happens at the tool-call layer). `None` ⇒ free-form text.
     #[serde(default)]
     pub schema: Option<String>,
+    /// Per-turn `tool_choice` policy applied while [`Self::schema`] is `Some`.
+    /// Additive — `#[serde(default)]` resolves to [`StructuredOutputMode::Forced`],
+    /// byte-identical to the pre-existing behavior for every caller that predates
+    /// this field (workflow `agent({schema})`). Fusion panels (`fusion::panel::spawn_request`)
+    /// request [`StructuredOutputMode::WhenDone`] so the panel can use its Read /
+    /// Grep / Glob / WebFetch tools instead of being forced to call
+    /// `StructuredOutput` on turn 1.
+    #[serde(default)]
+    pub structured_output_mode: StructuredOutputMode,
     /// Per-spawn thinking-effort override (claude-code workflow `agent({effort})`
     /// — `me={...ie,effort:ae}`): a level string (`"low"`..`"max"`) or an integer
     /// budget. When set, the spawner overrides the resolved agent definition's

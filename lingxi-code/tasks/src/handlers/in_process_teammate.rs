@@ -900,6 +900,7 @@ impl InProcessTeammateHandler {
             tool_schemas,
             // Teammates have no structured-output schema.
             schema: None,
+            structured_output_mode: Default::default(),
             // Inherit the shared budget enforcer when wired (claude-code teammates
             // charge the session's cumulative cost); `None` ⇒ no per-turn gate.
             budget: self.budget_enforcer.clone(),

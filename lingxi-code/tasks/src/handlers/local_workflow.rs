@@ -1550,6 +1550,10 @@ fn make_request(
             .get("schema")
             .filter(|v| !v.is_null())
             .map(std::string::ToString::to_string),
+        // Workflow `agent({schema})` keeps the pre-existing forced-every-turn
+        // contract (byte-parity with pre-WP2a behavior); only Fusion panels
+        // request `WhenDone`.
+        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
         // `agent(prompt, { effort })` → override the subagent's thinking effort
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
         // raw for the spawner to apply onto the resolved agent definition.

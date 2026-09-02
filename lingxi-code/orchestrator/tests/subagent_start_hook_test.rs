@@ -605,3 +605,166 @@ async fn subagent_start_and_stop_share_the_same_real_child_id() {
     assert_eq!(stop, expected, "SubagentStop carries the real child id");
     assert_eq!(start, stop, "both events share ONE canonical id");
 }
+
+// ---- G008 (WP2a item 3): a Fusion `Agent`-tool result fires NO chokepoint
+// SubagentStart/SubagentStop, phantom or otherwise ------------------------
+
+/// Stand-in for the `Agent` tool's Fusion branch (`call_fusion` ->
+/// `fusion_tool_result`, `tools/agent/src/agent.rs`): registered under the
+/// SAME dispatched name (`"Agent"`) the chokepoint keys on, but its result
+/// carries `subagentHooksFired: true` and — unlike [`FakeAgentTool`] — NO
+/// `agentId` at all, matching the real `fusion_tool_result`'s `data` shape (a
+/// Fusion run is N panels, not one child with a canonical id).
+struct FakeFusionTool;
+#[async_trait]
+impl Tool for FakeFusionTool {
+    fn name(&self) -> &str {
+        "Agent"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        "run fusion".into()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: json!({
+                "runId": "fusion-run-1",
+                "status": "completed",
+                "decision": null,
+                "panels": [],
+                "subagentHooksFired": true,
+            }),
+            model_content: Some("fusion final text".into()),
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
+    }
+}
+
+/// Counts every SubagentStart / SubagentStop the hook system fires, of
+/// either kind, without caring about the carried id — the fusion assertion
+/// is that the COUNT is zero, not what a particular fire looked like.
+struct StartStopCounter {
+    starts: Arc<Mutex<u32>>,
+    stops: Arc<Mutex<u32>>,
+}
+#[async_trait]
+impl BuiltinHookHandler for StartStopCounter {
+    fn id(&self) -> &str {
+        "count-start-stop"
+    }
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        match event {
+            HookEvent::SubagentStart { .. } => {
+                *self.starts.lock().unwrap() += 1;
+            }
+            HookEvent::SubagentStop { .. } => {
+                *self.stops.lock().unwrap() += 1;
+            }
+            _ => {}
+        }
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn fusion_tool_result_fires_no_subagent_hooks() {
+    // G008: before WP2a, this combination (`subagentHooksFired: true`, no
+    // `agentId`) fell through to the ordinary Agent-tool branch: SubagentStart
+    // skipped (runner_fired_start), but SubagentStop fired UNCONDITIONALLY on
+    // a freshly-minted id with no transcript — a phantom "fusion" stop paired
+    // with nothing. Both must now be zero.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id, "Agent", json!({}));
+    let starts = Arc::new(Mutex::new(0_u32));
+    let stops = Arc::new(Mutex::new(0_u32));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    {
+        let mut w = registry.write().await;
+        w.register(builtin_hook(
+            "count-start-stop",
+            HookEventType::SubagentStart,
+        ));
+        w.register(builtin_hook(
+            "count-start-stop",
+            HookEventType::SubagentStop,
+        ));
+    }
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(StartStopCounter {
+        starts: starts.clone(),
+        stops: stops.clone(),
+    }));
+    let hooks = Arc::new(exec);
+
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(FakeFusionTool));
+    let orch = orch_with(api, hooks, tools);
+
+    let outcome = orch.run_turn("run fusion").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    assert_eq!(
+        *starts.lock().unwrap(),
+        0,
+        "a Fusion tool result must fire ZERO SubagentStart events"
+    );
+    assert_eq!(
+        *stops.lock().unwrap(),
+        0,
+        "a Fusion tool result must fire ZERO SubagentStop events (no phantom pair)"
+    );
+}

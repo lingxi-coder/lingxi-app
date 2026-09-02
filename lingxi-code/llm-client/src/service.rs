@@ -3854,6 +3854,56 @@ impl ApiService {
         self.drive_stream(req).await
     }
 
+    /// Like [`Self::stream`], but ALSO threads a per-turn output-token ceiling
+    /// and a COGS query-source label onto the WIRE request (the agent crate's
+    /// `SubagentApiCallOpts` seam — Fusion panels and any other opts-aware
+    /// subagent caller). `max_tokens: None` and `query_source: None` keep the
+    /// body byte-identical to [`Self::stream`] (auto-computed ceiling, no
+    /// label).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_with_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.effort = effort;
+        req.query_source = query_source.map(str::to_string);
+        self.drive_stream(req).await
+    }
+
+    /// Like [`Self::stream_forced`], with the same per-turn output-token
+    /// ceiling + COGS query-source label as [`Self::stream_with_opts`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_forced_with_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.effort = effort;
+        if let Some(name) = forced_tool {
+            req.tool_choice = Some(crate::ToolChoice::Tool {
+                name: name.to_string(),
+            });
+        }
+        req.query_source = query_source.map(str::to_string);
+        self.drive_stream(req).await
+    }
+
     /// Structured-output streaming call constrained by a JSON SCHEMA rather
     /// than by a forced tool.
     ///

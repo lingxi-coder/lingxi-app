@@ -13671,6 +13671,7 @@ mod tests {
         let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
             isolated_credential_storage: false,
+            credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,

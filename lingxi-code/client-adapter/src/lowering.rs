@@ -754,6 +754,7 @@ mod tests {
         let uuid = uuid::Uuid::nil();
         let meta = SessionMetadata {
             uuid,
+            mode: session::jsonl::SessionMode::Code,
             title: "First chat".to_string(),
             modified: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),

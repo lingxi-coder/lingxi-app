@@ -58,6 +58,7 @@ fn session_metadata_parity() {
     // Identical to `tui::screens::resume::tests::meta("hello", 1_748_113_392, 1)`.
     let meta = SessionMetadata {
         uuid: uuid::Uuid::nil(),
+        mode: session::jsonl::SessionMode::Code,
         title: "hello".to_string(),
         modified: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
         // SESSION.6: created (file birthtime) tie-break key; the lowered DTO /

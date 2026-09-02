@@ -74,6 +74,8 @@ an explicit fail-closed precondition.
   "looks fine" without naming the evidence field that supports it is not a
   verdict.
 - "Validated selection read," listed for this role in the design's
-  tool-boundary table, has no backing Host tool
-  (`validated_selection_handle` is 0 hits repo-wide) — treat
-  `LocalAppGet`'s record as the only identity evidence actually available.
+  tool-boundary table, is `LocalAppResolveTemplateSelection` (granted above):
+  it resolves a Host-issued `validated_selection_handle` for the run's create
+  candidate. Use it only to read back that identity, never to originate one —
+  and for anything outside a create run, `LocalAppGet`'s persisted record
+  remains the only identity evidence.

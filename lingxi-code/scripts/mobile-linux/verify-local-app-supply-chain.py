@@ -888,7 +888,12 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "create_without_mcp=true",
         "create_approved_no_mcp",
         "create approval did not yield a unified scaffold receipt",
-        "LocalAppGet for app",
+        # The create builder no longer re-reads the shell record: its name and
+        # brief are the `untitled` placeholder until the scaffold commits, so the
+        # contract now pins the staged values and the inverted instruction.
+        "Do not call LocalAppGet to rediscover them",
+        "the Host commits the staged values",
+        "call LocalAppManifest to declare every collection",
         "LocalAppScaffold",
         "Invoke exactly the matching runtime specialist",
         "LocalAppBuild",

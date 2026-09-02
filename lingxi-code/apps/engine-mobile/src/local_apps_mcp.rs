@@ -1378,14 +1378,16 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "stage_create",
-                "Prepare isolated create staging from a Host-validated selection, persist optional structured design evidence, and return the install-before-build dependency_input_sha256. This operation never publishes a receipt or commits a Manifest.",
+                "Prepare isolated create staging from a Host-validated selection, persist the user-confirmed display name and brief plus optional structured design evidence, and return the install-before-build dependency_input_sha256. The name and brief staged here are authoritative for the rest of create: the native create confirmation sheet renders them and LocalAppScaffold commits them, never a caller-echoed value. This operation never publishes a receipt or commits a Manifest.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
                     "validated_selection_handle":{"type":"string","pattern":"^vsel_[A-Za-z0-9]{32}$"},
                     "quality_level":{"enum":["fast","balanced","thorough"]},
+                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed for this app."},
+                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
                     "design_spec":{"type":"object","description":"Optional structured design evidence to bind into the staged create candidate and later native approval contract."}
-                },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level"],"additionalProperties":false}),
+                },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level","name","brief"],"additionalProperties":false}),
             ),
             Self::tool(
                 "validate_mcp_proposal",
@@ -1433,11 +1435,11 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the confirmed display name, one-line brief, and Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name and one-line brief the Host commits are the ones staged through `stage_create`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
-                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed."},
-                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
+                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name staged through `stage_create`; the Host commits the staged value."},
+                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"Re-confirmation of the one-line brief staged through `stage_create`; the Host commits the staged value."},
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Required with receipt_id so the Host can re-bind the scaffold to the exact prepared create candidate."},
                     "receipt_id":{"type":"string","minLength":1,"description":"One-shot receipt from the unified native create confirmation. The Host binds it to the exact app, workflow run and approved create candidate before scaffolding."},
                     "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
@@ -2280,8 +2282,9 @@ impl LocalAppsMcpTransport {
                     if !record.scaffolded {
                         return Ok(Self::tool_error(format!(
                             "{SHELL_GATE_CODE}: 应用 `{app_id}` 还没有形态。\
-                             先与用户确认要做什么，再用 `LocalAppScaffold` \
-                             定下名称、简介与形态。"
+                             先与用户确认要做什么，再用 `Skill` 工具启动 `lingxi-local-app:create-local-app`（只以这个带插件前缀的名字注册）——\
+                             它会走统一的创建流程弹出一次原生确认，确认后才落地 \
+                             `LocalAppScaffold` 定下名称、简介与形态；不要自己直接调用它。"
                         )));
                     }
                 }
@@ -2454,7 +2457,7 @@ impl LocalAppsMcpTransport {
                 let name = input.get("name").and_then(Value::as_str);
                 if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
                     return Ok(Self::tool_error(
-                        "create no longer accepts runtime_profile or surface; create the shell first, confirm the runtime profile natively, then call scaffold with the receipt".to_string(),
+                        "create no longer accepts runtime_profile or surface; create the shell first, then let the `lingxi-local-app:create-local-app` skill (that exact plugin-qualified name; the bare name does not resolve) run its native create confirmation and call scaffold with the receipt it returns".to_string(),
                     ));
                 }
                 // The origin conversation is ENGINE-injected (the live session
@@ -3904,8 +3907,182 @@ mod tests {
                 "app_id",
                 "workflow_run_id",
                 "validated_selection_handle",
-                "quality_level"
+                "quality_level",
+                "name",
+                "brief"
             ])
+        );
+    }
+
+    /// WP5: the `local-app-build.js` create prompts must pass the values
+    /// staged through `LocalAppStageCreate` into `LocalAppScaffold`, not
+    /// re-fetch `LocalAppGet`'s still-empty shell record (which is where the
+    /// `untitled`/empty-brief placeholder that reached the native confirmation
+    /// sheet and the committed record used to come from). Source-level rather
+    /// than a JS-runtime assertion because the QuickJS harness that actually
+    /// executes this script lives in the `workflow` crate, not here.
+    #[test]
+    fn build_workflow_scaffold_prompt_passes_staged_values_not_local_app_get() {
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        assert!(
+            !source.contains("Read LocalAppGet"),
+            "the create scaffold prompt must not tell the model to rediscover \
+             name/brief from LocalAppGet's empty shell record: {source}"
+        );
+        for (call_needle, fragment) in [
+            ("Call LocalAppStageCreate with app_id=", "stageNaming"),
+            ("Call LocalAppScaffold with app_id=", "scaffoldNaming"),
+        ] {
+            let call = source
+                .lines()
+                .find(|line| line.contains(call_needle))
+                .unwrap_or_else(|| panic!("local-app-build.js must prompt `{call_needle}`"));
+            assert!(
+                call.contains(&format!("${{{fragment}}}")),
+                "the `{call_needle}` prompt must carry the `{fragment}` naming fragment \
+                 built from the launch-confirmed name/brief, got: {call}"
+            );
+            let declaration = source
+                .lines()
+                .find(|line| line.starts_with(&format!("const {fragment} =")))
+                .unwrap_or_else(|| panic!("local-app-build.js must declare `{fragment}`"));
+            assert!(
+                declaration.contains("JSON.stringify(confirmedName)")
+                    && declaration.contains("JSON.stringify(confirmedBrief)"),
+                "`{fragment}` must interpolate the launch-confirmed name/brief, \
+                 got: {declaration}"
+            );
+            // The empty-launch branch must NOT render an empty `name=`/`brief=`
+            // argument: the Host launch boundary only forwards the declared
+            // contract, and both receiving tools reject an empty name/brief
+            // outright, so a run without confirmed values has to fall back to
+            // prose rather than to `name=""`.
+            let fallback = declaration
+                .rsplit_once("` : ")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{fragment}` must be a ternary whose empty-launch branch is prose, \
+                         got: {declaration}"
+                    )
+                })
+                .1;
+            assert!(
+                !fallback.contains("name=") && !fallback.contains("brief="),
+                "`{fragment}`'s empty-launch branch must not render a `name=`/`brief=` \
+                 argument at all, because both would be empty and both receiving tools \
+                 reject an empty value: {fallback}"
+            );
+        }
+        assert!(
+            source.contains("const confirmedName = typeof input.name === 'string'")
+                && source.contains("const confirmedBrief = typeof input.brief === 'string'"),
+            "the confirmed name/brief must come from the workflow launch args"
+        );
+    }
+
+    /// The other half of the same chain: the Host launch boundary and the
+    /// script both accept `name`/`brief` now (see
+    /// `build_workflow_script_external_contract_is_accepted_by_the_host` in
+    /// `workflow_support.rs`), but nothing carries the user-confirmed wording
+    /// into the launch unless the skill that writes the launch JSON says so.
+    /// Without this the whole WP5 chain is plumbed and inert, and the create
+    /// confirmation sheet keeps showing the `untitled` placeholder.
+    #[test]
+    fn create_local_app_skill_launches_the_build_workflow_with_confirmed_name_and_brief() {
+        let skill =
+            include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
+        let launches: Vec<&str> = skill
+            .lines()
+            .filter(|line| line.contains(r#""operation":"create""#))
+            .collect();
+        assert!(
+            !launches.is_empty(),
+            "create-local-app/SKILL.md must show at least one create launch for \
+             lingxi-local-app:local-app-build, or this gate passes vacuously"
+        );
+        for launch in launches {
+            assert!(
+                launch.contains(r#""name":"<"#) && launch.contains(r#""brief":"<"#),
+                "every create launch in create-local-app/SKILL.md must pass the \
+                 user-confirmed name and brief, or LocalAppStageCreate stages nothing \
+                 and the confirmation sheet renders the `untitled` placeholder: {launch}"
+            );
+        }
+    }
+
+    /// WP6: the formal workspace contract (`local_apps_host.rs`'s
+    /// `formal_workspace_contract`) and `create-local-app/SKILL.md` both
+    /// require declaring a data collection through `LocalAppManifest` before
+    /// source relies on it, but `builder` — the ONLY agent with `Write`/`Edit`
+    /// during Create — was not granted the tool at all, so following that
+    /// contract was impossible from inside the role that has to follow it.
+    #[test]
+    fn builder_agent_grants_local_app_manifest() {
+        let builder = include_str!("../../../plugins/lingxi-local-app/agents/builder.md");
+        let tools_block = builder
+            .split_once("tools:\n")
+            .and_then(|(_, rest)| rest.split_once("skills:\n"))
+            .map(|(tools, _)| tools)
+            .expect("builder.md must have a `tools:` list followed by `skills:`");
+        assert!(
+            tools_block.lines().any(|line| line.trim() == "- LocalAppManifest"),
+            "builder.md's tools: list must grant LocalAppManifest, or the data-collection \
+             declaration the formal contract and create-local-app/SKILL.md both require is \
+             impossible for the one agent that writes App-managed source: {tools_block}"
+        );
+    }
+
+    /// The other half of the same chain: granting the tool is inert unless the
+    /// create branch's own prompt tells `builder` to use it BEFORE writing
+    /// source, and to use it for what the confirmed design actually needs —
+    /// otherwise the workflow's own `data_roundtrip` verification gate
+    /// (`local-app-build.js`'s `blockingFindings`) has nothing to check
+    /// because no collection was ever declared.
+    #[test]
+    fn build_workflow_create_branch_requires_manifest_declaration_before_source() {
+        let source =
+            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let build_call = source
+            .lines()
+            .find(|line| line.contains("Call LocalAppScaffold with app_id="))
+            .expect("local-app-build.js must prompt the create-branch scaffold+build call");
+        assert!(
+            build_call.contains("LocalAppManifest"),
+            "the create branch's builder-build prompt must require declaring data \
+             collections through LocalAppManifest before writing source that depends on \
+             them: {build_call}"
+        );
+        assert!(
+            build_call.contains("Before writing any source that reads or writes a data \
+             collection"),
+            "the manifest declaration must be ordered BEFORE writing source, not left as an \
+             unordered mention the model can defer past the write it is meant to gate: \
+             {build_call}"
+        );
+    }
+
+    /// WP8 item 6: every other create-branch stage prompt carries the
+    /// user-confirmed specification (`template-selector`, `builder-stage`,
+    /// `builder-build` all interpolate `input.spec`); the DESIGNER stage — the
+    /// one that decides what the app actually looks like and produces the
+    /// structured design spec every later stage consumes — did not, so the
+    /// designer worked from the resolved template profile alone and never saw
+    /// what the user asked for. Source-level like its siblings above, because
+    /// the QuickJS harness that executes this script lives in the `workflow`
+    /// crate, not here.
+    #[test]
+    fn build_workflow_designer_prompt_carries_the_confirmed_spec() {
+        let source =
+            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let designer_call = source
+            .lines()
+            .find(|line| line.contains("agentType: 'designer'"))
+            .expect("local-app-build.js must prompt the create-branch designer stage");
+        assert!(
+            designer_call.contains("${input.spec"),
+            "the designer stage prompt must interpolate the confirmed specification the way \
+             its sibling create-branch stages do, or the designer never sees what the user \
+             asked for: {designer_call}"
         );
     }
 

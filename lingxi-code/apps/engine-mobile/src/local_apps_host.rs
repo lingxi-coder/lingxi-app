@@ -187,6 +187,13 @@ struct CreateProposalContext {
     design_spec: Option<Value>,
     design_spec_sha256: Option<String>,
     contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+    /// The display name and brief the user confirmed through `LocalAppStageCreate`
+    /// (WP5). This is the ONLY name/brief source the native create confirmation
+    /// sheet and the scaffold commit are allowed to render or persist — never
+    /// the empty shell `AppRecord.name`/`.brief`, which stays the `untitled`
+    /// placeholder until `commit_scaffold` runs.
+    name: String,
+    brief: String,
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +201,10 @@ struct CreateScaffoldSeed {
     selection: crate::local_app_template_catalog::ValidatedTemplateSelection,
     template_root: PathBuf,
     contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+    /// Staged through `LocalAppStageCreate`; authoritative over whatever name/brief
+    /// the model echoes back into `LocalAppScaffold`. See `CreateProposalContext`.
+    name: String,
+    brief: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1001,7 +1012,7 @@ pub(crate) async fn reconcile_app_init_session_title(
 /// response). Handing off to it is what puts the agent in the right cwd with the
 /// right `LINGXI.md` auto-loaded.
 pub(crate) fn create_next_step_guidance() -> String {
-    "The app now exists as an EMPTY shell, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); continue there, where the guided workspace contract explains the interview and scaffold steps. Do not recreate the app, do not run a package-manager scaffold command, and do not install dependencies yet: runtime-profile confirmation and LocalAppScaffold happen first.".into()
+    "The app now exists as an EMPTY shell, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); continue there, where the guided workspace contract explains the interview and hands off to the `lingxi-local-app:create-local-app` skill (that exact, plugin-qualified name is how it is registered; the bare name does not resolve). Do not recreate the app, do not run a package-manager scaffold command, and do not install dependencies yet: the interview, a native create confirmation, and only then LocalAppScaffold happen first — never call LocalAppScaffold directly from this step.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -2267,6 +2278,24 @@ impl LocalAppsHostBroker {
             .map_err(|error| format!("create_staging_evidence_missing: {error}"))?;
         let staging_evidence: Value = serde_json::from_str(&evidence_body)
             .map_err(|error| format!("create_staging_evidence_invalid: {error}"))?;
+        // WP5: `stage_create` is the only production writer of this evidence
+        // file and always persists the confirmed name/brief onto it (see
+        // above); a missing field here means staging is corrupt, not that the
+        // caller may fall back to the shell record's `untitled` placeholder.
+        let name = staging_evidence
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "create_staging_evidence_invalid: staged evidence is missing name".to_string()
+            })?
+            .to_string();
+        let brief = staging_evidence
+            .get("brief")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "create_staging_evidence_invalid: staged evidence is missing brief".to_string()
+            })?
+            .to_string();
         let design_path = staging_root.join("design-spec.json");
         let (design_spec, design_spec_sha256) = match std::fs::read(&design_path) {
             Ok(bytes) => {
@@ -2295,6 +2324,8 @@ impl LocalAppsHostBroker {
                         design_spec,
                         design_spec_sha256,
                         contexts,
+                        name,
+                        brief,
                     });
                 }
                 Err(error) => {
@@ -2329,6 +2360,8 @@ impl LocalAppsHostBroker {
             selection: create_context.selection,
             template_root,
             contexts: create_context.contexts,
+            name: create_context.name,
+            brief: create_context.brief,
         })
     }
 
@@ -2379,7 +2412,13 @@ impl LocalAppsHostBroker {
     ) -> Result<bool, String> {
         let proposed = mcp_tool_surfaces_from_candidate(candidate)?;
         if !record.scaffolded {
-            let selection = self.create_selection_for_run(&record.id, workflow_run_id)?;
+            // WP5: render the name/brief the user confirmed through
+            // `LocalAppStageCreate`, never `record.name`/`record.brief` — the
+            // shell record is still the empty `untitled` placeholder at this
+            // point in the flow (it is only overwritten once `commit_scaffold`
+            // lands, long after this confirmation is answered).
+            let create_context = self.load_create_proposal_context(&record.id, workflow_run_id)?;
+            let selection = create_context.selection;
             let template = crate::local_app_template_catalog::catalog_view()?
                 .templates
                 .into_iter()
@@ -2392,8 +2431,8 @@ impl LocalAppsHostBroker {
                 request: LocalAppCreateConfirmationRequestDto {
                     request_id: request_id.clone(),
                     app_id: record.id.clone(),
-                    name: record.name.clone(),
-                    brief: record.brief.clone(),
+                    name: create_context.name,
+                    brief: create_context.brief,
                     selected_template: LocalAppTemplateSummaryDto {
                         template_id: selection.template_id,
                         surface: lower_surface(selection.surface),
@@ -2826,7 +2865,7 @@ impl LocalAppsHostBroker {
             || dependency_record.toolchain_key.as_deref() != Some(snapshot.toolchain_key.as_str())
         {
             return Err(format!(
-                "dependencies_dirty: app {} dependency record no longer matches the verified snapshot; run LocalAppUpdateDependencies to refresh it",
+                "dependencies_dirty: app {} dependency record no longer matches the verified snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying",
                 layout.app_id()
             ));
         }
@@ -3535,8 +3574,15 @@ impl LocalAppsHostBroker {
                 .runtime_profile
                 .is_some()
             {
+                // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` are Host
+                // operations, not model-callable tools: they are not in `LOCAL_APP_TOOLS`
+                // and the MCP transport refuses their static spelling outright (see
+                // `local_apps_mcp.rs`'s `the_mcp_surface_no_longer_serves_the_static_host_
+                // operations`). Naming them here as something the caller can "use" sends
+                // an agent to retry a call that fails closed forever; tell it to report the
+                // drift instead.
                 return Err(
-                    "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; use LocalAppConfirmDependencyChange and LocalAppUpdateDependencies"
+                    "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying"
                         .into(),
                 );
             } else {
@@ -6375,6 +6421,14 @@ impl LocalAppsHostBroker {
         }
         let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
         let create_seed = self.load_create_scaffold_seed(&app_id, &workflow_run_id)?;
+        // WP5: the candidate staged through `LocalAppStageCreate` — the exact
+        // values the user already saw and approved in the native create
+        // confirmation sheet — is authoritative here. The model may still echo
+        // `name`/`brief` back into this call (the schema still requires them so
+        // a caller cannot silently omit confirmation), but only the staged
+        // values are ever committed; a mismatched echo is not an error.
+        let name = create_seed.name.clone();
+        let brief = create_seed.brief.clone();
         self.pending_mcp_receipts
             .lock()
             .await
@@ -7380,6 +7434,28 @@ fn formal_workspace_contract(
 ///   wrong for the one turn that has none — which is why step 1 states the
 ///   exception in the same breath as the tool, rather than leaving a reader to
 ///   reconcile the two.
+/// - step 4 names the create SKILL below, not the build workflow it launches
+///   internally. There is no host-initiated launch site for the build
+///   workflow (the host only auto-starts MCP authoring and resume), so an
+///   agent that reaches this file can only get to `LocalAppScaffold` through
+///   the skill's own name — the only place that name lives, and the reason
+///   the literal below is a deliberate, allowlisted exception to the "no
+///   component names in Host prose" rule `component_literal_scan.rs`
+///   enforces elsewhere in this file's own history (P-1.4). Naming the
+///   WORKFLOW instead would reintroduce exactly the coupling that rule
+///   removed; naming the skill does not, because skill selection here was
+///   always model-driven (the model is only ever in this file's workspace
+///   because it already ran the skill once, to create the shell) while
+///   WORKFLOW selection stays fully Host-resolved and still appears nowhere
+///   in this file. `lingxi_md_contract_prose_names_no_workflow` still pins
+///   the FORMED contract and the tool-result guidance prose to naming no
+///   build workflow
+///   (the host authorizes exactly one and refuses any other there); this
+///   step never names the workflow id either, only the skill that owns the
+///   interview. Do not have this step call `LocalAppStageCreate` or
+///   `LocalAppApproveMcpProposal` directly: those are the workflow's own
+///   sub-agent calls, not something the top-level interview agent invokes
+///   itself.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
     format!(
         "# Local App（新建，尚未定形态）\n\n\
@@ -7400,9 +7476,11 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          3. 用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
          \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
          \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
-         4. 如需运行时细分，先读 `LocalAppRuntimeProfiles`，再用运行时确认工具为 `{id}` 取得短时 receipt。\n\
-         5. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`，并带上 runtime profile receipt）。\n\
-         6. 重读本文件，按新合约继续。\n\n\
+         4. 名称与形态确认后，用 `Skill` 工具启动 `lingxi-local-app:create-local-app`（技能只以这个\
+         带插件前缀的名字注册，裸名解析不到）继续：它会读 `LocalAppRuntimeProfiles` \
+         定运行时子档位，走统一创建流程暂存候选、弹出一次原生确认，确认后才落地 `LocalAppScaffold`。\
+         不要自己直接调 `LocalAppScaffold`——它需要那条流程发出的 receipt，没有任何捷径能绕过。\n\
+         5. 重读本文件，按新合约继续。\n\n\
          形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
         id = record.id,
     )
@@ -8071,6 +8149,27 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let workflow_run_id = required_string(&input, "workflow_run_id")?;
         let handle = required_string(&input, "validated_selection_handle")?;
         let quality_level = required_string(&input, "quality_level")?;
+        // WP5: the user-confirmed display name and brief are staged HERE, once,
+        // so they can be the single value the native create confirmation sheet
+        // renders and `LocalAppScaffold` commits — never the empty shell
+        // `AppRecord.name`/`.brief` (which stays the `untitled` placeholder the
+        // whole way through create; see `service.rs`'s `PLACEHOLDER_APP_NAME`).
+        let name = confirmed_field(&input, "name")?.to_string();
+        if name.len() > local_apps::service::MAX_NAME_BYTES {
+            return Err(format!(
+                "invalid_argument: name is {} bytes (limit {})",
+                name.len(),
+                local_apps::service::MAX_NAME_BYTES
+            ));
+        }
+        let brief = confirmed_field(&input, "brief")?.to_string();
+        if brief.len() > local_apps::service::MAX_BRIEF_BYTES {
+            return Err(format!(
+                "invalid_argument: brief is {} bytes (limit {})",
+                brief.len(),
+                local_apps::service::MAX_BRIEF_BYTES
+            ));
+        }
         let design_spec = input.get("design_spec").cloned();
         let record = self
             .service()?
@@ -8140,6 +8239,29 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .join(handle);
         std::fs::create_dir_all(&staging)
             .map_err(|error| format!("create isolated staging: {error}"))?;
+        // `load_create_proposal_context` (and therefore both
+        // `approve_mcp_proposal`'s create-without-MCP branch and
+        // `validate_mcp_proposal`'s pre-scaffold branch) require a staged
+        // MCP flow context file to exist before the native create
+        // confirmation can be raised. A brand-new app has no prior active
+        // MCP contexts to carry forward, so the correct seed here is the
+        // empty set — the same baseline `validate_app_mcp_proposal` would
+        // otherwise be handed for a first-time create. Writing it here,
+        // once, keeps this file's only production writer honest for every
+        // create run instead of leaving it to a `#[cfg(test)]` helper.
+        let staged_context_dir = staging.join(".lingxi");
+        std::fs::create_dir_all(&staged_context_dir)
+            .map_err(|error| format!("create staged MCP flow context directory: {error}"))?;
+        let staged_context_path = staged_context_dir.join("mcp-flow-contexts.json");
+        let staged_context_temp_path = staged_context_dir.join("mcp-flow-contexts.json.tmp");
+        std::fs::write(
+            &staged_context_temp_path,
+            serde_json::to_vec_pretty(&BTreeMap::<String, local_apps::AppMcpFlowContext>::new())
+                .map_err(|error| format!("serialize staged MCP flow contexts: {error}"))?,
+        )
+        .map_err(|error| format!("write staged MCP flow contexts: {error}"))?;
+        std::fs::rename(&staged_context_temp_path, &staged_context_path)
+            .map_err(|error| format!("commit staged MCP flow contexts: {error}"))?;
         let design_spec_sha256 = if let Some(design_spec) = design_spec.as_ref() {
             let design_bytes = serde_json::to_vec_pretty(design_spec)
                 .map_err(|error| format!("serialize design spec: {error}"))?;
@@ -8210,6 +8332,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "appId": app_id,
             "workflowRunId": workflow_run_id,
             "validatedSelectionHandle": handle,
+            "name": name,
+            "brief": brief,
             "templateId": selection.template_id,
             "dependencyInputSha256": dependency_input_sha256,
             "designSpecSha256": design_spec_sha256,
@@ -13178,12 +13302,23 @@ mod tests {
         }
     }
 
+    const TEST_DEFAULT_APP_NAME: &str = "Test App";
+    const TEST_DEFAULT_APP_BRIEF: &str = "test app brief";
+
     async fn approved_create_receipt(
         broker: &Arc<LocalAppsHostBroker>,
         app_id: &str,
         surface: &str,
     ) -> (String, String) {
-        approved_create_receipt_with_design(broker, app_id, surface, None).await
+        approved_create_receipt_with_design(
+            broker,
+            app_id,
+            surface,
+            None,
+            TEST_DEFAULT_APP_NAME,
+            TEST_DEFAULT_APP_BRIEF,
+        )
+        .await
     }
 
     async fn approved_create_receipt_with_design(
@@ -13191,6 +13326,8 @@ mod tests {
         app_id: &str,
         surface: &str,
         design_spec: Option<Value>,
+        name: &str,
+        brief: &str,
     ) -> (String, String) {
         let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
         let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
@@ -13221,6 +13358,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
+                "name": name,
+                "brief": brief,
                 "design_spec": design_spec,
             }))
             .await
@@ -13284,7 +13423,39 @@ mod tests {
         brief: &str,
         surface: &str,
     ) -> Value {
-        let (workflow_run_id, receipt_id) = approved_create_receipt(broker, app_id, surface).await;
+        // Stage the SAME name/brief that will be echoed into the scaffold call
+        // below, so these fixtures exercise the ordinary case where the model's
+        // echo matches what it staged — the mismatch case (staged wins) has its
+        // own dedicated test. `LocalAppStageCreate` enforces the same
+        // non-empty/max-length bounds `LocalAppScaffold` does, so a handful of
+        // this helper's callers deliberately pass a value ONLY meant to trip
+        // scaffold's own front-door validation (an empty/whitespace name or
+        // brief, an over-long name) — staging that value would fail before the
+        // scaffold call under test ever runs. Stage a safe placeholder in that
+        // case; the (possibly invalid) `name`/`brief` args still reach the
+        // returned scaffold input unchanged, so the validation under test
+        // still sees exactly what the caller asked for.
+        let stage_name = if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES
+        {
+            name
+        } else {
+            TEST_DEFAULT_APP_NAME
+        };
+        let stage_brief =
+            if !brief.trim().is_empty() && brief.len() <= local_apps::service::MAX_BRIEF_BYTES {
+                brief
+            } else {
+                TEST_DEFAULT_APP_BRIEF
+            };
+        let (workflow_run_id, receipt_id) = approved_create_receipt_with_design(
+            broker,
+            app_id,
+            surface,
+            None,
+            stage_name,
+            stage_brief,
+        )
+        .await;
         json!({
             "app_id": app_id,
             "name": name,
@@ -13661,6 +13832,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "fast",
+                "name": "Plain create",
+                "brief": "MCP remains optional",
             }))
             .await
             .expect("stage create");
@@ -13732,6 +13905,142 @@ mod tests {
             !load_mcp_settings(&broker.layout(&shell.id).expect("layout"))
                 .expect("MCP settings")
                 .enabled
+        );
+    }
+
+    /// WP4 gate: `stage_create` alone — never the `#[cfg(test)]`
+    /// `write_initial_staging_flow_contexts` helper — must leave enough on
+    /// disk for `approve_mcp_proposal(create_without_mcp=true)` to reach the
+    /// native create confirmation. Before the fix, `load_create_proposal_context`
+    /// fails closed with `mcp_flow_contexts_missing` before the confirmation
+    /// is ever raised.
+    #[tokio::test]
+    async fn create_without_mcp_reaches_confirmation_from_staged_context_alone() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_stage_only_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "stage-only create without MCP",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Staged context only",
+                "brief": "create without MCP lands an empty active context set",
+            }))
+            .await
+            .expect("stage create");
+        // Deliberately no `write_initial_staging_flow_contexts` call here:
+        // this test exercises exactly what production `stage_create` leaves
+        // on disk, nothing more.
+
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(approval);
+        let request_id = tokio::select! {
+            id = timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request_id) = broker
+                        .pending_create_confirmations
+                        .lock()
+                        .await
+                        .keys()
+                        .next()
+                        .cloned()
+                    {
+                        break request_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }) => id.expect(
+                "approve_mcp_proposal(create_without_mcp) must raise a native \
+                 CreateConfirmationRequested within 2s using only what production \
+                 stage_create wrote, but none was pending",
+            ),
+            result = &mut approval => {
+                panic!(
+                    "approve_mcp_proposal(create_without_mcp) must raise a native \
+                     CreateConfirmationRequested using only what production stage_create \
+                     wrote, but it returned before any confirmation was requested: {:?}",
+                    result.expect("approval task did not panic")
+                );
+            }
+        };
+        assert!(broker.resolve_create_confirmation(&request_id, true).await);
+        let approved = approval
+            .await
+            .expect("approval task")
+            .expect("approve plain create from staged context alone");
+        assert_eq!(approved["status"], "create_approved_no_mcp");
+        let receipt_id = approved["receipt_id"]
+            .as_str()
+            .expect("create receipt")
+            .to_string();
+        assert!(
+            !receipt_id.is_empty(),
+            "expected a non-empty receipt_id, got: {approved}"
+        );
+
+        // The empty staged context set must also survive landing: the seed
+        // carries `contexts` into `land_scaffold`, which calls
+        // `persist_active_mcp_flow_contexts`. Assert the landed file exists
+        // and round-trips to an empty map rather than trusting inspection.
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "Staged context only",
+                "brief": "create without MCP lands an empty active context set",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold from staged context alone");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
+        let landed_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
+            serde_json::from_slice(
+                &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
+                    .expect("landed active MCP flow contexts"),
+            )
+            .expect("parse landed active MCP flow contexts");
+        assert!(
+            landed_contexts.is_empty(),
+            "landing an empty staged context set must persist an empty active \
+             context map, got: {landed_contexts:?}"
         );
     }
 
@@ -13807,6 +14116,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "balanced",
+                "name": "Recipe list",
+                "brief": "two-screen recipe list",
                 "design_spec": design_spec,
             }))
             .await
@@ -13873,12 +14184,19 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        // WP5 gate (a): a distinctive staged name/brief, never echoed anywhere
+        // else in this test, so the assertion below can only pass if the
+        // native confirmation sheet actually rendered what was staged here.
+        const STAGED_NAME: &str = "记账本";
+        const STAGED_BRIEF: &str = "记录日常收支的小工具";
         let stage = broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "balanced",
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
                 "design_spec": {
                     "runtime_family": "react_dom",
                     "acceptance_checks": ["render shell"],
@@ -13941,6 +14259,11 @@ mod tests {
         assert_eq!(request.app_id, shell.id);
         assert_eq!(request.selected_template.template_id, "react-dom-r2");
         assert_eq!(request.initial_tools.len(), 1);
+        // WP5 gate (a): the sheet must carry the staged name/brief, never the
+        // empty shell record's `untitled` placeholder.
+        assert_eq!(request.name, STAGED_NAME, "got: {request:?}");
+        assert_eq!(request.brief, STAGED_BRIEF, "got: {request:?}");
+        assert_ne!(request.name, local_apps::service::PLACEHOLDER_APP_NAME);
         assert!(
             !sink.events().await.iter().any(|event| matches!(
                 event,
@@ -13961,11 +14284,15 @@ mod tests {
             .expect("approved");
         let receipt_id = approval["receipt_id"].as_str().expect("receipt id");
 
+        // WP5 gate (b): echo back a DIFFERENT name/brief than what was staged.
+        // The candidate staged through `LocalAppStageCreate` must still win —
+        // proving `LocalAppScaffold` commits the staged values, not whatever
+        // the model happens to send at scaffold time.
         broker
             .scaffold_shell_app_value(json!({
                 "app_id": shell.id,
-                "name": "Create E2E",
-                "brief": "single confirmation",
+                "name": "Model Echoed A Different Name",
+                "brief": "model echoed a different brief",
                 "workflow_run_id": workflow_run_id,
                 "receipt_id": receipt_id,
             }))
@@ -13973,6 +14300,8 @@ mod tests {
             .expect("scaffold from unified create receipt");
         let record = service.record(&shell.id).await.expect("record");
         assert!(record.scaffolded);
+        assert_eq!(record.name, STAGED_NAME, "scaffold must commit the staged name, not the model's echoed value");
+        assert_eq!(record.brief, STAGED_BRIEF, "scaffold must commit the staged brief, not the model's echoed value");
         let manifest = load_manifest(&layout).expect("scaffolded manifest");
         assert_eq!(
             manifest
@@ -14442,7 +14771,76 @@ mod tests {
             .await
             .expect_err("runtime-profile apps must not auto-repair dependency drift");
         assert!(error.contains("dependencies_dirty"), "{error}");
-        assert!(error.contains("LocalAppConfirmDependencyChange"), "{error}");
+        // WP8: the drift error must not send the agent to retry
+        // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` — neither is a
+        // model-callable tool (absent from `LOCAL_APP_TOOLS`, refused by name on the MCP
+        // transport) — it must tell the agent to report the drift instead.
+        assert!(
+            !error.contains("LocalAppConfirmDependencyChange")
+                && !error.contains("LocalAppUpdateDependencies"),
+            "{error}"
+        );
+        assert!(error.contains("report the drift"), "{error}");
+    }
+
+    /// WP8 (corrector): the behavioural test above pins ONE of the three host
+    /// copies that used to send an agent to the two dead tool names. The copy
+    /// that mattered most was a different one — `local_apps_build.rs`'s
+    /// `validate_dependency_snapshot_files`, reachable from the MODEL-callable
+    /// `LocalAppBuild` (`build_app` -> `build_workspace` ->
+    /// `build_workspace_locked`) — and a gate that covers only the copy that
+    /// was fixed makes the FAMILY look handled when it is not.
+    ///
+    /// So scan the production text of both files for an imperative that names
+    /// either operation. Neither is in `LOCAL_APP_TOOLS`; the MCP transport
+    /// refuses their static spelling outright (see `local_apps_mcp.rs`'s
+    /// `the_mcp_surface_no_longer_serves_the_static_host_operations`), so any
+    /// "use/run/call/retry/invoke <name>" in model-facing copy is an
+    /// instruction to retry a call that fails closed forever.
+    ///
+    /// The needles are ASSEMBLED at runtime rather than written out, because
+    /// this test's own source is inside one of the two files it scans — a
+    /// literal needle here would match itself and the gate could never go red.
+    /// Mentioning the names in prose (as the comments above and this one do) is
+    /// deliberately still allowed: the defect is the imperative, not the name.
+    #[test]
+    fn no_host_error_copy_tells_the_model_to_call_a_dead_dependency_operation() {
+        let dead = [
+            format!("LocalApp{}", "ConfirmDependencyChange"),
+            format!("LocalApp{}", "UpdateDependencies"),
+        ];
+        let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
+        let sources = [
+            ("local_apps_host.rs", include_str!("local_apps_host.rs")),
+            ("local_apps_build.rs", include_str!("local_apps_build.rs")),
+        ];
+        let mut hits: Vec<String> = Vec::new();
+        for (name, src) in sources {
+            for (index, line) in src.lines().enumerate() {
+                let lowered = line.to_lowercase();
+                for op in &dead {
+                    let lowered_op = op.to_lowercase();
+                    for verb in verbs {
+                        let needle = format!("{verb}{lowered_op}");
+                        if lowered.contains(&needle) {
+                            hits.push(format!(
+                                "{name}:{}: `{}` — {}",
+                                index + 1,
+                                line.trim(),
+                                needle
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "host copy must not tell a caller to invoke a dependency operation that is \
+             absent from LOCAL_APP_TOOLS and refused by name on the MCP transport; it must \
+             tell the agent to report the drift instead. Offending line(s):\n{}",
+            hits.join("\n")
+        );
     }
 
     #[tokio::test]
@@ -15737,6 +16135,79 @@ mod tests {
                      Host-side resolve/enforce exists to remove — found `{workflow}` in {prose}"
                 );
             }
+        }
+    }
+
+    /// WP8: every backticked `LocalApp*` token in a workspace contract must
+    /// name a REAL builtin tool, or the model is told to call something that
+    /// fails with an unrelated "tool not found" error it has no way to
+    /// diagnose. This is a forward-looking regression gate.
+    ///
+    /// It does not, by itself, catch the actual pre-fix defect: the guided
+    /// contract's steps 4-5 sent the model to "用运行时确认工具" (a "runtime
+    /// confirmation tool") that was never spelled as a tool name at all —
+    /// plain Chinese prose, no backticks, protocol 10.0.0 having removed the
+    /// path it once named — and then to call `LocalAppScaffold` (itself a
+    /// real, existing tool) directly with a runtime-profile receipt the real
+    /// path never produces. A scanner that only understands backticked
+    /// `LocalApp*` spans walks right past prose like that, so this test pins
+    /// the absence of that specific phrase directly alongside the general
+    /// scan, rather than pretending the scan alone would have caught it.
+    #[tokio::test]
+    async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
+        fn assert_only_real_tool_names(contract: &str, label: &str) {
+            let mut offset = 0;
+            while let Some(found) = contract[offset..].find('`') {
+                let start = offset + found + 1;
+                let Some(found_end) = contract[start..].find('`') else {
+                    break;
+                };
+                let end = start + found_end;
+                let span = &contract[start..end];
+                let name: String = span.chars().take_while(char::is_ascii_alphanumeric).collect();
+                if let Some(rest) = name.strip_prefix("LocalApp") {
+                    if !rest.is_empty() {
+                        assert!(
+                            crate::local_apps_tools::LOCAL_APP_TOOLS
+                                .iter()
+                                .any(|&(tool_name, _, _)| tool_name == name),
+                            "{label} names backticked tool `{name}`, which is not in \
+                             LOCAL_APP_TOOLS and cannot be called: {contract}"
+                        );
+                    }
+                }
+                offset = end + 1;
+            }
+        }
+
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the guided contract");
+        assert!(
+            !guided.contains("运行时确认工具"),
+            "the guided contract must not send the model to a \"runtime confirmation \
+             tool\" that does not exist — protocol 10.0.0 removed that path; the real \
+             path is the create-local-app skill's unified create flow, which stages a \
+             candidate, raises one native confirmation, and only then calls \
+             LocalAppScaffold: {guided}"
+        );
+        assert_only_real_tool_names(&guided, "the guided contract");
+
+        for surface in ["dom", "canvas"] {
+            let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+            let (root, service, broker) = create_broker(false, Some(runtime)).await;
+            let shell = shell_app_fixture(&broker, &service).await;
+            let input =
+                confirmed_scaffold_input(&broker, &shell.id, "契约扫描", "扫描正文的工具名", surface)
+                    .await;
+            broker
+                .scaffold_shell_app_value(input)
+                .await
+                .expect("scaffold");
+            let formal = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("read the formal contract");
+            assert_only_real_tool_names(&formal, &format!("the formal {surface} contract"));
         }
     }
 

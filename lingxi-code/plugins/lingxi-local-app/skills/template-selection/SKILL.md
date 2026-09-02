@@ -12,10 +12,12 @@ are deliberately withheld and must never be inferred. Babylon stays out of
 the production catalog while its real-device availability gate is pending.
 
 Choose the simplest available entry matching the confirmed requirements.
-Prefer `react-dom-r1` for ordinary forms, lists, data and navigation; choose
-canvas or an engine only when the brief requires drawing, 3D, scenes, sprites,
-tilemaps, collision or a game lifecycle. Record at least one rejected
-candidate for the display-only confirmation UI.
+Prefer the catalog's `dom` template entry for ordinary forms, lists, data and
+navigation; choose canvas or an engine only when the brief requires drawing,
+3D, scenes, sprites, tilemaps, collision or a game lifecycle. Read the
+`templateId` the catalog actually returns rather than assuming a fixed
+revision suffix — it changes as the catalog is revised. Record at least one
+rejected candidate for the display-only confirmation UI.
 
 Submit the proposal to `LocalAppValidateTemplateSelection` with the exact
 `catalog_digest`, `template_id`, `reason`, `rejected`, Host-supplied `app_id`

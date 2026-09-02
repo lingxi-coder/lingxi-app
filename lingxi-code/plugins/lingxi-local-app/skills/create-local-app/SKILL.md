@@ -51,14 +51,19 @@ shape yet. Settling what the app IS is your work in that conversation:
    `lingxi-local-app:local-app-build` create branch for this shell app. That
    Host-owned path re-reads the template catalog, stages the create candidate,
    shows one trusted native create confirmation, and only then calls
-   `LocalAppScaffold`. App creation never runs MCP authoring: the app-owned MCP
-   remains unconfigured and disabled until the user explicitly starts MCP setup
-   from that app's settings. Never call a
+   `LocalAppScaffold`. Pass the display **name** and **brief** the user just
+   confirmed in step 3 verbatim: they are staged with the create candidate, they
+   are what the native create confirmation sheet renders, and they are what the
+   Host commits onto the record — the shell app created in step 1 is still the
+   empty `untitled` placeholder, so a create launched without them cannot show
+   or commit the confirmed wording. App creation never runs MCP authoring: the
+   app-owned MCP remains unconfigured and disabled until the user explicitly
+   starts MCP setup from that app's settings. Never call a
    standalone runtime-profile selector or pass a model-authored
    surface/profile override. Do not supply `args.runtime_profile` as an authority; the host reads the materialized manifest and overwrites it:
 
 ```json
-{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}}
+{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}}
 ```
 
 5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
@@ -209,13 +214,19 @@ Do not silently add a package, capability, domain, platform, or image asset.
 The same business logic may serve multiple targets, but each target must use a
 platform adapter/tokens layer rather than a width-only conditional.
 
-For a non-core npm-registry package, propose an add/update/remove with a reason.
-Add/update must go through `LocalAppConfirmDependencyChange` and its native
-one-shot receipt, then `LocalAppUpdateDependencies`; removal still uses the
-host update tool but needs no extra native approval. Never edit package/lock or
-run npm, npx, Yarn, or pnpm directly. React, Ionic, Vite, renderer engines, and
-other Catalog core packages can change only through a same-family Runtime
-Profile migration.
+For a non-core npm-registry package, propose an add/update/remove with a
+reason. Add/update is designed to go through `LocalAppConfirmDependencyChange`
+and its native one-shot receipt, then `LocalAppUpdateDependencies` — but as
+shipped, neither Host operation is on the model-callable tool surface (absent
+from the builtin `LocalApp*` table, and the MCP transport refuses their static
+spelling by name). There is currently no agent-invocable way to add, update,
+or remove a non-core dependency: propose it and its reason as a finding for
+the workflow/user to resolve outside this agent turn. Never edit package/lock
+or run npm, npx, Yarn, or pnpm directly to work around the gap — that is
+exactly the drift the Host's dependency checks exist to catch. React, Ionic,
+Vite, renderer engines, and other Catalog core packages can change only
+through a same-family Runtime Profile migration, which is a separate,
+unrelated path.
 
 From a global or project chat, create a new shell with:
 
@@ -223,10 +234,13 @@ From a global or project chat, create a new shell with:
 {"brief":"<initial user brief>","name":"<optional provisional name>"}
 ```
 
-using `LocalAppCreate`. Inside the app session, obtain a native runtime-profile
-receipt and send the confirmed name/brief plus that receipt to
-`LocalAppScaffold`; calling `LocalAppCreate` there would create a second app.
-Then declare collections, domains, and capabilities with `LocalAppManifest`
+using `LocalAppCreate`, then continue in the app-scoped session it hands you:
+the create flow above (step 1 onward) governs from there, including the
+unified `lingxi-local-app:local-app-build` create branch that stages the
+candidate, raises the native create confirmation, and only then calls
+`LocalAppScaffold` — do not call `LocalAppScaffold` directly from this app
+session, and do not call `LocalAppCreate` again once inside it. Then declare
+collections, domains, and capabilities with `LocalAppManifest`
 before generated source
 relies on them. Derive `expected_writable_collections` from the confirmed core
 UI paths that write those manifest collections. On mobile, the host reads the
@@ -371,9 +385,11 @@ launch with the verified catalog (Create) or persisted profile/snapshot
 (Update/Verify); caller input never selects a renderer or profile:
 
 ```json
-{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","spec":"<confirmed spec>","quality_level":"balanced"}}
+{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced"}}
 ```
 
+`name` and `brief` are create-only and carry the user-confirmed wording; every
+other identity field stays Host-derived.
 For update use `operation: "update"` and for a verification-only run use
 `operation: "verify"`; both fail closed unless Host can read the persisted
 Runtime Profile and dependency snapshot. `quality_level` is the only quality

@@ -1052,9 +1052,23 @@ fn validate_namespaced_local_app_external_args(
     };
     for key in object.keys() {
         let allowed = match name {
+            // WP5: `name`/`brief` are the display name and one-line brief the
+            // user already confirmed conversationally before this launch. They
+            // carry no authority (the Host still owns profile, catalog and
+            // workspace identity) and they are the ONLY way the confirmed
+            // wording can reach `LocalAppStageCreate`, which is what the native
+            // create confirmation sheet renders and what `LocalAppScaffold`
+            // commits. Without them the create flow falls back to the
+            // `untitled` placeholder.
             name if name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID => matches!(
                 key.as_str(),
-                "operation" | "app_id" | "spec" | "revision_prompt" | "quality_level"
+                "operation"
+                    | "app_id"
+                    | "spec"
+                    | "revision_prompt"
+                    | "quality_level"
+                    | "name"
+                    | "brief"
             ),
             name if name == crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID => {
                 matches!(
@@ -2246,6 +2260,50 @@ mod plugin_args_tests {
         let error = validate_namespaced_local_app_external_args(&spec)
             .expect_err("Host-owned fields must be rejected at the public launch boundary");
         assert!(error.to_string().contains("validated_selection_handle"));
+    }
+
+    /// WP5 drift gate: `local-app-build.js` maintains its own `ALLOWED_EXTERNAL`
+    /// list, and the Host rejects any launch key outside the arm above. The two
+    /// lists are written in different languages in different files, so a key
+    /// added to the script alone silently becomes unreachable: `input.<key>` is
+    /// simply `undefined` for every real launch and nothing fails loudly. That
+    /// is exactly how the user-confirmed `name`/`brief` were inert. Assert the
+    /// script's declared contract against the real validator, key by key.
+    #[test]
+    fn build_workflow_script_external_contract_is_accepted_by_the_host() {
+        let script =
+            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let declaration = script
+            .lines()
+            .find(|line| line.starts_with("const ALLOWED_EXTERNAL ="))
+            .expect("local-app-build.js must declare ALLOWED_EXTERNAL");
+        let keys: Vec<String> = declaration
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("ALLOWED_EXTERNAL must be an array literal")
+            .0
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('\'').to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert!(
+            keys.contains(&"operation".to_string()) && keys.contains(&"app_id".to_string()),
+            "ALLOWED_EXTERNAL parse produced a list that does not even contain the \
+             known-good keys, so this gate would pass vacuously: {keys:?}"
+        );
+        for key in &keys {
+            let spec = tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+                args: Some(serde_json::json!({ key: "value" })),
+                ..Default::default()
+            };
+            validate_namespaced_local_app_external_args(&spec).unwrap_or_else(|error| {
+                panic!(
+                    "local-app-build.js declares external field {key:?} but the Host launch \
+                     boundary rejects it, so it can never reach the script: {error}"
+                )
+            });
+        }
     }
 }
 

@@ -14,8 +14,14 @@ tools:
   - LocalAppScaffold
   - LocalAppStageCreate
   - LocalAppRuntime
+  - LocalAppManifest
 skills:
   - device
+  - ionic-react-local-app
+  - canvas-2d-local-app
+  - threejs-local-app
+  - phaser-2d-local-app
+  - babylon-3d-local-app
 ---
 
 # Build a Local App's source
@@ -87,23 +93,23 @@ App's current profile) before editing, and stay inside the editable set.
   `LocalAppBuild` succeeds. It is not a source-editing tool.
 - `LocalAppInstallDeps` — re-syncs the App's *already-declared,
   Host-approved* dependency set (`ensure_dependency_install`,
-  `local_apps_host.rs:2335`). It is not how you add or change a package.
+  `local_apps_host.rs:3559`). It is not how you add or change a package.
   If the workspace's `package.json`/lockfile has drifted from the Host's
-  own snapshot, this call fails closed with `dependencies_dirty` and names
-  two tools to resolve it — `LocalAppConfirmDependencyChange` and
-  `LocalAppUpdateDependencies`. Both exist as Host operations
+  own snapshot, this call fails closed with `dependencies_dirty` and tells
+  you to report the drift rather than retry. `LocalAppConfirmDependencyChange`
+  and `LocalAppUpdateDependencies` exist as Host operations
   (`local_apps_mcp.rs:62-67`, `local_apps_host.rs:6459`,`:6590`) but
   **neither is in the model-callable builtin tool table**
-  (`local_apps_tools.rs:53-93` — 24 operations, and these are not among
-  them). §7.3 grants this role "dependency proposal" as a capability; as
-  shipped, there is no tool that lets you exercise it. Do not hand-edit
-  `package.json` or the lockfile to work around this — that is exactly the
-  drift `dependencies_dirty` exists to catch, and it is also a core-
-  dependency modification, which you are explicitly prohibited from making
-  regardless of what tool would let you attempt it. If a task needs a new
-  package, say so as a finding for the workflow/user to route through
-  Update's own dependency-input flow (§9.5) — don't route it through source
-  edits.
+  (`local_apps_tools.rs:53-93` — the MCP transport refuses their static
+  spelling outright, and this role is not granted them). §7.3 grants this
+  role "dependency proposal" as a capability; as shipped, there is no tool
+  that lets you exercise it. Do not hand-edit `package.json` or the lockfile
+  to work around this — that is exactly the drift `dependencies_dirty` exists
+  to catch, and it is also a core-dependency modification, which you are
+  explicitly prohibited from making regardless of what tool would let you
+  attempt it. If a task needs a new package, say so as a finding for the
+  workflow/user to resolve outside this agent turn — don't route it through
+  source edits.
 - `LocalAppCheckpointCreate` — take a checkpoint before a risky or
   wide-reaching edit. You are not granted `LocalAppCheckpointRestore`;
   rolling an App back is not your call to make.
@@ -121,10 +127,17 @@ same edit unless the Host-managed file policy forbids touching that file.
 ## What you must not do
 
 - No package manager access of any kind, direct or indirect — see above.
-- No `LocalAppManifest` — manifest mutation is Host-derived (§12.4) for every
-  field that matters. You may call `LocalAppScaffold` only in the one create
-  phase where the workflow explicitly hands you the Host approval receipt; do
-  not use it as a repair tool or a template reset.
+- `LocalAppManifest` is for declaring data collections / network domains /
+  capabilities the source you are about to write depends on — every field
+  that matters about identity, profile and core dependencies stays
+  Host-derived (§12.4) and is not something this call can change. Declare a
+  collection BEFORE writing the source that reads or writes it, never after;
+  a collection with no declaration and a declaration with no writing UI path
+  are both defects the workflow's data round-trip check exists to catch.
+  Never declare host-owned `recordId`, `revision`, `createdAtMs`, or
+  `updatedAtMs` as fields. You may call `LocalAppScaffold` only in the one
+  create phase where the workflow explicitly hands you the Host approval
+  receipt; do not use it as a repair tool or a template reset.
 - Never touch the per-App template snapshot
   (`<app-data>/templates/<snapshot-digest>/`, §9.6) or a core dependency/
   Runtime Profile field. `.lingxi/source-policy.json`'s `host_managed_

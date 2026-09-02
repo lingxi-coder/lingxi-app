@@ -8,7 +8,7 @@ export const meta = {
 };
 
 const WORKFLOW_ID = 'lingxi-local-app:local-app-build';
-const ALLOWED_EXTERNAL = ['operation', 'app_id', 'spec', 'revision_prompt', 'quality_level'];
+const ALLOWED_EXTERNAL = ['operation', 'app_id', 'spec', 'revision_prompt', 'quality_level', 'name', 'brief'];
 const INTERNAL_KEYS = ['host_context', 'workflow_run_id', 'selector_capability', 'validated_selection_handle', 'expected_writable_collections', 'runtime_profile', 'template_selection'];
 const QUALITY = ['fast', 'balanced', 'thorough'];
 const FINDING_KINDS = ['render', 'motion', 'data', 'webview', 'acceptance', 'build'];
@@ -22,6 +22,20 @@ if (unknown.length > 0) throw new Error(`${WORKFLOW_ID}: unknown external field(
 if (!['create', 'update', 'verify'].includes(input.operation)) throw new Error(`${WORKFLOW_ID}: operation must be create, update, or verify`);
 if (typeof input.app_id !== 'string' || input.app_id.trim().length === 0) throw new Error(`${WORKFLOW_ID}: app_id is required`);
 if (input.spec !== undefined && (typeof input.spec !== 'string' || input.spec.trim().length === 0)) throw new Error(`${WORKFLOW_ID}: spec must be a non-empty confirmed specification`);
+if (input.name !== undefined && (typeof input.name !== 'string' || input.name.trim().length === 0)) throw new Error(`${WORKFLOW_ID}: name must be a non-empty string when provided`);
+if (input.brief !== undefined && (typeof input.brief !== 'string' || input.brief.trim().length === 0)) throw new Error(`${WORKFLOW_ID}: brief must be a non-empty string when provided`);
+// The user-confirmed display name/brief for a create run. Threaded into both
+// LocalAppStageCreate (which persists them as the create candidate's
+// authoritative values) and LocalAppScaffold's prompt below — never
+// rediscovered from LocalAppGet's still-empty shell record.
+const confirmedName = typeof input.name === 'string' ? input.name.trim() : '';
+const confirmedBrief = typeof input.brief === 'string' ? input.brief.trim() : '';
+// The Host launch boundary only forwards the declared external contract, so a
+// run launched without confirmed values must NOT render an empty name="" into
+// LocalAppStageCreate/LocalAppScaffold: both surfaces require a non-empty name
+// and brief and would reject it. Fall back to an instruction instead.
+const stageNaming = confirmedName && confirmedBrief ? `name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)} — the exact display name and one-line brief already confirmed with the user; send them verbatim` : 'a non-empty name and brief derived from the confirmed specification below, because this launch carried no user-confirmed values';
+const scaffoldNaming = confirmedName && confirmedBrief ? `name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)} — the exact name and brief already confirmed with the user and staged through LocalAppStageCreate above` : 'the same non-empty name and brief you staged through LocalAppStageCreate above';
 const quality = input.quality_level === undefined ? 'balanced' : input.quality_level;
 if (!QUALITY.includes(quality)) throw new Error(`${WORKFLOW_ID}: quality_level must be fast, balanced, or thorough`);
 
@@ -87,7 +101,7 @@ if (input.operation === 'create') {
   if (typeof selection.validated_selection_handle !== 'string' || !selection.validated_selection_handle.startsWith('vsel_')) throw new Error(`${WORKFLOW_ID}: selector did not return a Host-issued validated_selection_handle`);
   selectedTemplateId = selection.template_id;
   if (quality === 'fast' && !selection.template_id.startsWith('react-dom-')) throw new Error(`${WORKFLOW_ID}: CANVAS_FAST_REJECTED: selector chose a canvas profile for fast quality`);
-  if (quality !== 'fast') designSpec = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection for app ${input.app_id}, workflow_run_id ${context.workflow_run_id}, handle ${selection.validated_selection_handle}; produce the platform-aware design spec for the resolved profile. ${HOST_CHROME_CONTRACT}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
+  if (quality !== 'fast') designSpec = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection for app ${input.app_id}, workflow_run_id ${context.workflow_run_id}, handle ${selection.validated_selection_handle}; produce the platform-aware design spec for the resolved profile. ${HOST_CHROME_CONTRACT} Confirmed specification: ${input.spec || ''}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
 }
 
 let build;
@@ -95,11 +109,11 @@ let createApproval;
 if (input.operation === 'create') {
   const handle = selection?.validated_selection_handle;
   if (!handle) throw new Error(`${WORKFLOW_ID}: CREATE_HANDLE_REQUIRED`);
-  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, and the structured design_spec ${JSON.stringify(designSpec)} when present. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
+  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, ${stageNaming}, and the structured design_spec ${JSON.stringify(designSpec)} when present. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
   if (staged.ok !== true) throw new Error(`${WORKFLOW_ID}: create staging did not succeed`);
   createApproval = await run(`Call LocalAppApproveMcpProposal exactly once for app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, create_without_mcp=true. This is the native create confirmation path: do not propose MCP tools, do not call the MCP authoring workflow, and do not publish or enable MCP. Return the Host-issued create receipt unchanged.`, { agentType: 'mcp-designer', label: 'native-create-approval', phase: 'Select and Design', schema: createApprovalSchema });
   if (createApproval.approved !== true || createApproval.status !== 'create_approved_no_mcp' || !createApproval.receipt_id) throw new Error(`${WORKFLOW_ID}: create approval did not yield a unified scaffold receipt`);
-  build = await run(`Read LocalAppGet for app ${input.app_id} so the Host-confirmed current name and brief are the only values that reach the create transaction. Then call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.receipt_id}, and that exact Host-confirmed name/brief. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. MCP remains unconfigured and disabled until the user starts MCP authoring from the app settings. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_CREATE_BUILD_DENIES, label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
+  build = await run(`Call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.receipt_id}, ${scaffoldNaming}. Do not call LocalAppGet to rediscover them: its shell record is still an empty placeholder at this point, and the Host commits the staged values regardless of what you send here. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace. Before writing any source that reads or writes a data collection, call LocalAppManifest to declare every collection the confirmed design spec relies on — id, name and fields, lower snake_case ids, never a host-owned recordId/revision/createdAtMs/updatedAtMs field — and repair and retry a rejected declaration before writing the source that depends on it; do not write against an undeclared collection. Then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. MCP remains unconfigured and disabled until the user starts MCP authoring from the app settings. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_CREATE_BUILD_DENIES, label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: create builder did not produce a successful preview`);
 } else if (input.operation !== 'verify') {
   build = await run(`Use only the Host-persisted runtime profile in host_context; do not reselect or resolve a create candidate. Invoke exactly the matching runtime specialist ${specialistFor()} for that persisted profile. Implement the confirmed Local App update for ${input.app_id}; use only App-managed files, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Persist no final receipt or publish. Host context: ${JSON.stringify(context)}. Revision: ${input.revision_prompt || ''}`, { agentType: 'builder', disallowedTools: BUILDER_UPDATE_DENIES, label: 'builder', phase: 'Generate and Build', schema: buildSchema });

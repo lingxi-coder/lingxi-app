@@ -162,7 +162,16 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// workflow entries from `tools/workflow/src`, the retired canvas workflow
 /// alias, and their dead allowlist rows leaves only the real remaining
 /// production component-name literals.
-const ALLOWLIST_BASELINE_COUNT: usize = 3;
+///
+/// 3 → 5 (WP8, 2026-09-02 create-flow audit): two new entries name the
+/// create skill by its PLUGIN-QUALIFIED registration
+/// `lingxi-local-app:create-local-app` — never a build workflow id — in
+/// `local_apps_host.rs` and `local_apps_mcp.rs`, the only way left for a
+/// model stuck on an unscaffolded shell to find the create flow now that
+/// steps 4-5 of the guided workspace contract no longer send it to a
+/// "runtime confirmation tool" that does not exist. See the allowlist file's
+/// own comments on both entries for why this does not reopen P-1.4.
+const ALLOWLIST_BASELINE_COUNT: usize = 5;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is

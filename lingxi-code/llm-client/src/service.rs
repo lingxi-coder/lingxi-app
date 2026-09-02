@@ -125,21 +125,45 @@ fn is_internal_account_class() -> bool {
 }
 
 /// Bound `max_tokens` so `input_tokens + output` fit `context_window`: reserve
-/// the estimated input plus a small margin, with a floor. Fixes models whose
+/// the estimated input plus provider-formatting headroom. Fixes models whose
 /// advertised max-output equals their context window (models.dev has no distinct
 /// output cap — 64 OpenRouter models + gpt-4) from requesting the ENTIRE window
 /// as output, which the endpoint rejects once any input is present. Never raises
 /// `max_tokens`; leaves it unchanged when it already fits.
 fn bound_output_to_context(max_tokens: u32, context_window: u64, input_tokens: u64) -> u32 {
-    /// Headroom below the exact fit (BOS/formatting tokens the estimate misses).
-    const OUTPUT_FIT_MARGIN: u64 = 1024;
-    /// Never cap output below this — a turn must be able to produce something.
-    const MIN_OUTPUT_TOKENS: u64 = 4096;
-    let fit = context_window
-        .saturating_sub(input_tokens)
-        .saturating_sub(OUTPUT_FIT_MARGIN)
-        .max(MIN_OUTPUT_TOKENS);
+    /// Keep bounded headroom unused because OpenAI-compatible routers may add
+    /// model-specific chat/tool templates.
+    const OUTPUT_FIT_MARGIN_MIN: u64 = 1_024;
+    const OUTPUT_FIT_MARGIN_MAX: u64 = 20_000;
+    let raw_fit = context_window.saturating_sub(input_tokens);
+    let margin = (context_window / 20).clamp(OUTPUT_FIT_MARGIN_MIN, OUTPUT_FIT_MARGIN_MAX);
+    let conservative_fit = raw_fit.saturating_sub(margin);
+    // If only the safety margin (rather than the actual input) consumes the
+    // remaining window, allow one token so the wire request remains valid.
+    let fit = if conservative_fit == 0 {
+        raw_fit.min(1)
+    } else {
+        conservative_fit
+    };
     max_tokens.min(u32::try_from(fit).unwrap_or(u32::MAX))
+}
+
+/// Allow one overflow-driven output reduction per request drive, and only when
+/// it strictly lowers the value already sent on the wire.
+fn guard_max_tokens_adjustment(
+    step: DriveStep,
+    current_max_tokens: Option<u32>,
+    already_adjusted: bool,
+) -> DriveStep {
+    match step {
+        DriveStep::AdjustMaxTokens(proposed)
+            if already_adjusted
+                || !current_max_tokens.is_some_and(|current| proposed < current) =>
+        {
+            DriveStep::Terminal
+        }
+        other => other,
+    }
 }
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
@@ -1106,14 +1130,6 @@ impl ApiService {
                 Some(&available_tool_names),
             ),
         ))?;
-        // Estimate the tool-schema input BEFORE `tools` is consumed — the full
-        // agent toolset is ~18k tokens and `approximate_tokens` does not count it.
-        // Used below to bound `max_tokens` against the context window.
-        let tool_input_tokens: u64 = tools
-            .iter()
-            .map(|t| t.to_string().len() as u64)
-            .sum::<u64>()
-            / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN;
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
@@ -1217,30 +1233,38 @@ impl ApiService {
         }
         req.stream = stream;
 
-        // max_tokens (DIV-3): honor the escalation override (Some) else the
-        // model value (claude.ts getMaxOutputTokensForModel). The base path
-        // passes None → the model's binary-grounded max-output tokens, NOT the
-        // codec's 4096 default.
-        req.max_tokens = Some(max_tokens.unwrap_or_else(|| {
-            u32::try_from(crate::model::context_window::max_output_tokens_for_model(
-                model,
-            ))
-            .unwrap_or(u32::MAX)
-        }));
+        // max_tokens (DIV-3): an explicit escalation wins; ordinary turns use a
+        // model-aware request default. Catalog `limit.output` is a hard ceiling,
+        // not a request default (notably OpenRouter GLM Free advertises 230.4k
+        // output inside a 256k total context window).
+        let requested_max_tokens = max_tokens.unwrap_or_else(|| {
+            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
+                .unwrap_or(u32::MAX)
+        });
+        req.max_tokens = Some(
+            crate::model::context_window::known_output_token_limit_for_model(model)
+                .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
+                .map_or(requested_max_tokens, |limit| {
+                    requested_max_tokens.min(limit)
+                }),
+        );
 
-        // Bound max_tokens so input + output fit the model's context window. Many
-        // non-Claude models advertise output == context (models.dev has no
-        // distinct output cap — e.g. 64 OpenRouter models + gpt-4), so the
-        // max-output above requests the ENTIRE window as output and the endpoint
-        // rejects the turn once ANY input is added — including the ~18k-token tool
-        // schemas that `approximate_tokens` doesn't count. Reserve the estimated
-        // input (system + messages + tools). Claude models (output << context)
+        // Bound max_tokens so input + output fit the model's context window.
+        // Even a safe ordinary output default may not fit beside a long prompt;
+        // reserve the structured input estimate (system + messages + tools)
+        // plus provider-formatting headroom. Claude models (output << context)
         // are unaffected unless the input is near-full.
         let context_window =
             crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
-        let input_est = crate::model::count_tokens::approximate_tokens(&req) + tool_input_tokens;
+        let input_est = crate::model::count_tokens::approximate_tokens(&req);
         if let Some(mt) = req.max_tokens {
-            req.max_tokens = Some(bound_output_to_context(mt, context_window, input_est));
+            let bounded = bound_output_to_context(mt, context_window, input_est);
+            if bounded == 0 {
+                return Err(LlmError::ContextOverflow {
+                    token_gap: input_est.saturating_sub(context_window),
+                });
+            }
+            req.max_tokens = Some(bounded);
         }
 
         // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
@@ -2517,6 +2541,7 @@ impl ApiService {
         let mut chain_idx: usize = 0;
         // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
         let mut aws_auth_attempts: u32 = 0;
+        let mut max_tokens_adjusted = false;
         loop {
             // prepare → inject headers → execute.
             let mut prepared = match self.client.prepare(&req).await {
@@ -2740,12 +2765,16 @@ impl ApiService {
                                 continue;
                             }
 
-                            let step = next_step_with_backoff(
-                                &mut state,
-                                &retry_control,
-                                &effective_err,
-                                thinking_budget,
-                                self.settings_backoff_ms,
+                            let step = guard_max_tokens_adjustment(
+                                next_step_with_backoff(
+                                    &mut state,
+                                    &retry_control,
+                                    &effective_err,
+                                    thinking_budget,
+                                    self.settings_backoff_ms,
+                                ),
+                                req.max_tokens,
+                                max_tokens_adjusted,
                             );
                             match step {
                                 DriveStep::RetryAfter(delay) => {
@@ -2778,6 +2807,7 @@ impl ApiService {
                                         )
                                         .await;
                                     }
+                                    max_tokens_adjusted = true;
                                     req.max_tokens = Some(new_max);
                                     continue;
                                 }
@@ -2955,15 +2985,14 @@ impl ApiService {
     /// session-scoped wire behavior, including thinking configuration and
     /// request metadata, remains shared.
     ///
-    /// `max_tokens` is `None` for "whatever this model can emit" — the same
-    /// signal the main turn passes, which [`Self::build_request`] resolves to
-    /// `max_output_tokens_for_model` and then bounds against the context
-    /// window. It was previously a bare `u32`, which forced every caller to
-    /// invent a ceiling; on a reasoning model that invented number silently
-    /// capped the THINKING pass as well as the answer, so a figure sized for
-    /// the answer alone truncated the response mid-tool-call. Pass `Some(n)`
-    /// only where a caller has a real reason to spend less than the model
-    /// allows.
+    /// `max_tokens` is `None` for the model-aware ordinary request budget — the
+    /// same signal the main turn passes. For Claude this remains its native
+    /// default; catalog-backed non-Claude routes use a safe 32k default rather
+    /// than treating a hard provider ceiling as a per-turn target. It was
+    /// previously a bare `u32`, which forced every caller to invent a ceiling;
+    /// on a reasoning model that invented number silently capped the THINKING
+    /// pass as well as the answer. Pass `Some(n)` only where a caller has a real
+    /// reason to request a different budget.
     #[allow(clippy::too_many_arguments)]
     pub async fn messages_create_side_query(
         &self,
@@ -3384,6 +3413,7 @@ impl ApiService {
         // `StreamNoResponse` owns a separate one-retry ledger in the oracle.
         // It is intentionally independent from the ordinary retry budget.
         let mut no_response_retries: u8 = 0;
+        let mut max_tokens_adjusted = false;
         // (cc 2.1.219) `Kt`/`no` — per-query, reset with every drive. Streams
         // are main-thread or subagent turns, never `fB()==="auxiliary"`.
         let mut dispatch = DispatchHeaderState::default();
@@ -3566,18 +3596,45 @@ impl ApiService {
                             continue;
                         }
 
-                        let step = next_step_with_backoff(
-                            &mut state,
-                            &ctl,
-                            &effective_err,
-                            thinking_budget,
-                            self.settings_backoff_ms,
+                        let step = guard_max_tokens_adjustment(
+                            next_step_with_backoff(
+                                &mut state,
+                                &ctl,
+                                &effective_err,
+                                thinking_budget,
+                                self.settings_backoff_ms,
+                            ),
+                            req.max_tokens,
+                            max_tokens_adjusted,
                         );
-                        if let DriveStep::RetryAfter(delay) = step {
-                            self.report_and_sleep_retry(&effective_err, delay, &state, &ctl)
-                                .await;
-                            // Re-prepare on next iteration so headers stay fresh.
-                            continue;
+                        match step {
+                            DriveStep::RetryAfter(delay) => {
+                                self.report_and_sleep_retry(&effective_err, delay, &state, &ctl)
+                                    .await;
+                                // Re-prepare on next iteration so headers stay fresh.
+                                continue;
+                            }
+                            DriveStep::AdjustMaxTokens(new_max) => {
+                                if let LlmError::InvalidRequest { message } = &decode_err {
+                                    if let Some(overflow) =
+                                        crate::model::overflow::parse_overflow_message(message)
+                                    {
+                                        telemetry::emit_max_tokens_overflow_adjustment(
+                                            &self.analytics,
+                                            &req.model,
+                                            overflow.input_tokens,
+                                            overflow.context_limit,
+                                            new_max,
+                                            state.attempt,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                max_tokens_adjusted = true;
+                                req.max_tokens = Some(new_max);
+                                continue;
+                            }
+                            _ => {}
                         }
                         // B6-T1: the stream connect DIES here — promote the
                         // 429 snapshot staged this attempt (TS terminal catch

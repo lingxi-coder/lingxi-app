@@ -1,8 +1,9 @@
 //! `max_tokens` context-overflow detection + re-shrink arithmetic.
 //!
-//! When the Anthropic Messages API rejects a request because the prompt plus
-//! the requested `max_tokens` exceed the model's context window, it returns a
-//! **400** whose error message has the byte-exact shape:
+//! When Anthropic or an OpenAI-compatible router rejects a request because the
+//! prompt plus the requested output budget exceed the model's context window,
+//! it returns a **400** that reports the server-counted input, requested output
+//! and context limit. Anthropic's error has the shape:
 //!
 //! ```text
 //! input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000
@@ -14,15 +15,15 @@
 //!
 //! This module ports the two pure helpers that drive that behaviour:
 //!
-//! * [`parse_max_tokens_overflow`] — 1:1 with claude-code
-//!   `parseMaxTokensContextOverflowError` (`withRetry.ts:550-595`).
-//! * [`adjusted_max_tokens`] — 1:1 with the overflow branch arithmetic
-//!   (`withRetry.ts:391-415`): `safetyBuffer = 1000`, `FLOOR_OUTPUT_TOKENS =
-//!   3000`, and `minRequired = thinkingBudget + 1`.
+//! * [`parse_max_tokens_overflow`] — the `Claude Code` parser plus `OpenRouter`'s
+//!   text/tool-input breakdown.
+//! * [`adjusted_max_tokens`] — the `Claude Code` safety-buffer and output-floor
+//!   arithmetic, with an additional guard against a thinking minimum that
+//!   cannot fit.
 //!
-//! The retry wiring (mutating the request body and re-looping) lives in
-//! `anthropic.rs::drive_retry_loop_with_429`; this module is intentionally
-//! pure so the arithmetic can be unit-tested in isolation.
+//! The retry wiring (mutating the request body and re-looping) lives in the
+//! service's streaming and non-streaming drivers; this module stays pure so
+//! the arithmetic can be unit-tested in isolation.
 
 #![forbid(unsafe_code)]
 
@@ -68,21 +69,32 @@ fn overflow_regex() -> &'static Regex {
     })
 }
 
+fn openrouter_overflow_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?is)maximum context length is ([\d,]+) tokens.*?requested about ([\d,]+) tokens \(([\d,]+) of text input, ([\d,]+) of tool input, ([\d,]+) in the output\)",
+        )
+        .expect("OpenRouter overflow regex is a valid, fixed pattern")
+    })
+}
+
+fn parse_number(value: &str) -> Option<u64> {
+    value.replace(',', "").parse::<u64>().ok()
+}
+
 /// Parse a `max_tokens` context-overflow **400** into its three numbers.
 ///
-/// 1:1 with claude-code `parseMaxTokensContextOverflowError`
-/// (`withRetry.ts:550-595`):
+/// Supports `Claude Code`'s Anthropic shape and `OpenRouter`'s equivalent
+/// text/tool-input breakdown:
 ///
 /// 1. Returns `None` unless `status == 400` (`:557`).
-/// 2. Returns `None` unless the body contains the literal substring
-///    `` input length and `max_tokens` exceed context limit `` (`:561-567`) —
-///    this cheap `contains` gate precedes the regex exactly as TS does.
-/// 3. Applies the byte-identical capture regex and parses the three groups as
-///    base-10 integers (`:569-588`).
+/// 2. For Anthropic, applies the upstream literal gate and capture regex.
+/// 3. For `OpenRouter`, sums the reported text and tool input and uses the
+///    reported output and context values.
 ///
 /// `body` is the server's error message text (claude-code reads
-/// `error.message`); for the Rust transport this is the raw 400 response body,
-/// which carries the same wording.
+/// `error.message`); this helper also accepts a complete JSON error envelope.
 ///
 /// Note: the three captures are `\d+`, so the values always parse; the TS
 /// `isNaN` guard (`:590`) is structurally unreachable here and is therefore not
@@ -92,20 +104,22 @@ pub fn parse_max_tokens_overflow(status: u16, body: &str) -> Option<Overflow> {
     if status != 400 {
         return None;
     }
-    // Cheap substring gate before the regex, mirroring TS `:561-567`.
-    if !body.contains("input length and `max_tokens` exceed context limit") {
-        return None;
+    if body.contains("input length and `max_tokens` exceed context limit") {
+        let caps = overflow_regex().captures(body)?;
+        return Some(Overflow {
+            input_tokens: parse_number(caps.get(1)?.as_str())?,
+            max_tokens: parse_number(caps.get(2)?.as_str())?,
+            context_limit: parse_number(caps.get(3)?.as_str())?,
+        });
     }
-    let caps = overflow_regex().captures(body)?;
-    // Groups are `\d+`; parse cannot fail for in-range values. We use `ok()?`
-    // so an absurdly large number (overflowing u64) degrades to `None` rather
-    // than panicking — TS parses to a JS number (f64), which never throws.
-    let input_tokens = caps.get(1)?.as_str().parse::<u64>().ok()?;
-    let max_tokens = caps.get(2)?.as_str().parse::<u64>().ok()?;
-    let context_limit = caps.get(3)?.as_str().parse::<u64>().ok()?;
+
+    let caps = openrouter_overflow_regex().captures(body)?;
+    let context_limit = parse_number(caps.get(1)?.as_str())?;
+    let text_input = parse_number(caps.get(3)?.as_str())?;
+    let tool_input = parse_number(caps.get(4)?.as_str())?;
     Some(Overflow {
-        input_tokens,
-        max_tokens,
+        input_tokens: text_input.saturating_add(tool_input),
+        max_tokens: parse_number(caps.get(5)?.as_str())?,
         context_limit,
     })
 }
@@ -113,8 +127,8 @@ pub fn parse_max_tokens_overflow(status: u16, body: &str) -> Option<Overflow> {
 /// Parse the overflow shape out of an llm-client `InvalidRequest` message.
 ///
 /// Delegates to [`parse_max_tokens_overflow`] with `status = 400`, which is
-/// the HTTP status Anthropic returns for this class of error. Used by the
-/// orchestrator retry driver to detect context-overflow `InvalidRequest`
+/// the HTTP status Anthropic and `OpenRouter` return for this class of error.
+/// Used by the retry drivers to detect context-overflow `InvalidRequest`
 /// errors and compute an adjusted `max_tokens`.
 #[must_use]
 pub fn parse_overflow_message(message: &str) -> Option<Overflow> {
@@ -124,7 +138,7 @@ pub fn parse_overflow_message(message: &str) -> Option<Overflow> {
 /// Recompute a safe `max_tokens` from a parsed [`Overflow`], or `None` to give
 /// up (surface the original 400).
 ///
-/// 1:1 with the overflow branch arithmetic in claude-code
+/// Based on the overflow branch arithmetic in Claude Code
 /// (`withRetry.ts:391-415`):
 ///
 /// ```text
@@ -132,7 +146,8 @@ pub fn parse_overflow_message(message: &str) -> Option<Overflow> {
 /// if availableContext < 3000:          // FLOOR_OUTPUT_TOKENS
 ///     return None                       // throw error (give up)
 /// minRequired = thinkingBudget + 1      // thinkingBudget = 0 when disabled
-/// adjusted = max(3000, availableContext, minRequired)
+/// if minRequired > availableContext: return None
+/// adjusted = availableContext
 /// ```
 ///
 /// `thinking_budget` is the extended-thinking budget in tokens (0 when thinking
@@ -161,10 +176,11 @@ pub fn adjusted_max_tokens(overflow: Overflow, thinking_budget: u64) -> Option<u
 
     // minRequired = thinkingBudget + 1 (at least one output token).
     let min_required = thinking_budget.saturating_add(1);
+    if min_required > available_context {
+        return None;
+    }
 
-    let adjusted = FLOOR_OUTPUT_TOKENS.max(available_context).max(min_required);
-
-    Some(u32::try_from(adjusted).unwrap_or(u32::MAX))
+    Some(u32::try_from(available_context).unwrap_or(u32::MAX))
 }
 
 #[cfg(test)]
@@ -238,6 +254,19 @@ mod parse_tests {
         );
     }
 
+    #[test]
+    fn parses_openrouter_text_and_tool_input_breakdown() {
+        let body = "This endpoint's maximum context length is 256000 tokens. However, you requested about 260085 tokens (10691 of text input, 24791 of tool input, 224603 in the output). Please reduce the length of either one.";
+        assert_eq!(
+            parse_max_tokens_overflow(400, body),
+            Some(Overflow {
+                input_tokens: 35_482,
+                max_tokens: 224_603,
+                context_limit: 256_000,
+            })
+        );
+    }
+
     // --- parse_overflow_message ---
 
     #[test]
@@ -274,7 +303,7 @@ mod adjust_tests {
     #[test]
     fn floor_wins_when_available_below_floor_but_room_remains() {
         // available = 100000 - 96000 - 1000 = 3000 (== floor) → not < floor →
-        // max(3000, 3000, 1) = 3000.
+        // return 3000.
         let overflow = Overflow {
             input_tokens: 96_000,
             max_tokens: 50_000,
@@ -307,15 +336,15 @@ mod adjust_tests {
     }
 
     #[test]
-    fn thinking_budget_raises_min_required() {
-        // available = 200000 - 188059 - 1000 = 10941; thinking budget 15000 →
-        // minRequired = 15001 → max(3000, 10941, 15001) = 15001.
+    fn thinking_budget_that_cannot_fit_gives_up() {
+        // available = 10941; a 15001-token minimum cannot fit and must not
+        // manufacture another overflowing retry.
         let overflow = Overflow {
             input_tokens: 188_059,
             max_tokens: 20_000,
             context_limit: 200_000,
         };
-        assert_eq!(adjusted_max_tokens(overflow, 15_000), Some(15_001));
+        assert_eq!(adjusted_max_tokens(overflow, 15_000), None);
     }
 
     #[test]

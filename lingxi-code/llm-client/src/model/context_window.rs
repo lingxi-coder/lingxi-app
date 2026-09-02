@@ -304,6 +304,59 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
     (default_tokens, upper_limit)
 }
 
+/// Returns the effective hard output ceiling for `model`.
+///
+/// Unlike [`default_output_tokens_for_model`], this value is only a validation
+/// ceiling. It should not be copied into every request as the implicit output
+/// budget.
+#[must_use]
+pub fn output_token_limit_for_model(model: &str) -> u64 {
+    model_max_output_tokens(model).1
+}
+
+/// Returns a provider-advertised hard output ceiling when model metadata is
+/// known. Unknown custom models return `None` instead of inheriting a guessed
+/// fallback ceiling.
+#[must_use]
+pub fn known_output_token_limit_for_model(model: &str) -> Option<u64> {
+    if is_claude_family(model) {
+        Some(output_token_limit_for_model(model))
+    } else {
+        super::model_limits::lookup(model).map(|limits| limits.max_output_tokens)
+    }
+}
+
+/// Returns the ordinary per-request output budget for `model`.
+///
+/// Catalog `limit.output` values are hard provider ceilings, not sensible
+/// defaults for every turn.  Most coding-agent turns need far less output, and
+/// using a ceiling that nearly equals the context window leaves no reliable
+/// room for provider-side prompt/tool formatting.  Keep Claude's model-specific
+/// defaults, but cap the implicit default for catalog-backed non-Claude models
+/// at the same 32k budget used by the generic fallback.  An explicit
+/// `LINGXI_MAX_OUTPUT_TOKENS` value may still opt in up to the model ceiling.
+#[must_use]
+pub fn default_output_tokens_for_model(model: &str) -> u64 {
+    let (model_default, upper_limit) = model_max_output_tokens(model);
+    let default_tokens = if is_claude_family(model) {
+        model_default
+    } else {
+        upper_limit.min(MAX_OUTPUT_TOKENS_DEFAULT)
+    };
+    configured_output_tokens(default_tokens, upper_limit)
+}
+
+fn configured_output_tokens(default_tokens: u64, upper_limit: u64) -> u64 {
+    if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
+        let value = platform_api::env::parse_int_env(&raw);
+        if !value.is_nan() && value > 0.0 {
+            return value.min(upper_limit as f64) as u64;
+        }
+    }
+
+    default_tokens
+}
+
 /// Returns the effective max output tokens for `model`.
 ///
 /// Mirrors `getMaxOutputTokensForModel` (`api/claude.ts:3399-3419`). The
@@ -314,19 +367,7 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
 #[must_use]
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let (default_tokens, upper_limit) = model_max_output_tokens(model);
-
-    // validateBoundedIntEnvVar('LINGXI_MAX_OUTPUT_TOKENS', …, default, upper)
-    // (`IPe`): the raw value is parsed by the shared `hp` helper; a `NaN`/
-    // non-positive value falls back to the default, anything above the upper
-    // limit is capped down to it.
-    if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
-        let o = platform_api::env::parse_int_env(&raw);
-        if !o.is_nan() && o > 0.0 {
-            return o.min(upper_limit as f64) as u64;
-        }
-    }
-
-    default_tokens
+    configured_output_tokens(default_tokens, upper_limit)
 }
 
 /// Returns the maximum thinking-budget tokens for `model`.
@@ -565,7 +606,9 @@ mod tests {
             },
         );
         assert_eq!(context_window_for_model(id, &[]), 1_050_000);
+        assert_eq!(output_token_limit_for_model(id), 128_000);
         assert_eq!(max_output_tokens_for_model(id), 128_000);
+        assert_eq!(default_output_tokens_for_model(id), 32_000);
         // Thinking ceiling follows the real output, not the Claude 128k-1.
         assert_eq!(max_thinking_tokens_for_model(id), 127_999);
 
@@ -587,6 +630,30 @@ mod tests {
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-8-20260115"),
             64_000
+        );
+    }
+
+    #[test]
+    fn openrouter_glm_free_does_not_use_hard_output_limit_as_default() {
+        use crate::model::model_limits::{register, ModelLimits};
+
+        let id = "z-ai/glm-5.2:free-test";
+        register(
+            id,
+            ModelLimits {
+                context_window: 256_000,
+                max_output_tokens: 230_400,
+            },
+        );
+
+        assert_eq!(context_window_for_model(id, &[]), 256_000);
+        assert_eq!(output_token_limit_for_model(id), 230_400);
+        assert_eq!(max_output_tokens_for_model(id), 230_400);
+        assert_eq!(default_output_tokens_for_model(id), 32_000);
+        assert_eq!(max_thinking_tokens_for_model(id), 230_399);
+        assert_eq!(
+            known_output_token_limit_for_model("unknown-custom-model"),
+            None
         );
     }
 

@@ -4,8 +4,19 @@
 use crate::model::betas::{apply_beta_header, BetaContext, Endpoint, Provider};
 use crate::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
 
-/// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
+/// Coarse divisor shared by transcript-size estimates. Request-fit estimation
+/// below deliberately uses a more conservative divisor.
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
+
+/// Conservative divisor for request-fit decisions. Structured JSON/tool
+/// schemas and CJK text commonly tokenize more densely than the generic
+/// four-bytes heuristic used by transcript-size estimates.
+const REQUEST_BYTES_PER_TOKEN: u64 = 3;
+
+/// Conservative token estimate for one image-like input when no provider
+/// counter is available.  This matches the order of magnitude used by Codex's
+/// model-visible history estimator without charging base64 bytes as text.
+const APPROX_MEDIA_TOKENS: u64 = 2_048;
 
 /// Count input tokens for `request`'s resolved route.
 pub async fn count_tokens(
@@ -57,23 +68,68 @@ pub async fn try_count_tokens_exact(
     }
 }
 
-/// Byte-length approximation used on non-Anthropic routes.
+/// Structured provider-visible approximation used when no exact endpoint is
+/// available.
 ///
-/// Only Text block content and system text are counted; tool/reasoning/image payloads contribute nothing.
+/// This is deliberately not described as tokenizer-accurate: providers apply
+/// model-specific chat templates after receiving the request.  It does cover
+/// every canonical message block plus tool declarations, tool choice and
+/// response schemas, then uses ceiling division so partial tokens are never
+/// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
     let mut byte_len = 0u64;
     for block in &request.system {
-        byte_len += block.text.len() as u64;
+        byte_len = byte_len.saturating_add(serialized_len(block));
     }
     for message in &request.messages {
+        byte_len = byte_len.saturating_add(serialized_len(&message.role));
         for block in &message.content {
-            if let crate::ContentBlock::Text { text, .. } = block {
-                byte_len += text.len() as u64;
-            }
+            byte_len = byte_len.saturating_add(estimated_block_bytes(block));
         }
     }
-    (byte_len / APPROX_CHARS_PER_TOKEN).max(1)
+    for tool in &request.tools {
+        // Account for the provider's function/tool wrapper in addition to the
+        // canonical declaration itself.  The server may add further chat
+        // template text; the request-level fit margin covers that uncertainty.
+        byte_len = byte_len
+            .saturating_add(serialized_len(tool))
+            .saturating_add(48);
+    }
+    if let Some(tool_choice) = &request.tool_choice {
+        byte_len = byte_len.saturating_add(serialized_len(tool_choice));
+    }
+    if let Some(response_format) = &request.response_format {
+        byte_len = byte_len.saturating_add(serialized_len(response_format));
+    }
+
+    byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN).max(1)
+}
+
+fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len() as u64)
+}
+
+fn estimated_block_bytes(block: &crate::ContentBlock) -> u64 {
+    const TEXT_BLOCK_WRAPPER_BYTES: u64 = 30;
+
+    match block {
+        crate::ContentBlock::Text { text, .. } => {
+            serialized_len(text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES)
+        }
+        crate::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => crate::protocol::json_string_len_from_utf16(utf16_code_units)
+            .saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
+        crate::ContentBlock::Image { .. } => APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN,
+        crate::ContentBlock::ImageUrl { url } => {
+            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).saturating_add(url.len() as u64)
+        }
+        crate::ContentBlock::Document { bytes, .. } => {
+            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).max(bytes.len() as u64)
+        }
+        _ => serialized_len(block),
+    }
 }
 
 #[cfg(test)]
@@ -84,7 +140,7 @@ mod tests {
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig,
         LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId,
         ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, SystemBlock,
-        Transport,
+        ToolDeclaration, Transport,
     };
     use std::sync::Mutex;
 
@@ -99,24 +155,33 @@ mod tests {
     }
 
     #[test]
-    fn approximate_tokens_known_char_count_divides_by_four() {
-        // 40 bytes → 10 tokens
+    fn approximate_tokens_includes_text_envelope() {
         let req =
             LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
         assert_eq!(req.messages[0].content.len(), 1);
-        assert_eq!(approximate_tokens(&req), 10);
+        assert!(approximate_tokens(&req) > 10);
+    }
+
+    #[test]
+    fn approximate_tokens_uses_ceiling_division() {
+        let req = LlmRequest::new("model").with_user_text("12345");
+        let byte_len = serialized_len(&req.messages[0].role)
+            + estimated_block_bytes(&req.messages[0].content[0]);
+        assert_eq!(
+            approximate_tokens(&req),
+            byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN)
+        );
     }
 
     #[test]
     fn approximate_tokens_system_blocks_are_counted() {
         let mut req = LlmRequest::new("model");
         req.system.push(SystemBlock::text("12345678")); // 8 bytes
-        assert_eq!(approximate_tokens(&req), 2); // 8/4 = 2
+        assert!(approximate_tokens(&req) >= 2);
     }
 
     #[test]
-    fn approximate_tokens_non_text_blocks_ignored() {
-        // Image blocks should not count.
+    fn approximate_tokens_counts_media_blocks_without_base64_inflation() {
         let mut req = LlmRequest::new("model");
         req.messages.push(Message {
             role: "user".to_string(),
@@ -125,15 +190,75 @@ mod tests {
                 bytes: vec![0u8; 100],
             }],
         });
-        // No text → floor to 1.
-        assert_eq!(approximate_tokens(&req), 1);
+        assert_eq!(approximate_tokens(&req), APPROX_MEDIA_TOKENS + 2);
     }
 
     #[test]
-    fn approximate_tokens_minimum_is_one_even_for_very_short_text() {
-        // 3 bytes < 4 → floor to 1
-        let req = LlmRequest::new("model").with_user_text("hi!");
-        assert_eq!(approximate_tokens(&req), 1);
+    fn approximate_tokens_counts_structured_messages_and_tools() {
+        let mut req = LlmRequest::new("model");
+        req.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::TextJsUtf16 {
+                    text: "structured text".to_string(),
+                    utf16_code_units: "structured text".encode_utf16().collect(),
+                    cache_control: None,
+                },
+                ContentBlock::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "lookup".to_string(),
+                    input: serde_json::json!({"query": "weather in San Francisco"}),
+                },
+                ContentBlock::ToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
+                    is_error: false,
+                    cache_control: None,
+                    cache_reference: None,
+                },
+            ],
+        });
+        req.tools.push(ToolDeclaration {
+            name: "lookup".to_string(),
+            description: "Look up current information for a location".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }),
+            ..Default::default()
+        });
+
+        assert!(
+            approximate_tokens(&req) > 1,
+            "provider-visible structured content and tool declarations must contribute"
+        );
+    }
+
+    #[test]
+    fn text_js_utf16_ascii_estimate_matches_plain_text() {
+        let text = "restored ASCII skill content".repeat(100);
+        let mut plain = LlmRequest::new("model");
+        plain.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }],
+        });
+        let mut exact_utf16 = LlmRequest::new("model");
+        exact_utf16.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::TextJsUtf16 {
+                utf16_code_units: text.encode_utf16().collect(),
+                text,
+                cache_control: None,
+            }],
+        });
+
+        assert_eq!(approximate_tokens(&exact_utf16), approximate_tokens(&plain));
     }
 
     // ----------------------------------------------------------------
@@ -329,14 +454,17 @@ mod tests {
             serde_json::json!({ "input_tokens": 9999 }),
         ));
         let client = openai_client();
-        // 20 bytes of text → 5 tokens
+        // The fallback includes provider-visible message structure as well as
+        // text, so it must be larger than the old raw-text / 4 heuristic.
         let req = LlmRequest::new("gpt").with_user_text("12345678901234567890");
+        let expected = approximate_tokens(&req);
 
         let count = count_tokens(&client, &transport, &req)
             .await
             .expect("count");
 
-        assert_eq!(count, 5);
+        assert_eq!(count, expected);
+        assert!(count > 5);
         // Transport must NOT have been called.
         assert!(
             transport.seen.lock().unwrap().is_none(),

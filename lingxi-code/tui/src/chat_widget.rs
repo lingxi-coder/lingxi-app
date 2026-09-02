@@ -2094,11 +2094,19 @@ impl ChatWidget {
     /// prompts are serialized, and the queued one surfaces as soon as the open
     /// prompt resolves.
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        if !self.accepts_turn_events
-            || self
-                .current_turn
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
+        // G006: NOT gated on `accepts_turn_events` — that flag tracks the
+        // main-loop turn's own streaming events and flips false as soon as
+        // the foreground turn ends (or was never true, for an ask with no
+        // owning turn at all, e.g. a background `/fusion` panel spawned
+        // outside the main loop). Gating on it here silently denied every
+        // such ask with no dialog and no diagnostic. Only drop an ask that
+        // belongs to a turn the user just cancelled (Esc/Ctrl-C on a
+        // still-running turn cancels the token but leaves `current_turn`
+        // `Some` until `TurnEnded` arrives).
+        if self
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -2114,11 +2122,11 @@ impl ChatWidget {
     /// permission prompts, it serializes behind any currently open interactive
     /// prompt and surfaces once the keyboard is free.
     pub fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
-        if !self.accepts_turn_events
-            || self
-                .current_turn
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
+        // G006: see `open_permission` — not gated on `accepts_turn_events`.
+        if self
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -2134,11 +2142,11 @@ impl ChatWidget {
     /// other interactive prompts, it serializes behind any currently open one
     /// and surfaces once the keyboard is free.
     pub fn open_computer_access(&mut self, exchange: ComputerAccessExchange) {
-        if !self.accepts_turn_events
-            || self
-                .current_turn
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
+        // G006: see `open_permission` — not gated on `accepts_turn_events`.
+        if self
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -8204,6 +8212,30 @@ mod tests {
         )
     }
 
+    fn computer_access_exchange() -> (
+        ComputerAccessExchange,
+        oneshot::Receiver<tui_core::computer_access_bridge::ComputerAccessResponse>,
+    ) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        (
+            ComputerAccessExchange {
+                request: tui_core::computer_access_bridge::ComputerAccessRequest {
+                    reason: "automate chat".to_string(),
+                    apps: vec![tui_core::computer_access_bridge::RequestedApp {
+                        label: "com.example.app".to_string(),
+                    }],
+                    tier: tui_core::computer_access_bridge::AccessTier::Full,
+                    clipboard_read: false,
+                    clipboard_write: false,
+                    system_key_combos: false,
+                    tcc_state: None,
+                },
+                resp_tx,
+            },
+            resp_rx,
+        )
+    }
+
     fn widget_with_models() -> ChatWidget {
         let mut widget = ChatWidget::new(
             Vec::new(),
@@ -8982,9 +9014,16 @@ mod tests {
             tool: "WebSearch".to_string(),
             input: serde_json::json!({"query": "unowned"}),
         });
+        // G006: a permission ask with no owning `current_turn` at all (a
+        // background `/fusion` panel spawned outside the main loop) must
+        // still open — dropped-in-`open_permission` used to be indistinguishable
+        // from a real deny. Resolve it (Esc = deny) so it doesn't leak into
+        // the rest of this test.
         let (unowned, unowned_rx) = tool_exchange();
         widget.open_permission(unowned);
-        assert!(unowned_rx.blocking_recv().is_err());
+        assert!(widget.has_open_permission(), "background ask must open");
+        widget.handle_key(press(KeyCode::Esc));
+        assert_eq!(unowned_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
         assert!(cells(&widget).is_empty());
 
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -9014,6 +9053,75 @@ mod tests {
         assert!(widget.cost.is_none());
         assert!(widget.activity.is_none());
         assert!(widget.active_tool_id.is_none());
+    }
+
+    // ---- G006: a background `/fusion` panel spawns after the launching
+    // slash command's own turn returns `Done` immediately (the CLI slash
+    // pump fires `TurnEnded` right away), so by the time a panel asks for a
+    // tool permission `accepts_turn_events` is already false. That used to
+    // make `open_permission` silently drop the ask — no dialog, no error —
+    // and `TuiPermissionGate` fed the panel a deny with an internal-sounding
+    // reason string. ----------------------------------------------------
+
+    #[test]
+    fn permission_ask_opens_after_turn_events_end_without_a_cancel() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        assert!(!widget.accepts_turn_events, "precondition: turn ended");
+        assert!(widget.current_turn.is_none(), "precondition: turn cleared");
+
+        let (background, background_rx) = tool_exchange();
+        widget.open_permission(background);
+        assert!(
+            widget.has_open_permission(),
+            "a background panel's ask must open even though the launching \
+             turn already ended"
+        );
+
+        widget.handle_key(press(KeyCode::Char('1')));
+        assert_eq!(
+            background_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
+    }
+
+    #[test]
+    fn ask_user_question_and_computer_access_also_open_after_turn_events_end() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+
+        let (ask, _ask_rx) = ask_exchange();
+        widget.open_ask_user_question(ask);
+        assert!(widget.has_open_ask_user_question());
+        widget.handle_key(press(KeyCode::Esc));
+
+        let (computer, _computer_rx) = computer_access_exchange();
+        widget.open_computer_access(computer);
+        assert!(widget.has_open_computer_access());
+    }
+
+    #[test]
+    fn permission_ask_still_drops_while_its_owning_turn_is_mid_cancel() {
+        // Distinct from the two tests above: a turn that was just Ctrl-C'd
+        // (cancelled but not yet `TurnEnded`) must still shed asks that
+        // belong to it — only the `accepts_turn_events` gate was removed,
+        // the cancelled-current_turn check stays.
+        let mut widget = widget();
+        typ(&mut widget, "x");
+        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let token = widget.current_turn.clone().expect("turn owns a token");
+        token.cancel();
+        assert!(widget.current_turn.is_some(), "not cleared until TurnEnded");
+
+        let (late, late_rx) = tool_exchange();
+        widget.open_permission(late);
+        assert!(!widget.has_open_permission(), "mid-cancel ask must not open");
+        assert!(late_rx.blocking_recv().is_err());
     }
 
     #[test]

@@ -132,15 +132,16 @@ pub use filesystem::{
     FileSystem, FileSystemCacheIdentity, FlockGuard, FsError,
 };
 pub use fusion::{
-    normalize_dimensions, validate_panel_report, EvidenceKind, FusionAgentSurface, FusionAnalysis,
-    FusionCompletionSink, FusionContradiction, FusionCostClass, FusionDecision, FusionError,
-    FusionExecutor, FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
-    FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionProgress, FusionRecommendation,
-    FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming, FusionUniqueInsight,
-    FusionUsage, NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelOutcome, PanelPosition,
-    PanelReport, PanelRisk, PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
-    DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
-    FUSION_SCHEMA_VERSION,
+    normalize_dimensions, parse_fusion_model_ref, parse_fusion_models, validate_panel_report,
+    EvidenceKind, FusionAgentSurface, FusionAnalysis, FusionCompletionSink, FusionContradiction,
+    FusionCostClass, FusionDecision, FusionError, FusionExecutor, FusionInheritance,
+    FusionLatencyClass, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
+    FusionPreset, FusionProgress, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
+    FusionStatus, FusionTiming, FusionUniqueInsight, FusionUsage, NoopFusionCompletionSink,
+    PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk,
+    PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
+    FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
+    FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{

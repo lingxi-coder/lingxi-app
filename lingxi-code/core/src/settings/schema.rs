@@ -758,7 +758,7 @@ pub struct FusionSettingsJson {
     /// Continue when some panels fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_ok: Option<bool>,
-    /// Per-panel turn cap (1..=32).
+    /// Per-panel turn cap (1..=12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_max_turns: Option<u32>,
     /// Per-turn output token cap.

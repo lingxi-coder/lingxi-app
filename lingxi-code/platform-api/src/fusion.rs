@@ -54,6 +54,18 @@ pub const FUSION_MAX_PANEL: u8 = 8;
 /// and never appears in the Agent listing.
 pub const FUSION_PANEL_TYPE: &str = "fusion-panel";
 
+/// Hard ceiling for workflow `fusion()` calls in a single workflow run.
+/// [`FusionExecutor::workflow_fusion_call_cap`] may return a lower value (a
+/// host/settings override), never higher — every caller clamps to this.
+/// `tasks::handlers::local_workflow` and this crate's own default
+/// [`FusionExecutor::workflow_fusion_call_cap`] read this constant directly.
+/// Settings validation (`core/src/settings/schema.rs`) and
+/// `fusion::config`'s literal default do NOT yet read it — they still
+/// hardcode `20` — so until those are consolidated onto this constant, do
+/// not treat this as the single source of truth; changing this value alone
+/// will not move the other two.
+pub const FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT: u32 = 20;
+
 /// Which surface started this Fusion run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +88,24 @@ pub enum FusionPreset {
     Fast,
 }
 
+/// Parse a preset from its wire string (`"quality"` / `"fast"`). The single
+/// implementation every caller (Agent tool, `/fusion`, workflow `fusion()`)
+/// parses a caller-supplied preset string through, so the accepted spelling
+/// and the rejection message stay identical across entrypoints.
+impl std::str::FromStr for FusionPreset {
+    type Err = FusionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "quality" => Ok(Self::Quality),
+            "fast" => Ok(Self::Fast),
+            other => Err(FusionError::InvalidRequest(format!(
+                "fusion preset `{other}` must be quality or fast"
+            ))),
+        }
+    }
+}
+
 /// One explicit panel / analyst model reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +115,49 @@ pub struct FusionModelRef {
     pub profile: Option<String>,
     /// Wire / display model id.
     pub model: String,
+}
+
+/// Parse one `--models` / `models[]` entry (`"profile:model"` or a bare
+/// `"model"`) into a [`FusionModelRef`]. The single implementation the Agent
+/// tool and `/fusion` both parse caller-supplied model strings through, so a
+/// malformed entry (e.g. `"openai:"` — a colon with an empty model) is
+/// rejected identically from either entrypoint instead of one silently
+/// treating the whole literal as a bare model id.
+///
+/// # Errors
+///
+/// Returns [`FusionError::InvalidRequest`] for an empty entry or one with a
+/// `:` but an empty profile or model half.
+pub fn parse_fusion_model_ref(item: &str) -> Result<FusionModelRef, FusionError> {
+    let item = item.trim();
+    if item.is_empty() {
+        return Err(FusionError::InvalidRequest(
+            "fusion models entries must be non-empty".into(),
+        ));
+    }
+    match item.split_once(':') {
+        Some((profile, model)) if !profile.is_empty() && !model.is_empty() => Ok(FusionModelRef {
+            profile: Some(profile.to_string()),
+            model: model.to_string(),
+        }),
+        Some(_) => Err(FusionError::InvalidRequest(format!(
+            "invalid fusion models entry `{item}`"
+        ))),
+        None => Ok(FusionModelRef {
+            profile: None,
+            model: item.to_string(),
+        }),
+    }
+}
+
+/// Parse a full `models` list from raw entry strings. See
+/// [`parse_fusion_model_ref`] for the per-entry grammar.
+///
+/// # Errors
+///
+/// Returns the first entry's [`FusionError::InvalidRequest`].
+pub fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, FusionError> {
+    raw.iter().map(|item| parse_fusion_model_ref(item)).collect()
 }
 
 /// Per-request Fusion input. Unknown fields are rejected (caller-facing).
@@ -776,7 +849,7 @@ pub trait FusionExecutor: Send + Sync {
     /// Hosts may return a lower value, but callers must still enforce the
     /// global hard ceiling of 20.
     fn workflow_fusion_call_cap(&self) -> u32 {
-        20
+        FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT
     }
 }
 
@@ -1016,6 +1089,76 @@ mod tests {
         );
         let back: PanelOutcome = serde_json::from_value(json).unwrap();
         assert_eq!(back, with_detail);
+    }
+
+    #[test]
+    fn preset_from_str_accepts_the_two_wire_spellings_and_rejects_others() {
+        assert_eq!("quality".parse::<FusionPreset>().unwrap(), FusionPreset::Quality);
+        assert_eq!("fast".parse::<FusionPreset>().unwrap(), FusionPreset::Fast);
+        let err = "sloppy".parse::<FusionPreset>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid fusion request: fusion preset `sloppy` must be quality or fast"
+        );
+    }
+
+    #[test]
+    fn parse_fusion_model_ref_rejects_a_colon_with_an_empty_model() {
+        // The Agent-tool bug this closes: `split_once(':')` on "openai:" used
+        // to fall through to `(None, "openai:")`, silently treating the whole
+        // literal (including the trailing colon) as a bare model id instead
+        // of rejecting the malformed `profile:` entry.
+        let err = parse_fusion_model_ref("openai:").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid fusion request: invalid fusion models entry `openai:`"
+        );
+    }
+
+    #[test]
+    fn parse_fusion_model_ref_accepts_profile_colon_model_and_bare_model() {
+        assert_eq!(
+            parse_fusion_model_ref("anthropic:claude-sonnet-5").unwrap(),
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "claude-sonnet-5".into(),
+            }
+        );
+        assert_eq!(
+            parse_fusion_model_ref("claude-sonnet-5").unwrap(),
+            FusionModelRef {
+                profile: None,
+                model: "claude-sonnet-5".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fusion_models_stops_at_the_first_bad_entry() {
+        let err =
+            parse_fusion_models(&["anthropic:opus".to_string(), "openai:".to_string()])
+                .unwrap_err();
+        assert!(err.to_string().contains("invalid fusion models entry"));
+    }
+
+    #[test]
+    fn workflow_fusion_call_cap_default_matches_the_single_hard_limit_constant() {
+        struct DefaultCapExecutor;
+        #[async_trait::async_trait]
+        impl FusionExecutor for DefaultCapExecutor {
+            async fn run(
+                &self,
+                _request: FusionRequest,
+                _inherit: FusionInheritance,
+                _progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
+            ) -> Result<FusionResult, FusionError> {
+                unimplemented!()
+            }
+        }
+        assert_eq!(
+            DefaultCapExecutor.workflow_fusion_call_cap(),
+            FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT
+        );
     }
 
     #[test]

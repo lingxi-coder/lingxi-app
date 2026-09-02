@@ -391,6 +391,12 @@ pub struct TaskNotification {
     /// `local_workflow`: number of terminal agent calls with empty results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_agents_empty_result: Option<u64>,
+    /// `local_fusion`: provider profiles that received prompt data on this
+    /// run (parent's profile plus any cross-provider panels) → the optional
+    /// `<egress-profiles>` line. Never includes model names, only profile
+    /// ids. Empty ⇒ the section is omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_profiles: Vec<String>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.

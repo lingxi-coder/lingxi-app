@@ -468,6 +468,18 @@ pub struct LocalFusionTaskState {
     /// Sanitized final text for TaskNotification `<result>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_text: Option<String>,
+    /// Failure reason for a `failed` run — folded into the `<error>` section
+    /// and the failed-summary text. `None` for a run that never failed (or
+    /// hasn't reached a terminal status yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Provider profiles that received prompt data on this run → the
+    /// `<egress-profiles>` notification line. Never includes model names.
+    #[serde(default)]
+    pub egress_profiles: Vec<String>,
+    /// Aggregate run usage summary for the `<usage>` notification section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<platform_api::task_registry::AgentRunUsage>,
 }
 
 /// Tripwire for the residual documented on

@@ -1875,11 +1875,18 @@ mod tests {
 
     #[test]
     fn description_matches_the_binary_byte_for_byte() {
-        // v2.1.245 runtime markers of the Workflow tool description.
+        // v2.1.245 runtime markers of the Workflow tool description, PLUS one
+        // accepted LingXi-only divergence: a `fusion(prompt, opts?)`
+        // paragraph (Agent Fusion — commit f5f27c978 — has no claude-code
+        // 2.1.245 counterpart, so it cannot be byte-locked against the
+        // binary; 20667 = 19200 (the 2.1.245 byte count) + the fusion()
+        // bullet's length). A drift in EITHER direction still fails this
+        // test — grep the diff against `workflow_description.txt` rather
+        // than bumping the number blind.
         assert_eq!(
             DESCRIPTION.len(),
-            19200,
-            "description byte length drifted from Claude Code 2.1.245"
+            20667,
+            "description byte length drifted from Claude Code 2.1.245 + the fusion() addition"
         );
         assert!(DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
@@ -1893,6 +1900,75 @@ mod tests {
         assert!(DESCRIPTION.contains("\"▸ name\" group in /workflows"));
         // No leftover raw escape sequences.
         assert!(!DESCRIPTION.contains("\\u2014"));
+        // The LingXi-only fusion() addition — see the length comment above.
+        assert!(DESCRIPTION.contains("fusion(prompt: string, opts?:"));
+        assert!(DESCRIPTION.contains("WorkflowFusionOptionError"));
+    }
+
+    /// Drift gate for the `fusion()` bullet's documented resolved-object shape.
+    /// Round 1 shipped `{runId, status, decision, panels, usage, timing, egress}`
+    /// in the description while `platform_api::FusionResult` actually
+    /// serializes `run_id` / `egress_profiles` (no `#[serde(rename_all)]`) and
+    /// carries `final_text` — the ONLY field with the deliberation's answer —
+    /// under no documented key at all. Nothing caught it: the byte-lock test
+    /// above only pins length + a handful of substrings, and the round-trip
+    /// test in `tasks` pins the real shape without ever comparing it back to
+    /// this description text. Parse the object literal out of the bullet and
+    /// assert every key it lists is an actual top-level key of a serialized
+    /// `FusionResult`, so the two can never independently drift again.
+    #[test]
+    fn fusion_bullet_documents_only_real_fusion_result_keys() {
+        let marker = "compact result object ({";
+        let start = DESCRIPTION
+            .find(marker)
+            .expect("fusion() bullet documents the resolved object shape")
+            + marker.len()
+            - 1; // keep the leading '{'
+        let rest = &DESCRIPTION[start..];
+        let end = rest
+            .find('}')
+            .expect("object literal in the fusion() bullet is closed");
+        let object_literal = &rest[1..end]; // strip the leading '{'
+        let documented_keys: Vec<&str> = object_literal
+            .split(',')
+            .map(|part| part.trim().split(':').next().unwrap().trim())
+            .collect();
+        assert!(
+            documented_keys.contains(&"run_id") && documented_keys.contains(&"final_text"),
+            "sanity: expected run_id and final_text among parsed keys, got {documented_keys:?}"
+        );
+
+        let sample = platform_api::FusionResult {
+            schema_version: 1,
+            run_id: "fu_test".into(),
+            status: platform_api::FusionStatus::Completed,
+            decision: platform_api::FusionDecision::Picked {
+                panel_id: "P1".into(),
+            },
+            final_text: "the answer".into(),
+            analysis: None,
+            panels: vec![platform_api::PanelOutcome {
+                panel_id: "P1".into(),
+                status: platform_api::PanelRunStatus::Completed,
+                duration_ms: 7,
+                error_category: None,
+                error_detail: None,
+                usage: None,
+            }],
+            usage: platform_api::FusionUsage::default(),
+            timing: platform_api::FusionTiming::default(),
+            egress_profiles: vec!["anthropic".into()],
+        };
+        let serialized = serde_json::to_value(&sample).expect("FusionResult serializes");
+        let actual_keys = serialized.as_object().expect("object");
+        for key in &documented_keys {
+            assert!(
+                actual_keys.contains_key(*key),
+                "fusion() bullet documents key `{key}` but FusionResult never serializes it \
+                 (actual keys: {:?}) — the description and the wire shape have drifted",
+                actual_keys.keys().collect::<Vec<_>>()
+            );
+        }
     }
 
     /// Managed `disableWorkflows: true` must disable the tool. Before this was

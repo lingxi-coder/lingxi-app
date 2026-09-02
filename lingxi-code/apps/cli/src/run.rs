@@ -2689,6 +2689,19 @@ async fn run_slash_command_with_budget(
     match runtime.dispatcher.dispatch(input).await {
         SlashDispatchResult::Handled { display } => {
             sink.command_output("", &display).await;
+            // G002: `/fusion` spawns a background `local_fusion` task and
+            // returns `Handled` immediately (design: no auto-turn). In print
+            // mode nothing else keeps the process alive, so without this the
+            // worker (and every dispatched panel) died with the process and
+            // the user got only a 9-char task id for a run that may never
+            // have produced output. `SlashDispatchResult` carries no
+            // structured task id (§0: not this package's type to widen), so
+            // recover it from the `/fusion` `Done` display's own format
+            // (`fusion_command.rs`: `"{task_id}  {preset}  {scope}"`) and
+            // await that one task to a terminal status before returning.
+            if let Some(task_id) = pending_local_fusion_task_id(&display) {
+                await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink).await;
+            }
             exit_codes::SUCCESS
         }
         // A prompt-expanding command (`/loop`, Markdown/Plugin): run the expanded
@@ -2723,6 +2736,140 @@ async fn run_slash_command_with_budget(
                 .await;
             exit_codes::RUNTIME_ERROR
         }
+    }
+}
+
+/// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
+/// (`"{task_id}  {preset}  {scope}"`, `apps/engine-desktop/src/
+/// fusion_command.rs`), if the display looks like one. `local_fusion` ids
+/// are `'f'` + 8 lowercase-base36 chars (`tasks::id::TaskType::id_prefix`) —
+/// unique among every other task-id prefix in the workspace.
+fn pending_local_fusion_task_id(display: &str) -> Option<&str> {
+    let first = display.split_whitespace().next()?;
+    let suffix = first.strip_prefix('f')?;
+    (suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+        .then_some(first)
+}
+
+/// The minimal `local_fusion`-state lookup [`await_local_fusion_result_bounded`]
+/// needs — implemented by the real registry, and by a scripted double in
+/// tests, so the polling/formatting logic doesn't require standing up a full
+/// composition root to exercise.
+#[async_trait::async_trait]
+trait FusionTaskLookup: Send + Sync {
+    async fn get(&self, task_id: &str) -> Option<tasks::state::TaskState>;
+}
+
+#[async_trait::async_trait]
+impl FusionTaskLookup for tasks::registry::TaskRegistry {
+    async fn get(&self, task_id: &str) -> Option<tasks::state::TaskState> {
+        tasks::registry::TaskRegistry::get(self, task_id).await
+    }
+}
+
+/// What to tell the user once an awaited `local_fusion` task reaches a
+/// terminal status.
+#[derive(Debug, PartialEq, Eq)]
+enum FusionPrintOutcome {
+    /// `Completed` — the run's sanitized final text.
+    FinalText(String),
+    /// `Failed` — the recorded failure reason (falls back to a generic
+    /// message when the reason was never recorded).
+    Failed(String),
+    /// Any other terminal status (`Killed`, or anything future statuses add)
+    /// — debug-formatted, since this path has no dedicated copy for it.
+    Other(String),
+}
+
+fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOutcome> {
+    let tasks::state::TaskState::LocalFusion(fusion) = state else {
+        return None;
+    };
+    Some(match fusion.base.status {
+        tasks::state::TaskStatus::Completed => {
+            FusionPrintOutcome::FinalText(fusion.final_text.clone().unwrap_or_default())
+        }
+        tasks::state::TaskStatus::Failed => FusionPrintOutcome::Failed(
+            fusion
+                .error
+                .clone()
+                .unwrap_or_else(|| "fusion run failed".to_string()),
+        ),
+        other => FusionPrintOutcome::Other(format!("{other:?}")),
+    })
+}
+
+/// Poll interval while print mode waits for a background `/fusion` run.
+const FUSION_PRINT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+/// Generous overall bound: a quality-preset panel can run up to 12 turns
+/// with its own 600s timeout, so the whole run needs real room to finish
+/// rather than being truncated arbitrarily.
+const FUSION_PRINT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// G002: await one `local_fusion` task to a terminal status and print its
+/// result, instead of leaving print mode's only trace of the run as a bare
+/// task id for work that dies with the process.
+async fn await_local_fusion_result(
+    task_id: &str,
+    task_registry: &tasks::registry::TaskRegistry,
+    sink: &dyn OutputSink,
+) {
+    await_local_fusion_result_bounded(
+        task_id,
+        task_registry,
+        sink,
+        FUSION_PRINT_POLL_INTERVAL,
+        FUSION_PRINT_MAX_WAIT,
+    )
+    .await;
+}
+
+async fn await_local_fusion_result_bounded<L>(
+    task_id: &str,
+    lookup: &L,
+    sink: &dyn OutputSink,
+    poll_interval: std::time::Duration,
+    max_wait: std::time::Duration,
+) where
+    L: FusionTaskLookup + ?Sized,
+{
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        let Some(state) = lookup.get(task_id).await else {
+            // Evicted or never created — nothing left to report.
+            return;
+        };
+        if state.base().status.is_terminal() {
+            match fusion_print_outcome(&state) {
+                Some(FusionPrintOutcome::FinalText(text)) => {
+                    sink.command_output("fusion", &text).await;
+                }
+                Some(FusionPrintOutcome::Failed(reason)) => {
+                    sink.error("fusion", &reason).await;
+                }
+                Some(FusionPrintOutcome::Other(status)) => {
+                    sink.error(
+                        "fusion",
+                        &format!("fusion run ended as {status} with no result"),
+                    )
+                    .await;
+                }
+                None => {}
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            sink.error(
+                "fusion",
+                &format!(
+                    "fusion run {task_id} did not finish before print mode's wait timed \
+                     out; it may still be running, but this process is exiting"
+                ),
+            )
+            .await;
+            return;
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 }
 
@@ -6279,6 +6426,7 @@ mod tests {
     fn resume_title_ambiguous_copy_is_byte_exact() {
         let row = |id: u128, secs: u64| SessionMetadata {
             uuid: uuid::Uuid::from_u128(id),
+            mode: session::jsonl::SessionMode::Code,
             title: "shared".to_string(),
             modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
             created: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
@@ -6307,6 +6455,7 @@ mod tests {
     fn titled_row(id: u128, secs: u64, searchable: &str) -> SessionMetadata {
         SessionMetadata {
             uuid: uuid::Uuid::from_u128(id),
+            mode: session::jsonl::SessionMode::Code,
             title: searchable.to_string(),
             modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
             created: std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
@@ -6518,5 +6667,272 @@ mod tests {
         let body = &resp["response"]["response"];
         assert_eq!(body["status"], "ok");
         assert_eq!(body["changed"], false);
+    }
+
+    // ---- G002: `/fusion` in print mode used to print a bare task id and
+    // exit — the spawned worker (and any dispatched panels) died with the
+    // process. `run_slash_command_with_budget`'s `Handled` branch now awaits
+    // that one task to a terminal status and prints its result. ------------
+
+    #[derive(Default)]
+    struct RecordingFusionSink {
+        outputs: tokio::sync::Mutex<Vec<(String, String)>>,
+        errors: tokio::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputSink for RecordingFusionSink {
+        async fn text(&self, _s: &str) {}
+        async fn turn_start(&self) {}
+        async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {}
+        async fn tool_call(&self, _tool: &str, _input: &serde_json::Value) {}
+        async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {}
+        async fn tool_heartbeat(&self, _id: &str, _tool: &str, _elapsed_ms: u64) {}
+        async fn command_output(&self, name: &str, display: &str) {
+            self.outputs
+                .lock()
+                .await
+                .push((name.to_string(), display.to_string()));
+        }
+        async fn error(&self, code: &str, message: &str) {
+            self.errors
+                .lock()
+                .await
+                .push((code.to_string(), message.to_string()));
+        }
+    }
+
+    /// Canned `local_fusion` states returned in order (repeating the last
+    /// one once exhausted), so a test can script "pending N times, then
+    /// terminal" without a live [`tasks::registry::TaskRegistry`].
+    struct ScriptedLookup {
+        states: Vec<Option<tasks::state::TaskState>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedLookup {
+        fn new(states: Vec<Option<tasks::state::TaskState>>) -> Self {
+            Self {
+                states,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FusionTaskLookup for ScriptedLookup {
+        async fn get(&self, _task_id: &str) -> Option<tasks::state::TaskState> {
+            let i = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let idx = i.min(self.states.len().saturating_sub(1));
+            self.states.get(idx).cloned().flatten()
+        }
+    }
+
+    fn fusion_state(
+        status: tasks::state::TaskStatus,
+        final_text: Option<&str>,
+        error: Option<&str>,
+    ) -> tasks::state::TaskState {
+        tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
+            base: tasks::state::TaskStateBase {
+                id: "ftest0001".to_string(),
+                task_type: tasks::id::TaskType::LocalFusion,
+                status,
+                description: "Fusion quality same: review".to_string(),
+                tool_use_id: None,
+                start_time: std::time::SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: PathBuf::from("/tmp/ftest0001"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            conversation_id: "conv".to_string(),
+            prompt: "review this".to_string(),
+            run_id: Some("fu_test".to_string()),
+            preset: "quality".to_string(),
+            cross_provider: false,
+            final_text: final_text.map(str::to_string),
+            error: error.map(str::to_string),
+            egress_profiles: Vec::new(),
+            usage: None,
+        })
+    }
+
+    #[test]
+    fn pending_local_fusion_task_id_recognizes_the_fusion_done_display() {
+        assert_eq!(
+            pending_local_fusion_task_id("f1a2b3c4d  quality  same-provider"),
+            Some("f1a2b3c4d")
+        );
+        // Wrong length / non-fusion prefix / plain error text: no match.
+        assert_eq!(pending_local_fusion_task_id("f1a2b3c  quality  x"), None);
+        assert_eq!(
+            pending_local_fusion_task_id("b1a2b3c4d  running"),
+            None,
+            "'b' is the local_bash prefix, not local_fusion's 'f'"
+        );
+        assert_eq!(
+            pending_local_fusion_task_id("fusion failed to start: too few models"),
+            None,
+            "the Err(_) Done display must not be mistaken for a task id"
+        );
+        assert_eq!(pending_local_fusion_task_id(""), None);
+    }
+
+    #[test]
+    fn fusion_print_outcome_maps_each_terminal_status() {
+        assert_eq!(
+            fusion_print_outcome(&fusion_state(
+                tasks::state::TaskStatus::Completed,
+                Some("the answer"),
+                None
+            )),
+            Some(FusionPrintOutcome::FinalText("the answer".to_string()))
+        );
+        assert_eq!(
+            fusion_print_outcome(&fusion_state(
+                tasks::state::TaskStatus::Failed,
+                None,
+                Some("too few fusion models")
+            )),
+            Some(FusionPrintOutcome::Failed(
+                "too few fusion models".to_string()
+            ))
+        );
+        // No recorded error text still yields a diagnostic, not a panic/None.
+        assert_eq!(
+            fusion_print_outcome(&fusion_state(tasks::state::TaskStatus::Failed, None, None)),
+            Some(FusionPrintOutcome::Failed("fusion run failed".to_string()))
+        );
+        assert_eq!(
+            fusion_print_outcome(&fusion_state(tasks::state::TaskStatus::Killed, None, None)),
+            Some(FusionPrintOutcome::Other("Killed".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_prints_final_text_when_already_completed() {
+        let lookup = ScriptedLookup::new(vec![Some(fusion_state(
+            tasks::state::TaskStatus::Completed,
+            Some("the sanitized answer"),
+            None,
+        ))]);
+        let sink = RecordingFusionSink::default();
+
+        await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[("fusion".to_string(), "the sanitized answer".to_string())]
+        );
+        assert!(sink.errors.lock().await.is_empty());
+        assert_eq!(lookup.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_polls_until_terminal_then_prints() {
+        let lookup = ScriptedLookup::new(vec![
+            Some(fusion_state(tasks::state::TaskStatus::Running, None, None)),
+            Some(fusion_state(tasks::state::TaskStatus::Running, None, None)),
+            Some(fusion_state(
+                tasks::state::TaskStatus::Completed,
+                Some("finished after polling"),
+                None,
+            )),
+        ]);
+        let sink = RecordingFusionSink::default();
+
+        await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[(
+                "fusion".to_string(),
+                "finished after polling".to_string()
+            )]
+        );
+        assert_eq!(
+            lookup.call_count(),
+            3,
+            "must have actually polled across the two Running states"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_reports_the_failure_reason() {
+        let lookup = ScriptedLookup::new(vec![Some(fusion_state(
+            tasks::state::TaskStatus::Failed,
+            None,
+            Some("TooFewModels"),
+        ))]);
+        let sink = RecordingFusionSink::default();
+
+        await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(sink.outputs.lock().await.is_empty());
+        assert_eq!(
+            sink.errors.lock().await.as_slice(),
+            &[("fusion".to_string(), "TooFewModels".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_times_out_with_a_named_diagnostic_instead_of_hanging() {
+        let lookup = ScriptedLookup::new(vec![Some(fusion_state(
+            tasks::state::TaskStatus::Running,
+            None,
+            None,
+        ))]);
+        let sink = RecordingFusionSink::default();
+
+        await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+        )
+        .await;
+
+        assert!(sink.outputs.lock().await.is_empty());
+        let errors = sink.errors.lock().await;
+        assert_eq!(errors.len(), 1, "exactly one timeout diagnostic: {errors:?}");
+        assert_eq!(errors[0].0, "fusion");
+        assert!(
+            errors[0].1.contains("ftest0001"),
+            "diagnostic must name the task id: {errors:?}"
+        );
+        assert!(errors[0].1.contains("still be running"), "{errors:?}");
     }
 }

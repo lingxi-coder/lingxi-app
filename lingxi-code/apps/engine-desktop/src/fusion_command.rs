@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use command_core::{fusion_request_from_slash, parse_fusion_slash};
-use platform_api::{FusionCompletionSink, FusionExecutor, FusionResult, OrchestratorHandle};
+use platform_api::{
+    FusionCompletionSink, FusionExecutor, FusionResult, FusionStatus, OrchestratorHandle,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
@@ -49,7 +51,29 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
             tracing::warn!(error = %err, "fusion completion sink failed; task status unchanged");
             return;
         }
+        // F006: before this, a finished background run's only trace was the
+        // meta-message row above — nothing live ever told the user it had
+        // finished. Fire a best-effort UI notice (whichever session/client is
+        // currently connected); the durable record above is the source of
+        // truth regardless of whether this reaches anyone live.
+        self.handle
+            .emit_background_system_notice(&fusion_completion_notice(result))
+            .await;
         seen.insert(key);
+    }
+}
+
+/// Short, content-free notice text for [`DesktopFusionCompletionSink::publish`]
+/// — no prompt, no final text, no model/provider names, just the status and a
+/// pointer at the durable record.
+fn fusion_completion_notice(result: &FusionResult) -> String {
+    match result.status {
+        FusionStatus::Completed => {
+            "Fusion run finished — see the result appended to this conversation.".to_string()
+        }
+        FusionStatus::NeedsParent => {
+            "Fusion run finished — it needs your judgment; see the summary appended to this conversation.".to_string()
+        }
     }
 }
 
@@ -118,6 +142,20 @@ impl FusionCompletionSink for DeferredFusionCompletionSink {
     }
 }
 
+/// Build the task-row description: `Fusion {preset} {scope}: <first line,
+/// first 80 chars>` instead of the raw, unbounded prompt (G012) — the prompt
+/// otherwise duplicates verbatim into `TaskCreated` hook payloads, `list()`,
+/// notifications, and the Electron detail pane / RuntimeCenter row title.
+fn fusion_task_description(preset: &str, scope: &str, prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or("");
+    const MAX_CHARS: usize = 80;
+    let mut truncated: String = first_line.chars().take(MAX_CHARS).collect();
+    if first_line.chars().count() > MAX_CHARS {
+        truncated.push('…');
+    }
+    format!("Fusion {preset} {scope}: {truncated}")
+}
+
 /// Desktop `/fusion` command.
 pub struct DesktopFusionCommandHandler {
     registry: Arc<tasks::registry::TaskRegistry>,
@@ -174,7 +212,16 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             surface.default_preset,
             surface.default_partial_ok,
         );
-        let description = request.prompt.clone();
+        let preset_word = match preset {
+            platform_api::FusionPreset::Quality => "quality",
+            platform_api::FusionPreset::Fast => "fast",
+        };
+        let scope_word = if cross {
+            "cross-provider"
+        } else {
+            "same-provider"
+        };
+        let description = fusion_task_description(preset_word, scope_word, &request.prompt);
         match self
             .registry
             .spawn(
@@ -187,20 +234,9 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             )
             .await
         {
-            Ok(task_id) => {
-                let preset = match preset {
-                    platform_api::FusionPreset::Quality => "quality",
-                    platform_api::FusionPreset::Fast => "fast",
-                };
-                let scope = if cross {
-                    "cross-provider"
-                } else {
-                    "same-provider"
-                };
-                CommandResult::Done {
-                    display: Some(format!("{task_id}  {preset}  {scope}")),
-                }
-            }
+            Ok(task_id) => CommandResult::Done {
+                display: Some(format!("{task_id}  {preset_word}  {scope_word}")),
+            },
             Err(err) => CommandResult::Done {
                 display: Some(format!("fusion failed to start: {err}")),
             },
@@ -254,6 +290,37 @@ mod tests {
         }
     }
 
+    // ---- G012: `description` was `request.prompt.clone()` verbatim — an
+    // unbounded, un-labeled string that leaked the full prompt into
+    // `TaskCreated` hook payloads, `list()`, notifications, and RuntimeCenter
+    // (which has no label for `local_fusion` and shows the raw string). ----
+
+    #[test]
+    fn description_is_labeled_with_preset_scope_and_truncated_first_line() {
+        let desc = fusion_task_description(
+            "quality",
+            "cross-provider",
+            "review this diff for races\nand also check the locking",
+        );
+        assert_eq!(
+            desc,
+            "Fusion quality cross-provider: review this diff for races"
+        );
+    }
+
+    #[test]
+    fn description_truncates_a_long_first_line_at_eighty_chars() {
+        let long_line = "x".repeat(200);
+        let desc = fusion_task_description("fast", "same-provider", &long_line);
+        assert_eq!(desc, format!("Fusion fast same-provider: {}…", "x".repeat(80)));
+    }
+
+    #[test]
+    fn description_does_not_truncate_a_short_prompt() {
+        let desc = fusion_task_description("fast", "same-provider", "short");
+        assert_eq!(desc, "Fusion fast same-provider: short");
+    }
+
     #[tokio::test]
     async fn deferred_sink_replays_prebind_result_once_after_bind() {
         let deferred = DeferredFusionCompletionSink::new();
@@ -264,5 +331,56 @@ mod tests {
         deferred.bind(counter.clone()).await;
         deferred.publish("c", &result).await;
         assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+    }
+
+    // ---- F006/WP6 item 3: before this, a finished background run's only
+    // trace was the `<fusion-result>` meta row appended to history — nothing
+    // live ever told the connected client the run had finished. ----------
+
+    #[tokio::test]
+    async fn publish_emits_exactly_one_content_free_background_notice() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let session_id = mock.current_session_id().await.to_string();
+        let sink = DesktopFusionCompletionSink::new(mock.clone());
+        let mut result = dummy_result("fu_1");
+        result.status = FusionStatus::Completed;
+        result.final_text = "the secret final answer".into();
+
+        sink.publish(&session_id, &result).await;
+
+        let notices = mock.background_notices();
+        assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
+        assert!(
+            notices[0].contains("Fusion run finished"),
+            "got: {notices:?}"
+        );
+        // Content-free: no prompt/final-text leak into the live notice — the
+        // durable `<fusion-result>` meta row carries that, not this notice.
+        assert!(
+            !notices[0].contains(&result.final_text),
+            "notice must not leak final_text: {notices:?}"
+        );
+
+        // Idempotent publish (same run id) must not double-notify.
+        sink.publish(&session_id, &result).await;
+        assert_eq!(mock.background_notices().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_notice_differs_for_needs_parent_vs_completed() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let session_id = mock.current_session_id().await.to_string();
+        let sink = DesktopFusionCompletionSink::new(mock.clone());
+        let mut result = dummy_result("fu_needs_parent");
+        result.status = FusionStatus::NeedsParent;
+
+        sink.publish(&session_id, &result).await;
+
+        let notices = mock.background_notices();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("needs your judgment"),
+            "got: {notices:?}"
+        );
     }
 }

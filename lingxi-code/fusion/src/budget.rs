@@ -32,6 +32,14 @@ pub struct ModelRates {
     pub output_nano_usd_per_token: u64,
     /// Flat nano-USD per provider request.
     pub per_request_nano_usd: u64,
+    /// Nano-USD per prompt-cache-READ token. `0` for a model whose catalog
+    /// entry has input/output rates but no cache rate (never `None` — a
+    /// missing cache rate must not turn an otherwise-priced, token-billed
+    /// model unpriced and hard-reject it under a session `--max-budget`).
+    pub cache_read_nano_usd_per_token: u64,
+    /// Nano-USD per prompt-cache-WRITE token. Same `0`-default rule as
+    /// [`Self::cache_read_nano_usd_per_token`].
+    pub cache_write_nano_usd_per_token: u64,
 }
 
 /// Injected price table. Production wraps [`cost::PricingCatalog`].
@@ -157,7 +165,15 @@ pub fn quote(
 /// is not a `Subscription`-class hint — the caller decides whether that is a
 /// hard failure (reservation quote, when the session has a max budget) or an
 /// `estimated = true` component (settlement).
+///
+/// `cache_read_tokens`/`cache_write_tokens` are priced through
+/// [`ModelRates::cache_read_nano_usd_per_token`] /
+/// [`ModelRates::cache_write_nano_usd_per_token`] the same way input/output
+/// are — omitting them here would under-bill every Fusion run that uses
+/// prompt caching against the SAME catalog the main turn loop's
+/// `CostCalculator` bills the identical usage from in full.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn price_component(
     profile: &str,
     model: &str,
@@ -165,6 +181,8 @@ pub(crate) fn price_component(
     prices: &dyn FusionPriceBook,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     calls: u64,
 ) -> Option<u64> {
     let hints = catalog
@@ -179,10 +197,17 @@ pub(crate) fn price_component(
         input_tokens
             .saturating_mul(rates.input_nano_usd_per_token)
             .saturating_add(output_tokens.saturating_mul(rates.output_nano_usd_per_token))
+            .saturating_add(
+                cache_read_tokens.saturating_mul(rates.cache_read_nano_usd_per_token),
+            )
+            .saturating_add(
+                cache_write_tokens.saturating_mul(rates.cache_write_nano_usd_per_token),
+            )
             .saturating_add(calls.saturating_mul(rates.per_request_nano_usd))
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn model_peak(
     model: &ResolvedPanel,
     catalog: &dyn ModelSource,
@@ -192,6 +217,11 @@ fn model_peak(
     output_tokens: u64,
     calls: u64,
 ) -> Result<u64, FusionError> {
+    // The reservation quote is a peak estimate built from configured turn
+    // caps, not real usage — it has no cache token counts to price, and
+    // deliberately does not invent one (0 in, 0 out of the cache terms);
+    // the cache premium is priced for real at settlement
+    // (`orchestrator::price_realized_usage`), where the actual counts exist.
     match price_component(
         &model.profile,
         &model.model,
@@ -199,6 +229,8 @@ fn model_peak(
         prices,
         input_tokens,
         output_tokens,
+        0,
+        0,
         calls,
     ) {
         Some(v) => Ok(v),
@@ -393,6 +425,8 @@ mod tests {
             input_nano_usd_per_token: 1,
             output_nano_usd_per_token: 1,
             per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: 1,
+            cache_write_nano_usd_per_token: 1,
         };
         let mut map = HashMap::new();
         for (p, m) in [
@@ -462,6 +496,29 @@ mod tests {
         ];
         let err = quote(&config, &resolved_three(), &request(), &catalog, &(), true).unwrap_err();
         assert!(matches!(err, FusionError::InvalidConfiguration(_)));
+    }
+
+    /// G003-cache follow-up: `price_component` must charge cache-read and
+    /// cache-write tokens the same way it charges input/output — a panel or
+    /// analyst/synth call that used prompt caching is still real spend, and
+    /// the main turn loop's `CostCalculator` (over the SAME catalog) already
+    /// bills all four classes in full.
+    #[test]
+    fn price_component_bills_cache_read_and_cache_write_tokens() {
+        let catalog = vec![hinted("anthropic", "sonnet", false)];
+        let rates = unit_prices(); // 1 nano-USD/token on every class
+        let priced = price_component(
+            "anthropic", "sonnet", &catalog, &rates, 5, 8, // input, output
+            200, 40, // cache_read, cache_write
+            0,
+        )
+        .expect("anthropic/sonnet has a unit rate");
+        assert_eq!(
+            priced,
+            5 + 8 + 200 + 40,
+            "cache-read and cache-write tokens must be priced, not silently dropped \
+(200 cache-read + 40 cache-write tokens went unbilled before this fix)"
+        );
     }
 
     struct RecordingBudget {

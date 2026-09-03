@@ -1028,6 +1028,38 @@ async fn analyst_twice_invalid_needs_parent() {
     ));
 }
 
+/// The analyst arm of `price_realized_usage` must mark the run `estimated`
+/// on failure the same way the panel arm already does — an analyst call
+/// that failed AFTER at least one real provider round trip (here: two, both
+/// consumed by `AlwaysInvalid`) contributes $0 to `realized_nano_usd`, and
+/// silently reporting that as an exact figure is worse than reporting no
+/// figure and flagging it as an estimate.
+#[tokio::test]
+async fn analyst_parse_failure_marks_run_estimated_even_though_panels_priced() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::AlwaysInvalid, vec![]);
+    let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert!(matches!(
+        result.decision,
+        FusionDecision::NeedsParent {
+            reason: FusionNeedsParentReason::AnalysisParseFailed
+        }
+    ));
+    // `priced_book()` has a rate for every panel's model, so the 3 panels'
+    // own spend is priced cleanly and non-zero — the gap is specific to the
+    // analyst component, not "nothing in this run has a price".
+    assert!(
+        result.usage.realized_nano_usd > 0,
+        "panel spend must still be priced even though the analyst failed"
+    );
+    assert!(
+        result.usage.estimated,
+        "an analyst failure must mark the run estimated, exactly like a \
+usage-less panel already does"
+    );
+}
+
 #[tokio::test]
 async fn synth_failure_needs_parent_with_summary() {
     let spawner = FakeSpawner::new(three_ok());
@@ -1052,6 +1084,77 @@ async fn synth_failure_needs_parent_with_summary() {
     assert!(events
         .iter()
         .any(|event| event.name == telemetry::tengu::fusion::COMPLETED));
+}
+
+/// `egress_profiles` must record the parent profile whenever `synthesize`
+/// actually sent it the prompt plus every panel's candidate answer — which
+/// happens on EVERY synthesizer attempt, not only a successful one. Uses a
+/// parent profile that is not one of the (cross-provider) panels' own
+/// profiles, so the assertion cannot be satisfied by the panel/analyst
+/// entries alone the way the default `request()` fixture would mask it.
+#[tokio::test]
+async fn egress_includes_parent_profile_when_synthesis_failed_after_being_billed() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(
+        AnalystMode::Merge,
+        vec![Err(SideQueryError::InvalidResponse("boom".into()))],
+    );
+    let orch = orch_scripted(spawner, side.clone());
+    let mut req = request("task");
+    req.parent_profile = "parent-only".into();
+    req.parent_model = "parent-only-model".into();
+    let result = orch.run(req, inherit(), None).await.unwrap();
+    assert!(matches!(
+        result.decision,
+        FusionDecision::NeedsParent {
+            reason: FusionNeedsParentReason::SynthesisFailed
+        }
+    ));
+    assert!(
+        result.egress_profiles.contains(&"parent-only".to_string()),
+        "the synthesizer sent every panel's candidate answer to the parent \
+profile even though that call then failed — egress_profiles must record \
+it, got {:?}",
+        result.egress_profiles
+    );
+}
+
+/// Same as above for the timeout arm of the synthesizer stage: `synthesize`
+/// issues the request (`BlockingSideQuery::query` hangs forever, simulating
+/// a real in-flight provider call) before the run's own timeout budget
+/// degrades it to `NeedsParent`.
+#[tokio::test]
+async fn egress_includes_parent_profile_when_synthesis_timed_out_after_being_billed() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BlockingSideQuery {
+        stage: BlockingStage::Synthesis,
+        started,
+        dropped,
+    });
+    let mut config = test_config();
+    config.total_timeout_ms = 100;
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        side,
+        Arc::new(config),
+        Arc::new(catalog()),
+    );
+    let mut req = request("task");
+    req.parent_profile = "parent-only".into();
+    req.parent_model = "parent-only-model".into();
+    let result = orch.run(req, inherit(), None).await.unwrap();
+    assert!(matches!(
+        result.decision,
+        FusionDecision::NeedsParent {
+            reason: FusionNeedsParentReason::SynthesisTimedOut
+        }
+    ));
+    assert!(
+        result.egress_profiles.contains(&"parent-only".to_string()),
+        "got {:?}",
+        result.egress_profiles
+    );
 }
 
 #[tokio::test]
@@ -1513,6 +1616,8 @@ fn priced_book() -> MapPrices {
         input_nano_usd_per_token: 1,
         output_nano_usd_per_token: 1,
         per_request_nano_usd: 0,
+        cache_read_nano_usd_per_token: 1,
+        cache_write_nano_usd_per_token: 1,
     };
     let mut map = HashMap::new();
     for (p, m) in [
@@ -1893,8 +1998,22 @@ async fn budget_reservation_releases_on_min_panels_not_met() {
         .unwrap_err();
     assert_eq!(err, platform_api::FusionError::MinPanelsNotMet);
     settle_spawned_drops().await;
-    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    // The "claude-sonnet-5" panel really completed (8 input + 4 output
+    // tokens, priced at 1 nano-USD/token by `priced_book()` = 12) before the
+    // other two panels' failures sealed `MinPanelsNotMet` — that real,
+    // already-billed spend must reach `commit_reservation`, not vanish
+    // behind a bare `release_reservation` the way an unspent hold should.
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst),
+        1,
+        "the one completed panel's realized spend must be committed even on a bar failure"
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![12],
+        "committed amount must be the completed panel's own priced usage"
+    );
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
 }
 
@@ -1942,8 +2061,18 @@ async fn budget_reservation_releases_on_total_timeout() {
         .unwrap_err();
     assert_eq!(err, platform_api::FusionError::TimedOutEmpty);
     settle_spawned_drops().await;
-    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    // Every panel `Hang`s (no `SubagentResult` is ever produced), so there is
+    // no usage to recover and the committed amount is 0 — but the
+    // `check_panel_bar` error path now always settles through
+    // `price_realized_usage` + `lease.commit` rather than branching on
+    // whether that total happens to be zero (see
+    // `budget_reservation_releases_on_min_panels_not_met` for the case where
+    // it is not). `commit_reservation(id, 0)` is exactly equivalent to a
+    // bare release (`record_external_cost` no-ops on 0, then releases the
+    // hold) — this only changes which counter the mock records.
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.committed.lock().unwrap().clone(), vec![0]);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
 }
 

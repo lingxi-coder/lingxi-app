@@ -56,6 +56,15 @@ pub struct CostState {
     /// Cache-creation tokens associated with [`Self::last_usage`].
     #[serde(default)]
     pub last_cache_creation_input_tokens: u64,
+    /// Cumulative externally-priced spend recorded via
+    /// [`CostTracker::record_external_cost`] (Fusion panel/analyst/synth
+    /// settlement) — a SUBSET already included in [`Self::total_nano_usd`],
+    /// tracked separately so a summary can reconcile
+    /// `sum(per_model_usage[..].cost_nano_usd) + external_nano_usd ==
+    /// total_nano_usd` instead of `total_nano_usd` silently outrunning the
+    /// per-model breakdown with no attributable source.
+    #[serde(default)]
+    pub external_nano_usd: u64,
 }
 
 /// Per-model usage and cost slice of a [`CostState`].
@@ -293,6 +302,20 @@ impl CostTracker {
     ///
     /// Emits on the persist channel like a real charge (unlike
     /// `restore_total_nano_usd`, which is a resume hydrate). No-op for `0`.
+    ///
+    /// KNOWN LIMITATION (tracked, not silently swept): this makes
+    /// [`CostState::external_nano_usd`] and [`crate::summary::CostTracker::summary`]
+    /// self-reconciling, but does NOT reach the production `/usage`/`/cost`
+    /// rendering path — `ConversationModel::snapshot_cost_real`
+    /// (`orchestrator/src/conversation/model.rs`) builds `platform_api::CostSnapshot`
+    /// from `state.total_nano_usd` and `state.per_model_usage` directly and does
+    /// not read this field, so a Fusion-only session still renders a nonzero
+    /// total above a `by_model`/token breakdown of zero. Closing that requires
+    /// either threading `external_nano_usd` through `CostSnapshot` and
+    /// `cost::render::cost_summary_from_snapshot` (touches ~12 `CostSnapshot { .. }`
+    /// literal sites plus the byte-pinned render template), or recording Fusion
+    /// usage per-model at the spawner/side-query layer instead — a larger,
+    /// separate task.
     pub async fn record_external_cost(&self, nano_usd: u64) {
         if nano_usd == 0 {
             return;
@@ -300,6 +323,12 @@ impl CostTracker {
         let snap = {
             let mut state = self.state.write().await;
             state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
+            // Track this addition separately from `per_model_usage` (which
+            // this call never touches — there is no single `ModelRef` for a
+            // Fusion run's several priced components) so a summary can tell
+            // "unattributed but accounted-for" apart from a `by_model`
+            // breakdown that has silently fallen behind the total.
+            state.external_nano_usd = state.external_nano_usd.saturating_add(nano_usd);
             state.clone()
         };
         let _ = self.persist_tx.send(snap).await;
@@ -442,6 +471,46 @@ mod tests {
         );
         let snap = rx.recv().await.unwrap();
         assert_eq!(snap.total_nano_usd, 3_500, "the addition is persisted");
+    }
+
+    /// The [`crate::summary::CostTracker::summary`] projection (NOT the
+    /// production `/cost`/`/usage` path — see the `record_external_cost` doc
+    /// comment) must be able to tell "this total includes externally-priced
+    /// Fusion spend with no per-model row" apart from "the per-model
+    /// breakdown has silently fallen behind the total" — before this fix a
+    /// session with ONLY a Fusion run showed a nonzero `total_nano_usd` and
+    /// an empty `by_model` map with nothing distinguishing that from a bug.
+    #[tokio::test]
+    async fn summary_reconciles_external_cost_against_the_empty_by_model_breakdown() {
+        let (tx, _rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.record_external_cost(1_800_000_000).await;
+        let summary = tracker.summary().await;
+        assert!(
+            summary.by_model.is_empty(),
+            "no per-model call was recorded"
+        );
+        assert_eq!(
+            summary.session.total_nano_usd, 1_800_000_000,
+            "the Fusion run's money reached the session total"
+        );
+        let by_model_total: u64 = summary
+            .by_model
+            .values()
+            .map(|m| m.total_nano_usd)
+            .sum();
+        assert_eq!(
+            by_model_total + summary.session.external_nano_usd,
+            summary.session.total_nano_usd,
+            "by_model's total plus external_nano_usd must reconcile to the \
+session total — before this fix external_nano_usd did not exist and this \
+gap had no explanation at all"
+        );
+        assert_eq!(summary.session.external_nano_usd, 1_800_000_000);
     }
 
     #[tokio::test]

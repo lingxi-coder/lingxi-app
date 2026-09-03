@@ -2680,6 +2680,23 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             .token_rates
             .get(&cost::pricing::TokenClass::Output)?
             .nano_usd_per_token;
+        // Cache-read/-write rates default to 0 rather than `?`-propagating a
+        // `None`: a model with real Input/Output rates but no CacheRead /
+        // CacheWrite entry must stay token-priced (only the cache premium is
+        // unrecovered), never flip to fully unpriced and hard-reject under a
+        // session `--max-budget` (`model_peak`'s `InvalidConfiguration`
+        // branch). `cost::calculator::CostCalculator` — the SAME catalog the
+        // main turn loop bills from — already treats a missing rate for a
+        // class it iterates as "that class contributes 0", so this mirrors
+        // it rather than diverging.
+        let cache_read = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::CacheRead)
+            .map_or(0, |rate| rate.nano_usd_per_token);
+        let cache_write = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::CacheWrite)
+            .map_or(0, |rate| rate.nano_usd_per_token);
         Some(fusion::ModelRates {
             input_nano_usd_per_token: input,
             output_nano_usd_per_token: output,
@@ -2689,6 +2706,8 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             // flat fee", not "unpriced" — token rates alone still gate the
             // hard-budget preflight correctly.
             per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: cache_read,
+            cache_write_nano_usd_per_token: cache_write,
         })
     }
 }
@@ -2709,6 +2728,13 @@ mod desktop_fusion_price_book_test {
             .expect("the builtin reference catalog prices claude-opus-4-6");
         assert_eq!(rates.input_nano_usd_per_token, 5_000);
         assert_eq!(rates.output_nano_usd_per_token, 25_000);
+        // G003-cache follow-up: the SAME catalog's cache rates
+        // (`insert_anthropic("claude-opus-4-6", 5_000, 25_000, 6_250, 500)`)
+        // must reach `ModelRates` too, not just input/output — otherwise a
+        // Fusion run using prompt caching under-bills against the exact
+        // catalog the main turn loop bills the identical usage from in full.
+        assert_eq!(rates.cache_write_nano_usd_per_token, 6_250);
+        assert_eq!(rates.cache_read_nano_usd_per_token, 500);
     }
 
     #[test]

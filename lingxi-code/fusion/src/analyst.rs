@@ -60,6 +60,12 @@ pub async fn analyze(
     let attempts = 1 + u32::from(config.analysis_protocol_retries);
     let mut calls = 0_u32;
     let mut last_decode_error: Option<String> = None;
+    // Accumulated across every attempt that reached a real (billed) provider
+    // response, including ones whose JSON then failed `decode_analysis` and
+    // got retried. Without this, only the LAST attempt's usage survived the
+    // loop and every earlier attempt's real, billed tokens vanished from
+    // `realized_nano_usd` / `FusionUsage` / the committed lease.
+    let mut usage_acc = cost::Usage::default();
     for attempt in 0..attempts {
         let user = analyst_user_message(request, panels, last_decode_error.as_deref());
         let req = StrictStructuredQueryRequest {
@@ -100,8 +106,9 @@ pub async fn analyze(
                 ));
             }
             Ok(Ok(StrictStructuredQueryResponse { value, usage, .. })) => {
+                usage_acc.add(&usage);
                 match decode_analysis(&value, request, panels) {
-                    Ok(analysis) => return Ok((analysis, usage, calls)),
+                    Ok(analysis) => return Ok((analysis, usage_acc, calls)),
                     Err(reason) if attempt + 1 == attempts => {
                         let _ = reason;
                         return Err(AnalystError::ParseFailed);
@@ -602,5 +609,123 @@ mod tests {
         // The whole point of this function: whatever the provider said, the
         // returned category is a fixed short label, never the message text.
         assert!(!analyst_failure_category(&err).contains("internal.example"));
+    }
+
+    /// A [`SideQueryClient`] whose first `query_json_schema` call returns
+    /// structurally-valid JSON that nonetheless fails `decode_analysis`
+    /// (empty `scores`, so `scores_match_request` rejects it) and whose
+    /// second call returns a decodable payload. Both calls report real,
+    /// distinct, non-zero usage so a test can tell whether the first
+    /// attempt's usage survived into the final result.
+    struct FlakyThenGoodClient {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for FlakyThenGoodClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, SideQueryError> {
+            unreachable!("analyze() only calls query_json_schema")
+        }
+
+        async fn query_json_schema(
+            &self,
+            _request: StrictStructuredQueryRequest,
+        ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (value, input, output) = if call == 0 {
+                (
+                    serde_json::json!({
+                        "consensus": [],
+                        "contradictions": [],
+                        "unique_insights": [],
+                        "coverage_gaps": [],
+                        // Empty `scores` fails `scores_match_request` (P1 is
+                        // unscored) — a decode failure, NOT a
+                        // `SideQueryError::InvalidResponse`, so this is real
+                        // billed usage from a fully-answered provider call.
+                        "scores": {},
+                        "confidence": 50,
+                        "recommendation": { "type": "needs_parent", "reason": "unsure" }
+                    }),
+                    100_u64,
+                    50_u64,
+                )
+            } else {
+                (
+                    serde_json::json!({
+                        "consensus": [],
+                        "contradictions": [],
+                        "unique_insights": [],
+                        "coverage_gaps": [],
+                        "scores": { "P1": { "coverage": 80 } },
+                        "confidence": 50,
+                        "recommendation": { "type": "needs_parent", "reason": "unsure" }
+                    }),
+                    20_u64,
+                    10_u64,
+                )
+            };
+            Ok(StrictStructuredQueryResponse {
+                value,
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input,
+                        output,
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
+                model: "m".into(),
+                profile: None,
+                request_id: None,
+                retry_count: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retried_attempts_usage_is_accumulated_not_dropped() {
+        let panels = vec![stub_panel("P1")];
+        let request = FusionRequest {
+            schema_version: 1,
+            origin: platform_api::FusionOrigin::Slash,
+            prompt: "task".into(),
+            preset: platform_api::FusionPreset::Quality,
+            models: None,
+            dimensions: vec!["coverage".into()],
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: true,
+            parent_profile: "anthropic".into(),
+            parent_model: "claude-sonnet-5".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        };
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        // Default config: `analysis_protocol_retries == 1` -> 2 attempts,
+        // exactly the shape the review's failure scenario relies on.
+        let config = FusionRuntimeConfig::defaults();
+        let client: Arc<dyn SideQueryClient> = Arc::new(FlakyThenGoodClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let (_, usage, calls) = analyze(client, &config, &request, &analyst, &panels)
+            .await
+            .expect("second attempt must decode successfully");
+        assert_eq!(calls, 2, "both attempts must be counted");
+        assert_eq!(
+            usage.tokens.input, 120,
+            "the first (decode-failed) attempt's 100 input tokens must not be \
+dropped — only the second attempt's 20 survived before this fix"
+        );
+        assert_eq!(
+            usage.tokens.output, 60,
+            "the first (decode-failed) attempt's 50 output tokens must not be dropped"
+        );
     }
 }

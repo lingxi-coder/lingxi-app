@@ -385,6 +385,29 @@ impl FusionOrchestrator {
             .run_panel_stage(config, &request, &resolved, &inherit, &progress, &run_id, started)
             .await?;
         if let Err(error) = check_panel_bar(&panels, &request, config) {
+            // The bar failing (not enough successful panels, or an
+            // incomplete set under `partial_ok: false`) does not mean
+            // nothing was spent: any panel with `Some(usage)` already made a
+            // real, billed provider call before the run gave up on it. Price
+            // and commit that realized spend now, before propagating the
+            // error — otherwise `lease`'s `Drop` only releases the hold and
+            // those tokens are charged to nobody (never reach
+            // `CostTracker::total_nano_usd`, so a `--max-budget` session
+            // never sees them). A commit failure here leaves the lease armed
+            // and falls back to `Drop`'s release, exactly as before this
+            // settlement was added.
+            let (priced_nano_usd, _estimated) = price_realized_usage(
+                self.catalog.as_ref(),
+                self.prices.as_ref(),
+                &panels,
+                &resolved.analyst,
+                None,
+                &request.parent_profile,
+                &request.parent_model,
+                None,
+            );
+            let _ = lease.commit(priced_nano_usd).await;
+
             let mut md = fusion_event_metadata(&request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
             add_panel_counts(&mut md, &panels);
@@ -458,7 +481,23 @@ impl FusionOrchestrator {
             .map(|panel| panel.profile.clone())
             .collect();
         egress.push(resolved.analyst.profile.clone());
-        if matches!(decision, FusionDecision::Merged) {
+        // `Merged` is only the SUCCESS outcome of the synthesizer stage —
+        // `synthesize` issues its side query to `request.parent_profile`
+        // (carrying the prompt, the full analysis, and every panel's
+        // candidate answer/summary) on every attempt, including the two
+        // failure arms below. The parent profile received that data whether
+        // or not the call then succeeded, so it belongs in `egress_profiles`
+        // on those arms too — otherwise a run whose synthesizer call failed
+        // or timed out under-reports a provider that demonstrably received
+        // every panel's answer.
+        if matches!(
+            decision,
+            FusionDecision::Merged
+                | FusionDecision::NeedsParent {
+                    reason: FusionNeedsParentReason::SynthesisFailed
+                        | FusionNeedsParentReason::SynthesisTimedOut,
+                }
+        ) {
             egress.push(request.parent_profile.clone());
         }
         egress.sort();
@@ -1196,6 +1235,8 @@ fn price_realized_usage(
             prices,
             usage.input_tokens,
             usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
             u64::from(usage.provider_requests),
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
@@ -1210,11 +1251,24 @@ fn price_realized_usage(
             prices,
             usage.tokens.input,
             usage.tokens.output,
+            usage.tokens.cache_read,
+            usage.tokens.cache_write,
             u64::from(calls),
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
             None => estimated = true,
         }
+    } else {
+        // `analyst_usage` is `None` only after an ATTEMPTED analyst call
+        // failed (`analyze_and_decide` always runs the analyst; every
+        // `AnalystError` arm leaves `priced_analyst` at its `None`
+        // initialization) — never "the analyst never ran". Unlike the
+        // synthesizer, which legitimately has no attempt on most decisions
+        // (it only runs on the `Merge` branch), a `None` here always means
+        // real, already-billed analyst spend is missing from
+        // `total_nano_usd` below, so the run must not report that total as
+        // exact.
+        estimated = true;
     }
     if let Some(usage) = synth_usage {
         match budget::price_component(
@@ -1224,6 +1278,8 @@ fn price_realized_usage(
             prices,
             usage.tokens.input,
             usage.tokens.output,
+            usage.tokens.cache_read,
+            usage.tokens.cache_write,
             1,
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),

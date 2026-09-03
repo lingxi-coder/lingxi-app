@@ -55,6 +55,28 @@ pub struct SessionCostSummary {
     pub total_nano_usd: u64,
     /// Cumulative total tokens (input + output across all models).
     pub total_tokens: u64,
+    /// Subset of `total_nano_usd` recorded via
+    /// [`crate::tracker::CostTracker::record_external_cost`] rather than
+    /// [`crate::tracker::CostTracker::record_api_response_v2`] — spend
+    /// (currently: Fusion panel/analyst/synthesizer settlement) that is real
+    /// and already included in `total_nano_usd`, but has no per-model
+    /// `ModelRef` to attribute inside `by_model` (a Fusion run prices
+    /// several models' usage into one already-computed total at the
+    /// reservation-commit seam). On a session whose money was never touched
+    /// by [`crate::tracker::CostTracker::restore_total_nano_usd`] (a
+    /// `--resume` hydrate, which sets `total_nano_usd` directly with no
+    /// per-model rows and no external attribution — a documented,
+    /// pre-existing gap, not this field's concern), `by_model`'s totals plus
+    /// this field should reconcile to `total_nano_usd`; a residual gap
+    /// beyond this field on such a session is an actual bug. A resumed
+    /// session's gap is expected and this field cannot close it.
+    ///
+    /// NOTE: this is the [`CostTracker::summary`] projection, which has no
+    /// production caller today — the live `/usage`/`/cost` rendering path is
+    /// `ConversationModel::snapshot_cost_real` /
+    /// `platform_api::CostSnapshot`, which does not yet read this field (see
+    /// [`crate::tracker::CostTracker::record_external_cost`] doc comment).
+    pub external_nano_usd: u64,
 }
 
 /// Period-scope rollup (day or month).
@@ -126,6 +148,7 @@ impl CostTracker {
                 session_id: state.session_id,
                 total_nano_usd: state.total_nano_usd,
                 total_tokens,
+                external_nano_usd: state.external_nano_usd,
             },
             day: PeriodCostSummary {
                 label: day_label,

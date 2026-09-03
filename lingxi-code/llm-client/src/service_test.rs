@@ -3083,7 +3083,7 @@ mod tests {
             );
             h
         };
-        adapter.record_rate_limit_from_429(&headers, None);
+        adapter.record_rate_limit_from_429(&headers, None, "claude-sonnet-4-20250514");
         // Sanity: the slot is genuinely staged before we clear it.
         assert!(
             adapter.pending_429.lock().unwrap().is_some(),
@@ -3584,7 +3584,7 @@ mod tests {
             "precondition: seed a non-empty raw snapshot first"
         );
 
-        adapter.record_rate_limit_from_429(&BTreeMap::new(), None);
+        adapter.record_rate_limit_from_429(&BTreeMap::new(), None, "claude-sonnet-4-20250514");
         adapter.promote_pending_429();
 
         assert_eq!(
@@ -4312,6 +4312,60 @@ mod tests {
             stream_transport.stream_call_count(),
             2,
             "must retry exactly once (429 → 200)"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_openrouter_free_429_surfaces_provider_detail_without_retrying() {
+        let model = "z-ai/glm-5.2:free";
+        let stream_transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
+            status: 429,
+            headers: BTreeMap::new(),
+            body_json: Some(serde_json::json!({
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Free model daily request limit exceeded"
+                }
+            })),
+        }]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            "https://openrouter.ai/api/v1",
+            "openrouter",
+            model,
+            Arc::clone(&stream_transport) as Arc<dyn Transport>,
+        );
+
+        let result = adapter
+            .stream(
+                model,
+                Some("openrouter"),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(LlmError::RateLimited { .. })),
+            "OpenRouter's 429 must keep the typed rate-limit error"
+        );
+        assert_eq!(
+            stream_transport.stream_call_count(),
+            1,
+            "a free-tier 429 must still fail fast"
+        );
+        assert_eq!(
+            adapter.last_rate_limit_error_message().as_deref(),
+            Some(
+                "OpenRouter free-model rate limit reached: Free model daily request limit exceeded. Try another free model or retry later."
+            ),
+            "the terminal surface must retain OpenRouter's useful error detail"
         );
     }
 

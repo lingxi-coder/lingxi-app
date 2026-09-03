@@ -238,6 +238,27 @@ fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(":free")
 }
 
+fn openrouter_free_rate_limit_message(body: Option<&serde_json::Value>) -> String {
+    let detail = body
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|error| error.get("message"))
+                .or_else(|| body.get("message"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(|message| message.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?')));
+
+    match detail {
+        Some(detail) => format!(
+            "OpenRouter free-model rate limit reached: {detail}. Try another free model or retry later."
+        ),
+        None => "OpenRouter free-model rate limit reached. Try another free model or retry later."
+            .to_string(),
+    }
+}
+
 const NEAR_LIMIT_WRAP_UP_DEFAULT_THRESHOLD: f64 = 0.95;
 const NEAR_LIMIT_WRAP_UP_MAX5X_THRESHOLD: f64 = 0.99;
 const NEAR_LIMIT_WRAP_UP_MAX20X_THRESHOLD: f64 = 0.9975;
@@ -426,19 +447,18 @@ pub struct ApiService {
     /// the TS module assignment. Exposed via the
     /// `OrchestratorApiClient::last_raw_utilization` override.
     last_raw_utilization: Mutex<Option<RawUtilization>>,
-    /// Limits-specific copy composed from the most recent 429 **error**
-    /// response's unified headers.
+    /// User-facing copy composed from the most recent 429 **error** response.
     ///
     /// Task 6 (llm-client future-work batch 5): claude-code builds the
     /// rejected-limits view from the terminal 429's own headers and renders
     /// `getRateLimitErrorMessage` as the user-visible error content
     /// (`errors.ts:480-524`). Set on EVERY decoded 429 by
-    /// [`Self::record_rate_limit_from_429`] — `Some(copy)` when the 429
-    /// carried unified headers, `None` otherwise (the
-    /// `if (rateLimitType || overageStatus)` gate at `errors.ts:480`) — and
-    /// cleared on every successful response, so it always reflects the most
-    /// recent response seen. Exposed via the
-    /// `OrchestratorApiClient::last_rate_limit_error_message` override.
+    /// [`Self::record_rate_limit_from_429`] — Anthropic's composed limits copy
+    /// when unified headers are present, or an actionable OpenRouter free-tier
+    /// message (including `error.message`) for `…:free` models. Other
+    /// headerless 429s leave this as `None`. Cleared on every successful
+    /// response, so it always reflects the most recent response seen. Exposed
+    /// via the `OrchestratorApiClient::last_rate_limit_error_message` override.
     last_429_message: Mutex<Option<String>>,
     /// 429-attempt state staged until the retry loop declares the error
     /// TERMINAL.
@@ -2060,11 +2080,12 @@ impl ApiService {
         *self.last_raw_utilization.lock().unwrap()
     }
 
-    /// The limits-specific copy composed from the most recent 429 **error**
-    /// response's unified headers. Backs the
+    /// The user-facing copy composed from the most recent 429 **error**
+    /// response. Backs the
     /// `OrchestratorApiClient::last_rate_limit_error_message` trait override (the
     /// orchestrator's terminal-429 re-map, claude-code `errors.ts:480-524`).
-    /// `None` when the 429 carried no unified headers.
+    /// `None` when neither unified Anthropic limits nor an OpenRouter free-model
+    /// response supplied actionable context.
     #[must_use]
     pub fn last_rate_limit_error_message(&self) -> Option<String> {
         self.last_429_message.lock().unwrap().clone()
@@ -2241,7 +2262,9 @@ impl ApiService {
     ///    `status: 'rejected'`, `errors.ts:482-516`), and
     /// 2. the composed `getRateLimitErrorMessage` copy is cached for the
     ///    orchestrator's terminal-error re-map
-    ///    (`OrchestratorError::RateLimitRejected`).
+    ///    (`OrchestratorError::RateLimitRejected`). A headerless OpenRouter
+    ///    free-model 429 instead caches its `error.message` plus retry/model
+    ///    switching guidance.
     ///
     /// The RAW per-window utilization is parsed from the SAME error headers
     /// UNCONDITIONALLY — `extractRawUtilization(headersToUse)` runs for ANY
@@ -2269,14 +2292,16 @@ impl ApiService {
         &self,
         headers: &std::collections::BTreeMap<String, String>,
         body: Option<&serde_json::Value>,
+        model: &str,
     ) {
-        self.record_rate_limit_from_429_at(headers, body, Self::now_ms());
+        self.record_rate_limit_from_429_at(headers, body, model, Self::now_ms());
     }
 
     fn record_rate_limit_from_429_at(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
         body: Option<&serde_json::Value>,
+        model: &str,
         ts_ms: u128,
     ) {
         let hvec: Vec<(String, String)> = headers
@@ -2304,7 +2329,9 @@ impl ApiService {
                 },
             )
         });
-        *self.last_429_message.lock().unwrap() = composed.flatten();
+        *self.last_429_message.lock().unwrap() = composed.flatten().or_else(|| {
+            is_free_tier_model(model).then(|| openrouter_free_rate_limit_message(body))
+        });
 
         // Monotonic guard (binary `Bha`/`Nha`): a stale (out-of-order) 429 must
         // not stage a snapshot that could later PROMOTE over a newer response's
@@ -2681,6 +2708,7 @@ impl ApiService {
                                 self.record_rate_limit_from_429(
                                     &provider_resp.headers,
                                     Some(&provider_resp.body_json),
+                                    &req.model,
                                 );
                                 let delay = Self::resolve_retry_after(&provider_resp.headers);
                                 telemetry::emit_rate_limited(
@@ -3555,7 +3583,11 @@ impl ApiService {
                         let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
                             // Task 6 (batch 5): same 429-error-header capture
                             // as the non-stream path (errors.ts:471-516).
-                            self.record_rate_limit_from_429(&response_headers, Some(&body_json));
+                            self.record_rate_limit_from_429(
+                                &response_headers,
+                                Some(&body_json),
+                                &req.model,
+                            );
                             LlmError::RateLimited {
                                 retry_after: Some(Self::resolve_retry_after(&response_headers)),
                                 scope: None,

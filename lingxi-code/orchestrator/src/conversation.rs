@@ -326,16 +326,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
-    /// Return the limits-specific copy composed from the most recent 429
-    /// **error** response's unified rate-limit headers, if any.
+    /// Return the user-facing copy composed from the most recent 429 **error**
+    /// response, if any.
     ///
     /// Task 6 (llm-client future-work batch 5): claude-code builds the
     /// rejected-limits view from the terminal 429's own headers and renders
     /// `getRateLimitErrorMessage` as the user-visible error content
-    /// (`errors.ts:480-524`). `ProviderApiAdapter` overrides this to expose
-    /// the copy it composed when it decoded the 429 (`None` when the 429
-    /// carried no unified headers — the `if (rateLimitType || overageStatus)`
-    /// gate at `errors.ts:480`). The public turn drivers consult it to
+    /// (`errors.ts:480-524`). `ProviderApiAdapter` overrides this to expose the
+    /// copy it composed when it decoded the 429: Anthropic limits text from
+    /// unified headers, or an actionable OpenRouter free-tier message derived
+    /// from the response body. The public turn drivers consult it to
     /// re-map a terminal `RateLimited` error into
     /// [`OrchestratorError::RateLimitRejected`].
     ///
@@ -367,8 +367,8 @@ pub trait OrchestratorApiClient: Send + Sync {
     }
 }
 
-/// Re-map a terminal `RateLimited` turn error onto the limits-specific copy
-/// composed from the 429's own headers (claude-code `errors.ts:480-524`):
+/// Re-map a terminal `RateLimited` turn error onto the user-facing copy
+/// composed from the 429 response (claude-code `errors.ts:480-524`):
 /// when the turn died on a 429 AND the API client recorded a composed
 /// rejected-limits message, the user-visible error becomes that copy
 /// ([`OrchestratorError::RateLimitRejected`]); otherwise the error passes

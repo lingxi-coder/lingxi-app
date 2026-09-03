@@ -1064,7 +1064,25 @@ impl AgentTool {
         // a synchronous, in-tool Fusion run (§1 fixes Agent-origin Fusion to
         // "只写 tool_result" — no background LocalFusion route exists here);
         // reject it explicitly instead of pretending to honor it.
+        //
+        // This early return in `call_fusion` used to skip `Self::emit_failed`
+        // while most sibling rejections (`agent_type_denied`,
+        // `agent_type_tools_denied`, `agent_type_not_found`,
+        // `fusion_invalid_configuration`, `budget_exceeded`,
+        // `subagent_count_cap`) emit one — this fix closes THIS gap so the
+        // rejection is visible to the dashboards that see every other
+        // `call_fusion` failure. It is not the only such gap: the
+        // `budget_enforcer` mis-wiring `ToolError::Internal` a few lines
+        // below (`self.ctx.budget_enforcer.clone().ok_or_else(...)`) also
+        // returns without emitting, and is out of scope here.
         if parsed.run_in_background == Some(true) {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "fusion_run_in_background",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
             return Err(ToolError::InvalidInput(
                 "fusion runs inline; use /fusion for a background run".into(),
             ));
@@ -1184,8 +1202,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<FusionProgress>(32);
         let forward_progress = progress.clone();
+        // F008: `Cancelled` spans both sides of the panel-spawn boundary —
+        // `FusionOrchestrator::run` returns it both from the pre-panel
+        // `resolve_and_reserve`/biased-select window (zero provider calls)
+        // and from a cancel observed mid-run (panels genuinely spawned).
+        // The forwarder already sees every progress event on this channel,
+        // so it is the cheapest place to learn which side of that boundary
+        // a `Cancelled` fell on: once a `RunningPanels` event is observed,
+        // at least one panel definitely spawned.
+        let panel_stage_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let panel_stage_observed_writer = panel_stage_observed.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = prog_rx.recv().await {
+                if matches!(event.stage, platform_api::FusionStage::RunningPanels { .. }) {
+                    panel_stage_observed_writer.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: protocol::ToolUseId::new(),
@@ -1240,7 +1271,24 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // reservation stays charged; a repeated failing Fusion run
                 // still advances `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
                 // instead of being free to retry forever.
-                if fusion_error_is_preflight(&err) {
+                //
+                // `Cancelled` is the one variant that spans BOTH sides of
+                // that boundary: `FusionOrchestrator::run` returns it from
+                // `resolve_and_reserve` (after model resolution, before
+                // `run_panel_stage`) and from the biased `cancel.cancelled()`
+                // select arm when the token was already cancelled at entry —
+                // both strictly pre-panel — as well as from a cancel that
+                // lands after panels have genuinely spawned. Treating it as
+                // always-preflight would refund panels that really ran (a
+                // free retry); treating it as never-preflight (the prior
+                // behaviour) permanently leaks `panel_n` reservations for
+                // agents that never existed on every pre-panel cancel. Use
+                // whether the forwarder ever observed a `RunningPanels`
+                // progress event to tell the two cases apart.
+                let releases_full_reservation = fusion_error_is_preflight(&err)
+                    || (matches!(err, platform_api::FusionError::Cancelled)
+                        && !panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed));
+                if releases_full_reservation {
                     if let Some(registry) = &self.ctx.task_registry {
                         registry.release_total_agent_spawn_reservations(panel_n);
                     }
@@ -2398,6 +2446,17 @@ impl Tool for AgentTool {
         // deny filter below — the binary's `prompt({agents,…})` wrapper passes
         // the unfiltered `agents` to `p7f` and handles deny separately.
         let general_purpose_available = general_purpose_is_available(&agents);
+        // F008 fix: append the synthetic `fusion` catalog entry BEFORE the
+        // two deny-filter `retain` calls below, not after — otherwise
+        // `Agent(fusion)` (or a `fusion` tools-denied rule) has no effect on
+        // this listing: the model keeps seeing `fusion` advertised and
+        // dispatches it, only to be hard-rejected by `call_fusion`'s own
+        // deny gate on every attempt. `append_fusion_listing` is a no-op
+        // when the Fusion surface is absent/disabled, so this is otherwise
+        // byte-identical to appending after (the entry it may add cannot be
+        // seen by `general_purpose_is_available` above it either way, since
+        // that check only ever matches the built-in `general-purpose` type).
+        self.append_fusion_listing(&mut agents);
         // Filter out agent types denied by a content-ful `Agent(<x>)` rule, so the
         // advertised catalog the model sees excludes them (claude-code `Pxe` —
         // the 2.1.186 Agent(type)-restriction prompt filter). No gate / no rules
@@ -2438,7 +2497,6 @@ impl Tool for AgentTool {
         // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
         // web-fetch agent for a coordinator session.
         drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
-        self.append_fusion_listing(&mut agents);
         Self::build_prompt(
             &agents,
             &mcp_server_names,

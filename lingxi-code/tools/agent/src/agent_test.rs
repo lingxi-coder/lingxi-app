@@ -1255,18 +1255,150 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    /// F008: an explicit `run_in_background: true` must be rejected rather
-    /// than silently ignored — Fusion has no background LocalFusion route
-    /// from the Agent tool (§1: Agent-origin Fusion "只写 tool_result").
+    /// F008: a `Cancelled` that lands AFTER at least one panel genuinely
+    /// spawned must NOT release the reservation — mirrors
+    /// `fusion_min_panels_not_met_keeps_all_reserved_spawns` for the one
+    /// error variant that spans both sides of the panel-spawn boundary.
+    struct CancelledAfterPanelSpawnFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for CancelledAfterPanelSpawnFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::RunningPanels {
+                    completed: 0,
+                    total: 3,
+                };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: None,
+                    })
+                    .await;
+            }
+            Err(platform_api::FusionError::Cancelled)
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// F008: `Cancelled` observed BEFORE any panel spawned (the
+    /// `resolve_and_reserve` / biased-select pre-panel window) must release
+    /// the full `panel_n` reservation — a cancel that never made a provider
+    /// call must not permanently narrow
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` for agents that never
+    /// existed. `ErroringFusion` never touches the progress channel, so it
+    /// models a cancel observed strictly before `run_panel_stage`.
     #[tokio::test]
-    async fn fusion_explicit_run_in_background_true_is_rejected() {
+    async fn fusion_cancelled_before_any_panel_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
         let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
         let bctx = wired_ctx(
             spawner,
-            arc_mock_task_registry(),
+            registry.clone(),
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::Cancelled,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "no panel ever spawned before Cancelled — the full panel_n reservation must be released"
+        );
+    }
+
+    /// F008: `Cancelled` observed AFTER a panel-stage progress event must
+    /// leave the reservation charged, exactly like `MinPanelsNotMet` —
+    /// those panels made real provider calls.
+    #[tokio::test]
+    async fn fusion_cancelled_after_panels_spawned_keeps_reservation_charged() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "a panel-stage progress event was observed before Cancelled — the reservation must stay charged"
+        );
+    }
+
+    /// F008: an explicit `run_in_background: true` must be rejected rather
+    /// than silently ignored — Fusion has no background LocalFusion route
+    /// from the Agent tool (§1: Agent-origin Fusion "只写 tool_result").
+    ///
+    /// [finding 24] It must ALSO log an `AGENT_FAILED` event like every one
+    /// of its sibling rejections in `call_fusion` — before the fix this was
+    /// the one early return in the function that returned without calling
+    /// `Self::emit_failed`, leaving the dashboards that see
+    /// `agent_type_denied`/`agent_type_not_found`/etc. blind to this one.
+    #[tokio::test]
+    async fn fusion_explicit_run_in_background_true_is_rejected() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
             result: sample_fusion_result(platform_api::FusionStatus::Completed),
@@ -1295,6 +1427,20 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             0,
             "run_in_background: true must be rejected before reaching the executor"
         );
+        let events = sink.events().await;
+        let failed: Vec<_> = events.iter().filter(|e| e.name == AGENT_FAILED).collect();
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly one AGENT_FAILED event, like every sibling rejection: {events:?}"
+        );
+        match failed[0].metadata.get("error_kind") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, "fusion_run_in_background"),
+            other => panic!(
+                "error_kind must name this rejection specifically, got {other:?}: {:?}",
+                failed[0].metadata
+            ),
+        }
     }
 
     #[test]
@@ -2947,6 +3093,73 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(
             !prompt.contains("- Explore:"),
             "denied Explore must be filtered out; prompt was:\n{prompt}"
+        );
+    }
+
+    // A permission gate that denies the synthetic `fusion` agent type, for
+    // [finding 23]: `Agent(fusion)` deny must apply to the catalog exactly
+    // like a built-in's deny, not leave the model advertised a type
+    // `call_fusion`'s own deny gate will hard-reject on every attempt.
+    struct DenyFusionGate;
+    #[async_trait::async_trait]
+    impl platform_api::permission_gate::PermissionGate for DenyFusionGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
+        }
+        async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+            (agent_type == "fusion").then(|| "localSettings".to_string())
+        }
+        async fn agent_deny_content_types(&self) -> Vec<String> {
+            vec!["fusion".to_string()]
+        }
+    }
+
+    /// [finding 23] The inline catalog (`LINGXI_AGENT_LIST_IN_MESSAGES=false`)
+    /// must not advertise `fusion` when `Agent(fusion)` is denied — the same
+    /// treatment `prompt_filters_denied_agent_types` proves for a built-in.
+    /// Before the fix, `append_fusion_listing` ran AFTER the deny-filter
+    /// `retain` calls, so the synthetic entry was immune to them.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn prompt_filters_denied_fusion_agent_type() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyFusionGate));
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: true,
+                model: None,
+                model_profile: None,
+            })
+            .await;
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            prompt.contains("- general-purpose:"),
+            "general-purpose should remain; prompt was:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("- fusion:"),
+            "denied fusion must be filtered out of the advertised catalog, \
+             or the model wastes a whole turn dispatching a type it will be \
+             hard-rejected for; prompt was:\n{prompt}"
         );
     }
 

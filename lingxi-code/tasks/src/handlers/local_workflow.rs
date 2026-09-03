@@ -815,6 +815,28 @@ fn normalize_fusion_opts_for_chain_key(opts_json: &str) -> String {
 /// hash bytes are private to LingXi (the journal is its own same-session format),
 /// so a stable FNV-1a-64 over `prev | prompt | opts` suffices.
 fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
+    chain_key_with_discriminator(prev, None, prompt, opts_json)
+}
+
+/// Shared FNV-1a-64 fold behind [`chain_key`] (agent()) and
+/// [`fusion_chain_key`] (fusion()). `discriminator`, when present, is folded
+/// as its own out-of-band field — between `prev` and `prompt`, wrapped in a
+/// reserved `\x1d` separator byte that never appears in `prev`/`prompt`/
+/// `opts_json` text — rather than being prepended as plain text into the
+/// `prompt` slot both call kinds hash over. That is what makes the two key
+/// spaces disjoint BY CONSTRUCTION: an agent() prompt that happens to be
+/// spelled `"fusion:X"` folds `\x1e` immediately before its prompt bytes,
+/// never `\x1d fusion \x1d`, so it can no longer reproduce a fusion() key by
+/// accident. Passing `discriminator: None` reproduces the pre-existing
+/// `chain_key` byte sequence exactly, so agent()'s own keys — and every
+/// journal entry a prior release already wrote to disk — are unchanged by
+/// this split.
+fn chain_key_with_discriminator(
+    prev: &str,
+    discriminator: Option<&str>,
+    prompt: &str,
+    opts_json: &str,
+) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fold = |bytes: &[u8]| {
         for &b in bytes {
@@ -824,10 +846,24 @@ fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
     };
     fold(prev.as_bytes());
     fold(b"\x1e");
+    if let Some(tag) = discriminator {
+        fold(b"\x1d");
+        fold(tag.as_bytes());
+        fold(b"\x1d");
+    }
     fold(prompt.as_bytes());
     fold(b"\x1f");
     fold(opts_json.as_bytes());
     format!("{h:016x}")
+}
+
+/// The chained resume-cache key for a `fusion(prompt, opts)` call — same
+/// running-cursor chaining as [`chain_key`], but folding a `"fusion"`
+/// discriminator as its own hashed field (see
+/// [`chain_key_with_discriminator`]) so this key space can never collide
+/// with `chain_key`'s, no matter what text an agent() prompt spells.
+fn fusion_chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
+    chain_key_with_discriminator(prev, Some("fusion"), prompt, opts_json)
 }
 
 /// Append-only workflow cache journal. Claude Code writes one `started` record
@@ -2517,17 +2553,21 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                     Ok(request) => {
                         // Chain into the SAME resume cursor `agent()` calls
                         // advance (`running_key`/`gone_live`), discriminated
-                        // by a `fusion:` prefix folded into the hashed prompt
-                        // so a fusion() call can never journal-cache-collide
-                        // with an agent() call that happens to share the same
-                        // prompt text. Every fusion opt participates in the
-                        // key (unlike agent()'s fixed-field projection) since
-                        // `WorkflowFusionOpts` has no display-only fields to
-                        // strip.
-                        let discriminated_prompt = format!("fusion:{}", call.prompt);
+                        // by an out-of-band `"fusion"` field
+                        // (`chain_key_with_discriminator`) folded as its own
+                        // hashed field rather than prepended as text into the
+                        // prompt slot agent() also hashes over — that keeps
+                        // this key space disjoint from agent()'s BY
+                        // CONSTRUCTION, so a fusion() call can never
+                        // journal-cache-collide with an agent() call, even
+                        // one whose prompt happens to be spelled
+                        // "fusion:<the same text>". Every fusion opt
+                        // participates in the key (unlike agent()'s
+                        // fixed-field projection) since `WorkflowFusionOpts`
+                        // has no display-only fields to strip.
                         let normalized_opts =
                             normalize_fusion_opts_for_chain_key(&call.opts_json);
-                        let key = chain_key(&running_key, &discriminated_prompt, &normalized_opts);
+                        let key = fusion_chain_key(&running_key, &call.prompt, &normalized_opts);
                         running_key.clone_from(&key);
                         let cached = if gone_live {
                             None

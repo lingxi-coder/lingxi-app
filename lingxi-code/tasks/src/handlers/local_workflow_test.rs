@@ -2074,9 +2074,9 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
         Ok(workflow_fusion_result()),
     );
     let cached_result = serde_json::to_string(&workflow_fusion_result()).unwrap();
-    let key = chain_key(
+    let key = fusion_chain_key(
         "",
-        "fusion:review this",
+        "review this",
         &normalize_fusion_opts_for_chain_key("{}"),
     );
     let journal = Arc::new(StdMutex::new(HashMap::from([(
@@ -3785,6 +3785,63 @@ fn chain_key_stable_regardless_of_input_key_order() {
     assert_eq!(
         key_a, key_b,
         "key order in opts JSON must not affect the chain key"
+    );
+}
+
+/// [finding 21] `fusion("X")`'s chain key must be disjoint from
+/// `agent("fusion:X")`'s by CONSTRUCTION — not by a `fusion:` text prefix
+/// folded into the same hashed `prompt` slot agent() also hashes over, which
+/// an agent() prompt that literally starts with `fusion:` can also spell.
+/// The two entry points must key-collide with NEITHER direction: a resumed
+/// run that was edited from one call shape to the other must not silently
+/// replay the wrong kind of cached result (a serialized `FusionResult` JSON
+/// handed to the script as a subagent's "final text", or the reverse: a
+/// `fusion() host returned invalid JSON` error because a plain agent reply
+/// was fed back through the fusion decode path).
+#[test]
+fn fusion_chain_key_never_collides_with_an_agent_prompt_spelled_fusion_colon() {
+    let opts = normalize_fusion_opts_for_chain_key("{}");
+    // What `fusion("pick the best plan")` computes.
+    let fusion_key = fusion_chain_key("", "pick the best plan", &opts);
+    // What `agent("fusion:pick the best plan")` computes for the SAME
+    // no-opts case (`normalize_opts_for_chain_key(&json!({}))` also
+    // serializes to `"{}"`, so the opts argument agrees too).
+    let agent_key = chain_key("", "fusion:pick the best plan", &opts);
+    assert_ne!(
+        fusion_key, agent_key,
+        "fusion(\"X\") must not hash to the same key as agent(\"fusion:X\")"
+    );
+}
+
+/// The fusion-side discriminator fold must not perturb `agent()`'s own
+/// `chain_key` bytes — an existing on-disk journal (written by a prior
+/// release, before this fix) must keep resuming correctly, not turn into a
+/// wholesale cache miss the moment this ships. Pinned against an
+/// independent, hand-rolled FNV-1a-64 fold of `prev | 0x1e | prompt | 0x1f |
+/// opts` (the documented algorithm) rather than a call back into
+/// `chain_key` itself, so a future accidental change to the fold order
+/// cannot silently drag both sides along together.
+#[test]
+fn agent_chain_key_bytes_are_unchanged_by_the_fusion_discriminator_fix() {
+    fn reference_fnv1a(prev: &str, prompt: &str, opts_json: &str) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fold = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        fold(prev.as_bytes());
+        fold(b"\x1e");
+        fold(prompt.as_bytes());
+        fold(b"\x1f");
+        fold(opts_json.as_bytes());
+        format!("{h:016x}")
+    }
+    let opts = normalize_opts_for_chain_key(&serde_json::from_str("{}").unwrap());
+    assert_eq!(
+        chain_key("prev", "do something", &opts),
+        reference_fnv1a("prev", "do something", &opts),
     );
 }
 

@@ -2699,10 +2699,15 @@ async fn run_slash_command_with_budget(
             // recover it from the `/fusion` `Done` display's own format
             // (`fusion_command.rs`: `"{task_id}  {preset}  {scope}"`) and
             // await that one task to a terminal status before returning.
-            if let Some(task_id) = pending_local_fusion_task_id(&display) {
-                await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink).await;
+            match pending_local_fusion_task_id(&display) {
+                Some(task_id) => {
+                    let outcome =
+                        await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink)
+                            .await;
+                    fusion_result_exit_code(outcome.as_ref())
+                }
+                None => exit_codes::SUCCESS,
             }
-            exit_codes::SUCCESS
         }
         // A prompt-expanding command (`/loop`, Markdown/Plugin): run the expanded
         // prompt AS a turn through the orchestrator (claude-code `type: "prompt"`)
@@ -2781,6 +2786,23 @@ enum FusionPrintOutcome {
     Other(String),
 }
 
+/// Map a terminal (or absent — evicted, or the print-mode wait timed out)
+/// `local_fusion` outcome to print mode's process exit code. Only
+/// `FinalText` means the run actually produced an answer for the user; a
+/// recorded `Failed`, any other terminal status (`Killed`, …), a task that
+/// vanished mid-wait, and the 20-minute print-mode timeout must all be
+/// non-zero so a script gating on `$?` can tell "produced an answer" from
+/// "produced nothing" — the failure is already reported to the user on
+/// `sink.error`, but until this the process itself always reported success.
+fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i32 {
+    match outcome {
+        Some(FusionPrintOutcome::FinalText(_)) => exit_codes::SUCCESS,
+        Some(FusionPrintOutcome::Failed(_) | FusionPrintOutcome::Other(_)) | None => {
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
 fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOutcome> {
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return None;
@@ -2813,7 +2835,7 @@ async fn await_local_fusion_result(
     task_id: &str,
     task_registry: &tasks::registry::TaskRegistry,
     sink: &dyn OutputSink,
-) {
+) -> Option<FusionPrintOutcome> {
     await_local_fusion_result_bounded(
         task_id,
         task_registry,
@@ -2821,31 +2843,37 @@ async fn await_local_fusion_result(
         FUSION_PRINT_POLL_INTERVAL,
         FUSION_PRINT_MAX_WAIT,
     )
-    .await;
+    .await
 }
 
+/// Returns the terminal outcome so the caller can set the process exit code
+/// (§13: a `Failed`/`Other`/evicted/timed-out run must not exit 0) — `None`
+/// covers every path that has no `FusionPrintOutcome` to report: the task
+/// evicted or never created, and the print-mode wait timing out.
 async fn await_local_fusion_result_bounded<L>(
     task_id: &str,
     lookup: &L,
     sink: &dyn OutputSink,
     poll_interval: std::time::Duration,
     max_wait: std::time::Duration,
-) where
+) -> Option<FusionPrintOutcome>
+where
     L: FusionTaskLookup + ?Sized,
 {
     let deadline = tokio::time::Instant::now() + max_wait;
     loop {
         let Some(state) = lookup.get(task_id).await else {
             // Evicted or never created — nothing left to report.
-            return;
+            return None;
         };
         if state.base().status.is_terminal() {
-            match fusion_print_outcome(&state) {
+            let outcome = fusion_print_outcome(&state);
+            match &outcome {
                 Some(FusionPrintOutcome::FinalText(text)) => {
-                    sink.command_output("fusion", &text).await;
+                    sink.command_output("fusion", text).await;
                 }
                 Some(FusionPrintOutcome::Failed(reason)) => {
-                    sink.error("fusion", &reason).await;
+                    sink.error("fusion", reason).await;
                 }
                 Some(FusionPrintOutcome::Other(status)) => {
                     sink.error(
@@ -2856,7 +2884,7 @@ async fn await_local_fusion_result_bounded<L>(
                 }
                 None => {}
             }
-            return;
+            return outcome;
         }
         if tokio::time::Instant::now() >= deadline {
             sink.error(
@@ -2867,7 +2895,7 @@ async fn await_local_fusion_result_bounded<L>(
                 ),
             )
             .await;
-            return;
+            return None;
         }
         tokio::time::sleep(poll_interval).await;
     }
@@ -6830,7 +6858,7 @@ mod tests {
         ))]);
         let sink = RecordingFusionSink::default();
 
-        await_local_fusion_result_bounded(
+        let outcome = await_local_fusion_result_bounded(
             "ftest0001",
             &lookup,
             &sink,
@@ -6845,6 +6873,17 @@ mod tests {
         );
         assert!(sink.errors.lock().await.is_empty());
         assert_eq!(lookup.call_count(), 1);
+        assert_eq!(
+            outcome,
+            Some(FusionPrintOutcome::FinalText(
+                "the sanitized answer".to_string()
+            ))
+        );
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::SUCCESS,
+            "a produced answer must exit 0"
+        );
     }
 
     #[tokio::test]
@@ -6892,7 +6931,7 @@ mod tests {
         ))]);
         let sink = RecordingFusionSink::default();
 
-        await_local_fusion_result_bounded(
+        let outcome = await_local_fusion_result_bounded(
             "ftest0001",
             &lookup,
             &sink,
@@ -6906,6 +6945,18 @@ mod tests {
             sink.errors.lock().await.as_slice(),
             &[("fusion".to_string(), "TooFewModels".to_string())]
         );
+        // §13: a Failed run must not exit 0 — a CI script gating on `$?`
+        // must be able to tell a deliberation that produced no answer apart
+        // from one that succeeded.
+        assert_eq!(
+            outcome,
+            Some(FusionPrintOutcome::Failed("TooFewModels".to_string()))
+        );
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR,
+            "a Failed fusion run must exit non-zero"
+        );
     }
 
     #[tokio::test]
@@ -6917,7 +6968,7 @@ mod tests {
         ))]);
         let sink = RecordingFusionSink::default();
 
-        await_local_fusion_result_bounded(
+        let outcome = await_local_fusion_result_bounded(
             "ftest0001",
             &lookup,
             &sink,
@@ -6935,5 +6986,57 @@ mod tests {
             "diagnostic must name the task id: {errors:?}"
         );
         assert!(errors[0].1.contains("still be running"), "{errors:?}");
+        // §13: the print-mode timeout must also exit non-zero — the run may
+        // still be completing elsewhere, but THIS process printed no answer.
+        assert_eq!(outcome, None);
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR,
+            "a print-mode timeout must exit non-zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_evicted_task_also_exits_non_zero() {
+        // §13 (companion gap named by the review's second refuter): a task
+        // that vanished mid-wait (evicted, or never created) prints nothing
+        // at all — that must ALSO exit non-zero, not silently succeed.
+        let lookup = ScriptedLookup::new(vec![None]);
+        let sink = RecordingFusionSink::default();
+
+        let outcome = await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(sink.outputs.lock().await.is_empty());
+        assert!(sink.errors.lock().await.is_empty());
+        assert_eq!(outcome, None);
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR,
+            "an evicted/never-created fusion task must exit non-zero"
+        );
+    }
+
+    #[test]
+    fn fusion_result_exit_code_only_final_text_is_success() {
+        assert_eq!(
+            fusion_result_exit_code(Some(&FusionPrintOutcome::FinalText("ok".to_string()))),
+            exit_codes::SUCCESS
+        );
+        assert_eq!(
+            fusion_result_exit_code(Some(&FusionPrintOutcome::Failed("no".to_string()))),
+            exit_codes::RUNTIME_ERROR
+        );
+        assert_eq!(
+            fusion_result_exit_code(Some(&FusionPrintOutcome::Other("Killed".to_string()))),
+            exit_codes::RUNTIME_ERROR
+        );
+        assert_eq!(fusion_result_exit_code(None), exit_codes::RUNTIME_ERROR);
     }
 }

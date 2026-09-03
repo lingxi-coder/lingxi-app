@@ -200,13 +200,27 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     })
 }
 
-/// Advance `cursor` past the next literal occurrence of `token` in `raw`,
-/// searching from `cursor` onward. `token` is a value pulled from the
-/// shell-quote tokenizer's output, so it is always a substring of the raw
-/// text at that position (quotes/backslashes it stripped surround it, but
-/// don't split it). If it can't be found (should not happen for well-formed
-/// input), fall back to skipping to the next whitespace boundary so parsing
-/// still makes forward progress instead of looping.
+/// Advance `cursor` past the next occurrence of `token` in `raw`, searching
+/// from `cursor` onward.
+///
+/// `token` is a value pulled from the shell-quote tokenizer's output. In the
+/// common case it is a literal substring of the raw text at this position
+/// (surrounded by whatever quotes/backslashes the tokenizer stripped, but
+/// not split by them), so a plain [`str::find`] locates it and we additionally
+/// skip one trailing closing quote so it doesn't leak into the recovered
+/// prompt. That `find` is also what lets an unquoted `*`/`?` glob the
+/// tokenizer drops, or a standalone operator character (`| & ; ( ) < >`)
+/// that produces no token at all, re-synchronise on the FOLLOWING token
+/// instead of desyncing the cursor.
+///
+/// `find` misses only when the token text itself is no longer a literal
+/// substring at this position — e.g. `--models="a, b"` (the `=`-form embeds
+/// whitespace inside a quoted span that a raw `find` for the whole token
+/// can't match around) or a backslash-escaped space (`a,\ b`). For exactly
+/// that case we fall back to [`advance_past_quoted_word`], which walks the
+/// RAW text honoring `'`/`"` quoting and `\` escapes the same way
+/// [`command_api::parser`]'s tokenizer does, so a quoted or escaped span is
+/// skipped in full rather than stopping at the first whitespace inside it.
 fn advance_past_token(raw: &str, cursor: usize, token: &str) -> usize {
     let cursor = cursor.min(raw.len());
     let rest = &raw[cursor..];
@@ -217,8 +231,8 @@ fn advance_past_token(raw: &str, cursor: usize, token: &str) -> usize {
         // `token` before handing it to us, so `token` matches only the
         // INSIDE of the raw quoted span — skip the closing quote too, or it
         // leaks as the first character of the recovered prompt.
-        let opened_with_quote = rel > 0
-            && matches!(rest.as_bytes().get(rel - 1), Some(b'"' | b'\''));
+        let opened_with_quote =
+            rel > 0 && matches!(rest.as_bytes().get(rel - 1), Some(b'"' | b'\''));
         if opened_with_quote {
             let opening = rest.as_bytes()[rel - 1];
             if raw.as_bytes().get(end) == Some(&opening) {
@@ -227,14 +241,56 @@ fn advance_past_token(raw: &str, cursor: usize, token: &str) -> usize {
         }
         return end;
     }
+    advance_past_quoted_word(raw, cursor)
+}
+
+/// Fallback for [`advance_past_token`]: advance `cursor` past the next shell
+/// word in `raw`, starting from `cursor` (leading whitespace is skipped
+/// first), honoring `'`/`"` quoting and `\` escapes so a whitespace-bearing
+/// quoted or escaped span is skipped in full instead of splicing its tail
+/// onto the front of the recovered prompt.
+fn advance_past_quoted_word(raw: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(raw.len());
+    let rest = &raw[cursor..];
     let trimmed_start = rest
         .find(|c: char| !c.is_whitespace())
         .unwrap_or(rest.len());
-    let after_start = &rest[trimmed_start..];
-    let word_end = after_start
-        .find(char::is_whitespace)
-        .unwrap_or(after_start.len());
-    cursor + trimmed_start + word_end
+    let start = cursor + trimmed_start;
+
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut end = start;
+    for c in raw[start..].chars() {
+        if escaped {
+            escaped = false;
+            end += c.len_utf8();
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if q == '"' && c == '\\' {
+                escaped = true;
+            }
+            end += c.len_utf8();
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            end += c.len_utf8();
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            end += c.len_utf8();
+            continue;
+        }
+        if c.is_whitespace() {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    end
 }
 
 /// Build a [`FusionRequest`] from parsed slash args and parent session identity.
@@ -556,5 +612,69 @@ mod tests {
             false,
         );
         assert!(!req.partial_ok);
+    }
+
+    #[test]
+    fn quoted_equals_flag_value_with_internal_whitespace_does_not_leak_into_prompt() {
+        // `--models="a, b"` tokenizes to one token `--models=a, b` with the
+        // quotes stripped, so `advance_past_token`'s literal `find` for that
+        // whole token fails against the still-quoted raw text and used to
+        // fall back to a plain whitespace boundary, landing INSIDE the
+        // quoted span and splicing its tail (plus the stray closing quote)
+        // onto the front of the prompt.
+        let args = parse(
+            "/fusion --models=\"openai:gpt-5, anthropic:opus\" summarize this design",
+        )
+        .unwrap();
+        assert_eq!(args.prompt, "summarize this design");
+        assert_eq!(args.models.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn escaped_space_in_equals_flag_value_does_not_leak_into_prompt() {
+        let args = parse("/fusion --models=openai:gpt-5,\\ anthropic:opus review the plan")
+            .unwrap();
+        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(args.models.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn quoted_equals_dimensions_with_internal_whitespace_does_not_leak_into_prompt() {
+        let args = parse("/fusion --dimensions=\"coverage, reasoning\" review the plan")
+            .unwrap();
+        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(
+            args.dimensions.as_deref(),
+            Some(["coverage".to_string(), "reasoning".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn unquoted_glob_word_between_flags_does_not_desync_the_cursor() {
+        // `*.rs` is an unquoted glob: `command_api::parser`'s tokenizer
+        // drops it entirely (it never becomes a `positional_args` token,
+        // per `flush_word`), so the flag loop's token list skips straight
+        // from `--fast` to `--max-panel`. A cursor-advance strategy that
+        // walks exactly one raw shell word per consumed token desyncs here
+        // — it lands on `*.rs` instead of `--max-panel` and never recovers.
+        // `advance_past_token`'s literal `find` for the LITERAL flag text
+        // scans forward past the dropped glob and resynchronises.
+        let args = parse("/fusion --fast *.rs --max-panel 4 review the plan").unwrap();
+        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(args.preset, Some(FusionPreset::Fast));
+        assert_eq!(args.max_panel, Some(4));
+    }
+
+    #[test]
+    fn standalone_shell_operator_between_flags_does_not_desync_the_cursor() {
+        // A bare `|` is a shell operator: the tokenizer emits no token at
+        // all for it (parser.rs's operator handling), so — like the glob
+        // case above — the token list skips straight from `--fast` to
+        // `--max-panel` while the raw text still has the operator sitting
+        // between them.
+        let args = parse("/fusion --fast | --max-panel 4 review the plan").unwrap();
+        assert_eq!(args.prompt, "review the plan");
+        assert_eq!(args.preset, Some(FusionPreset::Fast));
+        assert_eq!(args.max_panel, Some(4));
     }
 }

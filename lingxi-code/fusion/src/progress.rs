@@ -8,7 +8,7 @@ use tokio::sync::mpsc::Sender;
 /// stage transitions should back-pressure on. `try_send` (not `.send().await`)
 /// is what makes that true — a slow/stalled consumer must not delay the
 /// panel/analyst/synth stage it is merely observing.
-pub async fn emit(
+pub fn emit(
     progress: &Option<Sender<FusionProgress>>,
     stage: FusionStage,
     panel_id: Option<String>,

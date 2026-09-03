@@ -314,7 +314,11 @@ the schema, with no other text."
 /// converter (`llm_client::strict_schema::to_strict_schema`) does not allow
 /// those keywords — the host re-validates the numeric range itself in
 /// [`scores_match_request`].
-fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
+/// `analyst_json_schema` helper: the `scores` sub-schema — one required
+/// object per panel id, each requiring an integer score for every scoring
+/// dimension. Split out purely to keep the caller under the line-count
+/// lint.
+fn analyst_scores_schema(panel_ids: &[String], dimensions: &[String]) -> (Value, Vec<Value>) {
     let mut score_props = serde_json::Map::new();
     let mut score_required = Vec::with_capacity(panel_ids.len());
     for id in panel_ids {
@@ -335,6 +339,11 @@ fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
         );
         score_required.push(Value::String(id.clone()));
     }
+    (Value::Object(score_props), score_required)
+}
+
+fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
+    let (score_props, score_required) = analyst_scores_schema(panel_ids, dimensions);
 
     let position_item = serde_json::json!({
         "type": "object",
@@ -402,7 +411,7 @@ fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
             "coverage_gaps": { "type": "array", "items": { "type": "string" } },
             "scores": {
                 "type": "object",
-                "properties": Value::Object(score_props),
+                "properties": score_props,
                 "required": Value::Array(score_required),
                 "additionalProperties": false
             },

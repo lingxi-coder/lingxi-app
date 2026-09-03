@@ -32,18 +32,139 @@ pub struct FusionSlashArgs {
     pub prompt: String,
 }
 
+/// Accumulated `/fusion` flag values as the token loop parses them out
+/// (mirrors [`FusionSlashArgs`] minus the trailing prompt). Collected into
+/// one struct so the per-token step function stays under the argument-count
+/// lint instead of taking six separate `&mut Option<_>`.
+#[derive(Default)]
+struct FusionFlagAccum {
+    preset: Option<FusionPreset>,
+    cross_provider: Option<bool>,
+    partial_ok: Option<bool>,
+    models: Option<Vec<FusionModelRef>>,
+    dimensions: Option<Vec<String>>,
+    max_panel: Option<u8>,
+}
+
+/// Outcome of consuming one token in the `/fusion` flag loop.
+enum FlagStep {
+    /// A flag (and, for `--models value` style, its following token) was
+    /// consumed; resume the loop at `next_i`/`next_cursor`.
+    Consumed { next_i: usize, next_cursor: usize },
+    /// The current token is not a recognised flag: positional args (the
+    /// prompt) begin here.
+    Stop,
+}
+
+/// Parse and apply the flag at `tokens[i]`, advancing `cursor` past its
+/// matching span in `raw`. Same per-flag behavior as the original inline
+/// match — this is a straight extraction, not a rewrite.
+fn consume_fusion_flag(
+    tokens: &[String],
+    raw: &str,
+    i: usize,
+    cursor: usize,
+    acc: &mut FusionFlagAccum,
+) -> Result<FlagStep, String> {
+    let tok = tokens[i].as_str();
+    let consumed_one = |cursor: usize| FlagStep::Consumed {
+        next_i: i + 1,
+        next_cursor: advance_past_token(raw, cursor, tok),
+    };
+    match tok {
+        "--quality" => {
+            set_preset(&mut acc.preset, FusionPreset::Quality)?;
+            Ok(consumed_one(cursor))
+        }
+        "--fast" => {
+            set_preset(&mut acc.preset, FusionPreset::Fast)?;
+            Ok(consumed_one(cursor))
+        }
+        "--same-provider" => {
+            set_cross(&mut acc.cross_provider, false)?;
+            Ok(consumed_one(cursor))
+        }
+        "--cross-provider" => {
+            set_cross(&mut acc.cross_provider, true)?;
+            Ok(consumed_one(cursor))
+        }
+        "--partial-ok" => {
+            set_once(&mut acc.partial_ok, true, "--partial-ok/--no-partial")?;
+            Ok(consumed_one(cursor))
+        }
+        "--no-partial" => {
+            set_once(&mut acc.partial_ok, false, "--partial-ok/--no-partial")?;
+            Ok(consumed_one(cursor))
+        }
+        flag if flag.starts_with("--models=") => {
+            set_once(
+                &mut acc.models,
+                parse_models(&flag["--models=".len()..])?,
+                "--models",
+            )?;
+            Ok(consumed_one(cursor))
+        }
+        "--models" => {
+            let next_cursor = advance_past_token(raw, cursor, tok);
+            let value = tokens
+                .get(i + 1)
+                .ok_or_else(|| "--models requires a value".to_string())?;
+            set_once(&mut acc.models, parse_models(value)?, "--models")?;
+            Ok(FlagStep::Consumed {
+                next_i: i + 2,
+                next_cursor: advance_past_token(raw, next_cursor, value),
+            })
+        }
+        flag if flag.starts_with("--dimensions=") => {
+            set_once(
+                &mut acc.dimensions,
+                parse_dimensions(&flag["--dimensions=".len()..])?,
+                "--dimensions",
+            )?;
+            Ok(consumed_one(cursor))
+        }
+        "--dimensions" => {
+            let next_cursor = advance_past_token(raw, cursor, tok);
+            let value = tokens
+                .get(i + 1)
+                .ok_or_else(|| "--dimensions requires a value".to_string())?;
+            set_once(&mut acc.dimensions, parse_dimensions(value)?, "--dimensions")?;
+            Ok(FlagStep::Consumed {
+                next_i: i + 2,
+                next_cursor: advance_past_token(raw, next_cursor, value),
+            })
+        }
+        flag if flag.starts_with("--max-panel=") => {
+            set_once(
+                &mut acc.max_panel,
+                parse_max_panel(&flag["--max-panel=".len()..])?,
+                "--max-panel",
+            )?;
+            Ok(consumed_one(cursor))
+        }
+        "--max-panel" => {
+            let next_cursor = advance_past_token(raw, cursor, tok);
+            let value = tokens
+                .get(i + 1)
+                .ok_or_else(|| "--max-panel requires a value".to_string())?;
+            set_once(&mut acc.max_panel, parse_max_panel(value)?, "--max-panel")?;
+            Ok(FlagStep::Consumed {
+                next_i: i + 2,
+                next_cursor: advance_past_token(raw, next_cursor, value),
+            })
+        }
+        flag if flag.starts_with("--") => Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}")),
+        _ => Ok(FlagStep::Stop),
+    }
+}
+
 /// Parse `/fusion` tokens. Unknown flags and empty prompts are errors.
 ///
 /// # Errors
 ///
 /// Returns [`FUSION_SLASH_USAGE`] or a more specific mutex / parse error.
 pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, String> {
-    let mut preset = None;
-    let mut cross_provider = None;
-    let mut models = None;
-    let mut dimensions = None;
-    let mut partial_ok = None;
-    let mut max_panel = None;
+    let mut acc = FusionFlagAccum::default();
     let tokens = &args.positional_args;
     let raw = args.raw_args.as_str();
     // `tokens` is shell-quote output: unquoted `*`/`?` globs are dropped,
@@ -56,99 +177,12 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     let mut cursor = 0usize;
     let mut i = 0;
     while i < tokens.len() {
-        let tok = tokens[i].as_str();
-        match tok {
-            "--quality" => {
-                set_preset(&mut preset, FusionPreset::Quality)?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
+        match consume_fusion_flag(tokens, raw, i, cursor, &mut acc)? {
+            FlagStep::Consumed { next_i, next_cursor } => {
+                i = next_i;
+                cursor = next_cursor;
             }
-            "--fast" => {
-                set_preset(&mut preset, FusionPreset::Fast)?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--same-provider" => {
-                set_cross(&mut cross_provider, false)?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--cross-provider" => {
-                set_cross(&mut cross_provider, true)?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--partial-ok" => {
-                set_once(&mut partial_ok, true, "--partial-ok/--no-partial")?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--no-partial" => {
-                set_once(&mut partial_ok, false, "--partial-ok/--no-partial")?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            flag if flag.starts_with("--models=") => {
-                set_once(
-                    &mut models,
-                    parse_models(&flag["--models=".len()..])?,
-                    "--models",
-                )?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--models" => {
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-                let value = tokens
-                    .get(i)
-                    .ok_or_else(|| "--models requires a value".to_string())?;
-                set_once(&mut models, parse_models(value)?, "--models")?;
-                cursor = advance_past_token(raw, cursor, value);
-                i += 1;
-            }
-            flag if flag.starts_with("--dimensions=") => {
-                set_once(
-                    &mut dimensions,
-                    parse_dimensions(&flag["--dimensions=".len()..])?,
-                    "--dimensions",
-                )?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--dimensions" => {
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-                let value = tokens
-                    .get(i)
-                    .ok_or_else(|| "--dimensions requires a value".to_string())?;
-                set_once(&mut dimensions, parse_dimensions(value)?, "--dimensions")?;
-                cursor = advance_past_token(raw, cursor, value);
-                i += 1;
-            }
-            flag if flag.starts_with("--max-panel=") => {
-                set_once(
-                    &mut max_panel,
-                    parse_max_panel(&flag["--max-panel=".len()..])?,
-                    "--max-panel",
-                )?;
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-            }
-            "--max-panel" => {
-                cursor = advance_past_token(raw, cursor, tok);
-                i += 1;
-                let value = tokens
-                    .get(i)
-                    .ok_or_else(|| "--max-panel requires a value".to_string())?;
-                set_once(&mut max_panel, parse_max_panel(value)?, "--max-panel")?;
-                cursor = advance_past_token(raw, cursor, value);
-                i += 1;
-            }
-            flag if flag.starts_with("--") => {
-                return Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}"));
-            }
-            _ => break,
+            FlagStep::Stop => break,
         }
     }
     let prompt = raw[cursor.min(raw.len())..].trim().to_string();
@@ -156,12 +190,12 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
         return Err(FUSION_SLASH_USAGE.to_string());
     }
     Ok(FusionSlashArgs {
-        preset,
-        cross_provider,
-        models,
-        dimensions,
-        partial_ok,
-        max_panel,
+        preset: acc.preset,
+        cross_provider: acc.cross_provider,
+        models: acc.models,
+        dimensions: acc.dimensions,
+        partial_ok: acc.partial_ok,
+        max_panel: acc.max_panel,
         prompt,
     })
 }

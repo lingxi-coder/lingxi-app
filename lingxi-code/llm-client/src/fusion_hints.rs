@@ -435,7 +435,7 @@ mod tests {
     /// `stream_json_schema_with_thinking`" (the sidequery layer routes every
     /// provider through that call unconditionally — see
     /// `ProviderSideQueryBackend::Session` in
-    /// sidequery/src/provider_side_query.rs). Reconciling that flag's
+    /// `sidequery/src/provider_side_query.rs`). Reconciling that flag's
     /// semantics with `resolve_analyst`'s filter is a separate, broader
     /// change than this hint-table test; ratchet this back to `== 0` once
     /// it lands. Today's known offenders: anthropic/claude-opus-5,

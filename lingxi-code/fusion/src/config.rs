@@ -5,6 +5,10 @@ use platform_api::{FusionError, FusionPreset, FUSION_MAX_PANEL, FUSION_MIN_PANEL
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
+// This is a flat settings snapshot (mirrors `FusionSettingsJson` field-for-field);
+// the bools are independent toggles loaded from user config, not a state
+// machine, so collapsing them into enums would only add indirection.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionRuntimeConfig {
     /// Agent listing + workflow `fusion()` master switch.
@@ -180,7 +184,7 @@ impl FusionRuntimeConfig {
             cfg.allow_cross_provider_for_workflow = v;
         }
         if let Some(ref names) = settings.allowed_profiles {
-            cfg.allowed_profiles = names.clone();
+            cfg.allowed_profiles.clone_from(names);
         }
         if let Some(n) = settings.workflow_fusion_call_cap {
             cfg.workflow_fusion_call_cap = n;

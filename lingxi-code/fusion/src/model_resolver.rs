@@ -205,7 +205,7 @@ fn resolve_preset(
 }
 
 /// Canonical underlying-model key for cross-gateway dedup (F011): an
-/// OpenRouter row's `request_model` carries a `vendor/` prefix
+/// `OpenRouter` row's `request_model` carries a `vendor/` prefix
 /// (`"openai/gpt-5.6-sol"`) that the SAME model's direct-profile row
 /// (`"openai" -> "gpt-5.6-sol"`) does not, so a bare string compare misses the
 /// duplicate. Stripping to the last `/`-segment aligns both spellings.
@@ -508,8 +508,7 @@ mod tests {
         // always simultaneously the top panelist and the top judge.
         assert_eq!(
             set.analyst.model, "sonnet",
-            "the analyst must be the non-panelist judge, not panels[0]: {:?}",
-            set
+            "the analyst must be the non-panelist judge, not panels[0]: {set:?}"
         );
     }
 
@@ -975,8 +974,7 @@ mod tests {
         assert_eq!(
             set.analyst.model, "gpt4o",
             "the genuinely distinct 5th model must win, not the higher-ranked \
-             leftover gateway duplicate: {:?}",
-            set
+             leftover gateway duplicate: {set:?}"
         );
     }
 }

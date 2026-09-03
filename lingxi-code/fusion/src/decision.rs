@@ -65,7 +65,7 @@ pub fn interpret(analysis: &FusionAnalysis, panels: &[PanelInternal]) -> HostDec
 
 /// Successful panels that produced a report.
 #[must_use]
-pub fn successful<'a>(panels: &'a [PanelInternal]) -> Vec<&'a PanelInternal> {
+pub fn successful(panels: &[PanelInternal]) -> Vec<&PanelInternal> {
     panels
         .iter()
         .filter(|panel| panel.status == PanelRunStatus::Completed && panel.report.is_some())

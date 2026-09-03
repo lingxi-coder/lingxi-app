@@ -10,7 +10,7 @@
 //! `pipeline`, `phase`, `log`, `budget`, `args`, `workflow`) with CONCURRENT
 //! batch dispatch of `agent()` calls (agents pending together run as one batch)
 //! via the pluggable `agent_runner`. The host
-//! (`tasks::handlers::local_workflow`) bridges `agent_runner` to LingXi's
+//! (`tasks::handlers::local_workflow`) bridges `agent_runner` to `LingXi`'s
 //! subagent spawner and adds live progress, a real token budget
 //! ([`WorkflowBudgetSource`]), structured-output `agent({schema})`,
 //! journaling/resume, workflow-scoped Fusion, and `workflow()` nesting; the
@@ -1146,6 +1146,18 @@ where
 
 /// Like [`run_with_progress`], but also wires the workflow-global `fusion()`
 /// bridge used by the desktop task host.
+// `budget`/`args`/`cancel` are taken by value to keep this signature's shape
+// identical to `run_with_progress` (the sibling `tasks::handlers::local_workflow`
+// builds both calls from the same locals); narrowing only this variant to
+// references would fork the two functions' call-site contracts for no
+// behavioral gain. The one extra `fusion_runner` callback (over
+// `run_with_progress`'s param list) is what pushes the count past the
+// pedantic threshold. And the body itself is the full rquickjs Context/job-queue
+// wiring `run_with_progress` used to own directly before this commit made it a
+// thin wrapper delegating here — splitting the QuickJS FFI glue further is a
+// correctness-risk restructure out of proportion to a lint, not a genuine
+// readability problem.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run_with_progress_and_fusion<R, F, P>(
     script: &str,
     agent_runner: R,
@@ -2564,19 +2576,19 @@ log('wf=' + (typeof workflow))
     /// / `WorkflowAgentCapError` at lines 87-88) so a script can `catch (e)`
     /// and branch on `e.name` instead of string-matching `e.message`.
     fn fusion_rejection_name(thrown_message: &str) -> String {
-        let script = r#"
+        let script = r"
 try {
   await fusion('x');
   log('no throw');
 } catch (e) {
   log(e.name + ':' + e.message);
 }
-"#;
+";
         let msg = thrown_message.to_string();
         let out = run_with_progress_and_fusion(
             script,
             no_agents,
-            move |_: &str, _: &str| format!("{}{msg}", WF_THROW_PREFIX),
+            move |_: &str, _: &str| format!("{WF_THROW_PREFIX}{msg}"),
             |_: &Progress| {},
             None,
             false,

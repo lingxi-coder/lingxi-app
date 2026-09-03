@@ -176,7 +176,7 @@ pub struct FusionRequest {
     /// Explicit panel models. When set, must contain at least two distinct refs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<FusionModelRef>>,
-    /// Scoring dimensions (1..=12, snake_case, caller order after dedup).
+    /// Scoring dimensions (1..=12, `snake_case`, caller order after dedup).
     pub dimensions: Vec<String>,
     /// Continue into analysis when some panels fail but the min is met.
     pub partial_ok: bool,
@@ -388,7 +388,7 @@ pub struct FusionAnalysis {
     pub scores: BTreeMap<String, BTreeMap<String, u8>>,
     /// Analyst confidence 0..=100.
     pub confidence: u8,
-    /// Analyst recommendation (host may rewrite Merge → NeedsParent).
+    /// Analyst recommendation (host may rewrite Merge → `NeedsParent`).
     pub recommendation: FusionRecommendation,
 }
 
@@ -456,7 +456,7 @@ pub enum FusionDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelRunStatus {
-    /// Produced a valid PanelReport.
+    /// Produced a valid `PanelReport`.
     Completed,
     /// Failed (protocol, provider, or tool error).
     Failed,
@@ -531,13 +531,13 @@ pub struct FusionResult {
     /// Schema version.
     #[serde(default = "fusion_schema_version")]
     pub schema_version: u16,
-    /// `fu_` + ulid. Distinct from the LocalFusion task id (`f` + 8 base36).
+    /// `fu_` + ulid. Distinct from the `LocalFusion` task id (`f` + 8 base36).
     pub run_id: String,
     /// Completed vs needs-parent.
     pub status: FusionStatus,
     /// Decision.
     pub decision: FusionDecision,
-    /// Sanitized final text (or a deterministic NeedsParent summary).
+    /// Sanitized final text (or a deterministic `NeedsParent` summary).
     pub final_text: String,
     /// Analyst output when analysis ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -797,6 +797,10 @@ impl Ord for FusionCostClass {
 
 /// Snapshot the Agent tool needs to list / authorize Fusion without depending
 /// on the `fusion` crate.
+// A flat capability snapshot mirroring `FusionRuntimeConfig`'s independent
+// toggles; not a state machine, so enum-izing the bools would only add
+// indirection at the tool boundary.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FusionAgentSurface {
     /// When true, `fusion` is in the Agent listing and `subagent_type: "fusion"`
@@ -912,7 +916,7 @@ impl FusionCompletionSink for NoopFusionCompletionSink {
 /// # Errors
 ///
 /// Returns [`FusionError::InvalidRequest`] when the list is empty, longer than
-/// 12, not unique snake_case, or uses a reserved identity-like name.
+/// 12, not unique `snake_case`, or uses a reserved identity-like name.
 pub fn normalize_dimensions(raw: Vec<String>) -> Result<Vec<String>, FusionError> {
     if raw.is_empty() {
         return Ok(DEFAULT_FUSION_DIMENSIONS
@@ -984,7 +988,7 @@ fn is_reserved_dimension(s: &str) -> bool {
         && s.bytes().skip(1).all(|b| b.is_ascii_digit()))
 }
 
-/// Host-side PanelReport checks (dangling refs, ranges, uniqueness).
+/// Host-side `PanelReport` checks (dangling refs, ranges, uniqueness).
 ///
 /// # Errors
 ///

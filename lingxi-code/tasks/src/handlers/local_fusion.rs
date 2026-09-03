@@ -97,6 +97,175 @@ async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     Ok(())
 }
 
+/// Terminal-outcome half of `spawn`'s worker future: write the spool body /
+/// error, push the egress+usage summary, flip the task to its terminal
+/// status, and (on success) publish the sanitized result envelope. Split out
+/// of `spawn` purely to keep that function under the line-count lint — same
+/// ordering, same branches, same side effects.
+async fn finalize_fusion_outcome(
+    outcome: &Result<FusionResult, FusionError>,
+    output_manager: &TaskOutputManager,
+    worker_spool_path: &std::path::Path,
+    worker_task_id: &str,
+    status_sink: &Arc<dyn TaskStatusSink>,
+    sink: &Arc<dyn FusionCompletionSink>,
+    conversation_id: &str,
+) {
+    match outcome {
+        Ok(result) => {
+            let body = serde_json::to_string_pretty(result)
+                .unwrap_or_else(|_| result.final_text.clone());
+            let _ = output_manager.append(worker_spool_path, &body).await;
+            // Write the egress/usage summary BEFORE the terminal status
+            // transition (same ordering rule as `set_agent_outcome`): the
+            // registry's notification drain is terminal-status-gated, so the
+            // reverse order could let a drain observe a completed task whose
+            // usage summary hasn't landed yet.
+            let usage_summary = platform_api::task_registry::AgentRunUsage {
+                subagent_tokens: result
+                    .usage
+                    .input_tokens
+                    .saturating_add(result.usage.output_tokens),
+                tool_uses: u64::from(result.usage.provider_requests),
+                duration_ms: result.timing.total_ms,
+            };
+            status_sink
+                .set_fusion_egress_and_usage(
+                    worker_task_id,
+                    result.egress_profiles.clone(),
+                    Some(usage_summary),
+                )
+                .await;
+            status_sink
+                .finish_fusion_terminal(
+                    worker_task_id,
+                    result.run_id.clone(),
+                    result.final_text.clone(),
+                    TaskStatus::Completed,
+                )
+                .await;
+            sink.publish(conversation_id, result).await;
+        }
+        Err(FusionError::Cancelled) => {
+            status_sink
+                .set_status(worker_task_id, TaskStatus::Killed)
+                .await;
+        }
+        Err(err) => {
+            let _ = output_manager
+                .append(worker_spool_path, &err.to_string())
+                .await;
+            status_sink
+                .set_fusion_error(worker_task_id, err.to_string())
+                .await;
+            status_sink
+                .set_status(worker_task_id, TaskStatus::Failed)
+                .await;
+        }
+    }
+}
+
+/// Owned inputs the fusion background worker future needs, collected into a
+/// struct so `spawn` can build it in one call instead of moving a dozen
+/// separate captures into the closure — the struct itself is what keeps
+/// `spawn` under the argument-count and line-count lints.
+struct FusionWorkerArgs {
+    executor: Arc<dyn FusionExecutor>,
+    inherit: FusionInheritance,
+    request: platform_api::FusionRequest,
+    conversation_id: String,
+    sink: Arc<dyn FusionCompletionSink>,
+    status_sink: Arc<dyn TaskStatusSink>,
+    workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    output_manager: Arc<TaskOutputManager>,
+    worker_spool_path: std::path::PathBuf,
+    worker_task_id: String,
+    activation_rx: Option<oneshot::Receiver<()>>,
+    /// Held for its `Drop` side effect only — fires the completion signal
+    /// unconditionally once this future is done, whichever path it exits
+    /// through. Never read.
+    #[allow(dead_code)]
+    completion_signal: WorkerCompletionSignal,
+}
+
+/// `spawn`'s background worker body: run the deliberation, forward its
+/// progress into the task DTO's `stage`, and finalize the terminal outcome.
+/// Split out of `spawn` (as a plain fn taking owned args, not an inline
+/// `async move` closure) purely to keep that function under the line-count
+/// lint — same ordering, same finalize race handling, same side effects.
+async fn run_fusion_worker(args: FusionWorkerArgs) {
+    let FusionWorkerArgs {
+        executor,
+        inherit,
+        request,
+        conversation_id,
+        sink,
+        status_sink,
+        workers,
+        output_manager,
+        worker_spool_path,
+        worker_task_id,
+        activation_rx,
+        completion_signal: _completion_signal,
+    } = args;
+    if let Some(activation_rx) = activation_rx {
+        if activation_rx.await.is_err() {
+            workers.lock().await.remove(&worker_task_id);
+            return;
+        }
+    }
+    status_sink
+        .set_status(&worker_task_id, TaskStatus::Running)
+        .await;
+
+    // F005: forward progress into `LocalFusionTaskState.stage` so a client
+    // polling the task DTO sees the same `FusionStage::label()` text the
+    // Agent-tool path forwards as `subagent_activity` — before this the
+    // task carried NO progress at all between `Running` and its terminal
+    // status.
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
+    let forward_status_sink = status_sink.clone();
+    let forward_task_id = worker_task_id.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(event) = prog_rx.recv().await {
+            forward_status_sink
+                .set_fusion_stage(&forward_task_id, event.stage.label())
+                .await;
+        }
+    });
+
+    let outcome = executor.run(request, inherit, Some(prog_tx)).await;
+    let _ = forwarder.await;
+    // Natural completion and TaskStop race on this same worker-map lock.
+    // Whichever removes/marks the record first owns the terminal
+    // transition. Once finalizing wins, kill must not abort the
+    // commit→completion-sink window.
+    let may_finalize = {
+        let mut workers = workers.lock().await;
+        match workers.get_mut(&worker_task_id) {
+            Some(rec) => {
+                rec.finalizing = true;
+                true
+            }
+            None => false,
+        }
+    };
+    if !may_finalize {
+        return;
+    }
+    finalize_fusion_outcome(
+        &outcome,
+        &output_manager,
+        &worker_spool_path,
+        &worker_task_id,
+        &status_sink,
+        &sink,
+        &conversation_id,
+    )
+    .await;
+    workers.lock().await.remove(&worker_task_id);
+}
+
 /// Handler for [`TaskType::LocalFusion`].
 pub struct LocalFusionHandler {
     executor: Arc<dyn FusionExecutor>,
@@ -226,112 +395,23 @@ impl Task for LocalFusionHandler {
         };
         let (completion_tx, completion_rx) = oneshot::channel();
 
-        let worker = Box::pin(async move {
+        let worker = Box::pin(run_fusion_worker(FusionWorkerArgs {
+            executor,
+            inherit,
+            request,
+            conversation_id,
+            sink,
+            status_sink,
+            workers,
+            output_manager,
+            worker_spool_path,
+            worker_task_id,
+            activation_rx,
             // Fires unconditionally when this future is done — naturally, or
             // forced by `runtime.cancel`'s hard abort — so `kill`'s bounded
             // wait can tell the two apart (F012).
-            let _completion_signal = WorkerCompletionSignal::new(completion_tx);
-            if let Some(activation_rx) = activation_rx {
-                if activation_rx.await.is_err() {
-                    workers.lock().await.remove(&worker_task_id);
-                    return;
-                }
-            }
-            status_sink
-                .set_status(&worker_task_id, TaskStatus::Running)
-                .await;
-
-            // F005: forward progress into `LocalFusionTaskState.stage` so a
-            // client polling the task DTO sees the same `FusionStage::label()`
-            // text the Agent-tool path forwards as `subagent_activity` —
-            // before this the task carried NO progress at all between
-            // `Running` and its terminal status.
-            let (prog_tx, mut prog_rx) =
-                tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
-            let forward_status_sink = status_sink.clone();
-            let forward_task_id = worker_task_id.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(event) = prog_rx.recv().await {
-                    forward_status_sink
-                        .set_fusion_stage(&forward_task_id, event.stage.label())
-                        .await;
-                }
-            });
-
-            let outcome = executor.run(request, inherit, Some(prog_tx)).await;
-            let _ = forwarder.await;
-            // Natural completion and TaskStop race on this same worker-map
-            // lock. Whichever removes/marks the record first owns the terminal
-            // transition. Once finalizing wins, kill must not abort the
-            // commit→completion-sink window.
-            let may_finalize = {
-                let mut workers = workers.lock().await;
-                match workers.get_mut(&worker_task_id) {
-                    Some(rec) => {
-                        rec.finalizing = true;
-                        true
-                    }
-                    None => false,
-                }
-            };
-            if !may_finalize {
-                return;
-            }
-            match &outcome {
-                Ok(result) => {
-                    let body = serde_json::to_string_pretty(result)
-                        .unwrap_or_else(|_| result.final_text.clone());
-                    let _ = output_manager.append(&worker_spool_path, &body).await;
-                    // Write the egress/usage summary BEFORE the terminal
-                    // status transition (same ordering rule as
-                    // `set_agent_outcome`): the registry's notification drain
-                    // is terminal-status-gated, so the reverse order could
-                    // let a drain observe a completed task whose usage
-                    // summary hasn't landed yet.
-                    let usage_summary = platform_api::task_registry::AgentRunUsage {
-                        subagent_tokens: result
-                            .usage
-                            .input_tokens
-                            .saturating_add(result.usage.output_tokens),
-                        tool_uses: u64::from(result.usage.provider_requests),
-                        duration_ms: result.timing.total_ms,
-                    };
-                    status_sink
-                        .set_fusion_egress_and_usage(
-                            &worker_task_id,
-                            result.egress_profiles.clone(),
-                            Some(usage_summary),
-                        )
-                        .await;
-                    status_sink
-                        .finish_fusion_terminal(
-                            &worker_task_id,
-                            result.run_id.clone(),
-                            result.final_text.clone(),
-                            TaskStatus::Completed,
-                        )
-                        .await;
-                    sink.publish(&conversation_id, result).await;
-                }
-                Err(FusionError::Cancelled) => {
-                    status_sink
-                        .set_status(&worker_task_id, TaskStatus::Killed)
-                        .await;
-                }
-                Err(err) => {
-                    let _ = output_manager
-                        .append(&worker_spool_path, &err.to_string())
-                        .await;
-                    status_sink
-                        .set_fusion_error(&worker_task_id, err.to_string())
-                        .await;
-                    status_sink
-                        .set_status(&worker_task_id, TaskStatus::Failed)
-                        .await;
-                }
-            }
-            workers.lock().await.remove(&worker_task_id);
-        });
+            completion_signal: WorkerCompletionSignal::new(completion_tx),
+        }));
 
         let mut workers = self.workers.lock().await;
         let bg_handle = ctx
@@ -393,6 +473,7 @@ impl Task for LocalFusionHandler {
 }
 
 /// XML-escape `&`, `<`, `>`, `"`, `'`.
+#[must_use]
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -427,9 +508,10 @@ fn needs_parent_reason_label(reason: &platform_api::FusionNeedsParentReason) -> 
     }
 }
 
-/// Sanitized fusion-result envelope. No PanelReport, no raw provider errors,
+/// Sanitized fusion-result envelope. No `PanelReport`, no raw provider errors,
 /// no analyst payload, no model names (profile ids only, via
 /// `<egress-profiles>`).
+#[must_use]
 pub fn fusion_result_xml(result: &FusionResult) -> String {
     let status = match result.status {
         FusionStatus::Completed => "completed",

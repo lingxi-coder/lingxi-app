@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 /// 1 byte = 1 token is ONLY the missing-usage settlement fallback, never the
 /// reservation quote. Codex's original peak used 256 KiB for that mistake.
+// `budget` is a private module (see `fusion/src/lib.rs`), so this `pub` item
+// is unreachable outside the crate; it exists as a named regression
+// comparator for `mistaken_byte_input_tokens`'s tests, not dead API surface.
+#[allow(dead_code)]
 pub const CODEX_MISTAKEN_INPUT_BYTES_PER_TURN: u64 = 256 * 1024;
 
 /// Per-token / per-request rates for one model. `None` means unpriced.
@@ -56,6 +60,10 @@ pub struct FusionQuote {
 }
 
 /// Token counts the mistaken 1-byte-1-token formula would have reserved.
+// `budget` is a private module (see `fusion/src/lib.rs`), so this `pub` item
+// is unreachable outside the crate; it exists as a named regression
+// comparator for the corrected-quote tests below, not dead API surface.
+#[allow(dead_code)]
 #[must_use]
 pub fn mistaken_byte_input_tokens(panel_count: u8, panel_max_turns: u32) -> u64 {
     u64::from(panel_count)
@@ -228,7 +236,7 @@ impl ReservationLease {
         self.budget
             .commit_reservation(self.id, actual_nano_usd)
             .await
-            .map_err(map_budget_err)?;
+            .map_err(|err| map_budget_err(&err))?;
         self.disarmed = true;
         Ok(())
     }
@@ -285,11 +293,11 @@ pub async fn acquire(
             quote,
             disarmed: false,
         }),
-        Err(err) => Err(map_budget_err(err)),
+        Err(err) => Err(map_budget_err(&err)),
     }
 }
 
-fn map_budget_err(err: BudgetError) -> FusionError {
+fn map_budget_err(err: &BudgetError) -> FusionError {
     match err {
         BudgetError::Exceeded { .. } => FusionError::BudgetExceeded,
         BudgetError::Internal(_) => FusionError::BudgetReservationUnavailable,

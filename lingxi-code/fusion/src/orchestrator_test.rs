@@ -2103,22 +2103,14 @@ async fn run_reloads_the_config_source_between_consecutive_runs() {
     );
 }
 
-/// F011 round-2 blocking issue #2: `analyst_overlaps_panel` STARTED
-/// telemetry must agree with `resolve_analyst`'s selection rule by using the
-/// CANONICAL model key, not an exact (profile, model) pair — otherwise the
-/// flag lies in exactly the case it exists to catch (the analyst is the
-/// identical underlying model behind a second gateway).
-///
-/// "sol" is deliberately listed BARE under both "openai" and
-/// "openai-chatgpt" (no `vendor/` prefix), the same shape the checked-in
-/// hint table uses; the duplicate's cost_class is set to `Subscription`
-/// (cheapest) so it always wins the analyst tie-break regardless of whether
-/// the `is_panelist` selection fix (blocking issue #1 / a separate
-/// model_resolver test) is present — this test isolates the TELEMETRY bug
-/// specifically.
-#[tokio::test]
-async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
-    let panel_catalog = vec![
+/// Fixture for `analyst_overlaps_panel_telemetry_uses_canonical_model_key`:
+/// three high-rank, similarly-costed candidates plus a leftover gateway copy
+/// of the FIRST row's model (same wire model "sol", different profile,
+/// cheapest `cost_class`) — the case that used to fool the exact-pair
+/// `analyst_overlaps_panel` comparator. Split out purely to keep the test
+/// under the line-count lint.
+fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
+    vec![
         CatalogModel {
             profile: "openai".into(),
             model: "sol".into(),
@@ -2169,7 +2161,25 @@ async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
             },
             structured_output: true,
         },
-    ];
+    ]
+}
+
+/// F011 round-2 blocking issue #2: `analyst_overlaps_panel` STARTED
+/// telemetry must agree with `resolve_analyst`'s selection rule by using the
+/// CANONICAL model key, not an exact (profile, model) pair — otherwise the
+/// flag lies in exactly the case it exists to catch (the analyst is the
+/// identical underlying model behind a second gateway).
+///
+/// "sol" is deliberately listed BARE under both "openai" and
+/// "openai-chatgpt" (no `vendor/` prefix), the same shape the checked-in
+/// hint table uses; the duplicate's `cost_class` is set to `Subscription`
+/// (cheapest) so it always wins the analyst tie-break regardless of whether
+/// the `is_panelist` selection fix (blocking issue #1 / a separate
+/// `model_resolver` test) is present — this test isolates the TELEMETRY bug
+/// specifically.
+#[tokio::test]
+async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
+    let panel_catalog = leftover_gateway_panel_catalog();
     let explicit_request = FusionRequest {
         schema_version: 1,
         origin: FusionOrigin::Slash,

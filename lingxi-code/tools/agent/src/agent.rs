@@ -30,7 +30,8 @@ use platform_api::fusion::{
     FUSION_MIN_PANEL,
 };
 use platform_api::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnRequest,
+    StructuredOutputMode, SubagentInheritance, SubagentListingEntry, SubagentResult,
+    SubagentSpawnRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2147,7 +2148,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             fork_parent_system_prompt: None,
             // The Agent (Task) tool has no structured-output schema param.
             schema: None,
-            structured_output_mode: Default::default(),
+            structured_output_mode: StructuredOutputMode::default(),
             effort: None,
             // Thread the originating tool_use_id so the backgrounded agent's
             // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
@@ -3277,7 +3278,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 None
             },
             schema: None,
-            structured_output_mode: Default::default(),
+            structured_output_mode: StructuredOutputMode::default(),
             effort: None,
             // Sync spawn: no background task / notification, so no tool_use_id
             // to stamp (only the async/background path threads it).

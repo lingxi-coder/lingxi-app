@@ -145,10 +145,10 @@ impl FusionCompletionSink for DeferredFusionCompletionSink {
 /// Build the task-row description: `Fusion {preset} {scope}: <first line,
 /// first 80 chars>` instead of the raw, unbounded prompt (G012) — the prompt
 /// otherwise duplicates verbatim into `TaskCreated` hook payloads, `list()`,
-/// notifications, and the Electron detail pane / RuntimeCenter row title.
+/// notifications, and the Electron detail pane / `RuntimeCenter` row title.
 fn fusion_task_description(preset: &str, scope: &str, prompt: &str) -> String {
-    let first_line = prompt.lines().next().unwrap_or("");
     const MAX_CHARS: usize = 80;
+    let first_line = prompt.lines().next().unwrap_or("");
     let mut truncated: String = first_line.chars().take(MAX_CHARS).collect();
     if first_line.chars().count() > MAX_CHARS {
         truncated.push('…');

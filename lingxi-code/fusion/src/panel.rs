@@ -21,7 +21,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-/// Host-side view of one panel after JoinSet collection (pre-anonymization).
+/// Host-side view of one panel after `JoinSet` collection (pre-anonymization).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PanelInternal {
@@ -50,7 +50,7 @@ pub struct PanelInternal {
     pub spawn_prompt: String,
 }
 
-/// JSON Schema the hidden `fusion-panel` StructuredOutput tool must satisfy.
+/// JSON Schema the hidden `fusion-panel` `StructuredOutput` tool must satisfy.
 #[must_use]
 pub fn panel_report_json_schema() -> Value {
     serde_json::json!({
@@ -124,62 +124,38 @@ pub fn panel_report_json_schema() -> Value {
     })
 }
 
-/// Run every panel concurrently.
-///
-/// Cancel aborts the JoinSet and joins every task. Re-evaluates the panel bar
-/// after every completion (G004): once no combination of the still-running
-/// panels could reach `config.min_successful_panels` (or, when
-/// `!config.partial_ok`, as soon as any panel fails), the remaining siblings
-/// are aborted immediately rather than left to spend the full
-/// `panel_total_timeout_ms` paying a provider for a run that is already
-/// sealed. A panicked or aborted task's slot is synthesized from the
-/// `JoinError` (F012-join) so `result.len() == panels.len()` always holds —
-/// the bar and telemetry never silently lose a panel.
-///
-/// `overall_deadline` (F004 review fix) is what remains of the end-to-end
-/// `total_timeout_ms` budget at the moment the caller starts the panel stage
-/// (`FusionOrchestrator::remaining(started)`). Each panel's own timeout is
-/// `min(config.panel_total_timeout_ms, overall_deadline)` so a panel stage that
-/// would otherwise run past the whole-run deadline is cut off HERE — with
-/// whatever panels already finished kept in the returned `Vec` — instead of
-/// being cut off by the outer `run()` wrapper, which drops `run_inner` (and every
-/// panel result gathered so far) wholesale and degrades to `TimedOutEmpty` even
-/// when panels had already produced enough successful material for `NeedsParent`.
+/// One panel task's return payload: its index, the resolved panel identity,
+/// the prompt it was spawned with (needed to synthesize a panicked/aborted
+/// slot's [`PanelInternal`]), how long it ran, and how it finished.
+type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
+
+/// `run_panels` helper: spawn every panel's subagent task onto a fresh
+/// `JoinSet`, returning it plus a task-id → panel-index map (the collection
+/// loop needs this to recover a panicked/aborted task's identity — a join
+/// error loses the task's own return payload, F012-join). Split out purely
+/// to keep the caller under the line-count lint — same spawn shape, same
+/// per-panel timeout/cancel/watchdog wiring.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_panels(
-    spawner: Arc<dyn SubagentSpawner>,
+fn spawn_panel_tasks(
+    spawner: &Arc<dyn SubagentSpawner>,
     inherit: &FusionInheritance,
     config: &FusionRuntimeConfig,
-    task_prompt: &str,
     panels: &[ResolvedPanel],
     run_id: &str,
     overall_deadline: Duration,
-    progress: &Option<Sender<FusionProgress>>,
-) -> Result<Vec<PanelInternal>, FusionError> {
-    let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
-    let total = panels.len();
-    let min_successful = usize::from(
-        config
-            .min_successful_panels
-            .min(u8::try_from(total).unwrap_or(u8::MAX)),
-    )
-    .max(usize::from(FUSION_MIN_PANEL))
-    .min(total);
-    // Every panel's prompt is identical (panels are anonymized to each
-    // other, so the task text never varies by identity) — built once and
-    // reused both for spawning and for synthesizing a panicked/aborted slot.
-    let generic_prompt = panel_prompt(task_prompt);
-    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
-
+    schema: &str,
+    generic_prompt: &str,
+    max_input_bytes: u64,
+) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut join_set = JoinSet::new();
-    let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(total);
+    let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(panels.len());
     for (index, panel) in panels.iter().cloned().enumerate() {
-        let spawner = Arc::clone(&spawner);
+        let spawner = Arc::clone(spawner);
         let subagent = inherit.subagent.clone();
         let cancel = inherit.cancel.clone();
-        let prompt = generic_prompt.clone();
+        let prompt = generic_prompt.to_string();
         let spawn_prompt = prompt.clone();
-        let schema = schema.clone();
+        let schema = schema.to_string();
         let run_id = run_id.to_string();
         let max_turns = config.panel_max_turns;
         let max_out = config.panel_max_output_tokens_per_turn;
@@ -232,6 +208,67 @@ pub async fn run_panels(
         });
         task_index.insert(abort_handle.id(), index);
     }
+    (join_set, task_index)
+}
+
+/// Run every panel concurrently.
+///
+/// Cancel aborts the `JoinSet` and joins every task. Re-evaluates the panel bar
+/// after every completion (G004): once no combination of the still-running
+/// panels could reach `config.min_successful_panels` (or, when
+/// `!config.partial_ok`, as soon as any panel fails), the remaining siblings
+/// are aborted immediately rather than left to spend the full
+/// `panel_total_timeout_ms` paying a provider for a run that is already
+/// sealed. A panicked or aborted task's slot is synthesized from the
+/// `JoinError` (F012-join) so `result.len() == panels.len()` always holds —
+/// the bar and telemetry never silently lose a panel.
+///
+/// `overall_deadline` (F004 review fix) is what remains of the end-to-end
+/// `total_timeout_ms` budget at the moment the caller starts the panel stage
+/// (`FusionOrchestrator::remaining(started)`). Each panel's own timeout is
+/// `min(config.panel_total_timeout_ms, overall_deadline)` so a panel stage that
+/// would otherwise run past the whole-run deadline is cut off HERE — with
+/// whatever panels already finished kept in the returned `Vec` — instead of
+/// being cut off by the outer `run()` wrapper, which drops `run_inner` (and every
+/// panel result gathered so far) wholesale and degrades to `TimedOutEmpty` even
+/// when panels had already produced enough successful material for `NeedsParent`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_panels(
+    spawner: Arc<dyn SubagentSpawner>,
+    inherit: &FusionInheritance,
+    config: &FusionRuntimeConfig,
+    task_prompt: &str,
+    panels: &[ResolvedPanel],
+    run_id: &str,
+    overall_deadline: Duration,
+    progress: &Option<Sender<FusionProgress>>,
+) -> Result<Vec<PanelInternal>, FusionError> {
+    let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
+    let total = panels.len();
+    let min_successful = usize::from(
+        config
+            .min_successful_panels
+            .min(u8::try_from(total).unwrap_or(u8::MAX)),
+    )
+    .max(usize::from(FUSION_MIN_PANEL))
+    .min(total);
+    // Every panel's prompt is identical (panels are anonymized to each
+    // other, so the task text never varies by identity) — built once and
+    // reused both for spawning and for synthesizing a panicked/aborted slot.
+    let generic_prompt = panel_prompt(task_prompt);
+    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
+
+    let (mut join_set, task_index) = spawn_panel_tasks(
+        &spawner,
+        inherit,
+        config,
+        panels,
+        run_id,
+        overall_deadline,
+        &schema,
+        &generic_prompt,
+        max_input_bytes,
+    );
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
     let mut succeeded = 0usize;
@@ -260,7 +297,7 @@ pub async fn run_panels(
                         // before the stage starts) so the longest stage of a
                         // run — up to `panel_total_timeout_ms` per panel — has
                         // visible progress instead of a single stalled event.
-                        emit_running_panels(progress, index, collected.len(), total).await;
+                        emit_running_panels(progress, index, collected.len(), total);
                     }
                     Some(Err(join_err)) => {
                         // A panicked or (post-abort) cancelled task loses its
@@ -283,7 +320,7 @@ pub async fn run_panels(
                             );
                             failed += 1;
                             collected.push((index, internal));
-                            emit_running_panels(progress, index, collected.len(), total).await;
+                            emit_running_panels(progress, index, collected.len(), total);
                         }
                     }
                     None => break,
@@ -310,7 +347,7 @@ pub async fn run_panels(
 /// caller's side after this returns), so `panel_id` is the pre-shuffle spawn
 /// slot (`p{index+1}`) — an identifier for progress purposes only, never
 /// exposed as the panel's real anonymous id.
-async fn emit_running_panels(
+fn emit_running_panels(
     progress: &Option<Sender<FusionProgress>>,
     finished_index: usize,
     completed: usize,
@@ -325,8 +362,7 @@ async fn emit_running_panels(
         stage.clone(),
         Some(format!("p{}", finished_index + 1)),
         stage.label(),
-    )
-    .await;
+    );
 }
 
 enum PanelFinish {
@@ -414,17 +450,13 @@ fn finish_panel(
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("timeout".into());
         }
-        PanelFinish::Cancelled => {
+        PanelFinish::Cancelled | PanelFinish::Done(SubagentResult::Killed { .. }) => {
             internal.status = PanelRunStatus::Cancelled;
             internal.error_category = Some("cancelled".into());
         }
         PanelFinish::Failed { category, detail } => {
             internal.error_category = Some(category);
             internal.error_detail = detail;
-        }
-        PanelFinish::Done(SubagentResult::Killed { .. }) => {
-            internal.status = PanelRunStatus::Cancelled;
-            internal.error_category = Some("cancelled".into());
         }
         PanelFinish::Done(SubagentResult::Failed { reason, .. })
             if is_query_watchdog_timeout(&reason) =>
@@ -608,7 +640,11 @@ fn seed_from(s: &str) -> u64 {
 fn shuffle(items: &mut [usize], mut state: u64) {
     for i in (1..items.len()).rev() {
         state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
-        let j = (state as usize) % (i + 1);
+        // Reduce mod (i+1) in u64 BEFORE narrowing to usize: the result is
+        // always < i+1 (which already fits usize, being a valid index bound),
+        // so converting the wide `state` first would truncate on a 32-bit
+        // target and skew the distribution before the modulo ever ran.
+        let j = usize::try_from(state % (i as u64 + 1)).unwrap_or(0);
         items.swap(i, j);
     }
 }

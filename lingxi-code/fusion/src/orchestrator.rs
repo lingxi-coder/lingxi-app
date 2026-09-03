@@ -1,10 +1,10 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
 use crate::analyst::{analyze, AnalystError};
-use crate::budget::{self, FusionPriceBook};
+use crate::budget::{self, FusionPriceBook, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
-use crate::model_resolver::{self, ModelSource, ResolvedPanel};
+use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
 use crate::panel::{self, PanelInternal};
 use crate::progress;
 use crate::synthesizer::{synthesize, SynthError};
@@ -59,6 +59,21 @@ pub struct FusionOrchestrator {
     bus: Arc<AnalyticsBus>,
 }
 
+/// Return value of [`FusionOrchestrator::analyze_and_decide`]: the resolved
+/// decision plus everything `run_inner`'s finalize step needs afterward
+/// (timing for [`FusionTiming`], the running [`FusionUsage`], and the priced
+/// analyst/synth call usage `price_realized_usage` needs).
+struct AnalysisOutcome {
+    decision: FusionDecision,
+    final_text: String,
+    analysis: Option<FusionAnalysis>,
+    analyst_ms: u64,
+    synthesizer_ms: u64,
+    usage: FusionUsage,
+    priced_analyst: Option<(cost::Usage, u32)>,
+    priced_synth: Option<cost::Usage>,
+}
+
 impl FusionOrchestrator {
     /// Build an orchestrator from composition-root handles.
     ///
@@ -106,22 +121,24 @@ impl FusionOrchestrator {
         Duration::from_millis(config.total_timeout_ms.saturating_sub(millis_since(started)))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn run_inner(
+    /// `run_inner` stage 1/3: validate the request, resolve the panel/analyst
+    /// set, emit `STARTED`, then quote and reserve the budget hold. Split out
+    /// of `run_inner` purely to keep that function under the line-count lint
+    /// — same telemetry, same ordering, same early-return-on-error shape.
+    async fn resolve_and_reserve(
         &self,
         config: &FusionRuntimeConfig,
         request: FusionRequest,
-        inherit: FusionInheritance,
-        progress: Option<Sender<FusionProgress>>,
-        run_id: String,
-        started: Instant,
-    ) -> Result<FusionResult, FusionError> {
+        inherit: &FusionInheritance,
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+    ) -> Result<(FusionRequest, ResolvedSet, ReservationLease), FusionError> {
         let request_for_fail = request.clone();
         let request = match validate_request(request) {
             Ok(request) => request,
             Err(error) => {
                 let mut md = fusion_event_metadata(&request_for_fail);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
                 add_fusion_error_metadata(&mut md, &error);
                 self.bus
                     .log_event(telemetry::tengu::fusion::FAILED, md)
@@ -130,18 +147,17 @@ impl FusionOrchestrator {
             }
         };
         progress::emit(
-            &progress,
+            progress,
             FusionStage::ResolvingModels,
             None,
             FusionStage::ResolvingModels.label(),
-        )
-        .await;
+        );
         let resolved = match model_resolver::resolve(&request, config, self.catalog.as_ref())
         {
             Ok(resolved) => resolved,
             Err(error) => {
                 let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
                 add_fusion_error_metadata(&mut md, &error);
                 self.bus
                     .log_event(telemetry::tengu::fusion::FAILED, md)
@@ -149,43 +165,13 @@ impl FusionOrchestrator {
                 return Err(error);
             }
         };
-        {
-            let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-            md.insert(
-                "panel_count".into(),
-                AnalyticsValue::Int(resolved.panels.len() as i64),
-            );
-            md.insert(
-                "analyst_profile".into(),
-                AnalyticsValue::String(resolved.analyst.profile.clone()),
-            );
-            // F011 item 3: surface whether `resolve_analyst` had to fall back
-            // to a panelist judge (no non-panelist alternative existed) so
-            // operators can see how often the self-preference-bias avoidance
-            // actually applies. Round-2 fix: compare the CANONICAL model key
-            // (same helper `resolve_analyst`'s `is_panelist` uses), not the
-            // exact (profile, model) pair — otherwise this flag disagrees
-            // with the selection rule and reports `false` for exactly the
-            // leftover-gateway-duplicate case it exists to catch.
-            md.insert(
-                "analyst_overlaps_panel".into(),
-                AnalyticsValue::Bool(resolved.panels.iter().any(|panel| {
-                    model_resolver::canonical_key(&panel.model)
-                        == model_resolver::canonical_key(&resolved.analyst.model)
-                })),
-            );
-            self.bus
-                .log_event(telemetry::tengu::fusion::STARTED, md)
-                .await;
-        }
+        self.emit_started(&request, &resolved, run_id).await;
         progress::emit(
-            &progress,
+            progress,
             FusionStage::ReservingBudget,
             None,
             FusionStage::ReservingBudget.label(),
-        )
-        .await;
+        );
         let lease = match budget::acquire(
             config,
             &resolved,
@@ -199,10 +185,10 @@ impl FusionOrchestrator {
             Ok(lease) => lease,
             Err(error) => {
                 let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
                 md.insert(
                     "panel_count".into(),
-                    AnalyticsValue::Int(resolved.panels.len() as i64),
+                    AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
                 );
                 add_fusion_error_metadata(&mut md, &error);
                 self.bus
@@ -214,10 +200,10 @@ impl FusionOrchestrator {
 
         if inherit.cancel.is_cancelled() {
             let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+            md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
             md.insert(
                 "panel_count".into(),
-                AnalyticsValue::Int(resolved.panels.len() as i64),
+                AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
             );
             self.bus
                 .log_event(telemetry::tengu::fusion::CANCELLED, md)
@@ -225,6 +211,60 @@ impl FusionOrchestrator {
             return Err(FusionError::Cancelled);
         }
 
+        Ok((request, resolved, lease))
+    }
+
+    /// `resolve_and_reserve` helper: emit the `STARTED` telemetry event once
+    /// the panel/analyst set is resolved. Split out purely to keep the
+    /// caller under the line-count lint.
+    async fn emit_started(&self, request: &FusionRequest, resolved: &ResolvedSet, run_id: &str) {
+        let mut md = fusion_event_metadata(request);
+        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        md.insert(
+            "panel_count".into(),
+            AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
+        );
+        md.insert(
+            "analyst_profile".into(),
+            AnalyticsValue::String(resolved.analyst.profile.clone()),
+        );
+        // F011 item 3: surface whether `resolve_analyst` had to fall back to
+        // a panelist judge (no non-panelist alternative existed) so
+        // operators can see how often the self-preference-bias avoidance
+        // actually applies. Round-2 fix: compare the CANONICAL model key
+        // (same helper `resolve_analyst`'s `is_panelist` uses), not the
+        // exact (profile, model) pair — otherwise this flag disagrees with
+        // the selection rule and reports `false` for exactly the
+        // leftover-gateway-duplicate case it exists to catch.
+        md.insert(
+            "analyst_overlaps_panel".into(),
+            AnalyticsValue::Bool(resolved.panels.iter().any(|panel| {
+                model_resolver::canonical_key(&panel.model)
+                    == model_resolver::canonical_key(&resolved.analyst.model)
+            })),
+        );
+        self.bus
+            .log_event(telemetry::tengu::fusion::STARTED, md)
+            .await;
+    }
+
+    /// `run_inner` stage 2/3: run every panel (concurrent, progress-emitting)
+    /// and its per-panel telemetry, then anonymize. Split out of `run_inner`
+    /// purely to keep that function under the line-count lint — same
+    /// telemetry, same ordering, same early-return-on-error shape. The panel
+    /// bar check itself stays in `run_inner` (it needs `request` and `config`
+    /// alongside the returned panels/duration).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_panel_stage(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        inherit: &FusionInheritance,
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+        started: Instant,
+    ) -> Result<(Vec<PanelInternal>, u64), FusionError> {
         let panel_started = Instant::now();
         let panel_total = u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX);
         let initial_running_stage = FusionStage::RunningPanels {
@@ -232,16 +272,15 @@ impl FusionOrchestrator {
             total: panel_total,
         };
         progress::emit(
-            &progress,
+            progress,
             initial_running_stage.clone(),
             None,
             initial_running_stage.label(),
-        )
-        .await;
+        );
         for (index, _) in resolved.panels.iter().enumerate() {
-            let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-            md.insert("panel_slot".into(), AnalyticsValue::Int((index + 1) as i64));
+            let mut md = fusion_event_metadata(request);
+            md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+            md.insert("panel_slot".into(), AnalyticsValue::Int(saturating_i64(index + 1)));
             self.bus
                 .log_event(telemetry::tengu::fusion::PANEL_STARTED, md)
                 .await;
@@ -253,23 +292,23 @@ impl FusionOrchestrator {
         // duration.
         let mut panels = match panel::run_panels(
             Arc::clone(&self.spawner),
-            &inherit,
+            inherit,
             config,
             &request.prompt,
             &resolved.panels,
-            &run_id,
+            run_id,
             Self::remaining(config, started),
-            &progress,
+            progress,
         )
         .await
         {
             Ok(panels) => panels,
             Err(error) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+                let mut md = fusion_event_metadata(request);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
                 md.insert(
                     "panel_count".into(),
-                    AnalyticsValue::Int(resolved.panels.len() as i64),
+                    AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
                 );
                 if matches!(error, FusionError::Cancelled) {
                     self.bus
@@ -284,18 +323,18 @@ impl FusionOrchestrator {
                 return Err(error);
             }
         };
-        panel::anonymize(&mut panels, &run_id);
+        panel::anonymize(&mut panels, run_id);
         let panels_ms = millis_since(panel_started);
         for panel in &panels {
-            let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+            let mut md = fusion_event_metadata(request);
+            md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
             md.insert(
                 "panel_id".into(),
                 AnalyticsValue::String(panel.anonymous_id.clone()),
             );
             md.insert(
                 "duration_ms".into(),
-                AnalyticsValue::Int(panel.duration_ms as i64),
+                AnalyticsValue::Int(saturating_i64(panel.duration_ms)),
             );
             md.insert(
                 "status".into(),
@@ -325,11 +364,34 @@ impl FusionOrchestrator {
             };
             self.bus.log_event(event, md).await;
         }
+        Ok((panels, panels_ms))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        progress: Option<Sender<FusionProgress>>,
+        run_id: String,
+        started: Instant,
+    ) -> Result<FusionResult, FusionError> {
+        let (request, resolved, lease) = self
+            .resolve_and_reserve(config, request, &inherit, &progress, &run_id)
+            .await?;
+
+        let (panels, panels_ms) = self
+            .run_panel_stage(config, &request, &resolved, &inherit, &progress, &run_id, started)
+            .await?;
         if let Err(error) = check_panel_bar(&panels, &request, config) {
             let mut md = fusion_event_metadata(&request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
             add_panel_counts(&mut md, &panels);
-            md.insert("duration_ms".into(), AnalyticsValue::Int(panels_ms as i64));
+            md.insert(
+                "duration_ms".into(),
+                AnalyticsValue::Int(saturating_i64(panels_ms)),
+            );
             add_fusion_error_metadata(&mut md, &error);
             let event = if matches!(error, FusionError::Cancelled) {
                 telemetry::tengu::fusion::CANCELLED
@@ -340,278 +402,45 @@ impl FusionOrchestrator {
             return Err(error);
         }
 
-        progress::emit(
-            &progress,
-            FusionStage::Analyzing,
-            None,
-            FusionStage::Analyzing.label(),
-        )
-        .await;
-        let analyst_started = Instant::now();
-        // F004: bound the analyst stage by what actually remains of the
-        // end-to-end deadline, not just its own `analystTimeoutMs` budget —
-        // `analyze`'s own internal retry loop can otherwise run past `total`
-        // before the outer `run()` timeout ever gets polled (nested
-        // `tokio::time::timeout`s always poll their inner future first, so
-        // this always resolves before — never after — that outer wrapper).
-        // Reusing `AnalystError::Failed("timeout")` here folds this into the
-        // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
-        // below.
-        let remaining_for_analyst = Self::remaining(config, started);
-        let analysis_outcome = match tokio::time::timeout(
-            remaining_for_analyst,
-            analyze(
-                Arc::clone(&self.side_query),
-                config,
-                &request,
-                &resolved.analyst,
-                &panels,
-            ),
+        let outcome = self
+            .analyze_and_decide(config, &request, &resolved, &panels, &progress, &run_id, started)
+            .await;
+
+        self.finalize_result(
+            outcome, &resolved, &request, &panels, panels_ms, lease, &progress, run_id, started,
         )
         .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => Err(AnalystError::Failed("timeout".into())),
-        };
-        let analyst_ms = millis_since(analyst_started);
+    }
 
-        let mut usage = aggregate_panel_usage(&panels);
-        // Captured inside the match arms below so `price_realized_usage` (run
-        // after the decision is known) can price the analyst/synth calls
-        // against their OWN model/profile — a session-wide CostTracker delta
-        // cannot tell Fusion's spend apart from a concurrent parent turn's.
-        let mut priced_analyst: Option<(cost::Usage, u32)> = None;
-        let mut priced_synth: Option<cost::Usage> = None;
-        let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
-            Err(AnalystError::ParseFailed) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                add_panel_counts(&mut md, &panels);
-                md.insert("duration_ms".into(), AnalyticsValue::Int(analyst_ms as i64));
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("analysis_parse_failed".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
-                    .await;
-                (
-                    FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::AnalysisParseFailed,
-                    },
-                    needs_parent_text(&panels, "analyst JSON could not be parsed", None),
-                    None,
-                    0,
-                )
-            }
-            // F004: previously a hard `Err` after every panel had already been
-            // paid for. Reachable only when the catalog's `judge_eligible`
-            // hint was wrong for the model `model_resolver::resolve` picked
-            // (the preflight check there is the normal gate) — degrade to
-            // NeedsParent like every other post-panel analyst failure instead
-            // of throwing the panel material away.
-            Err(AnalystError::Unsupported) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                add_panel_counts(&mut md, &panels);
-                md.insert("duration_ms".into(), AnalyticsValue::Int(analyst_ms as i64));
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("structured_output_unsupported".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
-                    .await;
-                (
-                    FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::AnalysisFailed {
-                            category: "structured_output_unsupported".into(),
-                        },
-                    },
-                    needs_parent_text(
-                        &panels,
-                        "analyst structured output is unsupported",
-                        None,
-                    ),
-                    None,
-                    0,
-                )
-            }
-            Err(AnalystError::Failed(category)) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                add_panel_counts(&mut md, &panels);
-                md.insert("duration_ms".into(), AnalyticsValue::Int(analyst_ms as i64));
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("analysis_failed".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
-                    .await;
-                (
-                    FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::AnalysisFailed {
-                            category: category.clone(),
-                        },
-                    },
-                    needs_parent_text(
-                        &panels,
-                        &format!("analyst call failed: {category}"),
-                        None,
-                    ),
-                    None,
-                    0,
-                )
-            }
-            Ok((analysis, analyst_usage, analyst_calls)) => {
-                add_cost_usage(&mut usage, &analyst_usage, analyst_calls);
-                priced_analyst = Some((analyst_usage, analyst_calls));
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                add_panel_counts(&mut md, &panels);
-                md.insert("duration_ms".into(), AnalyticsValue::Int(analyst_ms as i64));
-                add_usage_metadata(&mut md, &usage);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::ANALYSIS_COMPLETED, md)
-                    .await;
-                match interpret(&analysis, &panels) {
-                    HostDecision::Pick { panel_id } => {
-                        progress::emit(
-                            &progress,
-                            FusionStage::Selecting,
-                            Some(panel_id.clone()),
-                            FusionStage::Selecting.label(),
-                        )
-                        .await;
-                        let text = panel_by_id(&panels, &panel_id)
-                            .and_then(|panel| panel.report.as_ref())
-                            .map(|report| report.candidate_answer.clone())
-                            .unwrap_or_else(|| {
-                                needs_parent_text(
-                                    &panels,
-                                    "picked panel had no candidate",
-                                    Some(&analysis),
-                                )
-                            });
-                        (FusionDecision::Picked { panel_id }, text, Some(analysis), 0)
-                    }
-                    HostDecision::NeedsParent { reason } => {
-                        let summary =
-                            needs_parent_text(&panels, &reason_line(&reason), Some(&analysis));
-                        (
-                            FusionDecision::NeedsParent { reason },
-                            summary,
-                            Some(analysis),
-                            0,
-                        )
-                    }
-                    HostDecision::Merge => {
-                        progress::emit(
-                            &progress,
-                            FusionStage::Synthesizing,
-                            None,
-                            FusionStage::Synthesizing.label(),
-                        )
-                        .await;
-                        let synth_started = Instant::now();
-                        // F004: same remaining-budget bound as the analyst
-                        // stage above, so a hanging synthesizer degrades to
-                        // NeedsParent (SynthesisTimedOut, which already
-                        // exists) rather than letting the run blow past
-                        // `total_timeout_ms` and lose everything to the outer
-                        // `TimedOutEmpty`.
-                        let remaining_for_synth = Self::remaining(config, started);
-                        let synth = match tokio::time::timeout(
-                            remaining_for_synth,
-                            synthesize(
-                                Arc::clone(&self.side_query),
-                                config,
-                                &request,
-                                &analysis,
-                                &panels,
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(outcome) => outcome,
-                            Err(_) => Err(SynthError::TimedOut),
-                        };
-                        let synthesizer_ms = millis_since(synth_started);
-                        match synth {
-                            Ok((text, synth_usage)) => {
-                                add_cost_usage(&mut usage, &synth_usage, 1);
-                                priced_synth = Some(synth_usage);
-                                let mut md = fusion_event_metadata(&request);
-                                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                                add_panel_counts(&mut md, &panels);
-                                md.insert(
-                                    "duration_ms".into(),
-                                    AnalyticsValue::Int(synthesizer_ms as i64),
-                                );
-                                add_usage_metadata(&mut md, &usage);
-                                self.bus
-                                    .log_event(telemetry::tengu::fusion::SYNTHESIS_COMPLETED, md)
-                                    .await;
-                                (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
-                            }
-                            Err(SynthError::TimedOut) => {
-                                let mut md = fusion_event_metadata(&request);
-                                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                                add_panel_counts(&mut md, &panels);
-                                md.insert(
-                                    "duration_ms".into(),
-                                    AnalyticsValue::Int(synthesizer_ms as i64),
-                                );
-                                md.insert(
-                                    "error".into(),
-                                    AnalyticsValue::String("synthesis_timed_out".into()),
-                                );
-                                self.bus
-                                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
-                                    .await;
-                                (
-                                    FusionDecision::NeedsParent {
-                                        reason: FusionNeedsParentReason::SynthesisTimedOut,
-                                    },
-                                    needs_parent_text(
-                                        &panels,
-                                        "synthesizer timed out",
-                                        Some(&analysis),
-                                    ),
-                                    Some(analysis),
-                                    synthesizer_ms,
-                                )
-                            }
-                            Err(SynthError::Failed) => {
-                                let mut md = fusion_event_metadata(&request);
-                                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                                add_panel_counts(&mut md, &panels);
-                                md.insert(
-                                    "duration_ms".into(),
-                                    AnalyticsValue::Int(synthesizer_ms as i64),
-                                );
-                                md.insert(
-                                    "error".into(),
-                                    AnalyticsValue::String("synthesis_failed".into()),
-                                );
-                                self.bus
-                                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
-                                    .await;
-                                (
-                                    FusionDecision::NeedsParent {
-                                        reason: FusionNeedsParentReason::SynthesisFailed,
-                                    },
-                                    needs_parent_text(&panels, "synthesizer failed", Some(&analysis)),
-                                    Some(analysis),
-                                    synthesizer_ms,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        };
+    /// `run_inner`'s tail: emit the terminal progress stage, compute the
+    /// egress profile list, price + commit the actual spend against the
+    /// lease, emit `COMPLETED` telemetry, and assemble the [`FusionResult`].
+    /// Split out of `run_inner` purely to keep that function under the
+    /// line-count lint — same telemetry, same ordering, same
+    /// early-return-on-error shape.
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_result(
+        &self,
+        outcome: AnalysisOutcome,
+        resolved: &ResolvedSet,
+        request: &FusionRequest,
+        panels: &[PanelInternal],
+        panels_ms: u64,
+        lease: ReservationLease,
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: String,
+        started: Instant,
+    ) -> Result<FusionResult, FusionError> {
+        let AnalysisOutcome {
+            decision,
+            final_text,
+            analysis,
+            analyst_ms,
+            synthesizer_ms,
+            mut usage,
+            priced_analyst,
+            priced_synth,
+        } = outcome;
 
         let status = match &decision {
             FusionDecision::NeedsParent { .. } => FusionStatus::NeedsParent,
@@ -621,7 +450,7 @@ impl FusionOrchestrator {
             FusionStatus::Completed => FusionStage::Completed,
             FusionStatus::NeedsParent => FusionStage::NeedsParent,
         };
-        progress::emit(&progress, stage.clone(), None, stage.label()).await;
+        progress::emit(progress, stage.clone(), None, stage.label());
 
         let mut egress: Vec<String> = resolved
             .panels
@@ -639,7 +468,7 @@ impl FusionOrchestrator {
         let (priced_nano_usd, priced_estimated) = price_realized_usage(
             self.catalog.as_ref(),
             self.prices.as_ref(),
-            &panels,
+            panels,
             &resolved.analyst,
             priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
             &request.parent_profile,
@@ -649,14 +478,14 @@ impl FusionOrchestrator {
         usage.realized_nano_usd = priced_nano_usd;
         usage.estimated = usage.estimated || priced_estimated;
         if let Err(error) = lease.commit(usage.realized_nano_usd).await {
-            let mut md = fusion_event_metadata(&request);
+            let mut md = fusion_event_metadata(request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-            add_panel_counts(&mut md, &panels);
+            add_panel_counts(&mut md, panels);
             add_usage_metadata(&mut md, &usage);
             add_egress_metadata(&mut md, &egress);
             md.insert(
                 "duration_ms".into(),
-                AnalyticsValue::Int(millis_since(started) as i64),
+                AnalyticsValue::Int(saturating_i64(millis_since(started))),
             );
             add_fusion_error_metadata(&mut md, &error);
             self.bus
@@ -671,38 +500,7 @@ impl FusionOrchestrator {
             analyst_ms,
             synthesizer_ms,
         };
-        let decision_label = match &decision {
-            FusionDecision::Picked { .. } => "picked",
-            FusionDecision::Merged => "merged",
-            FusionDecision::NeedsParent { .. } => "needs_parent",
-        };
-        let mut completion_md = fusion_event_metadata(&request);
-        completion_md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-        add_panel_counts(&mut completion_md, &panels);
-        add_usage_metadata(&mut completion_md, &usage);
-        add_egress_metadata(&mut completion_md, &egress);
-        completion_md.insert(
-            "decision".into(),
-            AnalyticsValue::String(decision_label.to_string()),
-        );
-        completion_md.insert(
-            "duration_ms".into(),
-            AnalyticsValue::Int(timing.total_ms as i64),
-        );
-        completion_md.insert(
-            "panels_duration_ms".into(),
-            AnalyticsValue::Int(timing.panels_ms as i64),
-        );
-        completion_md.insert(
-            "analysis_duration_ms".into(),
-            AnalyticsValue::Int(timing.analyst_ms as i64),
-        );
-        completion_md.insert(
-            "synthesis_duration_ms".into(),
-            AnalyticsValue::Int(timing.synthesizer_ms as i64),
-        );
-        self.bus
-            .log_event(telemetry::tengu::fusion::COMPLETED, completion_md)
+        self.emit_completed(request, panels, &run_id, &usage, &egress, &decision, &timing)
             .await;
 
         Ok(FusionResult {
@@ -717,6 +515,420 @@ impl FusionOrchestrator {
             timing,
             egress_profiles: egress,
         })
+    }
+
+    /// `finalize_result` helper: emit the `COMPLETED` telemetry event once
+    /// the lease has committed. Split out purely to keep the caller under
+    /// the line-count lint.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_completed(
+        &self,
+        request: &FusionRequest,
+        panels: &[PanelInternal],
+        run_id: &str,
+        usage: &FusionUsage,
+        egress: &[String],
+        decision: &FusionDecision,
+        timing: &FusionTiming,
+    ) {
+        let decision_label = match decision {
+            FusionDecision::Picked { .. } => "picked",
+            FusionDecision::Merged => "merged",
+            FusionDecision::NeedsParent { .. } => "needs_parent",
+        };
+        let mut completion_md = fusion_event_metadata(request);
+        completion_md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        add_panel_counts(&mut completion_md, panels);
+        add_usage_metadata(&mut completion_md, usage);
+        add_egress_metadata(&mut completion_md, egress);
+        completion_md.insert(
+            "decision".into(),
+            AnalyticsValue::String(decision_label.to_string()),
+        );
+        completion_md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(timing.total_ms)),
+        );
+        completion_md.insert(
+            "panels_duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(timing.panels_ms)),
+        );
+        completion_md.insert(
+            "analysis_duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(timing.analyst_ms)),
+        );
+        completion_md.insert(
+            "synthesis_duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(timing.synthesizer_ms)),
+        );
+        self.bus
+            .log_event(telemetry::tengu::fusion::COMPLETED, completion_md)
+            .await;
+    }
+
+    /// `run_inner` stage 3/3: run the analyst, `interpret` its verdict, and
+    /// (on `Merge`) run the synthesizer — all the telemetry and `NeedsParent`
+    /// degradation paths for each. Split out of `run_inner` purely to keep
+    /// that function under the line-count lint; unlike stages 1/2 this one
+    /// never fails the run outright (every branch produces a decision, even
+    /// if it is `NeedsParent`), so it returns a plain [`AnalysisOutcome`]
+    /// rather than a `Result`.
+    #[allow(clippy::too_many_arguments)]
+    async fn analyze_and_decide(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        panels: &[PanelInternal],
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+        started: Instant,
+    ) -> AnalysisOutcome {
+        progress::emit(
+            progress,
+            FusionStage::Analyzing,
+            None,
+            FusionStage::Analyzing.label(),
+        );
+        let (analysis_outcome, analyst_ms) = self
+            .run_analyst_call(config, request, resolved, panels, started)
+            .await;
+
+        let mut usage = aggregate_panel_usage(panels);
+        // Captured inside the match arms below so `price_realized_usage` (run
+        // after the decision is known) can price the analyst/synth calls
+        // against their OWN model/profile — a session-wide CostTracker delta
+        // cannot tell Fusion's spend apart from a concurrent parent turn's.
+        let mut priced_analyst: Option<(cost::Usage, u32)> = None;
+        let mut priced_synth: Option<cost::Usage> = None;
+        let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
+            Err(AnalystError::ParseFailed) => {
+                self.analysis_failed_outcome(
+                    request,
+                    panels,
+                    run_id,
+                    analyst_ms,
+                    FusionNeedsParentReason::AnalysisParseFailed,
+                    "analysis_parse_failed",
+                    "analyst JSON could not be parsed",
+                )
+                .await
+            }
+            // F004: previously a hard `Err` after every panel had already been
+            // paid for. Reachable only when the catalog's `judge_eligible`
+            // hint was wrong for the model `model_resolver::resolve` picked
+            // (the preflight check there is the normal gate) — degrade to
+            // NeedsParent like every other post-panel analyst failure instead
+            // of throwing the panel material away.
+            Err(AnalystError::Unsupported) => {
+                self.analysis_failed_outcome(
+                    request,
+                    panels,
+                    run_id,
+                    analyst_ms,
+                    FusionNeedsParentReason::AnalysisFailed {
+                        category: "structured_output_unsupported".into(),
+                    },
+                    "structured_output_unsupported",
+                    "analyst structured output is unsupported",
+                )
+                .await
+            }
+            Err(AnalystError::Failed(category)) => {
+                self.analysis_failed_outcome(
+                    request,
+                    panels,
+                    run_id,
+                    analyst_ms,
+                    FusionNeedsParentReason::AnalysisFailed {
+                        category: category.clone(),
+                    },
+                    "analysis_failed",
+                    &format!("analyst call failed: {category}"),
+                )
+                .await
+            }
+            Ok((analysis, analyst_usage, analyst_calls)) => {
+                self.handle_analyst_success(
+                    config,
+                    request,
+                    panels,
+                    progress,
+                    run_id,
+                    started,
+                    analyst_ms,
+                    analysis,
+                    analyst_usage,
+                    analyst_calls,
+                    &mut usage,
+                    &mut priced_analyst,
+                    &mut priced_synth,
+                )
+                .await
+            }
+        };
+
+        AnalysisOutcome {
+            decision,
+            final_text,
+            analysis,
+            analyst_ms,
+            synthesizer_ms,
+            usage,
+            priced_analyst,
+            priced_synth,
+        }
+    }
+
+    /// `analyze_and_decide` helper: the `Ok` arm of the analyst-call match —
+    /// price the analyst usage, emit `ANALYSIS_COMPLETED`, `interpret` the
+    /// verdict, and dispatch `Pick`/`NeedsParent`/`Merge`. Split out purely
+    /// to keep the caller under the line-count lint — same telemetry, same
+    /// ordering.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_analyst_success(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        panels: &[PanelInternal],
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+        started: Instant,
+        analyst_ms: u64,
+        analysis: FusionAnalysis,
+        analyst_usage: cost::Usage,
+        analyst_calls: u32,
+        usage: &mut FusionUsage,
+        priced_analyst: &mut Option<(cost::Usage, u32)>,
+        priced_synth: &mut Option<cost::Usage>,
+    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+        add_cost_usage(usage, &analyst_usage, analyst_calls);
+        *priced_analyst = Some((analyst_usage, analyst_calls));
+        let mut md = fusion_event_metadata(request);
+        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        add_panel_counts(&mut md, panels);
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(analyst_ms)),
+        );
+        add_usage_metadata(&mut md, usage);
+        self.bus
+            .log_event(telemetry::tengu::fusion::ANALYSIS_COMPLETED, md)
+            .await;
+        match interpret(&analysis, panels) {
+            HostDecision::Pick { panel_id } => {
+                progress::emit(
+                    progress,
+                    FusionStage::Selecting,
+                    Some(panel_id.clone()),
+                    FusionStage::Selecting.label(),
+                );
+                let text = panel_by_id(panels, &panel_id)
+                    .and_then(|panel| panel.report.as_ref())
+                    .map_or_else(
+                        || needs_parent_text(panels, "picked panel had no candidate", Some(&analysis)),
+                        |report| report.candidate_answer.clone(),
+                    );
+                (FusionDecision::Picked { panel_id }, text, Some(analysis), 0)
+            }
+            HostDecision::NeedsParent { reason } => {
+                let summary = needs_parent_text(panels, &reason_line(&reason), Some(&analysis));
+                (FusionDecision::NeedsParent { reason }, summary, Some(analysis), 0)
+            }
+            HostDecision::Merge => {
+                self.run_synthesis(
+                    config, request, analysis, panels, progress, run_id, started, usage,
+                    priced_synth,
+                )
+                .await
+            }
+        }
+    }
+
+    /// `analyze_and_decide` helper: the timeout-bounded analyst call itself.
+    /// Split out purely to keep the caller under the line-count lint.
+    async fn run_analyst_call(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        panels: &[PanelInternal],
+        started: Instant,
+    ) -> (Result<(FusionAnalysis, cost::Usage, u32), AnalystError>, u64) {
+        let analyst_started = Instant::now();
+        // F004: bound the analyst stage by what actually remains of the
+        // end-to-end deadline, not just its own `analystTimeoutMs` budget —
+        // `analyze`'s own internal retry loop can otherwise run past `total`
+        // before the outer `run()` timeout ever gets polled (nested
+        // `tokio::time::timeout`s always poll their inner future first, so
+        // this always resolves before — never after — that outer wrapper).
+        // Reusing `AnalystError::Failed("timeout")` here folds this into the
+        // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
+        // below.
+        let remaining_for_analyst = Self::remaining(config, started);
+        let analysis_outcome = match tokio::time::timeout(
+            remaining_for_analyst,
+            analyze(
+                Arc::clone(&self.side_query),
+                config,
+                request,
+                &resolved.analyst,
+                panels,
+            ),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(AnalystError::Failed("timeout".into())),
+        };
+        (analysis_outcome, millis_since(analyst_started))
+    }
+
+    /// `analyze_and_decide` helper: the shared `NeedsParent` degrade+telemetry
+    /// path for the three `AnalystError` arms (parse failure, structured
+    /// output unsupported, and any other analyst call failure). Split out
+    /// purely to keep the caller under the line-count lint — same telemetry,
+    /// same event name, same `(decision, text, analysis, synthesizer_ms)`
+    /// shape every other `analyze_and_decide` arm returns.
+    #[allow(clippy::too_many_arguments)]
+    async fn analysis_failed_outcome(
+        &self,
+        request: &FusionRequest,
+        panels: &[PanelInternal],
+        run_id: &str,
+        analyst_ms: u64,
+        reason: FusionNeedsParentReason,
+        error_label: &str,
+        message: &str,
+    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+        let mut md = fusion_event_metadata(request);
+        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        add_panel_counts(&mut md, panels);
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(analyst_ms)),
+        );
+        md.insert(
+            "error".into(),
+            AnalyticsValue::String(error_label.to_string()),
+        );
+        self.bus
+            .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
+            .await;
+        (
+            FusionDecision::NeedsParent { reason },
+            needs_parent_text(panels, message, None),
+            None,
+            0,
+        )
+    }
+
+    /// `analyze_and_decide` helper: the `HostDecision::Merge` branch — run
+    /// the synthesizer (timeout-bounded the same way the analyst call is)
+    /// and its `NeedsParent` degradation paths. Split out purely to keep the
+    /// caller under the line-count lint — same telemetry, same ordering.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_synthesis(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        analysis: FusionAnalysis,
+        panels: &[PanelInternal],
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+        started: Instant,
+        usage: &mut FusionUsage,
+        priced_synth: &mut Option<cost::Usage>,
+    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+        progress::emit(
+            progress,
+            FusionStage::Synthesizing,
+            None,
+            FusionStage::Synthesizing.label(),
+        );
+        let synth_started = Instant::now();
+        // F004: same remaining-budget bound as the analyst stage above, so a
+        // hanging synthesizer degrades to NeedsParent (SynthesisTimedOut,
+        // which already exists) rather than letting the run blow past
+        // `total_timeout_ms` and lose everything to the outer
+        // `TimedOutEmpty`.
+        let remaining_for_synth = Self::remaining(config, started);
+        let synth = match tokio::time::timeout(
+            remaining_for_synth,
+            synthesize(Arc::clone(&self.side_query), config, request, &analysis, panels),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(SynthError::TimedOut),
+        };
+        let synthesizer_ms = millis_since(synth_started);
+        match synth {
+            Ok((text, synth_usage)) => {
+                add_cost_usage(usage, &synth_usage, 1);
+                *priced_synth = Some(synth_usage);
+                let mut md = fusion_event_metadata(request);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+                add_panel_counts(&mut md, panels);
+                md.insert(
+                    "duration_ms".into(),
+                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
+                );
+                add_usage_metadata(&mut md, usage);
+                self.bus
+                    .log_event(telemetry::tengu::fusion::SYNTHESIS_COMPLETED, md)
+                    .await;
+                (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
+            }
+            Err(SynthError::TimedOut) => {
+                let mut md = fusion_event_metadata(request);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+                add_panel_counts(&mut md, panels);
+                md.insert(
+                    "duration_ms".into(),
+                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
+                );
+                md.insert(
+                    "error".into(),
+                    AnalyticsValue::String("synthesis_timed_out".into()),
+                );
+                self.bus
+                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
+                    .await;
+                (
+                    FusionDecision::NeedsParent {
+                        reason: FusionNeedsParentReason::SynthesisTimedOut,
+                    },
+                    needs_parent_text(panels, "synthesizer timed out", Some(&analysis)),
+                    Some(analysis),
+                    synthesizer_ms,
+                )
+            }
+            Err(SynthError::Failed) => {
+                let mut md = fusion_event_metadata(request);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+                add_panel_counts(&mut md, panels);
+                md.insert(
+                    "duration_ms".into(),
+                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
+                );
+                md.insert(
+                    "error".into(),
+                    AnalyticsValue::String("synthesis_failed".into()),
+                );
+                self.bus
+                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
+                    .await;
+                (
+                    FusionDecision::NeedsParent {
+                        reason: FusionNeedsParentReason::SynthesisFailed,
+                    },
+                    needs_parent_text(panels, "synthesizer failed", Some(&analysis)),
+                    Some(analysis),
+                    synthesizer_ms,
+                )
+            }
+        }
     }
 }
 
@@ -750,8 +962,7 @@ impl FusionExecutor for FusionOrchestrator {
                     FusionStage::Failed,
                     None,
                     FusionStage::Failed.label(),
-                )
-                .await;
+                );
                 return Err(error);
             }
         };
@@ -769,7 +980,7 @@ impl FusionExecutor for FusionOrchestrator {
                 md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
                 md.insert(
                     "duration_ms".into(),
-                    AnalyticsValue::Int(millis_since(started) as i64),
+                    AnalyticsValue::Int(saturating_i64(millis_since(started))),
                 );
                 self.bus
                     .log_event(telemetry::tengu::fusion::CANCELLED, md)
@@ -786,24 +997,23 @@ impl FusionExecutor for FusionOrchestrator {
                     run_id.clone(),
                     started,
                 ),
-            ) => match result {
-                Ok(result) => result,
-                Err(_) => {
-                    let mut md = fusion_event_metadata(&request_for_terminal);
-                    md.insert("run_id".into(), AnalyticsValue::String(run_id));
-                    md.insert(
-                        "duration_ms".into(),
-                        AnalyticsValue::Int(millis_since(started) as i64),
-                    );
-                    md.insert(
-                        "error".into(),
-                        AnalyticsValue::String("total_timeout".into()),
-                    );
-                    self.bus
-                        .log_event(telemetry::tengu::fusion::FAILED, md)
-                        .await;
-                    Err(FusionError::TimedOutEmpty)
-                }
+            ) => if let Ok(result) = result {
+                result
+            } else {
+                let mut md = fusion_event_metadata(&request_for_terminal);
+                md.insert("run_id".into(), AnalyticsValue::String(run_id));
+                md.insert(
+                    "duration_ms".into(),
+                    AnalyticsValue::Int(saturating_i64(millis_since(started))),
+                );
+                md.insert(
+                    "error".into(),
+                    AnalyticsValue::String("total_timeout".into()),
+                );
+                self.bus
+                    .log_event(telemetry::tengu::fusion::FAILED, md)
+                    .await;
+                Err(FusionError::TimedOutEmpty)
             }
         };
         if let Err(error) = &outcome {
@@ -812,7 +1022,7 @@ impl FusionExecutor for FusionOrchestrator {
             } else {
                 FusionStage::Failed
             };
-            progress::emit(&progress, stage.clone(), None, stage.label()).await;
+            progress::emit(&progress, stage.clone(), None, stage.label());
         }
         outcome
     }
@@ -1040,11 +1250,11 @@ fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {
 
 /// Byte cap on each panel's rendered `candidate_answer` inside
 /// [`needs_parent_text`] — the full text is still in `FusionResult.panels`
-/// material via the Agent `analysis`/panel path; this keeps the NeedsParent
+/// material via the Agent `analysis`/panel path; this keeps the `NeedsParent`
 /// summary itself bounded when panels wrote long patches.
 const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
 
-/// Render the NeedsParent summary (F004): unlike a bare status list, this
+/// Render the `NeedsParent` summary (F004): unlike a bare status list, this
 /// carries the actual paid deliberation material — consensus, contradictions,
 /// coverage gaps, per-panel scores, and each successful panel's (already
 /// sanitized, see `panel::sanitize_report` / `analyst::sanitize_analysis`)
@@ -1166,6 +1376,15 @@ fn millis_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Saturating conversion into `AnalyticsValue::Int`'s `i64` payload. Every
+/// caller here is a count or a millisecond/token/nano-usd duration that never
+/// approaches `i64::MAX` in practice; saturating instead of wrapping keeps a
+/// theoretical overflow a visibly-wrong metric rather than a silently
+/// negative one.
+fn saturating_i64<T: TryInto<i64>>(value: T) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
+}
+
 fn fusion_origin_label(origin: FusionOrigin) -> &'static str {
     match origin {
         FusionOrigin::Agent => "agent",
@@ -1223,7 +1442,7 @@ fn fusion_event_metadata(request: &FusionRequest) -> LogEventMetadata {
     );
     md.insert(
         "dimensions_count".into(),
-        AnalyticsValue::Int(request.dimensions.len() as i64),
+        AnalyticsValue::Int(saturating_i64(request.dimensions.len())),
     );
     md.insert(
         "partial_ok".into(),
@@ -1249,43 +1468,43 @@ fn fusion_event_metadata(request: &FusionRequest) -> LogEventMetadata {
 fn add_panel_counts(md: &mut LogEventMetadata, panels: &[PanelInternal]) {
     md.insert(
         "panel_count".into(),
-        AnalyticsValue::Int(panels.len() as i64),
+        AnalyticsValue::Int(saturating_i64(panels.len())),
     );
     md.insert(
         "panel_success_count".into(),
-        AnalyticsValue::Int(successful(panels).len() as i64),
+        AnalyticsValue::Int(saturating_i64(successful(panels).len())),
     );
     md.insert(
         "panel_failed_count".into(),
-        AnalyticsValue::Int(
+        AnalyticsValue::Int(saturating_i64(
             panels
                 .iter()
                 .filter(|panel| panel.status != PanelRunStatus::Completed)
-                .count() as i64,
-        ),
+                .count(),
+        )),
     );
 }
 
 fn add_usage_metadata(md: &mut LogEventMetadata, usage: &FusionUsage) {
     md.insert(
         "input_tokens".into(),
-        AnalyticsValue::Int(usage.input_tokens as i64),
+        AnalyticsValue::Int(saturating_i64(usage.input_tokens)),
     );
     md.insert(
         "output_tokens".into(),
-        AnalyticsValue::Int(usage.output_tokens as i64),
+        AnalyticsValue::Int(saturating_i64(usage.output_tokens)),
     );
     md.insert(
         "reasoning_tokens".into(),
-        AnalyticsValue::Int(usage.reasoning_tokens as i64),
+        AnalyticsValue::Int(saturating_i64(usage.reasoning_tokens)),
     );
     md.insert(
         "cache_read_tokens".into(),
-        AnalyticsValue::Int(usage.cache_read_tokens as i64),
+        AnalyticsValue::Int(saturating_i64(usage.cache_read_tokens)),
     );
     md.insert(
         "cache_write_tokens".into(),
-        AnalyticsValue::Int(usage.cache_write_tokens as i64),
+        AnalyticsValue::Int(saturating_i64(usage.cache_write_tokens)),
     );
     md.insert(
         "provider_requests".into(),
@@ -1293,11 +1512,11 @@ fn add_usage_metadata(md: &mut LogEventMetadata, usage: &FusionUsage) {
     );
     md.insert(
         "realized_nano_usd".into(),
-        AnalyticsValue::Int(usage.realized_nano_usd as i64),
+        AnalyticsValue::Int(saturating_i64(usage.realized_nano_usd)),
     );
     md.insert(
         "reserved_max_nano_usd".into(),
-        AnalyticsValue::Int(usage.reserved_max_nano_usd as i64),
+        AnalyticsValue::Int(saturating_i64(usage.reserved_max_nano_usd)),
     );
     md.insert("estimated".into(), AnalyticsValue::Bool(usage.estimated));
 }
@@ -1305,7 +1524,7 @@ fn add_usage_metadata(md: &mut LogEventMetadata, usage: &FusionUsage) {
 fn add_egress_metadata(md: &mut LogEventMetadata, egress: &[String]) {
     md.insert(
         "egress_profile_count".into(),
-        AnalyticsValue::Int(egress.len() as i64),
+        AnalyticsValue::Int(saturating_i64(egress.len())),
     );
     if !egress.is_empty() {
         md.insert(

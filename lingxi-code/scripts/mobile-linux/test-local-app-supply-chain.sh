@@ -51,6 +51,109 @@ trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/d
 python3 "${TOOL}" --repo-root "${REPO_ROOT}"
 python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile babylon-3d
 
+# `validate_node_modules` must accept a rollup-FREE tree and must still pin the
+# `@rollup/*` native bindings at 4.44.0.
+#
+# These two belong together. The staging validator used to open
+# `rollup/package.json` before it reached the binding loop, and the Rolldown
+# move took that package out of the graph — all five seed lockfiles carry zero
+# `rollup@` entries — so every stage aborted in `load_json` with "invalid JSON
+# … No such file or directory". That did not merely block staging: it made the
+# 4.44.0 binding pin below it UNREACHABLE, so the pin that actually protects
+# the shipped `.node` files was never evaluated at all.
+#
+# The fixture is synthetic on purpose: exercising this through a real staged
+# tree needs the build container, which is exactly what the bug prevented.
+python3 - "${SCRIPT_DIR}/stage-local-app-runtime.py" <<'PY'
+import importlib.util
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+stage_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("stage_local_app_runtime", stage_path)
+stage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stage)
+verify = stage._VERIFY
+
+
+def write_package(root, name, version):
+    directory = root / pathlib.PurePosixPath(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text(
+        json.dumps({"name": name, "version": version}), encoding="utf-8"
+    )
+    return directory
+
+
+def build_tree(root, rollup_binding_version):
+    for name, version in stage.EXPECTED_DEPENDENCIES.items():
+        write_package(root, name, version)
+    write_package(root, "rolldown", verify.EXPECTED_ROLLDOWN_VERSION)
+    write_package(root, "lightningcss", verify.EXPECTED_LIGHTNINGCSS_VERSION)
+    vite = root / "vite" / "bin"
+    vite.mkdir(parents=True, exist_ok=True)
+    (vite / "vite.js").write_text("// cli\n", encoding="utf-8")
+    # ios stages the arm64-musl slice only.
+    natives = {
+        "@rolldown/binding-linux-arm64-musl": verify.EXPECTED_ROLLDOWN_BINDINGS[
+            "@rolldown/binding-linux-arm64-musl"
+        ],
+        "@rollup/rollup-linux-arm64-musl": rollup_binding_version,
+        "lightningcss-linux-arm64-musl": verify.EXPECTED_LIGHTNINGCSS_BINDINGS[
+            "lightningcss-linux-arm64-musl"
+        ],
+    }
+    for name, version in natives.items():
+        directory = write_package(root, name, version)
+        (directory / verify.EXPECTED_NATIVE_PACKAGE_BINARIES[name]).write_bytes(b"\x00native\x00")
+    if (root / "rollup").exists():
+        raise SystemExit("fixture bug: the tree must NOT contain a rollup package")
+
+
+def run(rollup_binding_version):
+    temp = pathlib.Path(tempfile.mkdtemp())
+    try:
+        root = temp / "node_modules"
+        root.mkdir()
+        build_tree(root, rollup_binding_version)
+        code = (
+            "import importlib.util,pathlib\n"
+            f"spec=importlib.util.spec_from_file_location('s',{str(stage_path)!r})\n"
+            "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            f"m.validate_node_modules(pathlib.Path({str(root)!r}),'ios')\n"
+        )
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        return done.returncode, done.stdout + done.stderr
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+
+
+status, output = run("4.44.0")
+if status != 0:
+    raise SystemExit(
+        "a node_modules with no rollup package and correct bindings must "
+        f"validate, got exit {status}: {output}"
+    )
+
+status, output = run("4.43.0")
+if status == 0:
+    raise SystemExit("a wrong @rollup binding version must be rejected, but it validated")
+if "Traceback (most recent call last)" in output:
+    raise SystemExit(f"the rejection must not be a crash: {output}")
+# The point of the assertion: the rejection has to name the binding and the
+# pin. Merely exiting non-zero is what the old code did, for the wrong reason.
+if "@rollup/rollup-linux-arm64-musl@4.44.0" not in output:
+    raise SystemExit(
+        "the rejection must name @rollup/rollup-linux-arm64-musl@4.44.0, "
+        f"got: {output}"
+    )
+print("node_modules staging: rollup-free tree accepted, @rollup 4.44.0 pin still enforced")
+PY
+
 python3 - "${REPO_ROOT}/docs/mobile-linux/local-app-runtime-policy.json" <<'PY'
 import json
 import pathlib

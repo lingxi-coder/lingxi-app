@@ -2402,17 +2402,37 @@ fn cap_input_bytes(
             })
             .sum()
     };
+
+    // [F009] `history`'s FIRST unit is the caller's seeded task/fork prefix
+    // (`ctx.prompt_messages`, extended onto `history` before the first turn
+    // — see the seeding block above `run_subagent`'s turn loop). A Fusion
+    // panel's entire task text lives in that one unit and nothing
+    // re-injects it on a later turn, so the tail-only fill below must not
+    // silently evict it while a newer unit still fits the budget. Pin it
+    // whenever it fits the budget alone; when it does not (or there is only
+    // one unit total), fall back to the original "keep only what fits,
+    // newest first" behavior so an oversized prefix can still be dropped —
+    // `loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_output`'s
+    // "over-budget prefix must be dropped" assertion still exercises that path.
+    let pin_head = units.len() > 1 && unit_bytes(units[0]) <= max;
+    let head_bytes = if pin_head { unit_bytes(units[0]) } else { 0 };
+    let tail_budget = max.saturating_sub(head_bytes);
+    let tail_start = usize::from(pin_head);
+
     let mut out: Vec<&[protocol::ConversationMessage]> = Vec::new();
     let mut used = 0u64;
-    for unit in units.iter().rev() {
+    for unit in units[tail_start..].iter().rev() {
         let size = unit_bytes(unit);
-        if !out.is_empty() && used.saturating_add(size) > max {
+        if !out.is_empty() && used.saturating_add(size) > tail_budget {
             break;
         }
         used = used.saturating_add(size);
         out.push(unit);
     }
     out.reverse();
+    if pin_head {
+        out.insert(0, units[0]);
+    }
     if out.is_empty() {
         if let Some(last_unit) = units.last() {
             out.push(last_unit);

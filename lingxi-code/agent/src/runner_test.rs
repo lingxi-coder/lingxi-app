@@ -4627,3 +4627,52 @@ fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
         "the pair that fits the budget must be kept, not dropped entirely"
     );
 }
+
+/// [Finding 9] A Fusion panel seeds its ENTIRE task text as `history`'s
+/// first unit (`ctx.prompt_messages`, extended in before the first turn)
+/// and nothing re-injects it on later turns — it is the only production
+/// caller that sets `max_input_bytes_per_turn` (`panel.rs`'s
+/// `spawn_request`). The tail-only fill in `cap_input_bytes` must not evict
+/// that first unit while a newer tool-result pair still fits the budget: two
+/// large tool-result pairs from earlier turns must not silently erase the
+/// task, leaving the panel to emit a `PanelReport` written against no task
+/// at all.
+#[test]
+fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
+    let prompt = ConversationMessage::user(MessageId::new(), "TASK-MARKER: what is 2+2?".into());
+    let tool_id_1 = ToolUseId::new();
+    let tool_id_2 = ToolUseId::new();
+    let pair1 = [
+        assistant_tool_use(tool_id_1.clone(), "Read"),
+        user_tool_result(tool_id_1, &"y".repeat(50_000)),
+    ];
+    let pair2 = [
+        assistant_tool_use(tool_id_2.clone(), "Read"),
+        user_tool_result(tool_id_2, &"z".repeat(50_000)),
+    ];
+    let mut history = vec![prompt.clone()];
+    history.extend(pair1.iter().cloned());
+    history.extend(pair2.iter().cloned());
+
+    let prompt_bytes = serde_json::to_vec(&prompt).unwrap().len() as u64;
+    let newest_pair_bytes: u64 = pair2
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Room for the prompt plus exactly the NEWEST pair, not both pairs.
+    let max = prompt_bytes + newest_pair_bytes + 16;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+    let joined = format!("{capped:?}");
+    assert!(
+        joined.contains("TASK-MARKER"),
+        "the panel's task prompt must survive per-turn trimming while a \
+         newer tool-result pair still fits the budget; capped history: {joined}"
+    );
+    assert!(
+        !joined.contains(&"y".repeat(50_000)),
+        "the OLDER, over-budget tool-result pair must still be dropped — a \
+         `cap_input_bytes` that just returned the whole history unchanged \
+         would also contain TASK-MARKER, so this must go red on its own"
+    );
+}

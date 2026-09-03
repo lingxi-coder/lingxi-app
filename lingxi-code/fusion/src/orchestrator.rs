@@ -294,6 +294,10 @@ impl FusionOrchestrator {
             Arc::clone(&self.spawner),
             inherit,
             config,
+            // [Finding 20] the early-abort bar must seal on the request's
+            // own `partial_ok` opt-out too, not only the settings-level
+            // default — see `run_panels`'s doc comment.
+            request.partial_ok && config.partial_ok,
             &request.prompt,
             &resolved.panels,
             run_id,
@@ -1128,7 +1132,7 @@ fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionE
     Ok(request)
 }
 
-fn check_panel_bar(
+pub(crate) fn check_panel_bar(
     panels: &[PanelInternal],
     request: &FusionRequest,
     config: &FusionRuntimeConfig,
@@ -1142,9 +1146,25 @@ fn check_panel_bar(
     .max(usize::from(FUSION_MIN_PANEL))
     .min(panels.len());
     if ok == 0 {
-        if panels
+        // [Finding 19] A panel sealed off by the early-abort bar (G004,
+        // `panel.rs`'s `join_set.abort_all()`) never gets the chance to
+        // time out on its own — its `JoinError` is synthesized as
+        // `status: Failed, error_category: "aborted"` (panel.rs's
+        // `JoinError` collection arm), which carries no information about
+        // WHY the run failed. Excluding those slots here means the
+        // zero-success classification reflects only the panels that
+        // actually ran to a terminal outcome: if every one of THOSE timed
+        // out, the run-level error stays `TimedOutEmpty` even when the bar
+        // sealed early and aborted a still-running sibling before its own
+        // timeout could fire.
+        let real_outcomes: Vec<&PanelInternal> = panels
             .iter()
-            .all(|panel| panel.status == PanelRunStatus::TimedOut)
+            .filter(|panel| panel.error_category.as_deref() != Some("aborted"))
+            .collect();
+        if !real_outcomes.is_empty()
+            && real_outcomes
+                .iter()
+                .all(|panel| panel.status == PanelRunStatus::TimedOut)
         {
             return Err(FusionError::TimedOutEmpty);
         }

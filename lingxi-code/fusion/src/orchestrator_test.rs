@@ -235,6 +235,12 @@ enum FakePanel {
     /// `Fail` which is a terminal `SubagentResult::Failed` — used to exercise
     /// the pool-admission early-abort path (G004).
     SpawnErr,
+    /// [Finding 25] Mirrors `runner.rs`'s `!terminated_cleanly` arm: the
+    /// subagent loop ran out of `max_turns` without ever capturing a valid
+    /// `StructuredOutput`, so it reports `Completed` (not `Failed`) with
+    /// `content: {"reason": "max_turns_exhausted", "max_turns": N}` — a
+    /// shape `PanelReport` can never parse.
+    MaxTurnsExhausted,
 }
 
 impl FakeSpawner {
@@ -287,6 +293,21 @@ impl SubagentSpawner for FakeSpawner {
                 reason: "panel failed".into(),
             }),
             Some(FakePanel::SpawnErr) => Err(SubagentSpawnError::PoolFull),
+            Some(FakePanel::MaxTurnsExhausted) => Ok(SubagentResult::Completed {
+                agent_id: AgentId::new(),
+                content: serde_json::json!({
+                    "reason": "max_turns_exhausted",
+                    "max_turns": 12,
+                }),
+                usage: SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 0,
+                assistant_message_count: 12,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
+            }),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
@@ -1299,6 +1320,7 @@ async fn panel_idle_timeout_stops_spawns_that_make_no_progress() {
         spawner.clone(),
         &inherit(),
         &config,
+        config.partial_ok,
         "task",
         &two_resolved_panels(),
         "fu_idle",
@@ -1328,6 +1350,7 @@ async fn provider_stream_progress_can_outlive_one_idle_interval_in_total() {
         spawner.clone(),
         &inherit(),
         &config,
+        config.partial_ok,
         "task",
         &two_resolved_panels(),
         "fu_heartbeat",
@@ -2480,6 +2503,7 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
         spawner.clone(),
         &inherit(),
         &config,
+        config.partial_ok,
         "task",
         &[
             ResolvedPanel {
@@ -2556,6 +2580,7 @@ async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one(
         spawner,
         &inherit(),
         &test_config(),
+        test_config().partial_ok,
         "task",
         &[ResolvedPanel {
             profile: "anthropic".into(),
@@ -2590,6 +2615,7 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
         spawner.clone(),
         &inherit(),
         &config,
+        config.partial_ok,
         "task",
         &[
             ResolvedPanel {
@@ -2655,6 +2681,234 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
     );
 }
 
+/// [Finding 20] The early-abort bar (G004) must seal on the CALLER's
+/// effective `partial_ok`, not `config.partial_ok` alone. Three panels,
+/// `min_successful_panels: 2` so `cannot_reach_min` does NOT fire on the
+/// first failure alone (0 succeeded + 2 remaining == 2, not < 2) — only the
+/// `partial_ok`-driven half of the predicate can seal this run early. With
+/// `config.partial_ok` left at its default `true` but the caller's combined
+/// `partial_ok` passed as `false` (what `run_panel_stage` now computes from
+/// `request.partial_ok && config.partial_ok` for e.g. `/fusion
+/// --no-partial`), the FIRST panel failure must abort both still-hanging
+/// siblings immediately rather than letting them burn their full 5s
+/// `panel_total_timeout_ms` for a run that `check_panel_bar`'s later,
+/// separate `PanelSetIncomplete` check was always going to fail anyway.
+#[tokio::test]
+async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config() {
+    let mut config = test_config();
+    config.min_successful_panels = 2;
+    config.panel_total_timeout_ms = 5_000;
+    assert!(
+        config.partial_ok,
+        "the settings-level default must stay true so this scenario is only \
+         reachable through the caller-supplied effective value"
+    );
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Fail),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let wall_started = std::time::Instant::now();
+    let panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        // The request-level opt-out (`/fusion --no-partial`), NOT
+        // `config.partial_ok` (still `true` above).
+        false,
+        "task",
+        &[
+            ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+            },
+            ResolvedPanel {
+                profile: "openai".into(),
+                model: "gpt-5.6-terra".into(),
+            },
+            ResolvedPanel {
+                profile: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+        ],
+        "fu_partial_ok_early_abort",
+        std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
+    )
+    .await
+    .expect("panel collection");
+
+    assert!(
+        wall_started.elapsed() < std::time::Duration::from_millis(1_000),
+        "run_panels took {:?}, which means the two hanging siblings ran out \
+         their full 5s panel_total_timeout_ms instead of being aborted the \
+         moment the first panel failed under an effective partial_ok=false",
+        wall_started.elapsed()
+    );
+    for _ in 0..200 {
+        if spawner.live() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        spawner.live(),
+        0,
+        "both hanging sibling tasks must be dropped by the early abort"
+    );
+    assert_eq!(panels.len(), 3, "every requested panel must have a slot");
+    let aborted = panels
+        .iter()
+        .filter(|panel| panel.error_category.as_deref() == Some("aborted"))
+        .count();
+    assert_eq!(
+        aborted, 2,
+        "both still-hanging siblings must carry the synthesized early-abort \
+         category, got: {:?}",
+        panels
+            .iter()
+            .map(|p| (p.anonymous_id.clone(), p.error_category.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// [Finding 20] End-to-end sibling of the test above. The test above proves
+/// `panel.rs`'s `run_panels` correctly seals on whatever `partial_ok: bool`
+/// it is handed — but it hands that value in as a literal `false`, which
+/// never exercises the PRODUCTION call site (`run_panel_stage`,
+/// orchestrator.rs) that is supposed to COMPUTE it as
+/// `request.partial_ok && config.partial_ok`. This test drives the whole
+/// `FusionOrchestrator::run` path with `FusionRequest { partial_ok: false,
+/// .. }` while `config.partial_ok` stays at its default `true`, so only
+/// that production wiring — not `panel.rs`'s predicate, already covered
+/// above — can make it pass. Reverting orchestrator.rs's `request.partial_ok
+/// && config.partial_ok` back to plain `config.partial_ok` must turn this
+/// red even though the test above stays green.
+#[tokio::test]
+async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_partial_ok_is_true() {
+    let mut config = test_config();
+    config.min_successful_panels = 2;
+    config.panel_total_timeout_ms = 5_000;
+    assert!(
+        config.partial_ok,
+        "config.partial_ok must stay at its default true so the seal below \
+         can only be coming from the request-level opt-out"
+    );
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Fail),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(spawner.clone(), side, config).await;
+
+    let mut req = request("task");
+    req.partial_ok = false; // e.g. `/fusion --no-partial`
+
+    let wall_started = std::time::Instant::now();
+    let error = orch
+        .run(req, inherit(), None)
+        .await
+        .expect_err("one real failure plus two host-aborted siblings leaves zero successes");
+
+    assert!(
+        wall_started.elapsed() < std::time::Duration::from_millis(1_000),
+        "orch.run() took {:?}, meaning the request-level partial_ok:false \
+         opt-out never reached the early-abort bar and the two hanging \
+         siblings ran out their full 5s panel_total_timeout_ms instead of \
+         being sealed the moment the first panel failed",
+        wall_started.elapsed()
+    );
+    // See [Finding 20]'s non-blocking note: with the early-abort bar
+    // synthesizing the two aborted siblings as failed slots, `ok` drops to
+    // 0 and `check_panel_bar` reports `AllPanelsFailed` here — the same
+    // label the settings-level `fusion.partialOk: false` path already
+    // produces for an identical shape.
+    assert_eq!(error, FusionError::AllPanelsFailed);
+    for _ in 0..200 {
+        if spawner.live() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        spawner.live(),
+        0,
+        "both hanging sibling tasks must be dropped by the early abort"
+    );
+
+    let aborted_panel_events = sink
+        .events()
+        .await
+        .iter()
+        .filter(|event| {
+            event.name == telemetry::tengu::fusion::PANEL_FAILED
+                && matches!(
+                    event.metadata.get("error_category"),
+                    Some(AnalyticsValue::String(category)) if category == "aborted"
+                )
+        })
+        .count();
+    assert_eq!(
+        aborted_panel_events, 2,
+        "both hanging siblings must have been sealed by the bar as \
+         `error_category: aborted` before ever hitting their own 5s \
+         panel_total_timeout_ms"
+    );
+}
+
+/// [Finding 25] A panel that exhausts `panelMaxTurns` without ever landing a
+/// valid `StructuredOutput` arrives at `finish_panel` as a normal
+/// `SubagentResult::Completed` carrying `{"reason": "max_turns_exhausted",
+/// "max_turns": N}` (runner.rs's `!terminated_cleanly` arm) — it did not
+/// violate the report schema, it simply ran out of turns. Before the fix,
+/// `parse_and_sanitize` cannot match that shape against any `PanelReport`
+/// variant and always returns `Err("protocol")`, so the panel is recorded
+/// indistinguishably from a genuine malformed-report case. The distinct
+/// `"max_turns"` category must reach both the telemetry field and the
+/// parent-visible panel outcome instead.
+#[tokio::test]
+async fn a_panel_that_exhausts_its_turn_budget_is_not_reported_as_a_protocol_violation() {
+    let map = HashMap::from([("claude-sonnet-5".into(), FakePanel::MaxTurnsExhausted)]);
+    let spawner = FakeSpawner::new(map);
+    let panels = crate::panel::run_panels(
+        spawner,
+        &inherit(),
+        &test_config(),
+        test_config().partial_ok,
+        "task",
+        &[ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }],
+        "fu_max_turns",
+        std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
+        &None,
+    )
+    .await
+    .expect("panel collection");
+
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].status, PanelRunStatus::Failed);
+    assert_eq!(
+        panels[0].error_category.as_deref(),
+        Some("max_turns"),
+        "turn-budget exhaustion must not be mislabeled as a schema/protocol \
+         violation — got category {:?}",
+        panels[0].error_category
+    );
+    assert!(
+        panels[0]
+            .error_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("12")),
+        "the exhausted turn count (12) should survive into error_detail, got {:?}",
+        panels[0].error_detail
+    );
+}
+
 struct PanickingSpawner;
 
 #[async_trait]
@@ -2685,6 +2939,7 @@ async fn a_panicking_panel_task_still_yields_a_slot_instead_of_vanishing() {
         spawner,
         &inherit(),
         &test_config(),
+        test_config().partial_ok,
         "task",
         &resolved,
         "fu_panic",
@@ -2702,4 +2957,70 @@ async fn a_panicking_panel_task_still_yields_a_slot_instead_of_vanishing() {
     assert!(panels.iter().all(|panel| {
         panel.status == PanelRunStatus::Failed && panel.error_category.as_deref() == Some("panic")
     }));
+}
+
+fn make_panel_internal(
+    status: PanelRunStatus,
+    error_category: &str,
+) -> crate::panel::PanelInternal {
+    crate::panel::PanelInternal {
+        index: 0,
+        profile: "anthropic".into(),
+        model: "m".into(),
+        anonymous_id: String::new(),
+        status,
+        report: None,
+        duration_ms: 0,
+        error_category: Some(error_category.into()),
+        error_detail: None,
+        usage: None,
+        spawn_prompt: String::new(),
+    }
+}
+
+/// [Finding 19] `check_panel_bar` must classify a sealed-early run by the
+/// panels that actually ran, not by the abort-synthesized "aborted" slot the
+/// bar itself created. Three panels, `min_successful_panels: 2` (from
+/// `test_config()`): two idle-timeout out for real (`status: TimedOut`), the
+/// bar seals (0 succeeded + 1 remaining < 2 == cannot_reach_min), and the
+/// third is aborted mid-flight — `run_panels`'s `JoinError` arm
+/// (panel.rs:302-324) records THAT slot as `status: Failed,
+/// error_category: "aborted"`, never `TimedOut`, because the sibling was cut
+/// off before it could time out on its own. Before the fix that one
+/// synthetic slot flipped `panels.iter().all(TimedOut)` to false and the
+/// run-level error became `AllPanelsFailed` (telemetry
+/// `error_category: "all_panels_failed"`) instead of `TimedOutEmpty`
+/// (`"timed_out_empty"`), even though every panel that genuinely finished on
+/// its own timed out.
+#[test]
+fn check_panel_bar_ignores_bar_aborted_slots_when_every_real_panel_timed_out() {
+    let config = test_config();
+    let panels = vec![
+        make_panel_internal(PanelRunStatus::TimedOut, "idle_timeout"),
+        make_panel_internal(PanelRunStatus::TimedOut, "idle_timeout"),
+        make_panel_internal(PanelRunStatus::Failed, "aborted"),
+    ];
+    let err = crate::orchestrator::check_panel_bar(&panels, &request("task"), &config).unwrap_err();
+    assert_eq!(
+        err,
+        FusionError::TimedOutEmpty,
+        "an abort-synthesized 'aborted' slot (bar-sealed mid-flight, never \
+         actually timed out) must not suppress the all-timed-out \
+         classification of the panels that actually ran to completion"
+    );
+}
+
+/// Companion case: when the sealing failures are genuine provider errors
+/// (not timeouts), an aborted sibling must NOT flip the classification the
+/// other way either — `AllPanelsFailed` is still correct there.
+#[test]
+fn check_panel_bar_still_reports_all_panels_failed_on_genuine_provider_failures() {
+    let config = test_config();
+    let panels = vec![
+        make_panel_internal(PanelRunStatus::Failed, "provider"),
+        make_panel_internal(PanelRunStatus::Failed, "provider"),
+        make_panel_internal(PanelRunStatus::Failed, "aborted"),
+    ];
+    let err = crate::orchestrator::check_panel_bar(&panels, &request("task"), &config).unwrap_err();
+    assert_eq!(err, FusionError::AllPanelsFailed);
 }

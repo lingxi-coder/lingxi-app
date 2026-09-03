@@ -216,12 +216,22 @@ fn spawn_panel_tasks(
 /// Cancel aborts the `JoinSet` and joins every task. Re-evaluates the panel bar
 /// after every completion (G004): once no combination of the still-running
 /// panels could reach `config.min_successful_panels` (or, when
-/// `!config.partial_ok`, as soon as any panel fails), the remaining siblings
+/// `!partial_ok`, as soon as any panel fails), the remaining siblings
 /// are aborted immediately rather than left to spend the full
 /// `panel_total_timeout_ms` paying a provider for a run that is already
 /// sealed. A panicked or aborted task's slot is synthesized from the
 /// `JoinError` (F012-join) so `result.len() == panels.len()` always holds —
 /// the bar and telemetry never silently lose a panel.
+///
+/// `partial_ok` is the CALLER's already-combined effective value —
+/// [Finding 20] `request.partial_ok && config.partial_ok` — not
+/// `config.partial_ok` alone: a request that opts out of partial results
+/// (`/fusion --no-partial`, the Agent tool's `partial_ok: false`, or
+/// workflow `fusion({partialOk:false})`) must seal the bar on the FIRST
+/// panel failure exactly the way a settings-level `fusion.partialOk: false`
+/// already does, instead of only being enforced after every panel has
+/// already burned a full `panel_total_timeout_ms` round-trip in
+/// `check_panel_bar`'s separate, later `PanelSetIncomplete` check.
 ///
 /// `overall_deadline` (F004 review fix) is what remains of the end-to-end
 /// `total_timeout_ms` budget at the moment the caller starts the panel stage
@@ -237,6 +247,7 @@ pub async fn run_panels(
     spawner: Arc<dyn SubagentSpawner>,
     inherit: &FusionInheritance,
     config: &FusionRuntimeConfig,
+    partial_ok: bool,
     task_prompt: &str,
     panels: &[ResolvedPanel],
     run_id: &str,
@@ -330,7 +341,7 @@ pub async fn run_panels(
         if !bar_aborted {
             let remaining = total.saturating_sub(collected.len());
             let cannot_reach_min = succeeded.saturating_add(remaining) < min_successful;
-            let any_failure_requires_all = !config.partial_ok && failed > 0;
+            let any_failure_requires_all = !partial_ok && failed > 0;
             if remaining > 0 && (cannot_reach_min || any_failure_requires_all) {
                 join_set.abort_all();
                 bar_aborted = true;
@@ -480,18 +491,47 @@ fn finish_panel(
                 &usage,
                 assistant_message_count,
             ));
-            match parse_and_sanitize(&content) {
-                Ok(report) => {
-                    internal.status = PanelRunStatus::Completed;
-                    internal.report = Some(report);
-                }
-                Err(category) => {
-                    internal.error_category = Some(category);
+            if let Some(detail) = max_turns_exhausted_detail(&content) {
+                // [Finding 25] The runner's `!terminated_cleanly` arm reports
+                // turn-budget exhaustion as a normal `Completed` event, not a
+                // schema violation — recognize it before `parse_and_sanitize`
+                // (which would always return `Err("protocol")` for this
+                // shape, since it has none of `PanelReport`'s required
+                // fields) so telemetry and the parent-visible outcome say
+                // "ran out of turns", not "malformed report".
+                internal.error_category = Some("max_turns".into());
+                internal.error_detail = Some(detail);
+            } else {
+                match parse_and_sanitize(&content) {
+                    Ok(report) => {
+                        internal.status = PanelRunStatus::Completed;
+                        internal.report = Some(report);
+                    }
+                    Err(category) => {
+                        internal.error_category = Some(category);
+                    }
                 }
             }
         }
     }
     internal
+}
+
+/// [Finding 25] Recognize the runner's `!terminated_cleanly` shape
+/// (`agent/src/runner.rs`'s `SubagentEvent::Completed{ result: {"reason":
+/// "max_turns_exhausted", "max_turns": N}, .. }`) before it is handed to
+/// `parse_and_sanitize`. Returns a human-readable detail (carrying `N` when
+/// present) when `content` matches, `None` for every other completion shape
+/// (including a genuinely malformed `PanelReport`, which still falls through
+/// to the `"protocol"` category as before).
+fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
+    if content.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
+        return None;
+    }
+    Some(match content.get("max_turns").and_then(Value::as_u64) {
+        Some(n) => format!("panel exhausted its {n}-turn budget without a valid StructuredOutput"),
+        None => "panel exhausted its turn budget without a valid StructuredOutput".into(),
+    })
 }
 
 fn is_query_watchdog_timeout(reason: &str) -> bool {

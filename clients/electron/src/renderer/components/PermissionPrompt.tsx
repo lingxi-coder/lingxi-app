@@ -8,12 +8,12 @@
  * that head request with allow-once / deny actions, plus allow-always only when
  * the engine permits a persistent rule.
  *
- * It is intentionally framework-light (inline styles via the theme tokens,
- * mirroring the rest of the renderer) and renders nothing when no request is
- * pending.
+ * It is intentionally framework-light (CSS variables supplied by the current
+ * theme, mirroring the rest of the renderer) and renders nothing when no
+ * request is pending.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type CSSProperties } from 'react';
 import type { PermissionRequest } from '@lingxi/bridge-client';
 // Subpath, not the barrel — see the note in `bridge/conversation.ts`.
 import { redactSensitiveText } from '@lingxi/bridge-client/toolview';
@@ -76,8 +76,13 @@ export function permissionDetail(toolInputJson: string): string {
   );
 }
 
+interface PermissionDescription {
+  title: string;
+  detail: string;
+}
+
 /** Human title + detail for each {@link PermissionRequest} kind. */
-function describe(request: PermissionRequest): { title: string; detail: string } {
+function describe(request: PermissionRequest): PermissionDescription {
   const kind = request.kind;
   switch (kind.type) {
     case 'tool_use_confirm':
@@ -100,7 +105,10 @@ function describe(request: PermissionRequest): { title: string; detail: string }
       };
     default:
       // Exhaustiveness guard — a new kind shows a generic prompt rather than nothing.
-      return { title: 'Permission requested', detail: '' };
+      return {
+        title: 'Permission requested',
+        detail: '',
+      };
   }
 }
 
@@ -131,138 +139,102 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
 
   const { title, detail } = describe(request);
   const worker = request.worker;
+  const showPersistentRule = !request.suppress_always_allow_rule && !request.auto_mode_prompt;
+  const showAutoMode = Boolean(request.auto_mode_prompt && !request.suppress_always_allow_rule);
+  const themeVariables = {
+    '--permission-overlay': 'rgba(0, 0, 0, .32)',
+    '--permission-window': t.windowBg,
+    '--permission-surface': t.surface,
+    '--permission-surface-hover': t.surfaceHover,
+    '--permission-border': t.border,
+    '--permission-border-strong': t.borderStrong,
+    '--permission-text': t.text,
+    '--permission-text-2': t.text2,
+    '--permission-text-3': t.text3,
+    '--permission-accent': t.accent,
+    '--permission-accent-border': t.accentBorder,
+    '--permission-danger': t.danger,
+  } as CSSProperties;
 
   return (
     <div
-      role="dialog"
-      aria-label={title}
-      aria-describedby={[
-        detail ? 'lingxi-permission-detail' : null,
-        request.suppress_always_allow_rule || request.auto_mode_prompt ? null : 'lingxi-permission-scope',
-      ].filter(Boolean).join(' ') || undefined}
-      onFocusCapture={() => { promptHasFocus.current = true; }}
-      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
-      onKeyDown={(event) => {
-        if (event.key !== 'Escape') return;
-        event.preventDefault();
-        onDeny(request.request_id);
-      }}
-      style={{
-        position: 'absolute', inset: 0, zIndex: 60,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.32)',
-      }}
+      className="permission-prompt-overlay"
+      style={themeVariables}
     >
       <div
-        style={{
-          width: 420, maxWidth: '90%', borderRadius: 14, overflow: 'hidden',
-          background: t.windowBg, border: `0.5px solid ${t.border}`,
-          boxShadow: '0 18px 48px rgba(0,0,0,0.34)',
+        role="dialog"
+        aria-labelledby="lingxi-permission-title"
+        aria-describedby={detail ? 'lingxi-permission-detail' : undefined}
+        className="permission-prompt-panel"
+        onFocusCapture={() => { promptHasFocus.current = true; }}
+        onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          onDeny(request.request_id);
         }}
       >
-        <div style={{ padding: '18px 20px 14px' }}>
+        <header className="permission-prompt-titlebar">
+          <h2 id="lingxi-permission-title">{title}</h2>
+        </header>
+
+        <section className="permission-prompt-content">
           {worker && (
-            <div
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 8,
-                fontSize: 11, fontWeight: 600, color: worker.color || t.text3,
-              }}
-            >
-              <span
-                style={{
-                  width: 7, height: 7, borderRadius: '50%',
-                  background: worker.color || t.text3,
-                }}
-              />
+            <div className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
+              <span style={{ background: worker.color || t.text3 }} />
               {worker.name}
               {worker.team ? ` · ${worker.team}` : ''}
             </div>
           )}
-          <div style={{ fontSize: 15, fontWeight: 600, color: t.text, marginBottom: detail ? 8 : 0 }}>
-            {title}
-          </div>
           {detail && (
             <div
               id="lingxi-permission-detail"
-              className="mono"
-              style={{
-                fontSize: 12, color: t.text2, lineHeight: 1.5, maxHeight: 180, overflow: 'auto',
-                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                background: t.surface, border: `0.5px solid ${t.border}`,
-                borderRadius: 8, padding: '8px 10px',
-              }}
+              className="permission-prompt-detail mono"
             >
               {detail}
             </div>
           )}
-        </div>
-        <div
-          style={{
-            display: 'flex', gap: 8, padding: '12px 16px',
-            borderTop: `0.5px solid ${t.border}`, background: t.surface,
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => onDeny(request.request_id)}
-            style={{
-              flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-              color: t.danger, background: 'transparent',
-              border: `0.5px solid ${t.border}`,
-            }}
-          >
-            Deny
-          </button>
-          {!request.suppress_always_allow_rule && !request.auto_mode_prompt && (
+        </section>
+
+        <footer className="permission-prompt-footer">
+          <div className="permission-prompt-actions">
             <button
               type="button"
-              onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
-              style={{
-                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-                color: t.text2, background: 'transparent',
-                border: `0.5px solid ${t.border}`,
-              }}
+              className="permission-prompt-action permission-prompt-action--deny"
+              onClick={() => onDeny(request.request_id)}
             >
-              Allow matching actions
+              Deny
             </button>
-          )}
-          {request.auto_mode_prompt && !request.suppress_always_allow_rule && (
+            {showPersistentRule && (
+              <button
+                type="button"
+                className="permission-prompt-action permission-prompt-action--secondary"
+                onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
+              >
+                Allow matching actions
+              </button>
+            )}
+            {showAutoMode && (
+              <button
+                type="button"
+                className="permission-prompt-action permission-prompt-action--secondary"
+                onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
+              >
+                {request.auto_mode_prompt === 'workflow_bash'
+                  ? 'Yes, and switch to auto mode'
+                  : 'Yes, and use auto mode'}
+              </button>
+            )}
             <button
+              ref={primaryRef}
               type="button"
-              onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
-              style={{
-                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-                color: '#fff', background: t.accent,
-                border: `0.5px solid ${t.accentBorder}`,
-              }}
+              className="permission-prompt-action permission-prompt-action--primary"
+              onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
             >
-              {request.auto_mode_prompt === 'workflow_bash'
-                ? 'Yes, and switch to auto mode'
-                : 'Yes, and use auto mode'}
+              Allow once
             </button>
-          )}
-          <button
-            ref={primaryRef}
-            type="button"
-            onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
-            style={{
-              flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-              color: '#fff', background: t.accent,
-              border: `0.5px solid ${t.accentBorder}`,
-            }}
-          >
-            Allow once
-          </button>
-        </div>
-        {!request.suppress_always_allow_rule && !request.auto_mode_prompt && (
-          <div id="lingxi-permission-scope" style={{ padding: '0 16px 12px', background: t.surface, color: t.text3, fontSize: 10.5, lineHeight: 1.45 }}>
-            “Allow matching actions” saves a narrowed rule for this workspace when the engine supports it.
           </div>
-        )}
+        </footer>
       </div>
     </div>
   );

@@ -464,6 +464,189 @@ body {
   transform: translateY(-1px);
 }
 
+/* Permission request ---------------------------------------------------- */
+.permission-prompt-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: var(--permission-overlay);
+  -webkit-backdrop-filter: blur(12px) saturate(.86);
+  backdrop-filter: blur(12px) saturate(.86);
+  animation: permission-backdrop-enter 160ms ease-out both;
+}
+.permission-prompt-panel {
+  width: min(580px, 100%);
+  max-height: min(680px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 22px;
+  background: color-mix(in oklab, var(--permission-window) 94%, transparent);
+  color: var(--permission-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  -webkit-backdrop-filter: blur(28px) saturate(1.08);
+  backdrop-filter: blur(28px) saturate(1.08);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--permission-border-strong) 72%, transparent),
+    0 28px 80px -24px rgba(0, 0, 0, .62),
+    0 10px 28px -18px rgba(0, 0, 0, .48);
+  animation: permission-panel-enter 190ms cubic-bezier(.2, 0, 0, 1) both;
+}
+.permission-prompt-titlebar {
+  padding: 13px 24px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--permission-border) 76%, transparent);
+  text-align: center;
+}
+.permission-prompt-titlebar h2 {
+  color: var(--permission-text);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -.015em;
+  text-wrap: balance;
+}
+.permission-prompt-content {
+  min-height: 0;
+  padding: 22px 28px 24px;
+}
+.permission-prompt-worker {
+  width: fit-content;
+  min-height: 20px;
+  margin-bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.permission-prompt-worker > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.permission-prompt-detail {
+  max-height: min(260px, 38vh);
+  margin-top: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--permission-surface) 88%, transparent);
+  color: var(--permission-text-2);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--permission-border) 72%, transparent);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  font-variant-ligatures: none;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.permission-prompt-footer {
+  padding: 10px 16px 12px;
+  border-top: 1px solid color-mix(in oklab, var(--permission-border) 76%, transparent);
+  background: color-mix(in oklab, var(--permission-surface) 72%, transparent);
+}
+.permission-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.permission-prompt-action {
+  position: relative;
+  min-width: 78px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition-property: scale, background-color, color, box-shadow, filter;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.permission-prompt-action::before {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
+}
+.permission-prompt-action--deny {
+  color: var(--permission-danger);
+  background: transparent;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--permission-border) 72%, transparent);
+}
+.permission-prompt-action--deny:hover {
+  background: color-mix(in oklab, var(--permission-danger) 8%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--permission-danger) 24%, var(--permission-border));
+}
+.permission-prompt-action--secondary {
+  min-width: 154px;
+  color: var(--permission-text-2);
+  background: color-mix(in oklab, var(--permission-surface-hover) 48%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--permission-border) 72%, transparent);
+}
+.permission-prompt-action--secondary:hover {
+  color: var(--permission-text);
+  background: color-mix(in oklab, var(--permission-surface-hover) 74%, transparent);
+  box-shadow: 0 0 0 1px var(--permission-border-strong);
+}
+.permission-prompt-action--primary {
+  min-width: 98px;
+  color: #fff;
+  background: var(--permission-accent);
+  box-shadow: 0 0 0 1px var(--permission-accent-border);
+}
+.permission-prompt-action--primary:hover {
+  filter: brightness(1.04);
+}
+.permission-prompt-action:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--permission-window),
+    0 0 0 4px var(--permission-accent);
+}
+.permission-prompt-action:active {
+  scale: .96;
+}
+
+@media (max-width: 620px) {
+  .permission-prompt-overlay { padding: 16px; }
+  .permission-prompt-panel { border-radius: 20px; }
+  .permission-prompt-content { padding: 20px 22px 22px; }
+}
+
+@media (max-width: 460px) {
+  .permission-prompt-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .permission-prompt-action {
+    min-height: 40px;
+  }
+  .permission-prompt-action--primary {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .permission-prompt-overlay,
+  .permission-prompt-panel { animation: none; }
+  .permission-prompt-action { transition-duration: 0ms; }
+}
+
+@keyframes permission-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes permission-panel-enter {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 @keyframes empty-state-enter {
   from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
   to { opacity: 1; transform: translateY(0); filter: blur(0); }

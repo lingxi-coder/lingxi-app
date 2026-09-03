@@ -557,6 +557,32 @@ test('the permission dialog renders the FULL command it asks you to approve', ()
   assert.match(redacted, /\[REDACTED\]/);
 });
 
+test('the permission dialog keeps the compact macOS hierarchy without changing its actions', () => {
+  const request: PermissionRequest = {
+    request_id: 9,
+    kind: {
+      type: 'tool_use_confirm',
+      tool_name: 'WebFetch',
+      tool_input_json: JSON.stringify({ url: 'https://example.com', prompt: 'Summarize the page' }),
+      default_allow: false,
+    },
+  };
+  const html = render(
+    React.createElement(PermissionPrompt, { request, onApprove: () => {}, onDeny: () => {} }),
+  );
+
+  assert.match(html, /aria-labelledby="lingxi-permission-title"/);
+  assert.match(html, /<h2[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h2>/);
+  assert.match(html, /class="permission-prompt-titlebar"/);
+  assert.match(html, /class="permission-prompt-content"/);
+  assert.doesNotMatch(html, />Permission request</);
+  assert.doesNotMatch(html, />Requested input</);
+  assert.match(
+    html,
+    /<button[^>]*>Deny<\/button>[\s\S]*<button[^>]*>Allow matching actions<\/button>[\s\S]*<button[^>]*>Allow once<\/button>/,
+  );
+});
+
 test('session prompts are non-modal and do not install a global Tab trap', () => {
   const permission: PermissionRequest = {
     request_id: 21,

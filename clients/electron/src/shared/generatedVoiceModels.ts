@@ -1,27 +1,74 @@
-{
+// Generated from clients/voice/models.json. Do not edit by hand.
+
+export interface GeneratedRuntimeArtifactMetadata {
+  name: string;
+  sizeBytes: number;
+  url: string;
+  sha256: string;
+  sherpaVersion?: string;
+  onnxruntimeVersion?: string;
+}
+
+export type GeneratedModelKind = 'stt' | 'tts';
+
+export interface GeneratedTtsVoiceEntry {
+  id: string;
+  displayName: string;
+  language: string;
+}
+
+export type GeneratedSherpaRuntimeParams =
+  | { type: 'asr-online-transducer'; numThreads: number; decoding: string }
+  | { type: 'asr-offline-moonshine'; numThreads: number }
+  | { type: 'tts-vits'; numThreads: number }
+  | { type: 'tts-kitten'; numThreads: number };
+
+export interface GeneratedOfflineModelEntry {
+  id: string;
+  kind: GeneratedModelKind;
+  displayName: Record<string, string>;
+  languages: readonly string[];
+  streaming: boolean;
+  sampleRateHz: number;
+  approxSizeBytes: number;
+  sha256: string;
+  files: readonly string[];
+  requiredDirectories: readonly string[];
+  sourceUrl: string;
+  runtimeParams: GeneratedSherpaRuntimeParams;
+  voices: readonly GeneratedTtsVoiceEntry[];
+  license: string;
+}
+
+export interface GeneratedVoicePack {
+  language: string;
+  title: string;
+  subtitle: string;
+  modelIds: readonly string[];
+}
+
+export const GENERATED_VOICE_MODEL_CATALOG = {
   "schemaVersion": 1,
-  "runtime": {
-    "version": "1.13.2",
-    "android": {
-      "name": "sherpa-onnx-static-link-onnxruntime-1.13.2.aar",
-      "sizeBytes": 38208264,
-      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-static-link-onnxruntime-1.13.2.aar",
-      "sha256": "9b2a290b8c7f31bd0aba35abb4628e87fe8d0eb71796a98aa12f3acd089ceaed"
-    },
-    "ios": {
-      "name": "sherpa-onnx-v1.13.2-ios.tar.bz2",
-      "sizeBytes": 77611169,
-      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-ios.tar.bz2",
-      "sha256": "2886a04df4f8d5066c6c8b6e712278d65d7b60fc9e45990223df50262861d38b"
-    },
-    "macos": {
-      "sherpaVersion": "1.13.6",
-      "onnxruntimeVersion": "1.27.1",
-      "name": "sherpa-onnx-v1.13.6-macos-static.xcframework.zip",
-      "sizeBytes": 11590556,
-      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v1.13.6-macos-static.xcframework.zip",
-      "sha256": "ef8fa1ae6a7764b8d80a79ab66a49d553b40af2df7dd18b08b8559cdca3a1b1e"
-    }
+  "runtimeVersion": "1.13.2",
+  "androidRuntimeArtifact": {
+    "name": "sherpa-onnx-static-link-onnxruntime-1.13.2.aar",
+    "sizeBytes": 38208264,
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-static-link-onnxruntime-1.13.2.aar",
+    "sha256": "9b2a290b8c7f31bd0aba35abb4628e87fe8d0eb71796a98aa12f3acd089ceaed"
+  },
+  "iosRuntimeArtifact": {
+    "name": "sherpa-onnx-v1.13.2-ios.tar.bz2",
+    "sizeBytes": 77611169,
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-ios.tar.bz2",
+    "sha256": "2886a04df4f8d5066c6c8b6e712278d65d7b60fc9e45990223df50262861d38b"
+  },
+  "macOSRuntimeArtifact": {
+    "sherpaVersion": "1.13.6",
+    "onnxruntimeVersion": "1.27.1",
+    "name": "sherpa-onnx-v1.13.6-macos-static.xcframework.zip",
+    "sizeBytes": 11590556,
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v1.13.6-macos-static.xcframework.zip",
+    "sha256": "ef8fa1ae6a7764b8d80a79ab66a49d553b40af2df7dd18b08b8559cdca3a1b1e"
   },
   "models": [
     {
@@ -31,7 +78,9 @@
         "zh": "Zipformer 中文 14M",
         "en": "Zipformer Chinese 14M"
       },
-      "languages": ["zh"],
+      "languages": [
+        "zh"
+      ],
       "streaming": true,
       "sampleRateHz": 16000,
       "approxSizeBytes": 54344380,
@@ -59,7 +108,9 @@
         "zh": "Moonshine 英文 Tiny",
         "en": "Moonshine Tiny (English)"
       },
-      "languages": ["en"],
+      "languages": [
+        "en"
+      ],
       "streaming": false,
       "sampleRateHz": 16000,
       "approxSizeBytes": 107600538,
@@ -87,7 +138,10 @@
         "zh": "MeloTTS 中英双语",
         "en": "MeloTTS Chinese + English"
       },
-      "languages": ["zh", "en"],
+      "languages": [
+        "zh",
+        "en"
+      ],
       "streaming": true,
       "sampleRateHz": 44100,
       "approxSizeBytes": 167006755,
@@ -100,7 +154,9 @@
         "phone.fst",
         "number.fst"
       ],
-      "requiredDirectories": ["dict"],
+      "requiredDirectories": [
+        "dict"
+      ],
       "sourceUrl": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2",
       "runtimeParams": {
         "type": "tts-vits",
@@ -122,7 +178,9 @@
         "zh": "Kitten Nano 英文",
         "en": "Kitten Nano (English)"
       },
-      "languages": ["en"],
+      "languages": [
+        "en"
+      ],
       "streaming": true,
       "sampleRateHz": 24000,
       "approxSizeBytes": 26586708,
@@ -132,7 +190,9 @@
         "voices.bin",
         "tokens.txt"
       ],
-      "requiredDirectories": ["espeak-ng-data"],
+      "requiredDirectories": [
+        "espeak-ng-data"
+      ],
       "sourceUrl": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_2-fp16.tar.bz2",
       "runtimeParams": {
         "type": "tts-kitten",
@@ -168,4 +228,4 @@
       ]
     }
   ]
-}
+} as const;

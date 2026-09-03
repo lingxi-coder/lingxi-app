@@ -4,11 +4,18 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
+  appendTrackedTurnDelta,
+  bindTrackedTurn,
   beginProjectCatalogRequest,
   claimSlashTurn,
   clearCancellationRuntime,
   clearSlashTurnClaim,
+  clearTrackedTurnState,
+  completeTrackedTurn,
+  createDesktopTurnToken,
+  dequeueTrackedTurn,
   discardAudioBindings,
+  enqueueTrackedTurn,
   pruneAudioBindings,
   sessionAudioBindings,
   displayedSession,
@@ -341,18 +348,70 @@ test('configuration admin waits for the terminal event with the same domain and 
   assert.match(dispatchBody, /return terminal/);
 });
 
-test('a failed pending prompt does not release the turn already in progress', () => {
+test('tracked prompts reserve a token before dispatch and keep sendPrompt as a compatibility wrapper', () => {
+  const trackedBody = sliceBetweenMarkers(
+    useBridgeSource(),
+    'const sendTrackedPrompt = useCallback',
+    'const sendPrompt = useCallback',
+    'sendTrackedPrompt',
+  );
+
+  assert.match(trackedBody, /createDesktopTurnToken/);
+  assert.match(trackedBody, /enqueueTrackedTurn\(pendingTrackedTurns\.current, token\)/);
+  assert.match(trackedBody, /trackedTurnSequence\.current \+= 1/);
+  assert.match(trackedBody, /Failed to queue the pending message/);
+  assert.match(trackedBody, /running: wasTurnActive/);
+
   const sendPromptBody = sliceBetweenMarkers(
     useBridgeSource(),
     'const sendPrompt = useCallback',
     'const runSlashCommand = useCallback',
     'sendPrompt',
   );
+  assert.match(sendPromptBody, /const tracked = sendTrackedPrompt\(text, images, imageNames, filePaths\)/);
+  assert.match(sendPromptBody, /await tracked\.queued/);
+});
 
-  assert.match(sendPromptBody, /const wasTurnActive = turnActiveRefs\.current\.get\(sessionId\) === true/);
-  assert.match(sendPromptBody, /turnActiveRefs\.current\.set\(sessionId, wasTurnActive\)/);
-  assert.match(sendPromptBody, /Failed to queue the pending message/);
-  assert.match(sendPromptBody, /running: wasTurnActive/);
+test('tracked turns bind by client_turn_id and otherwise fall back to FIFO', () => {
+  const pending = new Map<string, ReturnType<typeof createDesktopTurnToken>[]>();
+  const active = new Map<string, { token: ReturnType<typeof createDesktopTurnToken>; text: string; turnId?: number; completed: boolean }>();
+  const first = createDesktopTurnToken('s1', 1, 'composer');
+  const second = createDesktopTurnToken('s1', 2, 'flow');
+  enqueueTrackedTurn(pending, first);
+  enqueueTrackedTurn(pending, second);
+
+  const explicit = bindTrackedTurn(
+    pending,
+    active,
+    's1',
+    { type: 'turn_started', turn_id: 7, client_turn_id: second.clientTurnId } as any,
+  );
+  assert.equal(explicit?.token.clientTurnId, second.clientTurnId);
+  assert.deepEqual(pending.get('s1')?.map((token) => token.clientTurnId), [first.clientTurnId]);
+
+  const fallback = bindTrackedTurn(pending, active, 's1', { type: 'turn_started', turn_id: 8 } as any);
+  assert.equal(fallback?.token.clientTurnId, first.clientTurnId);
+  assert.equal(pending.has('s1'), false);
+});
+
+test('tracked speech cleanup drops queued tokens and seals the active turn once', () => {
+  const pending = new Map<string, ReturnType<typeof createDesktopTurnToken>[]>();
+  const active = new Map<string, { token: ReturnType<typeof createDesktopTurnToken>; text: string; turnId?: number; completed: boolean }>();
+  const listeners = new Map<string, Set<(event: unknown) => void>>();
+  const queued = createDesktopTurnToken('s1', 1, 'composer');
+  const bound = createDesktopTurnToken('s1', 2, 'flow');
+  enqueueTrackedTurn(pending, queued);
+  enqueueTrackedTurn(pending, bound);
+  const tracked = bindTrackedTurn(pending, active, 's1', { type: 'turn_started', turn_id: 4 } as any);
+  assert.equal(tracked?.token.clientTurnId, queued.clientTurnId);
+  appendTrackedTurnDelta(active, 's1', 'hello');
+  const completed = completeTrackedTurn(active, 's1');
+  assert.equal(completed?.text, 'hello');
+  assert.equal(completeTrackedTurn(active, 's1'), null, 'completion must be unique');
+  const cleared = clearTrackedTurnState(pending, active, listeners as any, 's1');
+  assert.deepEqual(cleared.map((token) => token.clientTurnId), [bound.clientTurnId]);
+  dequeueTrackedTurn(pending, bound);
+  assert.equal(pending.size, 0);
 });
 
 test('a slash release resets the cancellation runtime, not just the turn claims (event fan-out)', () => {
@@ -483,7 +542,7 @@ test('a slash-turn claim is cleared on session reset events, not just turn_start
   const source = useBridgeSource();
   const sessionResetBody = sliceBetweenMarkers(
     source,
-    "if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);",
+    "if (event.type === 'turn_started') {\n        if (activeTrackedTurns.current.has(sessionId)) completeTrackedSpeech(sessionId, 'stale');",
     "if (event.type === 'slash_command_result' && shouldReleaseSlashTurn",
     'the session-reset slash-claim handling in the event fan-out',
   );

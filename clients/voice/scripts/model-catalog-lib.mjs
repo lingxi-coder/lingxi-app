@@ -14,6 +14,14 @@ export const swiftOutputPath = path.resolve(
   voiceRoot,
   "../ios/Sources/Voice/GeneratedVoiceModels.swift",
 );
+export const desktopSwiftOutputPath = path.resolve(
+  voiceRoot,
+  "../electron/native/audio-helper/GeneratedVoiceModels.swift",
+);
+export const desktopTypeScriptOutputPath = path.resolve(
+  voiceRoot,
+  "../electron/src/shared/generatedVoiceModels.ts",
+);
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -87,6 +95,11 @@ export function validateManifest(manifest) {
   assert.equal(typeof manifest.runtime.version, "string", "runtime.version must be a string");
   validateRuntimeArtifactMetadata(manifest.runtime.android, "runtime.android");
   validateRuntimeArtifactMetadata(manifest.runtime.ios, "runtime.ios");
+  if (manifest.runtime.macos !== undefined) {
+    validateRuntimeArtifactMetadata(manifest.runtime.macos, "runtime.macos");
+    assert.equal(typeof manifest.runtime.macos.sherpaVersion, "string", "runtime.macos.sherpaVersion must be a string");
+    assert.equal(typeof manifest.runtime.macos.onnxruntimeVersion, "string", "runtime.macos.onnxruntimeVersion must be a string");
+  }
   assert.ok(Array.isArray(manifest.models), "models must be an array");
   assert.ok(Array.isArray(manifest.packs), "packs must be an array");
 
@@ -490,10 +503,74 @@ ${indent(packs, 8)}
 `;
 }
 
+export function renderTypeScript(manifest) {
+  return `// Generated from clients/voice/models.json. Do not edit by hand.
+
+export interface GeneratedRuntimeArtifactMetadata {
+  name: string;
+  sizeBytes: number;
+  url: string;
+  sha256: string;
+  sherpaVersion?: string;
+  onnxruntimeVersion?: string;
+}
+
+export type GeneratedModelKind = 'stt' | 'tts';
+
+export interface GeneratedTtsVoiceEntry {
+  id: string;
+  displayName: string;
+  language: string;
+}
+
+export type GeneratedSherpaRuntimeParams =
+  | { type: 'asr-online-transducer'; numThreads: number; decoding: string }
+  | { type: 'asr-offline-moonshine'; numThreads: number }
+  | { type: 'tts-vits'; numThreads: number }
+  | { type: 'tts-kitten'; numThreads: number };
+
+export interface GeneratedOfflineModelEntry {
+  id: string;
+  kind: GeneratedModelKind;
+  displayName: Record<string, string>;
+  languages: readonly string[];
+  streaming: boolean;
+  sampleRateHz: number;
+  approxSizeBytes: number;
+  sha256: string;
+  files: readonly string[];
+  requiredDirectories: readonly string[];
+  sourceUrl: string;
+  runtimeParams: GeneratedSherpaRuntimeParams;
+  voices: readonly GeneratedTtsVoiceEntry[];
+  license: string;
+}
+
+export interface GeneratedVoicePack {
+  language: string;
+  title: string;
+  subtitle: string;
+  modelIds: readonly string[];
+}
+
+export const GENERATED_VOICE_MODEL_CATALOG = ${JSON.stringify({
+    schemaVersion: manifest.schemaVersion,
+    runtimeVersion: manifest.runtime.version,
+    androidRuntimeArtifact: manifest.runtime.android,
+    iosRuntimeArtifact: manifest.runtime.ios,
+    macOSRuntimeArtifact: manifest.runtime.macos ?? null,
+    models: manifest.models,
+    packs: manifest.packs,
+  }, null, 2)} as const;
+`;
+}
+
 export function renderGeneratedOutputs(manifest) {
   return {
     [kotlinOutputPath]: renderKotlin(manifest),
     [swiftOutputPath]: renderSwift(manifest),
+    [desktopSwiftOutputPath]: renderSwift(manifest),
+    [desktopTypeScriptOutputPath]: renderTypeScript(manifest),
   };
 }
 

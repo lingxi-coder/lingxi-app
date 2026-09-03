@@ -38,7 +38,8 @@
  * answer is "the user hasn't been asked yet".
  */
 import { providerById } from '../../shared/providers';
-import { isMicrophonePermissionStatus, type MicrophonePermissionStatus } from '../../shared/microphoneAccess';
+import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess';
+export { hostMicrophonePermissionReader } from '../../shared/microphoneAccess';
 import { DEFAULT_VOICE_SELECTION, LANGUAGE_AUTO, type VoicePreferences } from './preferences';
 
 /**
@@ -429,37 +430,6 @@ export function resolveActiveProviderVoiceCapability(
 }
 
 /** The one method of the preload bridge this module needs — `useBridge`'s `microphonePermission` is built on it. */
-export interface MicrophoneAccessHost {
-  microphoneAccess(): Promise<unknown>;
-}
-
-/**
- * The renderer's only honest source of the microphone grant: ask the main
- * process, which reads `systemPreferences.getMediaAccessStatus('microphone')`.
- *
- * There is deliberately NO browser fallback. The obvious one —
- * `navigator.permissions.query({name:'microphone'})` — is what this branch
- * removed: it reports the PAGE permission, which `main/index.ts`'s
- * `setPermissionCheckHandler` grants this app's own renderer unconditionally,
- * so it said `granted` on a machine where macOS had never granted anything
- * (measured; see `shared/microphoneAccess.ts`). Falling back to it when the
- * host is missing would restore exactly that lie in exactly the situation
- * where we know least. With no host (a plain browser dev run) the honest
- * answer is `'unavailable'` — the row then says 无法确定.
- *
- * An answer that is not one of the four known states is `'unavailable'` too:
- * a value this renderer cannot interpret is not evidence of a grant.
- */
-export function hostMicrophonePermissionReader(
-  host: MicrophoneAccessHost | undefined,
-): () => Promise<VoicePermissionStatus> {
-  return async () => {
-    if (typeof host?.microphoneAccess !== 'function') return 'unavailable';
-    const answer = await host.microphoneAccess();
-    return isMicrophonePermissionStatus(answer) ? answer : 'unavailable';
-  };
-}
-
 /** Structural subset of an `EventTarget` this module subscribes to; the real `window`/`document` satisfy it. */
 export interface GrantChangeTarget {
   addEventListener(type: string, listener: () => void): void;

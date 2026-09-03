@@ -10,6 +10,7 @@ import {
   resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
 } from './credential-broker.js';
+import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -24,6 +25,7 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
+let nativeAudio: NativeAudioManager | null = null;
 let quitting = false;
 
 function developmentRendererUrl(): string | undefined {
@@ -54,9 +56,9 @@ function isLocalRendererUrl(raw: string): boolean {
 function secureSession(session: Session): void {
   if (securedSessions.has(session)) return;
   securedSessions.add(session);
-  // The composer can use the browser's speech recognition API, but no other
-  // permission is needed by the desktop app. Keep the allowlist scoped to the
-  // local renderer so a future navigation cannot inherit microphone access.
+  // Keep legacy renderer media access scoped to the local app origin. The
+  // production voice path is the signed native Audio Helper; this remains for
+  // compatibility tests and cannot authorize an arbitrary navigation.
   session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => (
     permission === 'media' && isLocalRendererUrl(requestingOrigin)
   ));
@@ -105,6 +107,12 @@ function createWindow(): BrowserWindow {
 
   secureSession(mainWindow.webContents.session);
   host?.registerWindow(mainWindow.webContents, target.url);
+  const releaseAudio = (): void => {
+    void nativeAudio?.suspend('window hidden').catch(() => undefined);
+  };
+  mainWindow.on('hide', releaseAudio);
+  mainWindow.on('minimize', releaseAudio);
+  mainWindow.on('closed', releaseAudio);
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -147,6 +155,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  nativeAudio = process.platform === 'darwin'
+    ? new NativeAudioManager({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        userDataPath: userData,
+        diagnostics,
+      })
+    : null;
   const sessionCatalog = new ProjectSessionCatalog({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -234,6 +250,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     undefined,
     undefined,
     credentialBroker,
+    nativeAudio ?? undefined,
   );
   host.registerIpc();
   createWindow();
@@ -271,7 +288,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   quitting = true;
   host?.dispose();
   host = null;
+  const currentAudio = nativeAudio;
+  nativeAudio = null;
   const currentBridge = bridge;
   bridge = null;
-  void (currentBridge?.dispose() ?? Promise.resolve()).finally(() => app.quit());
+  void Promise.all([
+    currentAudio?.dispose() ?? Promise.resolve(),
+    currentBridge?.dispose() ?? Promise.resolve(),
+  ]).finally(() => app.quit());
   });

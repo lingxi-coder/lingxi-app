@@ -29,6 +29,7 @@ const MAX_ADMIN_JSON_PAYLOAD_LENGTH = 768 * 1024;
 const MAX_LIST_ITEMS = 128;
 const MAX_RULE_LENGTH = 4096;
 const MAX_PATH_LENGTH = 4096;
+const MAX_AUDIO_TRANSCRIPT_LENGTH = 256 * 1024;
 const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
 const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
 const MCP_SCOPES = ['user', 'local', 'project'] as const;
@@ -228,19 +229,12 @@ function audioSampleRate(value: unknown): number {
 }
 
 /**
- * One `AudioResultDto`, narrowed to the outcomes this renderer can honestly
- * produce.
+ * One `AudioResultDto`, bounded to what the desktop host may truthfully send.
  *
- * `transcript` is deliberately ABSENT. Desktop has no speech recognizer, and
- * the renderer cannot reach a provider transcription API either — `host.ts`
- * forwards a provider credential straight to the engine and keeps nothing,
- * so there is no key here to call one with. `renderer/audio/requests.ts`
- * therefore answers `AudioOpDto::Transcribe` with `failed`/`unavailable`,
- * and leaving `transcript` off this gate means a fabricated transcript
- * cannot leave the renderer even if some future code tried to send one. Wire
- * real transcription first, then widen this — the same bounded-surface
- * discipline that keeps `new_session`/`resume_session` off
- * `ALLOWED_CLIENT_COMMAND_TYPES`.
+ * `transcript` is now a real path: the host-native audio executor can return
+ * local speech recognition text, and that answer still needs the same local
+ * gate every other audio result goes through so an invalid payload becomes an
+ * immediate renderer failure instead of a parked engine request.
  */
 function validateAudioResult(value: unknown): AudioResultDto {
   const input = object(value);
@@ -271,6 +265,25 @@ function validateAudioResult(value: unknown): AudioResultDto {
         // `0` is legal, and required: it is half of the played-in-place pair.
         sample_rate_hz: audioSampleRate(input['sample_rate_hz']),
       };
+    case 'transcript': {
+      exactKeys(input, ['type', 'text', 'language', 'confidence']);
+      const rawConfidence = input['confidence'];
+      if (
+        rawConfidence !== undefined
+        && (typeof rawConfidence !== 'number' || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1)
+      ) {
+        throw new Error('invalid audio transcript confidence');
+      }
+      const confidence = typeof rawConfidence === 'number' ? rawConfidence : undefined;
+      return {
+        type,
+        text: audioText(input['text'], MAX_AUDIO_TRANSCRIPT_LENGTH, 'audio transcript text'),
+        ...(input['language'] === undefined
+          ? {}
+          : { language: audioText(input['language'], 64, 'audio transcript language') }),
+        ...(confidence === undefined ? {} : { confidence }),
+      };
+    }
     case 'failed':
       exactKeys(input, ['type', 'kind', 'message']);
       return {

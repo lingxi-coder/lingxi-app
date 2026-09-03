@@ -43,6 +43,13 @@ import {
   verifyTeamIdentifier,
   writeEntitlements,
 } from './credential-broker.mjs';
+import {
+  AUDIO_HELPER_APP,
+  AUDIO_HELPER_EXECUTABLE,
+  audioHelperIdentifiers,
+  buildAudioHelperApp,
+  ensureAudioHelperResourceLayout,
+} from './audio-helper.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -99,16 +106,21 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
   const profilePath = process.env['LINGXI_MAC_PROVISIONING_PROFILE']?.trim();
   const brokerProfilePath = process.env['LINGXI_MAC_BROKER_PROVISIONING_PROFILE']?.trim() ?? profilePath;
+  const audioProfilePath = process.env['LINGXI_MAC_AUDIO_PROVISIONING_PROFILE']?.trim();
   if (!teamId || !/^[A-Z0-9]{10}$/.test(teamId)) {
     throw new Error('LINGXI_MAC_TEAM_ID must be the 10-character team identifier for signed builds');
   }
   if (!profilePath) throw new Error('LINGXI_MAC_PROVISIONING_PROFILE is required for signed builds');
   if (!brokerProfilePath) throw new Error('LINGXI_MAC_BROKER_PROVISIONING_PROFILE is required for the credential broker app');
+  if (!audioProfilePath) throw new Error('LINGXI_MAC_AUDIO_PROVISIONING_PROFILE is required for the audio helper app');
   const absoluteProfilePath = resolve(profilePath);
   const absoluteBrokerProfilePath = resolve(brokerProfilePath);
+  const absoluteAudioProfilePath = resolve(audioProfilePath);
   const identifiers = brokerIdentifiers(channel);
+  const audioIdentifiers = audioHelperIdentifiers(channel);
   validateProvisioningProfile(absoluteProfilePath, teamId, identifiers.desktopBundleId);
   validateProvisioningProfile(absoluteBrokerProfilePath, teamId, identifiers.brokerBundleId);
+  validateProvisioningProfile(absoluteAudioProfilePath, teamId, audioIdentifiers.bundleId);
   copyFileSync(absoluteProfilePath, join(contents, 'embedded.provisionprofile'));
   copyFileSync(
     absoluteBrokerProfilePath,
@@ -126,29 +138,40 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
     teamId,
     bundleId: identifiers.brokerBundleId,
   });
+  const audioEntitlementsPath = join(appContainer, 'LingXiAudioHelper.entitlements.plist');
+  writeEntitlements(audioEntitlementsPath, {
+    teamId,
+    bundleId: audioIdentifiers.bundleId,
+  });
   const helperEntitlementsPath = join(appContainer, 'Electron-Helper.entitlements.plist');
   const pluginEntitlementsPath = join(appContainer, 'Electron-Plugin-Helper.entitlements.plist');
   writeHelperEntitlements(helperEntitlementsPath);
   writeHelperEntitlements(pluginEntitlementsPath, true);
   ensureBrokerResourceLayout(brokerResourceRoot);
+  ensureAudioHelperResourceLayout(join(contents, 'Resources'));
   const nestedFrameworkBinaries = signNestedFrameworks(
     join(contents, 'Frameworks'),
     identity,
     helperEntitlementsPath,
     pluginEntitlementsPath,
   );
+  const audioHelperAppPath = join(contents, 'Resources', AUDIO_HELPER_APP);
   signBinary(packagedSidecar, identity, identifiers.bridgeServerIdentifier);
   signBinary(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identity, identifiers.clientIdentifier);
+  signAppBundle(audioHelperAppPath, identity, audioEntitlementsPath);
   signAppBundle(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identity, brokerEntitlementsPath);
   signAppBundle(appPath, identity, appEntitlementsPath);
   verifyIdentifier(packagedSidecar, identifiers.bridgeServerIdentifier, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
+  verifyIdentifier(audioHelperAppPath, audioIdentifiers.bundleId, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
   verifyIdentifier(appPath, identifiers.desktopBundleId, teamId);
+  verifySignedEntitlements(audioHelperAppPath, teamId, audioIdentifiers.bundleId);
   verifySignedEntitlements(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
   verifySignedEntitlements(appPath, teamId, identifiers.desktopBundleId);
+  verifyTeamIdentifier(join(audioHelperAppPath, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
   for (const path of nestedFrameworkBinaries) verifyTeamIdentifier(path, teamId);
-  log(`signed app and credential broker with ${identity} (${version})`);
+  log(`signed app, audio helper, and credential broker with ${identity} (${version})`);
 }
 
 async function main() {
@@ -232,6 +255,18 @@ async function main() {
     targetTriple: 'aarch64-apple-darwin',
     target: TARGET_ARCH,
   });
+  const audioHelperStageRoot = join(paths.appContainer, 'audio-helper-resource');
+  const builtAudioHelperApp = buildAudioHelperApp(audioHelperStageRoot, {
+    channel: brokerChannel,
+    profilePath: process.env['LINGXI_MAC_AUDIO_PROVISIONING_PROFILE']?.trim()
+      ? resolve(process.env['LINGXI_MAC_AUDIO_PROVISIONING_PROFILE'])
+      : undefined,
+    version: metadata.version,
+    targetTriple: 'aarch64-apple-darwin',
+    target: TARGET_ARCH,
+  });
+  cpSync(builtAudioHelperApp, join(resources, AUDIO_HELPER_APP), { recursive: true });
+  ensureAudioHelperResourceLayout(resources);
 
   copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.icns'), join(resources, 'icon.icns'));
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));

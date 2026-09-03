@@ -22,11 +22,19 @@ import type {
   SkillAdminCommandDto,
 } from '@lingxi/bridge-client';
 
-import { browserMicrophoneCaptureDeps, MicrophoneCapture } from '../audio/capture';
-import { handleAudioRequestEvent, type AudioRequestDeps } from '../audio/requests';
-import { browserSynthesisDeps, synthesize } from '../audio/synthesis';
-import { hostMicrophonePermissionReader, type VoicePermissionStatus } from '../audio/capabilities';
-import { defaultVoicePreferences, type VoicePreferences } from '../../shared/voicePreferences';
+import type { AudioRequestDeps } from '../audio/requests';
+import {
+  hostMicrophonePermissionReader,
+  type MicrophonePermissionStatus as VoicePermissionStatus,
+} from '../../shared/microphoneAccess';
+import {
+  defaultNativeAudioSnapshot,
+  type NativeAudioCommand,
+  type NativeAudioCommandResult,
+  type NativeAudioResponse,
+  type NativeAudioSnapshot,
+} from '../../shared/nativeAudio.js';
+import type { VoicePreferences } from '../../shared/voicePreferences';
 import {
   appendPendingUserPrompt,
   beginCompaction,
@@ -96,6 +104,24 @@ export type SkillCatalogEvent = Extract<ClientEvent, { type: 'skill_catalog' }>;
 export type SkillDocumentEvent = Extract<ClientEvent, { type: 'skill_document' }>;
 export type McpConfigurationSnapshotEvent = Extract<ClientEvent, { type: 'mcp_configuration_snapshot' }>;
 export type PluginCatalogEvent = Extract<ClientEvent, { type: 'plugin_catalog' }>;
+export type TrackedPromptPurpose = 'composer' | 'flow';
+
+export interface DesktopTurnToken {
+  readonly sessionId: string;
+  readonly clientTurnId: string;
+  readonly purpose: TrackedPromptPurpose;
+}
+
+export type TrackedSpeechTerminal = 'message_complete' | 'turn_ended' | 'stale';
+
+export interface TrackedSpeechEvent {
+  readonly type: 'delta' | 'completion';
+  readonly token: DesktopTurnToken;
+  readonly text: string;
+  readonly sequence: number;
+  readonly turnId?: number;
+  readonly terminal?: TrackedSpeechTerminal;
+}
 
 export interface UseBridge {
   readonly hosted: boolean;
@@ -129,7 +155,16 @@ export interface UseBridge {
   readonly pendingComputerAccess: ComputerAccessRequestDto | null;
   readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
   readonly error: string | null;
+  readonly audioSnapshot: NativeAudioSnapshot;
   clearError(): void;
+  sendTrackedPrompt(
+    text: string,
+    images?: ImageRefDto[],
+    imageNames?: string[],
+    filePaths?: string[],
+    options?: { purpose?: TrackedPromptPurpose },
+  ): { token: DesktopTurnToken; queued: Promise<void> } | null;
+  subscribeTrackedSpeech(token: DesktopTurnToken, listener: (event: TrackedSpeechEvent) => void): () => void;
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
@@ -245,6 +280,7 @@ export interface UseBridge {
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
+  audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
   refresh(): Promise<void>;
   newSession(projectPath?: string): Promise<void>;
   resumeSession(sessionId: string): Promise<void>;
@@ -293,6 +329,7 @@ interface PendingConfigurationOperation {
 }
 
 const CONFIGURATION_OPERATION_TIMEOUT_MS = 5 * 60_000;
+const MAX_TRACKED_SPEECH_SUBSCRIBERS = 64;
 
 function configurationOperationId(
   command: SkillAdminCommandDto | McpAdminCommandDto | PluginAdminCommandDto | HookAdminCommandDto,
@@ -624,6 +661,123 @@ interface RuntimeState {
   error?: string;
 }
 
+interface ActiveTrackedTurn {
+  token: DesktopTurnToken;
+  text: string;
+  sequence: number;
+  turnId?: number;
+  completed: boolean;
+}
+
+type TrackedSpeechListener = (event: TrackedSpeechEvent) => void;
+
+export function createDesktopTurnToken(
+  sessionId: string,
+  sequence: number,
+  purpose: TrackedPromptPurpose,
+): DesktopTurnToken {
+  return { sessionId, clientTurnId: `${sessionId}:tracked:${sequence}`, purpose };
+}
+
+export function enqueueTrackedTurn(
+  pending: Map<string, DesktopTurnToken[]>,
+  token: DesktopTurnToken,
+): void {
+  const queue = pending.get(token.sessionId);
+  if (queue) queue.push(token);
+  else pending.set(token.sessionId, [token]);
+}
+
+export function dequeueTrackedTurn(
+  pending: Map<string, DesktopTurnToken[]>,
+  token: DesktopTurnToken,
+): void {
+  const queue = pending.get(token.sessionId);
+  if (!queue) return;
+  const next = queue.filter((entry) => entry.clientTurnId !== token.clientTurnId);
+  if (next.length === 0) pending.delete(token.sessionId);
+  else pending.set(token.sessionId, next);
+}
+
+function eventClientTurnId(event: Extract<ClientEvent, { type: 'turn_started' }>): string | undefined {
+  const clientTurnId = (event as { client_turn_id?: unknown }).client_turn_id;
+  return typeof clientTurnId === 'string' && clientTurnId.length > 0 ? clientTurnId : undefined;
+}
+
+function trackedListenerKey(token: DesktopTurnToken): string {
+  return token.clientTurnId;
+}
+
+function emitTrackedSpeech(
+  listeners: Map<string, Set<TrackedSpeechListener>>,
+  event: TrackedSpeechEvent,
+): void {
+  const subscribers = listeners.get(trackedListenerKey(event.token));
+  if (!subscribers || subscribers.size === 0) return;
+  for (const listener of [...subscribers]) listener(event);
+}
+
+export function bindTrackedTurn(
+  pending: Map<string, DesktopTurnToken[]>,
+  active: Map<string, ActiveTrackedTurn>,
+  sessionId: string,
+  event: Extract<ClientEvent, { type: 'turn_started' }>,
+): ActiveTrackedTurn | null {
+  const queue = pending.get(sessionId);
+  if (!queue || queue.length === 0) return null;
+  const explicitClientTurnId = eventClientTurnId(event);
+  const index = explicitClientTurnId
+    ? Math.max(0, queue.findIndex((entry) => entry.clientTurnId === explicitClientTurnId))
+    : 0;
+  const [token] = queue.splice(index, 1);
+  if (!token) return null;
+  if (queue.length === 0) pending.delete(sessionId);
+  const tracked = { token, text: '', sequence: 0, turnId: event.turn_id, completed: false };
+  active.set(sessionId, tracked);
+  return tracked;
+}
+
+export function appendTrackedTurnDelta(
+  active: Map<string, ActiveTrackedTurn>,
+  sessionId: string,
+  text: string,
+): ActiveTrackedTurn | null {
+  if (!text) return null;
+  const tracked = active.get(sessionId);
+  if (!tracked || tracked.completed) return null;
+  tracked.text += text;
+  tracked.sequence += 1;
+  return tracked;
+}
+
+export function completeTrackedTurn(
+  active: Map<string, ActiveTrackedTurn>,
+  sessionId: string,
+): ActiveTrackedTurn | null {
+  const tracked = active.get(sessionId);
+  if (!tracked || tracked.completed) return null;
+  tracked.completed = true;
+  active.delete(sessionId);
+  return tracked;
+}
+
+export function clearTrackedTurnState(
+  pending: Map<string, DesktopTurnToken[]>,
+  active: Map<string, ActiveTrackedTurn>,
+  listeners: Map<string, Set<TrackedSpeechListener>>,
+  sessionId: string,
+): DesktopTurnToken[] {
+  const cleared: DesktopTurnToken[] = pending.get(sessionId) ?? [];
+  pending.delete(sessionId);
+  const tracked = active.get(sessionId);
+  if (tracked) {
+    active.delete(sessionId);
+    cleared.push(tracked.token);
+  }
+  for (const token of cleared) listeners.delete(trackedListenerKey(token));
+  return cleared;
+}
+
 function emptyRuntimeState(connection: ConnectionState = { status: 'idle' }): RuntimeState {
   return {
     connection,
@@ -647,6 +801,7 @@ export function useBridge(): UseBridge {
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
   const [settingsSnapshotEvent, setSettingsSnapshotEvent] = useState<SettingsSnapshotEvent | null>(null);
@@ -676,6 +831,10 @@ export function useBridge(): UseBridge {
   const catalogRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const catalogRequestGenerations = useRef(new Map<string, number>());
   const runtimeResourceSendSequence = useRef(0);
+  const trackedTurnSequence = useRef(0);
+  const pendingTrackedTurns = useRef(new Map<string, DesktopTurnToken[]>());
+  const activeTrackedTurns = useRef(new Map<string, ActiveTrackedTurn>());
+  const trackedSpeechListeners = useRef(new Map<string, Set<TrackedSpeechListener>>());
 
   useEffect(() => () => {
     for (const pending of pendingConfigurationOperations.current.values()) {
@@ -683,6 +842,23 @@ export function useBridge(): UseBridge {
       pending.reject(new Error('configuration operation was interrupted'));
     }
     pendingConfigurationOperations.current.clear();
+    for (const sessionId of new Set<string>([
+      ...pendingTrackedTurns.current.keys(),
+      ...activeTrackedTurns.current.keys(),
+    ])) {
+      const tracked = completeTrackedTurn(activeTrackedTurns.current, sessionId);
+      if (tracked) {
+        emitTrackedSpeech(trackedSpeechListeners.current, {
+          type: 'completion',
+          token: tracked.token,
+          text: tracked.text,
+          sequence: tracked.sequence,
+          turnId: tracked.turnId,
+          terminal: 'stale',
+        });
+      }
+      clearTrackedTurnState(pendingTrackedTurns.current, activeTrackedTurns.current, trackedSpeechListeners.current, sessionId);
+    }
   }, []);
 
   const persistedActiveSession = bootstrap?.activeSession ?? bootstrap?.settings.activeSession;
@@ -693,6 +869,34 @@ export function useBridge(): UseBridge {
   activeSessionIdRef.current = activeSessionId;
   sessionLoadingRef.current = sessionLoading;
   bootstrapRef.current = bootstrap;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!host?.audio) {
+      setAudioSnapshot(defaultNativeAudioSnapshot());
+      if (host) {
+        void hostMicrophonePermissionReader(host)().then((microphone) => {
+          if (!cancelled) setAudioSnapshot({
+            ...defaultNativeAudioSnapshot(),
+            permissions: { microphone, speech: 'unavailable' },
+          });
+        });
+      }
+      return () => { cancelled = true; };
+    }
+    void host.audio.request({ type: 'get_snapshot' }).then((response) => {
+      if (!cancelled) setAudioSnapshot(response.snapshot);
+    }).catch(() => {
+      if (!cancelled) setAudioSnapshot(defaultNativeAudioSnapshot());
+    });
+    const offAudio = host.audio.onEvent((event) => {
+      if (!cancelled) setAudioSnapshot(event.snapshot);
+    });
+    return () => {
+      cancelled = true;
+      offAudio();
+    };
+  }, [host]);
 
   // Settings are captured per-CONNECTION on the engine side (`SettingsContext`
   // is built once per `assemble_with_provider_keys` call), so a snapshot from
@@ -714,32 +918,37 @@ export function useBridge(): UseBridge {
     throw cause;
   }, []);
 
-  /**
-   * The microphone/speaker bindings the engine's `audio_request` events are
-   * serviced with, keyed by session — see {@link sessionAudioBindings} for why
-   * one instance per SESSION rather than one per hook or one per request.
-   * Built lazily because it touches `navigator.mediaDevices` and
-   * `window.speechSynthesis`, which a server-rendered probe of this hook has
-   * neither of.
-   */
-  const audioBindings = useRef(new Map<string, AudioRequestDeps>());
-  const audioRequestDeps = useCallback((sessionId: string): AudioRequestDeps => (
-    sessionAudioBindings(audioBindings.current, sessionId, () => {
-      const synthesisDeps = browserSynthesisDeps();
-      return {
-        recorder: new MicrophoneCapture(browserMicrophoneCaptureDeps()),
-        synthesize: (text, voiceId, rate) => synthesize(text, voiceId, rate, synthesisDeps),
-        // `AudioOpDto::Synthesize` carries the text and sometimes a voice,
-        // never a rate — that is a device preference. Read through the ref
-        // on every request so a settings change takes effect without
-        // rebuilding these bindings.
-        playback: () => {
-          const preferences = bootstrapRef.current?.settings.voice ?? defaultVoicePreferences();
-          return { voiceSelection: preferences.voiceSelection, rate: preferences.rate };
-        },
-      };
-    })
-  ), []);
+  const completeTrackedSpeech = useCallback((sessionId: string, terminal: TrackedSpeechTerminal): void => {
+    const tracked = completeTrackedTurn(activeTrackedTurns.current, sessionId);
+    if (!tracked) {
+      if (terminal === 'stale') {
+        clearTrackedTurnState(
+          pendingTrackedTurns.current,
+          activeTrackedTurns.current,
+          trackedSpeechListeners.current,
+          sessionId,
+        );
+      }
+      return;
+    }
+    emitTrackedSpeech(trackedSpeechListeners.current, {
+      type: 'completion',
+      token: tracked.token,
+      text: tracked.text,
+      sequence: tracked.sequence,
+      turnId: tracked.turnId,
+      terminal,
+    });
+    trackedSpeechListeners.current.delete(trackedListenerKey(tracked.token));
+    if (terminal === 'stale') {
+      clearTrackedTurnState(
+        pendingTrackedTurns.current,
+        activeTrackedTurns.current,
+        trackedSpeechListeners.current,
+        sessionId,
+      );
+    }
+  }, []);
 
   const runtime = activeSessionId ? runtimeStates.get(activeSessionId) : undefined;
   const connection: ConnectionState = sessionLoading
@@ -814,9 +1023,12 @@ export function useBridge(): UseBridge {
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
       pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
-      // Not `pruneRuntimeMaps`: a discarded session may still hold the
-      // microphone, and nothing else can release it.
-      pruneAudioBindings(audioBindings.current, runtimeIds);
+      for (const sessionId of new Set<string>([
+        ...pendingTrackedTurns.current.keys(),
+        ...activeTrackedTurns.current.keys(),
+      ])) {
+        if (!runtimeIds.has(sessionId)) completeTrackedSpeech(sessionId, 'stale');
+      }
       for (const summary of summaries) {
         const current = next.get(summary.sessionId) ?? emptyRuntimeState(summary.connection);
         const nextState: RuntimeState = {
@@ -851,7 +1063,7 @@ export function useBridge(): UseBridge {
       return next;
     });
     setBootstrap(snapshot);
-  }, []);
+  }, [completeTrackedSpeech]);
 
   const beginNavigationOperation = useCallback((): number => {
     pendingSessionRef.current = null;
@@ -928,7 +1140,11 @@ export function useBridge(): UseBridge {
       const event = envelope.event;
       if (event.type === 'turn_started') turnActiveRefs.current.set(sessionId, true);
       if (event.type === 'turn_ended' || event.type === 'session_ended') turnActiveRefs.current.set(sessionId, false);
-      if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      if (event.type === 'turn_started') {
+        if (activeTrackedTurns.current.has(sessionId)) completeTrackedSpeech(sessionId, 'stale');
+        bindTrackedTurn(pendingTrackedTurns.current, activeTrackedTurns.current, sessionId, event);
+        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      }
       // The reducer resets `pendingSlashName` to null on every one of these
       // three events (a fresh `emptyConversation()`/`conversationFromMessages`
       // state). The refs half of the claim must reset in lockstep, or a stale
@@ -969,6 +1185,22 @@ export function useBridge(): UseBridge {
         const task = cancellationTasks.current.get(sessionId);
         if (cancelling && task) clearCancellationRuntime(cancelling, task);
         updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
+      }
+      if (event.type === 'text_delta') {
+        const tracked = appendTrackedTurnDelta(activeTrackedTurns.current, sessionId, event.text);
+        if (tracked) {
+          emitTrackedSpeech(trackedSpeechListeners.current, {
+            type: 'delta',
+            token: tracked.token,
+            text: event.text,
+            sequence: tracked.sequence,
+            turnId: tracked.turnId,
+          });
+        }
+      }
+      if (event.type === 'message_complete') completeTrackedSpeech(sessionId, 'message_complete');
+      if (event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'session_started' || event.type === 'session_resumed') {
+        completeTrackedSpeech(sessionId, event.type === 'turn_ended' ? 'turn_ended' : 'stale');
       }
       updateRuntime(sessionId, (state) => {
         let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
@@ -1064,27 +1296,32 @@ export function useBridge(): UseBridge {
         if (activeSessionIdRef.current === sessionId) setError(event.message);
       }
       if (event.type === 'audio_request') {
-        // The engine has no microphone or speaker of its own on desktop: it
-        // asks the connected client and PARKS the call on a deadline (5s /
-        // 30s / 180s per op, `audio_bridge.rs`). Every request must produce
-        // exactly one `audio_response`, which is what
-        // `handleAudioRequestEvent` guarantees — including on its error
-        // paths, so `void` here can never leave a request unanswered nor
-        // raise an unhandled rejection.
-        void handleAudioRequestEvent(
-          sessionId,
-          event,
-          () => audioRequestDeps(sessionId),
-          (target, command) => host.command(target, command),
-          // Deliberately NOT `capture`: that helper rethrows, which would
-          // strand the parked engine call. A failure to answer at all is
-          // reported the same way an engine `error` event is, above.
-          (cause) => {
+        const result = host.audio
+          ? host.audio.executeEngineRequest(sessionId, event.op)
+          : Promise.resolve(event.op.type === 'is_recording'
+              ? { type: 'recording_state', recording: false } as const
+              : {
+                  type: 'failed',
+                  kind: 'unavailable',
+                  message: 'native audio is unavailable on this host',
+                } as const);
+        void result
+          .catch((cause) => {
             const message = messageFrom(cause);
             updateRuntime(sessionId, (state) => ({ ...state, error: message }));
             if (activeSessionIdRef.current === sessionId) setError(message);
-          },
-        );
+            return { type: 'failed', kind: 'other', message } as const;
+          })
+          .then((result) => host.command(sessionId, {
+            type: 'audio_response',
+            request_id: event.request_id,
+            result,
+          }))
+          .catch((cause) => {
+            const message = messageFrom(cause);
+            updateRuntime(sessionId, (state) => ({ ...state, error: message }));
+            if (activeSessionIdRef.current === sessionId) setError(message);
+          });
       }
     });
     const offState = host.onConnectionStateChanged((envelope) => {
@@ -1112,9 +1349,7 @@ export function useBridge(): UseBridge {
           return next.size === previous.size ? previous : next;
         });
         removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
-        // Not `removeRuntimeFromMaps`: a removed session may still hold the
-        // microphone, and nothing else can release it.
-        discardAudioBindings(audioBindings.current, sessionId);
+        completeTrackedSpeech(sessionId, 'stale');
         return;
       }
       if (removedRuntimeIds.current.has(sessionId)) return;
@@ -1146,6 +1381,7 @@ export function useBridge(): UseBridge {
         // claim, so the outstanding slash claim it may have been carrying
         // must be cleared with it.
         clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+        completeTrackedSpeech(sessionId, 'stale');
       }
       if (activeSessionIdRef.current === sessionId && state.status === 'error') setError(state.message);
       if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason) setError(state.reason);
@@ -1202,7 +1438,7 @@ export function useBridge(): UseBridge {
       offPermission();
       offComputerAccess();
     };
-  }, [applyBootstrap, audioRequestDeps, capture, host, scheduleProjectCatalogRefresh, updateRuntime]);
+  }, [applyBootstrap, capture, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
   useEffect(() => {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
@@ -1226,37 +1462,39 @@ export function useBridge(): UseBridge {
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
-  const sendPrompt = useCallback(async (
+  const sendTrackedPrompt = useCallback((
     text: string,
     images: ImageRefDto[] = [],
     imageNames: string[] = [],
     filePaths: string[] = [],
-  ) => {
+    options: { purpose?: TrackedPromptPurpose } = {},
+  ): { token: DesktopTurnToken; queued: Promise<void> } | null => {
     const trimmed = text.trim();
     const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return;
+    if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return null;
     const wasTurnActive = turnActiveRefs.current.get(sessionId) === true;
     turnActiveRefs.current.set(sessionId, true);
     runtimeResourceSendSequence.current += 1;
+    trackedTurnSequence.current += 1;
+    const token = createDesktopTurnToken(sessionId, trackedTurnSequence.current, options.purpose ?? 'composer');
+    enqueueTrackedTurn(pendingTrackedTurns.current, token);
     const sendToken = `${sessionId}:${runtimeResourceSendSequence.current}`;
     const resources = promptRuntimeResources(sessionId, sendToken, images, imageNames, filePaths);
-    updateRuntime(sessionId, (state) => {
-      return {
+    updateRuntime(sessionId, (state) => ({
+      ...state,
+      conversation: appendPendingUserPrompt(state.conversation, trimmed, images),
+      runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
+    }));
+    const queued = host.sendPrompt(sessionId, trimmed, images).then(() => {
+      if (removedRuntimeIds.current.has(sessionId)) return;
+      updateRuntime(sessionId, (state) => ({
         ...state,
-        conversation: appendPendingUserPrompt(state.conversation, trimmed, images),
-        runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
-      };
-    });
-    try {
-      await host.sendPrompt(sessionId, trimmed, images);
-      if (!removedRuntimeIds.current.has(sessionId)) {
-        updateRuntime(sessionId, (state) => ({
-          ...state,
-          runtimeCenter: commitRuntimeResources(state.runtimeCenter, sendToken),
-        }));
-      }
-    } catch (cause) {
+        runtimeCenter: commitRuntimeResources(state.runtimeCenter, sendToken),
+      }));
+    }).catch((cause) => {
       turnActiveRefs.current.set(sessionId, wasTurnActive);
+      dequeueTrackedTurn(pendingTrackedTurns.current, token);
+      trackedSpeechListeners.current.delete(trackedListenerKey(token));
       if (!removedRuntimeIds.current.has(sessionId)) {
         updateRuntime(sessionId, (state) => ({
           ...state,
@@ -1271,8 +1509,36 @@ export function useBridge(): UseBridge {
       }
       capture(cause);
       throw cause;
-    }
+    });
+    return { token, queued };
   }, [capture, host, updateRuntime]);
+
+  const sendPrompt = useCallback(async (
+    text: string,
+    images: ImageRefDto[] = [],
+    imageNames: string[] = [],
+    filePaths: string[] = [],
+  ) => {
+    const tracked = sendTrackedPrompt(text, images, imageNames, filePaths);
+    if (!tracked) return;
+    await tracked.queued;
+  }, [sendTrackedPrompt]);
+
+  const subscribeTrackedSpeech = useCallback((token: DesktopTurnToken, listener: TrackedSpeechListener): (() => void) => {
+    const key = trackedListenerKey(token);
+    const listeners = trackedSpeechListeners.current.get(key) ?? new Set<TrackedSpeechListener>();
+    if (listeners.size >= MAX_TRACKED_SPEECH_SUBSCRIBERS) {
+      throw new Error('too many tracked speech subscribers for one turn');
+    }
+    listeners.add(listener);
+    trackedSpeechListeners.current.set(key, listeners);
+    return () => {
+      const current = trackedSpeechListeners.current.get(key);
+      if (!current) return;
+      current.delete(listener);
+      if (current.size === 0) trackedSpeechListeners.current.delete(key);
+    };
+  }, []);
 
   const runSlashCommand = useCallback(async (raw: string) => {
     const command = raw.trim();
@@ -1635,6 +1901,28 @@ export function useBridge(): UseBridge {
     try { return await host.exportDiagnostics(); } catch (cause) { return capture(cause); }
   }, [capture, host]);
 
+  const audioRequest = useCallback(async (value: NativeAudioCommand): Promise<NativeAudioResponse> => {
+    if (!host?.audio) {
+      return {
+        type: 'error',
+        snapshot: defaultNativeAudioSnapshot(),
+        error: { code: 'unavailable', message: 'native audio is unavailable on this host' },
+      };
+    }
+    try {
+      const response = await host.audio.request(value);
+      setAudioSnapshot(response.snapshot);
+      return response;
+    } catch (cause) {
+      capture(cause);
+      return {
+        type: 'error',
+        snapshot: defaultNativeAudioSnapshot(),
+        error: { code: 'native-error', message: messageFrom(cause) },
+      };
+    }
+  }, [capture, host]);
+
   const command = useCallback(async (value: Parameters<NonNullable<typeof host>['command']>[1]) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -1917,6 +2205,7 @@ export function useBridge(): UseBridge {
     loading,
     bootstrap,
     settingsSnapshotEvent,
+    audioSnapshot,
     mcpServersEvent,
     skillsEvent,
     skillCatalogEvent,
@@ -1945,6 +2234,8 @@ export function useBridge(): UseBridge {
     pendingAskUserQuestion: askUserQuestionQueue[0] ?? null,
     error,
     clearError: () => setError(null),
+    sendTrackedPrompt,
+    subscribeTrackedSpeech,
     sendPrompt,
     runSlashCommand,
     beginLocalCommand,
@@ -1958,6 +2249,7 @@ export function useBridge(): UseBridge {
     cancelAskUserQuestion,
     openSystemSettings,
     microphonePermission,
+    audioRequest,
     addProject,
     activateProject,
     removeProject,

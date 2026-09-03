@@ -28,6 +28,12 @@ import {
   validateProvisioningProfileMetadata,
   validateSignedEntitlements,
 } from '../scripts/credential-broker.mjs';
+import {
+  AUDIO_HELPER_USAGE_DESCRIPTIONS,
+  audioHelperIdentifiers,
+  ensureAudioHelperResourceLayout,
+  writeAudioHelperInfoPlist,
+} from '../scripts/audio-helper.mjs';
 
 /**
  * A minimal but structurally real Info.plist — the same shape Electron's own
@@ -206,6 +212,59 @@ test('credential broker manifest stays metadata-only and caller allowlist stays 
   });
 });
 
+test('audio helper identifiers follow the desktop packaging channel split', () => {
+  assert.deepEqual(audioHelperIdentifiers('production'), {
+    bundleId: 'com.lingxi.code.audio-helper',
+    desktopBundleId: 'com.lingxi.code',
+  });
+  assert.deepEqual(audioHelperIdentifiers('development'), {
+    bundleId: 'com.lingxi.code.audio-helper.development',
+    desktopBundleId: 'com.lingxi.code.development',
+  });
+  assert.throws(() => audioHelperIdentifiers('staging'), /unsupported audio helper channel/);
+});
+
+test('audio helper resource layout and plist declare the expected macOS voice permissions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-audio-helper-test-'));
+  try {
+    const contents = join(root, 'LingXiAudioHelper.app', 'Contents');
+    const macOS = join(contents, 'MacOS');
+    mkdirSync(macOS, { recursive: true });
+    writeFileSync(join(macOS, 'LingXiAudioHelper'), 'placeholder');
+    writeAudioHelperInfoPlist(contents, {
+      bundleId: 'com.lingxi.code.audio-helper.development',
+      version: '9.9.9',
+    });
+
+    ensureAudioHelperResourceLayout(root);
+
+    const plist = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(contents, 'Info.plist')], {
+      encoding: 'utf8',
+    }));
+    assert.equal(plist.CFBundleIdentifier, 'com.lingxi.code.audio-helper.development');
+    assert.equal(plist.LSUIElement, true);
+    assert.equal(plist.NSMicrophoneUsageDescription, AUDIO_HELPER_USAGE_DESCRIPTIONS.microphone);
+    assert.equal(plist.NSSpeechRecognitionUsageDescription, AUDIO_HELPER_USAGE_DESCRIPTIONS.speechRecognition);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('audio helper release builds remap local source and debug paths', () => {
+  const source = readFileSync(join(import.meta.dirname, '../scripts/audio-helper.mjs'), 'utf8');
+  assert.match(source, /-file-prefix-map/);
+  assert.match(source, /-debug-prefix-map/);
+  assert.match(source, /\$\{repoRoot\}=\/workspace/);
+  assert.match(source, /run\('\/usr\/bin\/strip', \['-S', '-x', helperBinary\]\)/);
+});
+
+test('Apple Speech is constrained to its on-device recognizer before audio is appended', () => {
+  const source = readFileSync(join(import.meta.dirname, '../native/audio-helper/AudioHelperMain.swift'), 'utf8');
+  assert.match(source, /recognizer\.supportsOnDeviceRecognition/);
+  assert.match(source, /request\.requiresOnDeviceRecognition = true/);
+  assert.doesNotMatch(source, /request\.requiresOnDeviceRecognition = false/);
+});
+
 test('credential broker launch agent template keeps an install-time executable placeholder', () => {
   const plist = renderLaunchAgentTemplate();
   assert.match(plist, /com\.lingxi\.code\.credential-broker/);
@@ -286,6 +345,22 @@ test('package scanning rejects developer paths and an obvious secret canary', ()
       () => scanTreeForForbiddenContent(root),
       /absolute macOS user path found/,
     );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('package scanning permits the public source prefix embedded by the official sherpa archive', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-package-sherpa-path-'));
+  try {
+    writeFileSync(
+      join(root, 'upstream.txt'),
+      [
+        '/Users/runner/work/sherpa-onnx/sherpa-onnx/sherpa-onnx/csrc/offline-recognizer.cc',
+        '/Users/runner/work/onnxruntime-libs/onnxruntime-libs/onnxruntime/core/framework/session_state.cc',
+      ].join('\n'),
+    );
+    assert.doesNotThrow(() => scanTreeForForbiddenContent(root));
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

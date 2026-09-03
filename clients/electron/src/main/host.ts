@@ -31,6 +31,8 @@ import {
 } from './host-utils.js';
 import { validateClipboardText } from './validation.js';
 import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
+import type { NativeAudioManager } from './audio/nativeAudioManager.js';
+import { CH_NATIVE_AUDIO_ENGINE_REQUEST, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import type { SettingsStore } from './settings.js';
 
@@ -220,6 +222,7 @@ const SYSTEM_SETTINGS_PANES = {
   accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   screen_recording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
   microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  speech_recognition: 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition',
 } as const;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export type SystemSettingsPane = keyof typeof SYSTEM_SETTINGS_PANES;
@@ -303,6 +306,7 @@ export class HostController {
   private readonly brokerConfiguredProviders = new Set<string>();
   private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
+  private offNativeAudio?: () => void;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -318,6 +322,7 @@ export class HostController {
      */
     private readonly mediaAccess?: MediaAccessReader,
     private readonly credentialBroker?: ProviderCredentialBroker,
+    private readonly nativeAudio?: NativeAudioManager,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -336,6 +341,14 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    if (this.nativeAudio && !this.offNativeAudio) {
+      this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
+        for (const webContents of this.targets.keys()) {
+          if (webContents.isDestroyed()) continue;
+          webContents.send(CH_NATIVE_AUDIO_EVENT, audioEvent);
+        }
+      });
+    }
     this.ipc.handle(CH_BOOTSTRAP, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.bootstrap();
@@ -641,6 +654,20 @@ export class HostController {
     this.ipc.handle(CH_MICROPHONE_ACCESS_GET, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return readMicrophoneAccess(this.mediaAccess);
+    });
+    this.ipc.handle(CH_NATIVE_AUDIO_REQUEST, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      return this.nativeAudio.request(command);
+    });
+    this.ipc.handle(CH_NATIVE_AUDIO_ENGINE_REQUEST, async (
+      event: IpcMainInvokeEvent,
+      sessionId: unknown,
+      op: unknown,
+    ) => {
+      this.assertSender(event);
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      return this.nativeAudio.executeEngineRequest(sessionId, op);
     });
   }
 
@@ -1116,9 +1143,12 @@ export class HostController {
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
-      CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
+      CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
+      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_ENGINE_REQUEST,
     ]) this.ipc.removeHandler(channel);
+    this.offNativeAudio?.();
+    this.offNativeAudio = undefined;
     this.registered = false;
     this.targets.clear();
   }

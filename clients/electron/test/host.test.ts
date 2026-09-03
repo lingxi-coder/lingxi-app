@@ -1037,10 +1037,8 @@ test('settings model and voice patches persist without restarting a live session
       language: 'ZH-cn',
       voiceSelection: 'system:Alex',
       rate: 2.0,
+      autoPlayReplies: true,
     });
-    // The removed auto-play flag cannot re-enter the settings file through a
-    // renderer patch either: `parseVoicePreferences` keeps known keys only.
-    assert.ok(!('autoPlayReplies' in (result.voice ?? {})));
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 

@@ -51,6 +51,7 @@ test('the Flare macOS wrapper pins the iOS team and isolated development identif
   assert.match(output, /^channel=development$/m);
   assert.match(output, /^desktop_bundle_id=com\.lingxi\.code\.development$/m);
   assert.match(output, /^broker_bundle_id=com\.lingxi\.code\.credential-broker\.development$/m);
+  assert.match(output, /^audio_bundle_id=com\.lingxi\.code\.audio-helper\.development$/m);
 
   const packageJson = JSON.parse(readFileSync(join(electronRoot, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['package:mac:flare'], 'bash scripts/package-macos-flare.sh');
@@ -61,4 +62,5 @@ test('the Flare macOS wrapper pins the iOS team and isolated development identif
   ], { encoding: 'utf8' });
   assert.match(help, /Xcode Automatic Signing/);
   assert.match(help, /--no-register/);
+  assert.match(help, /LINGXI_MAC_AUDIO_PROVISIONING_PROFILE/);
 });

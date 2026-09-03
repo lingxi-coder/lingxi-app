@@ -31,6 +31,7 @@ unless explicit paths are supplied through:
 
   LINGXI_MAC_PROVISIONING_PROFILE
   LINGXI_MAC_BROKER_PROVISIONING_PROFILE
+  LINGXI_MAC_AUDIO_PROVISIONING_PROFILE
 
 Options:
   --channel CHANNEL  Credential namespace to package (default: development)
@@ -88,10 +89,12 @@ case "$channel" in
   development)
     readonly desktop_bundle_id="com.lingxi.code.development"
     readonly broker_bundle_id="com.lingxi.code.credential-broker.development"
+    readonly audio_bundle_id="com.lingxi.code.audio-helper.development"
     ;;
   production)
     readonly desktop_bundle_id="com.lingxi.code"
     readonly broker_bundle_id="com.lingxi.code.credential-broker"
+    readonly audio_bundle_id="com.lingxi.code.audio-helper"
     ;;
   *)
     fail "unsupported channel: ${channel}"
@@ -104,6 +107,7 @@ if [[ "$print_config" == true ]]; then
   printf 'channel=%s\n' "$channel"
   printf 'desktop_bundle_id=%s\n' "$desktop_bundle_id"
   printf 'broker_bundle_id=%s\n' "$broker_bundle_id"
+  printf 'audio_bundle_id=%s\n' "$audio_bundle_id"
   exit 0
 fi
 
@@ -230,23 +234,31 @@ if [[ -z "$broker_profile" ]]; then
   broker_profile="$(find_profile "$broker_bundle_id" || true)"
 fi
 
-if [[ -z "$desktop_profile" || -z "$broker_profile" ]]; then
+audio_profile="${LINGXI_MAC_AUDIO_PROVISIONING_PROFILE:-}"
+if [[ -z "$audio_profile" ]]; then
+  audio_profile="$(find_profile "$audio_bundle_id" || true)"
+fi
+
+if [[ -z "$desktop_profile" || -z "$broker_profile" || -z "$audio_profile" ]]; then
   if [[ "$auto_register" == true ]]; then
     [[ -n "$desktop_profile" ]] || register_profile_with_xcode "$desktop_bundle_id" desktop_profile desktop
     [[ -n "$broker_profile" ]] || register_profile_with_xcode "$broker_bundle_id" broker_profile broker
+    [[ -n "$audio_profile" ]] || register_profile_with_xcode "$audio_bundle_id" audio_profile audio
   fi
 fi
 
-if [[ -z "$desktop_profile" || -z "$broker_profile" ]]; then
+if [[ -z "$desktop_profile" || -z "$broker_profile" || -z "$audio_profile" ]]; then
   cat >&2 <<EOF
 [package:mac:flare] ERROR: matching Mac App Development provisioning profiles are not installed.
 
 Create or download profiles for the Flare App, Inc. team (${FLARE_TEAM_ID}):
   Desktop: ${desktop_bundle_id}
   Broker:  ${broker_bundle_id}
+  Audio:   ${audio_bundle_id}
 
 Install them with Xcode, or provide their paths through
-LINGXI_MAC_PROVISIONING_PROFILE and LINGXI_MAC_BROKER_PROVISIONING_PROFILE.
+LINGXI_MAC_PROVISIONING_PROFILE, LINGXI_MAC_BROKER_PROVISIONING_PROFILE,
+and LINGXI_MAC_AUDIO_PROVISIONING_PROFILE.
 The iOS Xcode Managed Profiles cannot sign these macOS bundles.
 Remove --no-register to let Xcode Automatic Signing create them.
 EOF
@@ -255,22 +267,27 @@ fi
 
 [[ -f "$desktop_profile" ]] || fail "Desktop provisioning profile is missing: ${desktop_profile}"
 [[ -f "$broker_profile" ]] || fail "Broker provisioning profile is missing: ${broker_profile}"
+[[ -f "$audio_profile" ]] || fail "Audio Helper provisioning profile is missing: ${audio_profile}"
 
 export LINGXI_CODESIGN_IDENTITY="$identity_hash"
 export LINGXI_MAC_TEAM_ID="$FLARE_TEAM_ID"
 export LINGXI_MAC_PROVISIONING_PROFILE="$desktop_profile"
 export LINGXI_MAC_BROKER_PROVISIONING_PROFILE="$broker_profile"
+export LINGXI_MAC_AUDIO_PROVISIONING_PROFILE="$audio_profile"
 export LINGXI_CREDENTIAL_BROKER_CHANNEL="$channel"
 
 (
   cd "$ELECTRON_DIR"
-  node --input-type=module - "$desktop_profile" "$broker_profile" "$FLARE_TEAM_ID" "$channel" <<'NODE'
+  node --input-type=module - "$desktop_profile" "$broker_profile" "$audio_profile" "$FLARE_TEAM_ID" "$channel" <<'NODE'
+import { audioHelperIdentifiers } from './scripts/audio-helper.mjs';
 import { brokerIdentifiers, validateProvisioningProfile } from './scripts/credential-broker.mjs';
 
-const [desktopProfile, brokerProfile, teamId, channel] = process.argv.slice(2);
+const [desktopProfile, brokerProfile, audioProfile, teamId, channel] = process.argv.slice(2);
 const identifiers = brokerIdentifiers(channel);
+const audioIdentifiers = audioHelperIdentifiers(channel);
 validateProvisioningProfile(desktopProfile, teamId, identifiers.desktopBundleId);
 validateProvisioningProfile(brokerProfile, teamId, identifiers.brokerBundleId);
+validateProvisioningProfile(audioProfile, teamId, audioIdentifiers.bundleId);
 NODE
 )
 
@@ -278,6 +295,7 @@ log "signing team: Flare App, Inc. (${FLARE_TEAM_ID})"
 log "signing identity: ${FLARE_CERTIFICATE_NAME} (${identity_hash})"
 log "Desktop profile: ${desktop_profile}"
 log "Broker profile: ${broker_profile}"
+log "Audio Helper profile: ${audio_profile}"
 log "credential channel: ${channel}"
 
 if [[ "$preflight_only" == true ]]; then

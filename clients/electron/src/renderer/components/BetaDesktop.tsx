@@ -8,6 +8,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import { type UseBridge } from '../bridge/useBridge';
+import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
@@ -42,9 +43,19 @@ import {
   resolveDesktopCommand,
   type DesktopCommandContext,
 } from '../bridge/slashDispatch';
+import {
+  DEFAULT_VOICE_FLOW_STATE,
+  VoiceFlowController,
+  type VoiceFlowState,
+} from '../audio/flow/controller';
+import { sanitizeSpeakableText } from '../audio/flow/segmenter';
+import { shouldAutoplayTrackedReply } from '../audio/autoplay';
 import { Icon } from './Icon';
+import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
+import { defaultVoicePreferences, LANGUAGE_AUTO } from '../../shared/voicePreferences';
+import type { NativeAudioOwner, NativeAudioResponse } from '../../shared/nativeAudio';
 import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
 import type { RunItem } from '../model/runItem';
 
@@ -728,36 +739,15 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   );
 }
 
-type SpeechRecognitionResultLike = {
-  isFinal: boolean;
-  [index: number]: { transcript: string };
-};
+function nativeAudioApi(): NativeAudioApi | undefined {
+  return typeof window === 'undefined' ? undefined : window.lingxi?.audio;
+}
 
-type SpeechRecognitionEventLike = Event & {
-  resultIndex: number;
-  results: { length: number; [index: number]: SpeechRecognitionResultLike };
-};
-
-type SpeechRecognitionLike = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start(): void;
-  stop(): void;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: Event & { error?: string }) => void) | null;
-  onend: (() => void) | null;
-};
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
-function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  if (typeof window === 'undefined') return null;
-  const browserWindow = window as Window & {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  };
-  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
+function resolvedVoiceLanguage(configured: string): string {
+  if (configured === LANGUAGE_AUTO) {
+    return typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
+  }
+  return configured;
 }
 
 function modelLabel(model?: string | null): string {
@@ -925,6 +915,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [imageDragActive, setImageDragActive] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
   const [flowMode, setFlowMode] = useState(false);
+  const [flowState, setFlowState] = useState<VoiceFlowState>(DEFAULT_VOICE_FLOW_STATE);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
   const input = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
@@ -936,8 +927,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const modelTrigger = useRef<HTMLButtonElement>(null);
   const modelSearchInput = useRef<HTMLInputElement>(null);
   const slashControl = useRef<HTMLDivElement>(null);
-  const recognition = useRef<SpeechRecognitionLike | null>(null);
-  const voiceBase = useRef('');
+  const dictationInsertionRange = useRef<Range | null>(null);
+  const flowControllerRef = useRef<VoiceFlowController | null>(null);
   const fileSearchRequest = useRef(0);
   const savedEditorSelection = useRef<Range | null>(null);
   const activeMentionRange = useRef<Range | null>(null);
@@ -949,6 +940,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const draftSessionId = useRef<string | null>(null);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
+  const audio = nativeAudioApi();
+  const voicePrefs = bridge.bootstrap?.settings.voice ?? defaultVoicePreferences();
+  const voicePrefsRef = useRef(voicePrefs);
+  voicePrefsRef.current = voicePrefs;
+  const dictationOwner = useRef<NativeAudioOwner | null>(null);
+  const autoplayOwner = useRef<NativeAudioOwner | null>(null);
+  const autoplaySubscription = useRef<(() => void) | null>(null);
+  const activeAudioSessionId = useRef(activeSessionId);
+  activeAudioSessionId.current = activeSessionId;
+  const flowModeRef = useRef(flowMode);
+  flowModeRef.current = flowMode;
+  const standardListeningRef = useRef(false);
 
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
@@ -1126,11 +1129,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [fileMenuOpen, filePicker?.source]);
 
   useEffect(() => () => {
-    recognition.current?.stop();
-    recognition.current = null;
-  }, []);
-
-  useEffect(() => () => {
     const previewUrls = new Set(imageAttachmentsRef.current.map((attachment) => attachment.previewUrl));
     for (const draft of draftsBySession.current.values()) {
       for (const attachment of draft.images) previewUrls.add(attachment.previewUrl);
@@ -1304,77 +1302,243 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setSlashQuery(null);
   };
 
-  const replaceVoiceText = (nextText: string) => {
+  const insertVoiceTextAtSelection = (transcript: string, selection = dictationInsertionRange.current) => {
     const editor = input.current;
-    if (!editor) return;
-    const mentions = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)];
-    editor.replaceChildren();
-    for (const mention of mentions) editor.append(mention, document.createTextNode(ZERO_WIDTH_SPACE));
-    if (nextText) editor.append(document.createTextNode(nextText));
-    const range = editorSelection(editor);
-    range.selectNodeContents(editor);
-    range.collapse(false);
-    savedEditorSelection.current = range;
-    setText(nextText);
+    if (!editor || transcript.length === 0) return;
+    const insertion = selection?.cloneRange() ?? savedEditorSelection.current?.cloneRange() ?? editorSelection(editor);
+    insertion.deleteContents();
+    const node = document.createTextNode(transcript);
+    insertion.insertNode(node);
+    const caret = document.createRange();
+    caret.setStart(node, node.length);
+    caret.collapse(true);
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    dictationInsertionRange.current = caret.cloneRange();
+    syncPromptState();
+    updateActiveCompletions();
   };
 
-  const stopVoice = () => {
-    recognition.current?.stop();
-    recognition.current = null;
+  const audioOwner = useCallback((kind: NativeAudioOwner['kind']): NativeAudioOwner => ({
+    kind,
+    id: `${activeSessionId ?? 'desktop'}:${kind}`,
+  }), [activeSessionId]);
+
+  const reportNativeAudioFailure = useCallback((response: NativeAudioResponse): boolean => {
+    if (response.type !== 'error') return false;
+    if (response.error.code === 'permission') setVoiceState('denied');
+    else if (response.error.code === 'unavailable') setVoiceState('unsupported');
+    else setVoiceState('idle');
+    return true;
+  }, []);
+
+  const cancelStandardListening = useCallback(async () => {
+    const owner = dictationOwner.current;
+    standardListeningRef.current = false;
+    dictationOwner.current = null;
+    dictationInsertionRange.current = null;
     setVoiceState('idle');
-  };
+    if (!audio || !owner) return;
+    try {
+      await audio.request({ type: 'cancel', owner });
+    } catch {}
+  }, [audio]);
 
-  const toggleVoice = () => {
-    if (voiceState === 'listening') {
-      stopVoice();
-      return;
-    }
-    const SpeechRecognition = speechRecognitionConstructor();
-    if (!SpeechRecognition) {
+  const cancelAutoplay = useCallback(async () => {
+    autoplaySubscription.current?.();
+    autoplaySubscription.current = null;
+    const owner = autoplayOwner.current;
+    autoplayOwner.current = null;
+    if (!audio || !owner) return;
+    try {
+      await audio.request({ type: 'stop_speaking', owner });
+    } catch {}
+  }, [audio]);
+
+  const startStandardListening = async () => {
+    if (!audio) {
       setVoiceState('unsupported');
       return;
     }
-    const next = new SpeechRecognition();
-    voiceBase.current = text.trimEnd();
-    next.continuous = true;
-    next.interimResults = true;
-    next.lang = typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
-    next.onresult = (event) => {
-      const transcript = Array.from(event.results, (result) => result[0]?.transcript ?? '').join('');
-      const prefix = voiceBase.current;
-      replaceVoiceText(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
-    };
-    next.onerror = (event) => {
-      setVoiceState(event.error === 'not-allowed' || event.error === 'service-not-allowed' ? 'denied' : 'idle');
-      recognition.current = null;
-    };
-    next.onend = () => {
-      recognition.current = null;
-      setVoiceState((current) => current === 'listening' ? 'idle' : current);
-    };
-    recognition.current = next;
-    setVoiceState('listening');
-    try {
-      next.start();
-    } catch {
-      recognition.current = null;
-      setVoiceState('idle');
+    const editor = input.current;
+    dictationInsertionRange.current = editor ? editorSelection(editor).cloneRange() : savedEditorSelection.current?.cloneRange() ?? null;
+    const owner = audioOwner('dictation');
+    dictationOwner.current = owner;
+    const permissions = await audio.request({ type: 'request_authorization', permissions: ['microphone', 'speech'] });
+    if (reportNativeAudioFailure(permissions)) {
+      dictationOwner.current = null;
+      dictationInsertionRange.current = null;
+      return;
     }
+    const response = await audio.request({
+      type: 'start_listening',
+      owner,
+      recognitionMode: voicePrefs.recognitionMode,
+      language: resolvedVoiceLanguage(voicePrefs.language),
+    });
+    if (reportNativeAudioFailure(response)) {
+      dictationOwner.current = null;
+      dictationInsertionRange.current = null;
+      return;
+    }
+    standardListeningRef.current = true;
+    setVoiceState('listening');
+  };
+
+  const finishStandardListening = async () => {
+    if (!audio || !dictationOwner.current) return;
+    const owner = dictationOwner.current;
+    standardListeningRef.current = false;
+    dictationOwner.current = null;
+    const response = await audio.request({ type: 'finish_listening', owner });
+    if (reportNativeAudioFailure(response)) {
+      dictationInsertionRange.current = null;
+      return;
+    }
+    setVoiceState('idle');
+    if (response.type === 'listening_finished') {
+      const transcript = response.transcript?.text.trim() ?? '';
+      if (transcript) insertVoiceTextAtSelection(transcript);
+    }
+    dictationInsertionRange.current = null;
+  };
+
+  const stopFlowMode = useCallback(async () => {
+    setFlowMode(false);
+    await flowControllerRef.current?.stop();
+  }, []);
+
+  const retryFlowMode = useCallback(() => {
+    if (!flowModeRef.current) setFlowMode(true);
+    void flowControllerRef.current?.retry();
+  }, []);
+
+  useEffect(() => {
+    if (!audio) {
+      flowControllerRef.current = null;
+      setVoiceState('unsupported');
+      setFlowState({
+        ...DEFAULT_VOICE_FLOW_STATE,
+        phase: 'configurationRequired',
+        detail: 'Native audio is unavailable in this environment.',
+      });
+      return;
+    }
+    const controller = new VoiceFlowController({
+      audio: {
+        request: (command) => audio.request(command),
+        onEvent: (listener) => audio.onEvent(listener),
+      },
+      bridge: {
+        sendTrackedPrompt: bridge.sendTrackedPrompt,
+        subscribeTrackedSpeech: bridge.subscribeTrackedSpeech,
+        cancel: bridge.cancel,
+      },
+      getPreferences: () => voicePrefsRef.current,
+      createOwner: audioOwner,
+      timers: {
+        setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimeout: (handle) => window.clearTimeout(handle as number),
+      },
+      onStateChange: (state) => setFlowState(state),
+    });
+    flowControllerRef.current = controller;
+    setFlowState(controller.getState());
+    return () => {
+      if (flowControllerRef.current === controller) flowControllerRef.current = null;
+      controller.dispose();
+    };
+  }, [audio, audioOwner, bridge.cancel, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
+
+  useEffect(() => {
+    const controller = flowControllerRef.current;
+    if (!controller) return;
+    if (flowMode) {
+      void controller.start();
+      return;
+    }
+    void controller.stop();
+  }, [flowMode]);
+
+  useEffect(() => {
+    if (!audio) {
+      setVoiceState('unsupported');
+      return;
+    }
+    return audio.onEvent((event) => {
+      if (event.type === 'speech_state'
+          && autoplayOwner.current?.id === event.owner.id
+          && (event.state === 'finished' || event.state === 'interrupted')) {
+        autoplayOwner.current = null;
+      }
+      if (event.type === 'error' && autoplayOwner.current?.id === event.owner?.id) {
+        autoplayOwner.current = null;
+      }
+      if (event.type === 'error' && event.owner && dictationOwner.current && event.owner.id === dictationOwner.current.id) {
+        standardListeningRef.current = false;
+        dictationOwner.current = null;
+        dictationInsertionRange.current = null;
+        setVoiceState(event.error.code === 'permission' ? 'denied' : 'idle');
+      }
+    });
+  }, [audio]);
+
+  const previousAudioSessionId = useRef(activeSessionId);
+  useEffect(() => {
+    if (previousAudioSessionId.current === activeSessionId) return;
+    previousAudioSessionId.current = activeSessionId;
+    if (standardListeningRef.current) void cancelStandardListening();
+    void cancelAutoplay();
+    if (flowModeRef.current) setFlowMode(false);
+  }, [activeSessionId, cancelAutoplay, cancelStandardListening]);
+
+  useEffect(() => {
+    const handleHidden = () => {
+      if (!document.hidden) return;
+      if (standardListeningRef.current) void cancelStandardListening();
+      void cancelAutoplay();
+      if (flowModeRef.current) setFlowMode(false);
+    };
+    document.addEventListener('visibilitychange', handleHidden);
+    return () => document.removeEventListener('visibilitychange', handleHidden);
+  }, [cancelAutoplay, cancelStandardListening]);
+
+  useEffect(() => () => {
+    if (standardListeningRef.current) void cancelStandardListening();
+    void cancelAutoplay();
+    flowControllerRef.current?.dispose();
+  }, [cancelAutoplay, cancelStandardListening]);
+
+  const stopVoice = () => {
+    if (flowModeRef.current) {
+      void stopFlowMode();
+      return;
+    }
+    if (standardListeningRef.current) {
+      void finishStandardListening();
+      return;
+    }
+    setVoiceState('idle');
   };
 
   const toggleStandardVoice = () => {
-    if (flowMode) setFlowMode(false);
-    toggleVoice();
+    if (flowModeRef.current) {
+      void stopFlowMode();
+      return;
+    }
+    if (standardListeningRef.current) {
+      void finishStandardListening();
+      return;
+    }
+    void startStandardListening();
   };
 
   const toggleFlowMode = () => {
-    if (flowMode) {
-      stopVoice();
-      setFlowMode(false);
+    if (flowModeRef.current) {
+      void stopFlowMode();
       return;
     }
     setFlowMode(true);
-    if (voiceState !== 'listening') toggleVoice();
   };
 
   const addImageFiles = async (files: File[]) => {
@@ -1443,7 +1607,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const submit = async () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
-    if (!ready) return;
+    if (!ready || flowModeRef.current) return;
     if (!value) {
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
@@ -1477,12 +1641,56 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     const submittingSessionId = draftSessionId.current;
     try {
-      await bridge.sendPrompt(
+      const supportsTrackedSend = typeof bridge.sendTrackedPrompt === 'function';
+      const tracked = supportsTrackedSend
+        ? bridge.sendTrackedPrompt(
+            value,
+            images,
+            imageAttachments.map((attachment) => attachment.name),
+            snapshot.files,
+          )
+        : null;
+      if (supportsTrackedSend && !tracked) return;
+      const queued = tracked?.queued ?? bridge.sendPrompt(
         value,
         images,
         imageAttachments.map((attachment) => attachment.name),
         snapshot.files,
       );
+      if (voicePrefs.autoPlayReplies && audio && tracked) {
+        await cancelAutoplay();
+        const autoplayTokenOwner = { kind: 'autoplay', id: tracked.token.clientTurnId } satisfies NativeAudioOwner;
+        autoplayOwner.current = autoplayTokenOwner;
+        const offTrackedSpeech = bridge.subscribeTrackedSpeech(tracked.token, (event) => {
+          if (event.type !== 'completion') return;
+          offTrackedSpeech();
+          if (autoplaySubscription.current === offTrackedSpeech) autoplaySubscription.current = null;
+          if (!shouldAutoplayTrackedReply(activeAudioSessionId.current, tracked.token.sessionId, document.hidden)) {
+            autoplayOwner.current = null;
+            return;
+          }
+          const spoken = sanitizeSpeakableText(event.text);
+          if (!spoken) {
+            autoplayOwner.current = null;
+            return;
+          }
+          void audio.request({
+            type: 'speak',
+            owner: autoplayTokenOwner,
+            text: spoken,
+            voiceId: voicePrefs.voiceSelection,
+            rate: voicePrefs.rate,
+          }).then((response) => {
+            if (response.type === 'error' && autoplayOwner.current?.id === autoplayTokenOwner.id) {
+              autoplayOwner.current = null;
+            }
+          }).catch(() => {
+            if (autoplayOwner.current?.id === autoplayTokenOwner.id) autoplayOwner.current = null;
+          });
+        });
+        autoplaySubscription.current = offTrackedSpeech;
+      }
+      await queued;
       clearComposer(submittingSessionId);
     } catch {
       setImageNotice('发送失败，图片附件已保留，可以重试。');
@@ -1688,50 +1896,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
       {flowMode && (
-        <div
-          role="status"
-          aria-label="Flow mode is listening"
-          style={{
-            position: 'relative',
-            maxWidth: 980,
-            height: 156,
-            margin: '0 auto 10px',
-            overflow: 'hidden',
-            borderRadius: 22,
-            border: `1px solid ${t.accentBorder}`,
-            background: `radial-gradient(circle at 50% 48%, ${t.accentBg} 0%, ${t.surface} 72%)`,
-            boxShadow: '0 14px 36px rgba(0,0,0,.10)',
-          }}
-        >
-          <div style={{ position: 'absolute', left: 16, top: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 7, height: 7, borderRadius: 99, background: t.accent, boxShadow: `0 0 12px ${t.accent}` }} />
-            <span style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>心流模式</span>
-          </div>
-          <button
-            type="button"
-            aria-label="关闭心流模式"
-            title="关闭心流模式"
-            onClick={toggleFlowMode}
-            style={{ ...composerIconStyle(t), position: 'absolute', right: 12, top: 9, width: 32, height: 32, background: t.surfaceHover }}
-          >
-            <Icon name="x" size={13} color={t.text3} stroke={1.9} />
-          </button>
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 180 64"
-            style={{ position: 'absolute', left: '50%', top: '48%', width: 210, height: 74, transform: 'translate(-50%, -50%)', color: t.accent }}
-          >
-            {[12, 23, 34, 48, 34, 23, 12].map((height, index) => (
-              <rect key={index} x={27 + index * 20} y={(64 - height) / 2} width="7" height={height} rx="3.5" fill="currentColor" opacity={0.5 + index * 0.06}>
-                <animate attributeName="height" values={`${height};${Math.max(12, 58 - Math.abs(3 - index) * 8)};${height}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
-                <animate attributeName="y" values={`${(64 - height) / 2};${(64 - Math.max(12, 58 - Math.abs(3 - index) * 8)) / 2};${(64 - height) / 2}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
-              </rect>
-            ))}
-          </svg>
-          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 13, textAlign: 'center', color: t.text3, fontSize: 11.5 }}>
-            {voiceState === 'listening' ? '正在聆听 · 可继续使用下方输入框' : '轻点波形按钮继续聆听'}
-          </div>
-        </div>
+        <VoiceFlowPanel
+          state={flowState}
+          onOrb={() => { void flowControllerRef.current?.orb(); }}
+          onRetry={retryFlowMode}
+          onOpenSettings={() => onOpenSettingsPage('voice')}
+          onClose={() => { void stopFlowMode(); }}
+        />
       )}
       <div
         className="beta-composer"
@@ -2160,7 +2331,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </div>
             )}
           </div>
-          <button type="button" disabled={!ready} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
+          <button type="button" disabled={!ready || flowMode} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           <button
             type="button"
             disabled={!ready}
@@ -2184,12 +2355,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           )}
           <button
             type="button"
-            disabled={!ready || !hasPrompt}
+            disabled={!ready || !hasPrompt || flowMode}
             onClick={() => { void submit(); }}
             aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
             title={bridge.running ? 'Send as pending message' : 'Send prompt'}
-            style={composerSendStyle(t, Boolean(ready && hasPrompt))}
-          ><Icon name="arrowU" size={18} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
+            style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
+          ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
         </div>
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
           {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}

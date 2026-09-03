@@ -21,9 +21,17 @@ import {
   validateZipEntries,
 } from './package-support.mjs';
 import {
+  AUDIO_HELPER_APP,
+  AUDIO_HELPER_EXECUTABLE,
+  AUDIO_HELPER_MINIMUM_SYSTEM_VERSION,
+  AUDIO_HELPER_USAGE_DESCRIPTIONS,
+  audioHelperIdentifiers,
+} from './audio-helper.mjs';
+import {
   BROKER_RESOURCE_DIRNAME,
   brokerIdentifiers,
   findMachOFiles,
+  validateProvisioningProfile,
   verifyIdentifier,
   verifySignedEntitlements,
   verifyTeamIdentifier,
@@ -75,6 +83,10 @@ export function verifyPackage(root = packageRoot) {
     join(contents, 'Info.plist'),
     join(contents, 'MacOS', APP_NAME),
     join(resources, 'bin', 'bridge-server'),
+    join(resources, AUDIO_HELPER_APP),
+    join(resources, AUDIO_HELPER_APP, 'Contents', 'Info.plist'),
+    join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
+    join(resources, AUDIO_HELPER_APP, 'Contents', 'embedded.provisionprofile'),
     join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'),
     join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.launchd.plist'),
     join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'),
@@ -93,9 +105,14 @@ export function verifyPackage(root = packageRoot) {
   for (const path of expected) requirePath(path);
   const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
   const identifiers = brokerIdentifiers(manifest.channel);
+  const audioIdentifiers = audioHelperIdentifiers(manifest.channel);
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
+  assertArm64Executable(
+    join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
+    'packaged audio helper app',
+  );
   assertArm64Executable(
     join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'),
     'packaged credential broker client',
@@ -118,6 +135,22 @@ export function verifyPackage(root = packageRoot) {
   for (const [key, value] of Object.entries(expectedPlist)) {
     const actual = plistValue(plistPath, key);
     if (actual !== value) throw new Error(`${key} is ${actual}; expected ${value}`);
+  }
+  const helperPlistPath = join(resources, AUDIO_HELPER_APP, 'Contents', 'Info.plist');
+  const expectedHelperPlist = {
+    CFBundleExecutable: AUDIO_HELPER_EXECUTABLE,
+    CFBundleIdentifier: audioIdentifiers.bundleId,
+    CFBundleName: 'LingXiAudioHelper',
+    CFBundleShortVersionString: metadata.version,
+    CFBundleVersion: metadata.version,
+    LSMinimumSystemVersion: AUDIO_HELPER_MINIMUM_SYSTEM_VERSION,
+    LSUIElement: 'true',
+    NSMicrophoneUsageDescription: AUDIO_HELPER_USAGE_DESCRIPTIONS.microphone,
+    NSSpeechRecognitionUsageDescription: AUDIO_HELPER_USAGE_DESCRIPTIONS.speechRecognition,
+  };
+  for (const [key, value] of Object.entries(expectedHelperPlist)) {
+    const actual = plistValue(helperPlistPath, key);
+    if (actual !== value) throw new Error(`audio helper ${key} is ${actual}; expected ${value}`);
   }
   for (const key of [
     'NSAppTransportSecurity',
@@ -162,6 +195,8 @@ export function verifyPackage(root = packageRoot) {
     `${APP_NAME}.app/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/MacOS/${APP_NAME}`,
     `${APP_NAME}.app/Contents/Resources/bin/bridge-server`,
+    `${APP_NAME}.app/Contents/Resources/${AUDIO_HELPER_APP}/Contents/Info.plist`,
+    `${APP_NAME}.app/Contents/Resources/${AUDIO_HELPER_APP}/Contents/MacOS/${AUDIO_HELPER_EXECUTABLE}`,
     `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/broker-manifest.json`,
     `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/LingXiCredentialBroker.launchd.plist`,
     `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/bin/lingxi-credential-client`,
@@ -180,16 +215,37 @@ export function verifyPackage(root = packageRoot) {
   if (commandAvailable('/usr/bin/codesign')) {
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', paths.appPath], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bridge-server')], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, AUDIO_HELPER_APP)], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app')], { stdio: 'pipe' });
+    const helperBinary = join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE);
+    const helperDependencies = execFileSync('/usr/bin/otool', ['-L', helperBinary], { encoding: 'utf8' })
+      .split('\n')
+      .slice(1)
+      .map((line) => line.trim().split(/\s+/)[0])
+      .filter(Boolean);
+    const externalDependency = helperDependencies.find((dependency) => (
+      !dependency.startsWith('/System/Library/') && !dependency.startsWith('/usr/lib/')
+    ));
+    if (externalDependency) {
+      throw new Error(`audio helper has an unbundled dynamic dependency: ${externalDependency}`);
+    }
     const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
     if (teamId) {
       verifyIdentifier(paths.appPath, identifiers.desktopBundleId, teamId);
       verifyIdentifier(join(resources, 'bin', 'bridge-server'), identifiers.bridgeServerIdentifier, teamId);
+      validateProvisioningProfile(
+        join(resources, AUDIO_HELPER_APP, 'Contents', 'embedded.provisionprofile'),
+        teamId,
+        audioIdentifiers.bundleId,
+      );
+      verifyIdentifier(join(resources, AUDIO_HELPER_APP), audioIdentifiers.bundleId, teamId);
       verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
       verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
+      verifySignedEntitlements(join(resources, AUDIO_HELPER_APP), teamId, audioIdentifiers.bundleId);
       verifySignedEntitlements(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
       verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId);
+      verifyTeamIdentifier(join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
       for (const path of findMachOFiles(join(contents, 'Frameworks'))) {
         verifyTeamIdentifier(path, teamId);
       }

@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
+  AudioOpDto,
+  AudioResultDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -11,6 +13,17 @@ import type {
 } from '@lingxi/bridge-client';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
+import {
+  CH_NATIVE_AUDIO_ENGINE_REQUEST,
+  CH_NATIVE_AUDIO_EVENT,
+  CH_NATIVE_AUDIO_REQUEST,
+} from '../shared/nativeAudio.js';
+import type {
+  NativeAudioCommand,
+  NativeAudioCommandResult,
+  NativeAudioEvent,
+  NativeAudioResponse,
+} from '../shared/nativeAudio.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
@@ -127,9 +140,14 @@ export interface BootstrapState {
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 
 export type Unsubscribe = () => void;
+export interface NativeAudioApi {
+  request(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
+  onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
+  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
+}
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
@@ -183,6 +201,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  audio: NativeAudioApi;
 }
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
@@ -250,6 +269,13 @@ const api: LingxiApi = {
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
   onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
+  audio: {
+    request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
+    onEvent: (callback) => subscribe(CH_NATIVE_AUDIO_EVENT, callback),
+    executeEngineRequest: (sessionId, op) => (
+      ipcRenderer.invoke(CH_NATIVE_AUDIO_ENGINE_REQUEST, sessionId, op) as Promise<AudioResultDto>
+    ),
+  },
 };
 
 contextBridge.exposeInMainWorld('lingxi', api);

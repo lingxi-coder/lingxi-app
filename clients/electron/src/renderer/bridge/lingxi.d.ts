@@ -1,5 +1,7 @@
 import type {
   AskUserQuestionRequestDto,
+  AudioOpDto,
+  AudioResultDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -9,6 +11,11 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
+import type {
+  NativeAudioCommand,
+  NativeAudioResponse,
+  NativeAudioEvent,
+} from '../../shared/nativeAudio.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 
@@ -92,9 +99,14 @@ export interface BootstrapState {
 }
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
+export interface NativeAudioApi {
+  request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
+  onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
+  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
+}
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
@@ -141,6 +153,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  audio: NativeAudioApi;
 }
 
 declare global {

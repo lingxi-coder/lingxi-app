@@ -849,6 +849,19 @@ final class LocalAppsStore {
         errorMessage = String(localized: "local_apps_creation_result_unknown")
     }
 
+    /// The created-app hand-off exhausted its retry budget: the record exists
+    /// and the one-shot landing signal is already spent, so nothing else will
+    /// carry the user into the new app's conversation.
+    ///
+    /// Reuses `reportUnknownCreateResult`'s copy deliberately. From the user's
+    /// side the two are the same situation — the app was created and is in the
+    /// library, but this client could not take them to it — and inventing a
+    /// second string would need a new key in `clients/translations/*.json`
+    /// (the generated catalogs' real source) for a case that reads identically.
+    func reportCreatedAppLandingExhausted() {
+        errorMessage = String(localized: "local_apps_creation_result_unknown")
+    }
+
     /// Disarm the pending create — but ONLY if `requestID` is the one still in
     /// flight. Every caller passes a key that came off the wire, so this guard
     /// is what makes "ignore any event whose request id does not match" true

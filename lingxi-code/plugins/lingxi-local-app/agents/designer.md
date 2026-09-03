@@ -76,7 +76,9 @@ renderer guidance; do not apply every renderer-specific profile at once.
 - No `LocalAppActOnUi` — you observe the current build; driving it to
   produce new evidence is `operator`'s job, not yours.
 - "Validated selection read," listed for this role in the design's
-  tool-boundary table, has no backing Host tool — there is no
-  `validate_template_selection`/`get_validated_selection` anywhere in the
-  repo. Take the App's Runtime Profile from `LocalAppGet` instead, and
-  never assert a `family`/`revision`/digest you didn't read this turn.
+  tool-boundary table, is `LocalAppResolveTemplateSelection` (granted above):
+  it resolves a Host-issued `validated_selection_handle` for the run's create
+  candidate. Use it only to read back that identity, never to originate one —
+  and for anything outside a create run, `LocalAppGet`'s persisted record
+  remains the only identity evidence. Never assert a `family`/`revision`/digest
+  you did not read this turn.

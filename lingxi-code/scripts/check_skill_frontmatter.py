@@ -50,6 +50,16 @@ SKILL_ROOTS = ["lingxi-code/plugins/lingxi-local-app/skills"]
 # 来自**目录名**。两者都由 `plugin/src/discovery.rs` 的 `glob_md()` 递归发现。
 AGENT_ROOTS = ["lingxi-code/plugins/lingxi-local-app/agents"]
 
+# Prose that asserts a tool does not exist. Matched per SENTENCE against the
+# agent's own granted tool names, so "no `LocalAppActOnUi` — that is operator's
+# job" (a scope statement about a tool the agent was NOT granted) does not trip
+# it; only "<granted tool> ... has no backing Host tool" does.
+DENIES_EXISTENCE = re.compile(
+    r"(has no backing|no backing Host tool|do(?:es)? not exist|there is no Host tool|"
+    r"is not reachable from any tool|anywhere in the repo|zero hits|0 hits)",
+    re.I,
+)
+
 # ⛔ 这三个字段出现在 plugin agent 的 frontmatter 里就是错的,而且**两种错法不同**:
 # `hooks` / `permissionMode` 让 `validate_plugin_agent_frontmatter` 失败,
 # 于是 `PluginManagerError::Validation` **让整个 plugin 装载失败**
@@ -132,6 +142,30 @@ def main():
                     "agents/%s.md declares `%s`, which a plugin agent must never set — it %s"
                     % (stem, field, how)
                 )
+
+        # An agent that GRANTS a tool must not also tell itself the tool does
+        # not exist. The 2026-09-02 create-flow fix corrected exactly this
+        # sentence in `tester.md` and left the identical sentence standing in
+        # `designer.md`, `operator.md` and `verifier.md` — three of the four
+        # agents the build workflow orders to resolve a selection handle were
+        # still reading "there is no such tool anywhere in the repo" in their
+        # own system prompt. Nothing caught it: the frontmatter was right, the
+        # tool was registered, and the contradiction lived only in prose.
+        body = text[m.end():]
+        for tool in re.findall(r"^\s*-\s*([A-Za-z][A-Za-z0-9_]*)\s*$", block, re.M):
+            if tool not in body:
+                continue
+            for sentence in re.split(r"(?<=[.。])\s+", body):
+                if tool not in sentence:
+                    continue
+                if DENIES_EXISTENCE.search(sentence):
+                    problems.append(
+                        "agents/%s.md grants `%s` in its frontmatter but its prose says the tool "
+                        "does not exist: %r — an agent told its own granted tool is missing will "
+                        "skip the step that needs it"
+                        % (stem, tool, " ".join(sentence.split())[:160])
+                    )
+                    break
 
     for path in skills:
         directory = path.parent.name

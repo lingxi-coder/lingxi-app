@@ -1033,8 +1033,11 @@ struct RootView: View {
         let kickoff = LocalAppKickoff.message
         // The library consumed its one-shot signal to call this, so a refused
         // switch would lose the created app with nothing left to re-arm it.
-        // `switchScope` refuses only while another switch is in flight, so
-        // retry once that finishes.
+        // `switchScope` refuses for EITHER of two reasons (see its own guard):
+        // another switch is in flight (`projectSwitching`), or
+        // `ConversationSessionMutationPolicy` is holding the session — an
+        // unresolved turn recovery, an inactive durable recovery, or a
+        // cancellation in progress.
         // `sessionID` is nil only when the engine's best-effort init-session
         // mint failed. Landing on a fresh conversation is still correct: the
         // scope, not the session, is what roots the agent in the app workspace.
@@ -1045,15 +1048,32 @@ struct RootView: View {
             startNew: sessionID == nil,
             initialPrompt: kickoff
         ) else {
+            // Always delay, and retry the SWITCH rather than tail-calling this
+            // function, so one bound covers both refusals.
+            //
+            // The previous shape — `for _ in 0..<40 where projectSwitching` —
+            // read as a wait but is a FILTER: under the mutation-policy refusal
+            // `projectSwitching` is false, so the body never ran, nothing
+            // slept, the `guard` below it passed, and the tail call re-entered
+            // immediately. That is an unbounded zero-delay recursion on the
+            // MainActor for as long as the policy holds the session.
             Task { @MainActor in
-                for _ in 0..<40 where projectSwitching {
+                for _ in 0..<40 {
                     try? await Task.sleep(for: .milliseconds(250))
+                    if switchScope(
+                        to: .localApp(appID),
+                        mode: .code,
+                        resumeSessionID: sessionID,
+                        startNew: sessionID == nil,
+                        initialPrompt: kickoff
+                    ) {
+                        return
+                    }
                 }
-                guard !projectSwitching else { return }
-                openCreatedAppSession(
-                    appID: appID,
-                    sessionID: sessionID
-                )
+                // Bounding the retry introduces a give-up path the recursive
+                // version never had, so it must not drop the app silently: the
+                // record exists and the landing signal is spent.
+                localAppsStore.reportCreatedAppLandingExhausted()
             }
             return
         }

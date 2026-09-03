@@ -168,6 +168,19 @@ private const val LANDING_SWITCH_RETRY_MS = 250L
 private const val SESSION_READY_TIMEOUT_MS = 20_000L
 
 /**
+ * How long a created-app landing waits for a STREAMING TURN to finish before it
+ * even attempts the scope switch.
+ *
+ * Separate from [LANDING_SWITCH_ATTEMPTS] x [LANDING_SWITCH_RETRY_MS] because
+ * the two refusals `switchWorkspaceSource` raises have different timescales: a
+ * competing switch clears in milliseconds, while a turn routinely runs for
+ * minutes. Spending the 10 s switch budget on a streaming turn is what silently
+ * dropped the hand-off. Still bounded — an unbounded wait would suspend inside
+ * `collect` and strand every later landing.
+ */
+private const val LANDING_STREAM_WAIT_MS = 180_000L
+
+/**
  * A conversation notification is usually tapped on a COLD start, so the first
  * attempt can land before the engine source is bound. Retry on the same budget
  * shape as the created-app landing, then report instead of dropping the route.
@@ -1208,6 +1221,22 @@ fun RootScreen(
                 // it: the app's agent rooted in the wrong directory, which is the
                 // exact failure the comment above says was observed on device.
                 // Retry, the way iOS's `openCreatedAppSession` does.
+                //
+                // But the two refusals need two different waits. A competing
+                // switch clears in milliseconds; a STREAMING TURN does not, and
+                // routinely outlives the whole 40 x 250 ms budget below. Paying
+                // for it out of that budget is what dropped the hand-off into
+                // the (previously empty) `else` at the bottom: the user was left
+                // with an orphan draft app and only the unrelated
+                // 「请先停止当前任务，再切换项目。」 chat banner, which says nothing
+                // about the app that was just created. iOS parks the landing
+                // until the turn ends; wait for it here on a turn-sized budget
+                // before spending the switch budget at all.
+                if (chatViewModel.state.value.streaming) {
+                    withTimeoutOrNull(LANDING_STREAM_WAIT_MS) {
+                        chatViewModel.state.first { !it.streaming }
+                    }
+                }
                 var switched = false
                 var attempt = 0
                 while (!switched && attempt < LANDING_SWITCH_ATTEMPTS) {
@@ -1231,12 +1260,31 @@ fun RootScreen(
                             it.sessionReady && !it.sessionTransitioning && it.session.id.isNotBlank()
                         }
                     }?.let {
-                        // Placeholder-free copy: a shell has no brief to
-                        // interpolate, and the old text told the agent the
-                        // shape and the name were "already fixed", which is
-                        // exactly what the conversation now exists to decide.
-                        chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                        // Readiness says WHEN, never WHICH. The predicate above
+                        // is satisfied by whatever conversation becomes ready —
+                        // including the user's previous one if the transition was
+                        // abandoned or a competing switch won — so re-check the
+                        // scope, and that the transcript is still empty, before
+                        // firing. Without this the first message of the interview
+                        // can land in the wrong conversation, rooting the agent
+                        // outside the app workspace. iOS checks scope, target
+                        // session id and emptiness at its own send site.
+                        val landed = chatViewModel.sourceScope.value ==
+                            ConversationScope.LocalApp(landing.appId)
+                        if (landed && chatViewModel.state.value.messages.isEmpty()) {
+                            // Placeholder-free copy: a shell has no brief to
+                            // interpolate, and the old text told the agent the
+                            // shape and the name were "already fixed", which is
+                            // exactly what the conversation now exists to decide.
+                            chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                        }
                     }
+                } else {
+                    // The switch budget is spent and the landing came off a
+                    // one-shot channel, so nothing else will carry the user in.
+                    // Say so against the app, rather than leaving only the
+                    // switch's own banner, which never names it.
+                    localAppsViewModel.reportCreatedAppLandingExhausted()
                 }
             }
         }

@@ -570,6 +570,35 @@ class LocalAppsViewModel(
         }
     }
 
+    /**
+     * The created-app hand-off ran out of retries: the record exists and the
+     * landing was already taken off its one-shot channel, so nothing else will
+     * carry the user into the new app's conversation.
+     *
+     * Reuses the abandoned-create copy above on purpose. From the user's side
+     * the two situations are the same — the app was created and is in the
+     * library, this client just could not take them to it — and a second string
+     * would need a new key in the `clients/translations` JSON catalogs (the real
+     * source behind the generated `strings.xml`) for a message that reads
+     * identically.
+     *
+     * NOTE: do not write that path with a glob. Kotlin block comments NEST, so
+     * a `slash-star` sequence inside this doc comment opens a second comment and
+     * swallows the rest of the file — the closing delimiter here then closes
+     * only the inner one. It costs 33 cascading "unresolved reference" errors
+     * across three files and one real syntax error 1800 lines away.
+     */
+    fun reportCreatedAppLandingExhausted() {
+        _uiState.update {
+            it.copy(
+                error = strings.resolve(
+                    R.string.local_apps_creation_result_unknown,
+                    "创建结果未知，请在应用库确认。",
+                ),
+            )
+        }
+    }
+
     /** Release the create claim and its stop-loss together — always both. */
     private fun clearPendingCreate() {
         pendingCreateRequestId = null

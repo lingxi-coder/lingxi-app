@@ -87,5 +87,6 @@ yours to run — you propose, `mcp-qa`'s eventual workflow step evaluates.
   call `LocalAppApproveMcpProposal` with `create_without_mcp=true`, return the
   Host receipt unchanged, and do not design or publish any MCP tool.
 - "Validated selection read," listed for this role in the design's
-  tool-boundary table, has no backing Host tool — cite `LocalAppGet`'s
-  record instead.
+  tool-boundary table, is `LocalAppResolveTemplateSelection` — a real Host
+  tool, but one this role is NOT granted (see the frontmatter above). Cite
+  `LocalAppGet`'s record instead.

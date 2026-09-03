@@ -89,8 +89,9 @@ independent gates on data mutation).
   tool in your list.
 - Never accept or act on an absolute workspace, plugin, or snapshot path
   handed to you in a prompt — you only ever address the app by `app_id`.
-- "Validated selection read" is listed in the design's tool-boundary table
-  for this role, but there is no Host tool to read it — `validate_template_
-  selection`/`get_validated_selection` do not exist. `LocalAppGet`'s record
-  is the closest available identity evidence; report whatever it returns
-  this turn verbatim, never a remembered or inferred value.
+- "Validated selection read," listed in the design's tool-boundary table for
+  this role, is `LocalAppResolveTemplateSelection` (granted above): it resolves
+  a Host-issued `validated_selection_handle` for the run's create candidate.
+  Use it only to read that identity back, never to originate one. Outside a
+  create run, `LocalAppGet`'s record is the identity evidence; report whatever
+  either returns this turn verbatim, never a remembered or inferred value.

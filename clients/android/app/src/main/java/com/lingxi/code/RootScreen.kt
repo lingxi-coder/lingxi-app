@@ -2133,7 +2133,6 @@ fun RootScreen(
                         // false`, and why `LocalAppsErrorDialog` (at the bottom
                         // of this file) has to exist at all.
                         onCreateApp = {
-                            setConversationMode(SessionMode.Code)
                             closeDrawer()
                             localAppsViewModel.createAppFromDrawer()
                         },

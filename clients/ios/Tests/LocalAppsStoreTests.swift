@@ -2469,6 +2469,29 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertTrue(again, "the timeout is a stop-loss, not a permanent latch")
         }
 
+        /// `RootView`'s created-app landing retries `switchScope` up to 40
+        /// times (250ms apart) before giving up; the give-up path calls this
+        /// method directly rather than routing back through the create-result
+        /// timeout. This pins only that store-side half of the hand-off: that
+        /// calling it surfaces the same "result unknown" copy the timeout
+        /// path uses, resolved out of the catalog rather than falling through
+        /// as the raw key. It does NOT exercise `RootView`'s retry loop, the
+        /// kickoff-send-once-landed guard, or the 40-attempt bound itself —
+        /// that wiring lives in `RootView.swift`, outside this file.
+        func testReportCreatedAppLandingExhaustedSurfacesTheUnknownResultCopy() {
+            let store = LocalAppsStore()
+            XCTAssertNil(store.errorMessage, "a fresh store must start with no error surfaced")
+
+            store.reportCreatedAppLandingExhausted()
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_creation_result_unknown"))
+            XCTAssertNotEqual(
+                store.errorMessage, "local_apps_creation_result_unknown",
+                "the key must resolve in the catalog, not fall through as itself")
+        }
+
         /// A reconnect clears the pending create, says so, and refuses to
         /// claim anything that arrives afterwards.
         ///
@@ -3547,5 +3570,94 @@ final class LocalAppsStoreTests: XCTestCase {
             markAfter, false,
             "the identical url was served the SAME document — a rebuilt app would keep showing stale bytes"
         )
+    }
+
+    // ── The created-app landing hand-off, read out of RootView.swift ──────
+    //
+    // Android pins the same chain in
+    // `RootLocalAppPresenterSourceTest.kt`. The iOS half lives in
+    // `RootView.openCreatedAppSession`, which is a private method on a
+    // SwiftUI `View` with no seam this suite can drive, so the gate is a
+    // source-level read of that one function — the same technique
+    // `LocalAppsWidgetTests` already uses on this file.
+
+    /// Reads a file from the iOS client tree relative to THIS test file, so
+    /// the lookup cannot drift with whatever working directory the runner
+    /// uses. Throws (failing the test) when the file is gone: an unreadable
+    /// source must never read as "the assertion holds".
+    private func clientSource(_ relativePath: String) throws -> String {
+        let clientRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // clients/ios
+        return try String(
+            contentsOf: clientRoot.appendingPathComponent(relativePath),
+            encoding: .utf8)
+    }
+
+    /// Everything below is source-text containment INSIDE the sliced body of
+    /// `openCreatedAppSession`. It proves the named code is written in that
+    /// function; it does not run the function and proves nothing about the
+    /// runtime behaviour of the retry.
+    ///
+    /// The slice matters: `switchScope(` and the sleep have other homes in
+    /// this 3000-line view, so a whole-file check for them could not fail on
+    /// the defect its own message names. Comment lines are stripped before
+    /// asserting, because the function's own comment quotes the very
+    /// `0..<40 where projectSwitching` shape the regression guard forbids.
+    func testCreatedAppLandingRetriesTheScopeSwitchOnABoundedLoop() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+
+        guard let start = source.range(of: "private func openCreatedAppSession("),
+              let end = source.range(
+                  of: "private func startNewAppSession(",
+                  range: start.upperBound ..< source.endIndex)
+        else {
+            return XCTFail("read the wrong file: openCreatedAppSession/startNewAppSession not found")
+        }
+        let body = String(source[start.lowerBound ..< end.lowerBound])
+        let code = body
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(
+            code.contains("switchScope("),
+            "vacuity guard: the sliced openCreatedAppSession body must still call switchScope")
+
+        XCTAssertTrue(
+            code.contains("for _ in 0..<40 {"),
+            """
+            the retry must be a bounded LOOP over 40 attempts; a tail call back into \
+            openCreatedAppSession is unbounded recursion on the MainActor
+            """)
+        XCTAssertFalse(
+            code.contains("0..<40 where"),
+            """
+            `for _ in 0..<40 where <cond>` is a FILTER, not a wait: under the \
+            mutation-policy refusal the condition is false, the body never runs and \
+            nothing sleeps
+            """)
+        XCTAssertTrue(
+            code.contains("milliseconds(250)"),
+            "every retry attempt must sleep, otherwise 40 attempts are spent in one runloop tick")
+        // A containment check cannot tell the first attempt from the retry --
+        // both call `switchScope(` inside this slice -- so count instead: EVERY
+        // attempt has to carry the kickoff, or the attempt that finally lands
+        // opens the app's first conversation with no prompt in it.
+        let switchCalls = code.components(separatedBy: "switchScope(").count - 1
+        let kickoffCalls = code.components(separatedBy: "initialPrompt: kickoff").count - 1
+        XCTAssertEqual(switchCalls, 2, "expected exactly two switch attempts: the first and the retry")
+        XCTAssertEqual(
+            kickoffCalls, switchCalls,
+            """
+            the kickoff must ride on the switch itself, so it is sent by whichever \
+            attempt succeeded rather than fired independently of where the session landed
+            """)
+        XCTAssertTrue(
+            code.contains("localAppsStore.reportCreatedAppLandingExhausted()"),
+            """
+            bounding the retry adds a give-up path the recursive version never had; it \
+            must name the app rather than dropping a spent one-shot landing silently
+            """)
     }
 }

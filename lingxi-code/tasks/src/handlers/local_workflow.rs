@@ -394,14 +394,16 @@ fn parse_workflow_fusion_request(
     if !executor.agent_surface().enabled {
         return Err(FusionError::Disabled);
     }
-    let opts: WorkflowFusionOpts =
-        serde_json::from_str(opts_json).map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
+    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json)
+        .map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
     let surface = executor.agent_surface();
     let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| FusionError::InvalidRequest("workflow parent model is unavailable".into()))?;
+        .ok_or_else(|| {
+            FusionError::InvalidRequest("workflow parent model is unavailable".into())
+        })?;
     let parent_profile = executor
         .resolve_parent_profile(parent_model, parent_model_profile)
         .ok_or_else(|| {

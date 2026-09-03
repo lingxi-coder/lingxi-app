@@ -251,6 +251,73 @@ import XCTest
             XCTAssertEqual(submitted.count, 1)
         }
 
+        func testCompactSlashShowsCliProgressThenSettlesFromCompactionEvent() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [
+                command(name: "compact", description: "Compact the conversation")
+            ]))
+            source.setCommandSubmitterForTesting { _ in }
+
+            let token = try XCTUnwrap(source.send("/compact"))
+            await flushTasks()
+
+            guard case let .running(startedAt) = source.model.compactionStatus else {
+                return XCTFail("expected running compaction status")
+            }
+            XCTAssertTrue(source.model.requiresBackgroundExecution)
+            XCTAssertLessThanOrEqual(abs(startedAt.timeIntervalSinceNow), 1)
+            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 0), 0)
+            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 4), 4)
+            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 90), 63)
+            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 10_000), 95)
+
+            source.applyForTesting(.compactionCompleted(
+                messagesBefore: 20,
+                messagesAfter: 7,
+                bytesSaved: 4096
+            ))
+            XCTAssertEqual(source.model.compactionStatus, .completed(
+                messagesBefore: 20,
+                messagesAfter: 7,
+                bytesSaved: 4096
+            ))
+            XCTAssertFalse(source.model.requiresBackgroundExecution)
+
+            source.applyForTesting(.slashCommandResult(
+                turnId: token.clientTurnId,
+                display: "Compacted (ctrl+o to see full summary)",
+                isError: false
+            ))
+            XCTAssertEqual(source.model.compactionStatus, .completed(
+                messagesBefore: 20,
+                messagesAfter: 7,
+                bytesSaved: 4096
+            ))
+        }
+
+        func testCompactSlashFailureSettlesProgressWithoutPretendingSuccess() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [
+                command(name: "compact", description: "Compact the conversation")
+            ]))
+            source.setCommandSubmitterForTesting { _ in }
+
+            let token = try XCTUnwrap(source.send("/compact"))
+            await flushTasks()
+            source.applyForTesting(.slashCommandResult(
+                turnId: token.clientTurnId,
+                display: "Not enough messages to compact.",
+                isError: false
+            ))
+
+            XCTAssertEqual(
+                source.model.compactionStatus,
+                .failed(detail: "Not enough messages to compact.")
+            )
+        }
+
         func testPromptSlashCommandTransitionsIntoNormalStreamingTurn() async throws {
             let source = makeSource()
             source.model.activeSessionId = "session-a"

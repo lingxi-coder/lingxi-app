@@ -1930,10 +1930,8 @@ mod tests {
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":0}}"#).unwrap();
         assert!(zero_total.validate().is_err());
 
-        let exceeds_default_total: SettingsJson = serde_json::from_str(
-            r#"{"fusion":{"panelTotalTimeoutMs":900001}}"#,
-        )
-        .unwrap();
+        let exceeds_default_total: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900001}}"#).unwrap();
         assert!(exceeds_default_total.validate().is_err());
 
         let retries: SettingsJson =

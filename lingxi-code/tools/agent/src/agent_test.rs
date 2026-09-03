@@ -908,14 +908,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             runs: std::sync::atomic::AtomicUsize::new(0),
         };
 
-        let request = fusion_request_from_agent(
-            None,
-            &parsed,
-            &ctx,
-            fusion.agent_surface(),
-            &fusion,
-        )
-        .expect("profile fallback");
+        let request =
+            fusion_request_from_agent(None, &parsed, &ctx, fusion.agent_surface(), &fusion)
+                .expect("profile fallback");
 
         assert_eq!(request.parent_model, "test");
         assert_eq!(request.parent_profile, "resolved-profile");

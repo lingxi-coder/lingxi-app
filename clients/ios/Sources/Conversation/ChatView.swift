@@ -570,6 +570,8 @@ struct ChatView: View {
                     color: t.accent,
                     isAnimated: true
                 )
+            case let .compaction(status):
+                CompactionRuntimeFooter(status: status)
             case .stopping:
                 runtimeFooterRow(
                     label: String(localized: "chat_stopping"),
@@ -599,6 +601,9 @@ struct ChatView: View {
     private var runtimeFooterState: RuntimeFooterState {
         if let captureStatus, !captureStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .error(captureStatus)
+        }
+        if let compaction = convo.compactionStatus {
+            return .compaction(compaction)
         }
         if let error = convo.error {
             return .error(error.message)
@@ -850,9 +855,110 @@ private enum RuntimeFooterState: Equatable {
     case activeTool(ConversationToolTrace)
     case thinking(String?)
     case activeLabel(String)
+    case compaction(ConversationCompactionStatus)
     case stopping
     case waiting
     case error(String)
+}
+
+private struct CompactionRuntimeFooter: View {
+    @Environment(\.theme) private var t
+    let status: ConversationCompactionStatus
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        return formatter
+    }()
+
+    var body: some View {
+        switch status {
+        case let .running(startedAt):
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let elapsed = max(0, context.date.timeIntervalSince(startedAt))
+                row(
+                    title: String(localized: "chat_compacting_context"),
+                    detail: "\(ConversationCompactionProgress.percent(elapsed: elapsed))% · \(Int(elapsed))s",
+                    icon: .book,
+                    color: t.accent,
+                    progress: ConversationCompactionProgress.percent(elapsed: elapsed)
+                )
+            }
+        case let .completed(messagesBefore, messagesAfter, bytesSaved):
+            row(
+                title: String(localized: "chat_compacted_label"),
+                detail: Self.completedDetail(
+                    messagesBefore: messagesBefore,
+                    messagesAfter: messagesAfter,
+                    bytesSaved: bytesSaved
+                ),
+                icon: .check,
+                color: t.ok,
+                progress: nil
+            )
+        case let .failed(detail):
+            row(
+                title: String(localized: "chat_compaction_failed"),
+                detail: detail,
+                icon: .x,
+                color: t.danger,
+                progress: nil
+            )
+        }
+    }
+
+    private static func completedDetail(
+        messagesBefore: UInt32?,
+        messagesAfter: UInt32?,
+        bytesSaved: UInt64?
+    ) -> String? {
+        guard let messagesBefore, let messagesAfter, let bytesSaved else { return nil }
+        let formattedBytes = byteFormatter.string(fromByteCount: Int64(clamping: bytesSaved))
+        return String(
+            format: String(localized: "chat_compaction_status"),
+            Int(messagesBefore),
+            Int(messagesAfter),
+            formattedBytes
+        )
+    }
+
+    private func row(
+        title: String,
+        detail: String?,
+        icon: LXIconName,
+        color: Color,
+        progress: Int?
+    ) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            LXIcon(
+                name: icon,
+                size: 16,
+                color: color,
+                stroke: 1.75
+            )
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(color)
+                if let detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(t.text4)
+                        .lineLimit(2)
+                }
+                if let progress {
+                    ProgressView(value: Double(progress), total: 100)
+                        .tint(color)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation.compaction-status")
+    }
 }
 
 /// Selects one running affordance for the footer. Text-only active states use

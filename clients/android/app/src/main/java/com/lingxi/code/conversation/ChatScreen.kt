@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
@@ -35,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -66,6 +68,7 @@ import com.lingxi.code.connectivity.OfflineBanner
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.theme.LingXiTheme
+import kotlinx.coroutines.delay
 
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
@@ -221,6 +224,7 @@ fun ChatScreen(
             } else {
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
+            state.compaction?.let { CompactionProgressRow(it) }
             state.statusLine?.let { StatusRow(text = it) }
             ExecutionStatusPanel(
                 tasks = state.backgroundTasks.values.toList(),
@@ -528,6 +532,75 @@ private fun EmptyState() {
             textAlign = TextAlign.Center,
             modifier = Modifier.widthIn(max = 260.dp),
         )
+    }
+}
+
+@Composable
+private fun CompactionProgressRow(progress: CompactionProgressUi) {
+    val t = LingXiTheme.palette
+    var elapsedMs by remember(progress.startedAtMillis, progress.status) { mutableLongStateOf(0L) }
+    LaunchedEffect(progress.startedAtMillis, progress.status) {
+        if (progress.status != CompactionProgressStatus.Running) return@LaunchedEffect
+        while (true) {
+            elapsedMs = (compactionClockMillis() - progress.startedAtMillis).coerceAtLeast(0L)
+            delay(1_000)
+        }
+    }
+    val percent = compactProgressPercent(elapsedMs)
+    val color = when (progress.status) {
+        CompactionProgressStatus.Running -> t.accent
+        CompactionProgressStatus.Completed -> t.ok
+        CompactionProgressStatus.Failed -> t.danger
+    }
+    val title = when (progress.status) {
+        CompactionProgressStatus.Running -> stringResource(R.string.chat_compacting_context)
+        CompactionProgressStatus.Completed -> stringResource(R.string.chat_compacted_label)
+        CompactionProgressStatus.Failed -> stringResource(R.string.chat_compaction_failed)
+    }
+    val detail = when (progress.status) {
+        CompactionProgressStatus.Running -> stringResource(
+            R.string.chat_compaction_progress,
+            percent,
+            elapsedMs / 1_000,
+        )
+        CompactionProgressStatus.Completed -> stringResource(
+            R.string.chat_compaction_status,
+            progress.messagesBefore ?: 0,
+            progress.messagesAfter ?: 0,
+            formatCompactBytes(progress.bytesSaved ?: 0L),
+        )
+        CompactionProgressStatus.Failed -> progress.detail.orEmpty()
+    }
+
+    Row(
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .semantics { contentDescription = "$title. $detail" },
+    ) {
+        LXIcon(
+            name = when (progress.status) {
+                CompactionProgressStatus.Running -> LXIconName.Book
+                CompactionProgressStatus.Completed -> LXIconName.Check
+                CompactionProgressStatus.Failed -> LXIconName.X
+            },
+            size = 17.dp,
+            color = color,
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
+            Text(title, color = color, fontSize = 12.5f.sp, fontWeight = FontWeight.Medium)
+            Text(detail, color = t.text4, fontSize = 10.5f.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (progress.status == CompactionProgressStatus.Running) {
+                LinearProgressIndicator(
+                    progress = { percent / 100f },
+                    color = color,
+                    trackColor = t.surfaceActive,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
     }
 }
 

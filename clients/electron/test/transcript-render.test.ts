@@ -46,8 +46,10 @@ import { Stage } from '../src/renderer/components/Stage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
+  compactProgressPercent,
   NARRATION_COLLAPSE_MAX_CHARS,
   type CommandRunItem,
+  type CompactionRunItem,
   type NarrationRunItem,
   type ToolRunItem,
 } from '../src/renderer/model/runItem';
@@ -85,6 +87,49 @@ const DIFF: StructuredDiffDto = {
   truncated_rows: 0,
   rows: [{ kind: 'add', line_no: 12, hunk: 0, segments: [{ text: 'let a = 2;', class: 'plain' }] }],
 };
+
+function renderCompaction(item: CompactionRunItem): string {
+  return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
+}
+
+test('compaction status exposes CLI-compatible estimated progress and terminal summaries', () => {
+  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running' });
+  assert.match(running, /role="status"/);
+  assert.match(running, /Compacting context/);
+  assert.match(running, /class="compact-progress-track"/);
+  assert.match(running, /aria-label="Compaction in progress"/);
+  assert.match(running, /aria-valuenow="0"/);
+  assert.match(running, />0% · 0s<\/span>/);
+  assert.match(running, /--sweep-base:/);
+  assert.match(running, /--sweep-highlight:/);
+
+  const complete = renderCompaction({
+    type: 'compaction',
+    id: 'compact-1',
+    status: 'complete',
+    messagesBefore: 18,
+    messagesAfter: 4,
+    bytesSaved: 32_768,
+  });
+  assert.match(complete, /Context compacted/);
+  assert.match(complete, /18 → 4 messages/);
+  assert.match(complete, /32 KB saved/);
+  assert.doesNotMatch(complete, /compact-progress-track/);
+
+  const failed = renderCompaction({
+    type: 'compaction', id: 'compact-1', status: 'error', detail: 'provider rate limited',
+  });
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /Compaction failed/);
+  assert.match(failed, /provider rate limited/);
+});
+
+test('compaction progress matches the CLI exponential estimate and never claims completion', () => {
+  assert.equal(compactProgressPercent(0), 0);
+  assert.equal(compactProgressPercent(4_000), 4);
+  assert.equal(compactProgressPercent(90_000), 63);
+  assert.equal(compactProgressPercent(10_000_000), 95);
+});
 
 // ── Message collapse defaults and accessible markup ──────────────────────────
 

@@ -587,6 +587,8 @@ final class ConversationModel: ObservableObject {
     /// A `RunSlashCommand` has been submitted but has not yet resolved into a
     /// local result or a normal streaming turn.
     @Published var slashCommandPending = false
+    /// Latest manual `/compact` lifecycle; terminal state remains until the next action.
+    @Published var compactionStatus: ConversationCompactionStatus? = nil
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil
@@ -883,12 +885,13 @@ final class ConversationModel: ObservableObject {
         Self.requiresBackgroundExecution(
             streaming: streaming,
             backgroundTasks: backgroundTasks,
-            items: items
+            items: items,
+            compactionStatus: compactionStatus
         )
     }
 
     var backgroundExecutionActivity: AnyPublisher<Bool, Never> {
-        Publishers.CombineLatest3($streaming, $backgroundTasks, $items)
+        Publishers.CombineLatest4($streaming, $backgroundTasks, $items, $compactionStatus)
             .map(Self.requiresBackgroundExecution)
             .removeDuplicates()
             .eraseToAnyPublisher()
@@ -897,9 +900,13 @@ final class ConversationModel: ObservableObject {
     private static func requiresBackgroundExecution(
         streaming: Bool,
         backgroundTasks: [BackgroundTaskSnapshot],
-        items: [ConversationRenderItem]
+        items: [ConversationRenderItem],
+        compactionStatus: ConversationCompactionStatus?
     ) -> Bool {
         if streaming || backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
+            return true
+        }
+        if case .running = compactionStatus {
             return true
         }
         return items.contains { item in
@@ -2205,6 +2212,7 @@ final class MockConversationSource: ConversationSource {
             model.streaming = false
             model.isCancelling = false
             model.slashCommandPending = false
+            model.compactionStatus = nil
             model.turnCompletion = nil
             model.activeTurnToken = nil
             model.isNew = isNew
@@ -2768,6 +2776,7 @@ final class MockConversationSource: ConversationSource {
             model.hasUnresolvedTurnRecovery = false
             model.isCancelling = false
             model.slashCommandPending = false
+            model.compactionStatus = nil
             model.turnCompletion = nil
             turnSpeechSequence = 0
             model.statusLine = nil
@@ -2804,11 +2813,19 @@ final class MockConversationSource: ConversationSource {
             return token
         }
 
+        private static func isCompactSlash(_ raw: String) -> Bool {
+            raw.split(whereSeparator: { $0.isWhitespace }).first?
+                .lowercased() == "/compact"
+        }
+
         private func startSlashCommand(raw: String, turnId: UInt64) -> ConversationTurnToken {
             model.notice = nil
             model.streaming = false
             model.isCancelling = false
             model.slashCommandPending = true
+            model.compactionStatus = Self.isCompactSlash(raw)
+                ? .running(startedAt: Date())
+                : nil
             model.turnCompletion = nil
             turnSpeechSequence = 0
             model.statusLine = nil
@@ -4368,6 +4385,19 @@ final class MockConversationSource: ConversationSource {
                       turnId == nil || turnId == token.clientTurnId
                 else { return }
                 let raw = pendingSlashRaw ?? "/"
+                if Self.isCompactSlash(raw) {
+                    if case .completed = model.compactionStatus {
+                        // The authoritative CompactionCompleted metrics arrived first.
+                    } else if !isError && display.hasPrefix("Compacted") {
+                        model.compactionStatus = .completed(
+                            messagesBefore: nil,
+                            messagesAfter: nil,
+                            bytesSaved: nil
+                        )
+                    } else {
+                        model.compactionStatus = .failed(detail: display)
+                    }
+                }
                 model.items.append(.commandOutput(ConversationCommandOutput(
                     id: "slash-\(token.sessionEpoch)-\(token.clientTurnId)",
                     command: raw,
@@ -4715,6 +4745,11 @@ final class MockConversationSource: ConversationSource {
 
             case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved):
                 guard acceptTurnEvent(event) else { return }
+                model.compactionStatus = .completed(
+                    messagesBefore: messagesBefore,
+                    messagesAfter: messagesAfter,
+                    bytesSaved: bytesSaved
+                )
                 updateActiveRun {
                     $0.compactions.append(
                         ConversationCompactionSnapshot(
@@ -5083,6 +5118,17 @@ final class MockConversationSource: ConversationSource {
                 )
                 print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
                 guard accepted else { return }
+                if case .running = model.compactionStatus,
+                   message.lowercased().hasPrefix("force_compact failed:") {
+                    let detail = message.dropFirst("force_compact failed:".count)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .replacingOccurrences(
+                            of: "^handle action failed:\\s*",
+                            with: "",
+                            options: [.regularExpression, .caseInsensitive]
+                        )
+                    model.compactionStatus = .failed(detail: detail.isEmpty ? message : detail)
+                }
                 if case let .resuming(taskID) = model.workflowResumeState {
                     model.workflowResumeState = .failed(taskID: taskID, message: message)
                 }

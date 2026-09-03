@@ -515,7 +515,10 @@ fn parent_profile_resolution_prefers_session_identity_then_catalog_fallback() {
         test_config(),
         Arc::new(ambiguous_catalog),
     );
-    assert_eq!(ambiguous.resolve_parent_profile("gpt-5.6-terra", None), None);
+    assert_eq!(
+        ambiguous.resolve_parent_profile("gpt-5.6-terra", None),
+        None
+    );
 }
 
 async fn orch_with_telemetry(
@@ -933,9 +936,12 @@ async fn panel_idle_timeout_stops_spawns_that_make_no_progress() {
         panel.status == PanelRunStatus::TimedOut
             && panel.error_category.as_deref() == Some("idle_timeout")
     }));
-    assert!(spawner.seen.lock().unwrap().iter().all(|watchdog| {
-        watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0
-    }));
+    assert!(spawner
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|watchdog| { watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0 }));
 }
 
 #[tokio::test]
@@ -959,9 +965,12 @@ async fn provider_stream_progress_can_outlive_one_idle_interval_in_total() {
     assert!(panels
         .iter()
         .all(|panel| panel.status == PanelRunStatus::Completed));
-    assert!(spawner.seen.lock().unwrap().iter().all(|watchdog| {
-        watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0
-    }));
+    assert!(spawner
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|watchdog| { watchdog.stall_timeout_ms == 25 && watchdog.max_retries == 0 }));
 }
 
 #[tokio::test]

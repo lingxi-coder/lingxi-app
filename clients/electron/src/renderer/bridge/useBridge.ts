@@ -24,6 +24,7 @@ import { hostMicrophonePermissionReader, type VoicePermissionStatus } from '../a
 import { defaultVoicePreferences, type VoicePreferences } from '../../shared/voicePreferences';
 import {
   appendPendingUserPrompt,
+  beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
   emptyConversation,
@@ -978,7 +979,7 @@ export function useBridge(): UseBridge {
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);
       if (event.type === 'skills' && activeSessionIdRef.current === sessionId) setSkillsEvent(event);
-      if (event.type === 'error') {
+      if (event.type === 'error' && !/^force_compact failed:\s*/i.test(event.message)) {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
       }
@@ -1581,7 +1582,29 @@ export function useBridge(): UseBridge {
   const setPermissionMode = useCallback((mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }), [command]);
   const login = useCallback(() => command({ type: 'login' }), [command]);
   const logout = useCallback(() => command({ type: 'logout' }), [command]);
-  const forceCompact = useCallback(() => command({ type: 'force_compact' }), [command]);
+  const forceCompact = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId) return;
+    setError(null);
+    updateRuntime(sessionId, (state) => ({
+      ...state,
+      error: undefined,
+      conversation: beginCompaction(state.conversation),
+    }));
+    try {
+      await host.command(sessionId, { type: 'force_compact' });
+    } catch (cause) {
+      updateRuntime(sessionId, (state) => ({
+        ...state,
+        conversation: reduceEvent(state.conversation, {
+          type: 'error',
+          kind: { type: 'transport' },
+          message: `force_compact failed: ${messageFrom(cause)}`,
+        }),
+      }));
+      capture(cause);
+    }
+  }, [capture, host, updateRuntime]);
   const clearSession = useCallback(async () => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;

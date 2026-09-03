@@ -17,6 +17,7 @@ import type {
   ToolResultDisplayDto,
 } from '@lingxi/bridge-client';
 import {
+  beginCompaction,
   beginLocalSlashCommand,
   conversationFromMessages,
   emptyConversation,
@@ -33,6 +34,7 @@ type Narration = Extract<ConversationState['items'][number], { type: 'narration'
 type Tool = ToolRunItem;
 type Meta = Extract<ConversationState['items'][number], { type: 'meta' }>;
 type Thinking = Extract<ConversationState['items'][number], { type: 'thinking' }>;
+type Compaction = Extract<ConversationState['items'][number], { type: 'compaction' }>;
 
 const COST = {
   total_usd: 0.01,
@@ -340,6 +342,64 @@ test('appendUserPrompt echoes a strong narration line and ignores blank input', 
   const line = s.items.at(-1) as Narration;
   assert.equal(line.text, 'fix the bug');
   assert.equal(line.strong, true);
+});
+
+test('manual compaction immediately adds one visible running status and settles it on completion', () => {
+  const echoed = beginLocalSlashCommand(emptyConversation(), '/compact');
+  let s = beginCompaction(echoed);
+
+  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'compaction']);
+  assert.equal((s.items[0] as Narration).text, '/compact');
+  assert.equal(s.activeCompactionId, 'i2');
+  assert.equal((s.items[1] as Compaction).status, 'running');
+
+  // Re-entering the action while it is already active must not create a
+  // second optimistic row or a second `/compact` echo.
+  assert.equal(beginCompaction(s), s);
+
+  s = reduceEvent(s, {
+    type: 'compaction_completed',
+    messages_before: 18,
+    messages_after: 4,
+    bytes_saved: 32_768,
+  });
+  const status = s.items[1] as Compaction;
+  assert.equal(status.status, 'complete');
+  assert.equal(status.messagesBefore, 18);
+  assert.equal(status.messagesAfter, 4);
+  assert.equal(status.bytesSaved, 32_768);
+  assert.equal(s.activeCompactionId, null);
+  assert.equal(s.pendingSlashName, null);
+});
+
+test('palette compaction echoes /compact and a compact failure settles the same status row', () => {
+  let s = beginCompaction(emptyConversation());
+  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'compaction']);
+  assert.equal((s.items[0] as Narration).text, '/compact');
+
+  s = reduceEvent(s, {
+    type: 'error',
+    message: 'force_compact failed: handle action failed: provider rate limited',
+  });
+  const status = s.items[1] as Compaction;
+  assert.equal(status.status, 'error');
+  assert.equal(status.detail, 'provider rate limited');
+  assert.equal(s.activeCompactionId, null);
+  assert.equal(s.lastError, null, 'the inline status replaces a duplicate global error banner');
+  assert.equal(
+    s.items.filter((item) => item.type === 'narration').length,
+    1,
+    'the compact status owns its failure; a duplicate error narration is noise',
+  );
+});
+
+test('an unrelated error does not falsely fail an active compaction', () => {
+  const running = beginCompaction(emptyConversation());
+  const after = reduceEvent(running, { type: 'error', message: 'settings refresh failed' });
+  const status = after.items.find((item) => item.type === 'compaction') as Compaction;
+  assert.equal(status.status, 'running');
+  assert.equal(after.activeCompactionId, running.activeCompactionId);
+  assert.equal(after.items.at(-1)?.type, 'narration');
 });
 
 test('submitted prompt reserves the turn slot before turn_started arrives', () => {

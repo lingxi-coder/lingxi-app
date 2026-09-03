@@ -861,6 +861,10 @@ textarea, input { font-family: inherit; }
   }
 }
 
+@media (max-width: 920px) {
+  .model-picker-model-submenu { right: calc(100% - 4px) !important; }
+}
+
 @media (max-width: 760px) {
   .command-help-grid { grid-template-columns: minmax(0, 1fr); }
   .command-help-entry { grid-template-columns: minmax(100px, .45fr) minmax(0, 1.55fr); }

@@ -681,6 +681,44 @@ impl Drop for ScaffoldReservation {
     }
 }
 
+/// One claimed [`local_apps::McpConfirmationReceipt`] slot, held from the
+/// moment `claim_candidate` succeeds until the scaffold transaction leaves by
+/// ANY path — an ordinary `Err`, a panic, or the future being dropped (a Stop,
+/// a 529 non-streaming fallback, connection teardown). Before this guard
+/// existed, only the explicit `Err` arm called `release_claim`, so every OTHER
+/// exit left `McpReceiptBook::issue`'s in-use predicate tripped for the app
+/// until the process restarted — the same class of leak `ScaffoldReservation`
+/// exists to prevent, one level down.
+///
+/// `McpConfirmationReceipt::release_claim` is already a no-op once the
+/// receipt is `consumed`, so this guard drops harmlessly after a successful
+/// `commit_claimed_candidate`: it needs no separate hand-off method the way
+/// [`PortLease::commit`] does. That rests entirely on `release_claim` being a
+/// no-op once `consumed` — if that ever stops being true, this guard needs an
+/// explicit "defused" flag set at the commit point.
+struct ReceiptClaim {
+    book: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>,
+    receipt_id: String,
+}
+
+impl ReceiptClaim {
+    /// Wrap an ALREADY-CLAIMED receipt id. Does not itself call
+    /// `claim_candidate` — the caller does that first, under the same lock,
+    /// so a failed claim never produces a guard with nothing to release.
+    fn held(book: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>, receipt_id: String) -> Self {
+        Self { book, receipt_id }
+    }
+}
+
+impl Drop for ReceiptClaim {
+    fn drop(&mut self) {
+        self.book
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .release_claim(&self.receipt_id);
+    }
+}
+
 // The `device.*` operations of the bridge — capture / pick / record / locate
 // / notify. A CHILD module (not a sibling) so it reaches the broker's private
 // fields and `authorize_declared_capability` without widening their
@@ -1109,7 +1147,10 @@ pub(crate) struct LocalAppsHostBroker {
     pending_mcp_proposal_approvals: Mutex<HashMap<String, PendingNativeApproval>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     pending_dependency_change_receipts: Mutex<HashMap<String, PendingDependencyChangeReceipt>>,
-    pending_mcp_receipts: Mutex<local_apps::McpReceiptBook>,
+    /// `std::sync::Mutex`, not `tokio::sync::Mutex`, for the same reason as
+    /// `scaffold_reservations` (:1172): [`ReceiptClaim::drop`] releases a
+    /// leaked claim, and `Drop` cannot `.await`.
+    pending_mcp_receipts: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
@@ -1245,7 +1286,9 @@ impl LocalAppsHostBroker {
             pending_mcp_proposal_approvals: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             pending_dependency_change_receipts: Mutex::new(HashMap::new()),
-            pending_mcp_receipts: Mutex::new(local_apps::McpReceiptBook::default()),
+            pending_mcp_receipts: Arc::new(std::sync::Mutex::new(
+                local_apps::McpReceiptBook::default(),
+            )),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -4525,6 +4568,9 @@ impl LocalAppsHostBroker {
         }
     }
 
+    /// Scaffold-landing caller (`land_scaffold`'s commit path): the record's
+    /// dependency state is NOT yet `Installing` here, so this wrapper owns
+    /// the whole transition itself.
     async fn install_scaffold_dependencies(
         &self,
         service: &Arc<AppService>,
@@ -4535,6 +4581,23 @@ impl LocalAppsHostBroker {
             .start_dependency_install(app_id)
             .await
             .map_err(|error| error.to_string())?;
+        self.run_started_dependency_install(service, app_id, layout)
+            .await
+    }
+
+    /// Run one dependency-install attempt assuming the record is ALREADY
+    /// `Installing` -- e.g. `ensure_dependency_install` transitions it there
+    /// itself before spawning `run_dependency_install`. Re-calling
+    /// `start_dependency_install` here would always fail (the state is
+    /// already `Installing`), leaving the record permanently stuck: this is
+    /// the body both callers of the state transition above actually need to
+    /// run, split out so each caller owns its own precondition.
+    async fn run_started_dependency_install(
+        &self,
+        service: &Arc<AppService>,
+        app_id: &str,
+        layout: &AppLayout,
+    ) -> Result<(), String> {
         match self.dependency_install_once(layout, app_id).await {
             Ok(completion) => service
                 .complete_dependency_install_with_metadata(
@@ -4617,10 +4680,29 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
+        // `ensure_dependency_install` already transitioned this record to
+        // `Installing` before spawning us -- run the install body directly
+        // rather than through `install_scaffold_dependencies`, which would
+        // try to make that SAME transition again and always fail because the
+        // state is already `Installing`, leaving the record stuck forever.
         if let Err(error) = self
-            .install_scaffold_dependencies(&service, &app_id, &layout)
+            .run_started_dependency_install(&service, &app_id, &layout)
             .await
         {
+            // Every other early return out of this worker already lands the
+            // record in `Failed` (:4618, :4633). This arm must too: the record
+            // is `Installing` when we get here, and the one Err this arm can
+            // still receive with the install itself having succeeded is the
+            // `complete_dependency_install_with_metadata` persist failure,
+            // whose Ok-arm has made no state transition at all. Without this,
+            // that window leaves the record terminal `Installing` -- nothing
+            // on any boot path sweeps it, so every later `LocalAppBuild`
+            // polls the full `DEPENDENCY_INSTALL_TIMEOUT` and fails.
+            // Re-failing an already-`Failed` record is an idempotent rewrite
+            // (`fail_dependency_install` has no state guard).
+            let _ = service
+                .fail_dependency_install(&app_id, error.clone())
+                .await;
             tracing::warn!(app_id = %app_id, error = %error, "dependency install failed");
         }
     }
@@ -6431,7 +6513,7 @@ impl LocalAppsHostBroker {
         let brief = create_seed.brief.clone();
         self.pending_mcp_receipts
             .lock()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .claim_candidate(
                 &receipt_id,
                 &app_id,
@@ -6441,6 +6523,12 @@ impl LocalAppsHostBroker {
                 now_ms(),
             )
             .map_err(|issue| issue.message)?;
+        // Held across every path out of this function — success, an ordinary
+        // `Err`, a panic, or the future being dropped mid-transaction — so the
+        // claim can never outlive this call the way it used to when only the
+        // `Err` arm below released it. See [`ReceiptClaim`].
+        let _receipt_claim =
+            ReceiptClaim::held(Arc::clone(&self.pending_mcp_receipts), receipt_id.clone());
         let receipt_binding = create_seed.selection.runtime_profile.clone();
         let scaffolded = async {
             let surface = receipt_binding.family.surface();
@@ -6549,7 +6637,7 @@ impl LocalAppsHostBroker {
             Ok(committed) => {
                 self.pending_mcp_receipts
                     .lock()
-                    .await
+                    .unwrap_or_else(|error| error.into_inner())
                     .commit_claimed_candidate(
                         &receipt_id,
                         &app_id,
@@ -6596,13 +6684,10 @@ impl LocalAppsHostBroker {
                 }
                 committed
             }
-            Err(error) => {
-                self.pending_mcp_receipts
-                    .lock()
-                    .await
-                    .release_claim(&receipt_id);
-                return Err(error);
-            }
+            // No explicit `release_claim` here: `_receipt_claim`'s `Drop`
+            // covers this arm AND every other exit (panic, dropped future)
+            // that used to leak the claim.
+            Err(error) => return Err(error),
         };
 
         // STEP 5 — the pinned init session's title, AFTER the commit and
@@ -8484,6 +8569,65 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 );
             }
             let layout = self.layout(&app_id)?;
+            // Already-approved reuse arm. Without it, a repeated
+            // `create_without_mcp` call for a `workflow_run_id` whose
+            // candidate journal is already sealed at `Approved` rewrites that
+            // journal back to `Prepared`, re-raises the native
+            // create-confirmation sheet a second time, and then — if the
+            // FIRST receipt is still claimed by an in-flight scaffold —
+            // throws the user's fresh answer away when `issue()` returns
+            // `receipt_in_use`.
+            //
+            // The user has already answered the sheet for exactly this
+            // contract digest, so reuse asks nothing again and never touches
+            // the sealed journal. It does NOT mirror the MCP-revise branch's
+            // `receipt_id: null` / `approved_reusable` answer: that shape is
+            // only safe there because its consumer (the MCP-authoring
+            // workflow script) declares `receipt_id` nullable and is told to
+            // consume the existing receipt. THIS branch's only consumer, the
+            // unified build workflow script, requires a non-empty
+            // `receipt_id` whenever `approved` is true — both in the
+            // `createApprovalSchema` the agent must satisfy and in the
+            // imperative check before `LocalAppScaffold` — so a null here
+            // would swap one dead end for another. Mint a usable receipt
+            // against the sealed journal instead.
+            //
+            // `issue()` still refuses while a live, unexpired claim is
+            // outstanding. Post-WP-B that is a scaffold genuinely in flight,
+            // and starting a second one is exactly what must not happen, so
+            // this surfaces a named error WITHOUT raising a sheet — no user
+            // answer can be discarded because none was solicited.
+            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
+                if existing_journal.workflow_run_id == workflow_run_id
+                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
+                {
+                    let receipt = local_apps::McpConfirmationReceipt::new(
+                        &app_id,
+                        &workflow_run_id,
+                        existing_journal.approval_contract_sha256.clone(),
+                        existing_journal.proposal_sha256.clone(),
+                        now_ms(),
+                    );
+                    let receipt_id = receipt.receipt_id.clone();
+                    self.pending_mcp_receipts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .issue(receipt)
+                        .map_err(|issue| {
+                            format!(
+                                "create_approval_in_flight: the sealed create approval for this \
+                                 app is already claimed by an in-flight scaffold; retry after it \
+                                 finishes ({})",
+                                issue.message
+                            )
+                        })?;
+                    return Ok(json!({
+                        "approved": true,
+                        "receipt_id": receipt_id,
+                        "status": "create_approved_no_mcp",
+                    }));
+                }
+            }
             let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
             let create_context = self.load_create_proposal_context(&app_id, &workflow_run_id)?;
             let proposal = local_apps::AppMcpProposal {
@@ -8575,7 +8719,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let receipt_id = receipt.receipt_id.clone();
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .issue(receipt)
                 .map_err(|issue| issue.message)?;
             journal = journal
@@ -8659,7 +8803,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let receipt_id = receipt.receipt_id.clone();
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .issue(receipt)
                 .map_err(|issue| issue.message)?;
             journal = journal
@@ -8960,7 +9104,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if let Some(receipt_id) = receipt_id.as_deref() {
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .consume_candidate(
                     receipt_id,
                     &app_id,
@@ -13908,6 +14052,481 @@ mod tests {
         );
     }
 
+    /// WP-C gate (`r4-engine-core-01`): a SECOND `create_without_mcp` call for
+    /// a `workflow_run_id` whose candidate journal is already sealed at
+    /// `Approved` must reuse that approval — no second native
+    /// `CreateConfirmationRequested` sheet, the sealed journal stays
+    /// `Approved` rather than being rewritten back to `Prepared`, and the
+    /// answer must be one the create workflow can actually spend: a non-empty
+    /// `receipt_id` that `LocalAppScaffold` can claim. Before the reuse arm
+    /// existed, the second call rebuilt a fresh `Prepared` journal and
+    /// re-raised the native sheet unconditionally. A reuse arm that answers
+    /// with `receipt_id: null` fixes only the sheet — `local-app-build.js`
+    /// rejects that payload in `createApprovalSchema` and again before
+    /// `LocalAppScaffold`, so the retry still dies, which is why the receipt
+    /// is asserted here too.
+    ///
+    /// The tail covers the one case where reuse legitimately cannot hand out a
+    /// receipt: a scaffold already holds a live claim. That must fail fast
+    /// with a named `create_approval_in_flight:` error and still raise no
+    /// sheet, so no user answer can be solicited and then discarded.
+    #[tokio::test]
+    async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet(
+    ) {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, _service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &_service).await;
+        let workflow_run_id = format!("wf_reuse_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "reuse arm coverage",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Reuse arm",
+                "brief": "second approval call must reuse the sealed journal",
+            }))
+            .await
+            .expect("stage create");
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let first_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        let first_request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) = broker
+                    .pending_create_confirmations
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first create confirmation request");
+        assert!(
+            broker
+                .resolve_create_confirmation(&first_request_id, true)
+                .await
+        );
+        let first_approved = first_approval
+            .await
+            .expect("first approval task")
+            .expect("approve plain create");
+        assert_eq!(first_approved["status"], "create_approved_no_mcp");
+        let first_receipt_id = first_approved["receipt_id"]
+            .as_str()
+            .expect("first create receipt")
+            .to_string();
+
+        let sealed_journal =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal after first approval");
+        assert_eq!(sealed_journal.stage, local_apps::McpAuthoringStage::Approved);
+
+        // A SECOND identical call must reuse the sealed approval promptly —
+        // it must NOT raise a second native confirmation sheet and hang
+        // waiting for an answer nothing in this test will ever give it.
+        let second_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(second_approval);
+        let second_approved = tokio::select! {
+            result = &mut second_approval => result
+                .expect("second approval task did not panic")
+                .expect("reuse arm must return the existing approval, not an error"),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                let pending = broker.pending_create_confirmations.lock().await.len();
+                panic!(
+                    "the create approval branch has no already-approved reuse arm: a second \
+                     create_without_mcp call for an already-Approved journal is still pending \
+                     after 300ms (pending_create_confirmations={pending}), meaning it re-raised \
+                     the native create-confirmation sheet instead of reusing the sealed approval"
+                );
+            }
+        };
+        assert_eq!(second_approved["status"], "create_approved_no_mcp");
+        assert_eq!(second_approved["approved"], true);
+        assert!(
+            broker.pending_create_confirmations.lock().await.is_empty(),
+            "the reuse arm must leave no native create-confirmation sheet outstanding"
+        );
+
+        // The reuse answer must be USABLE, not merely prompt. `local-app-build.js`
+        // rejects `approved: true` without a non-empty `receipt_id` twice over —
+        // `createApprovalSchema` (the shape the mcp-designer agent must satisfy)
+        // and the imperative check before `LocalAppScaffold` — so a `null`
+        // receipt here would replace the duplicate-sheet dead end with an
+        // unnamed workflow failure and leave `create_declined` as the agent's
+        // only schema-valid answer for a creation the user actually approved.
+        let second_receipt_id = second_approved["receipt_id"].as_str().unwrap_or_else(|| {
+            panic!(
+                "the reuse arm returned receipt_id={:?}, which is not a string: \
+                 local-app-build.js requires a non-empty receipt_id whenever approved is true \
+                 (createApprovalSchema + the LocalAppScaffold precondition), so this retry can \
+                 never complete",
+                second_approved["receipt_id"]
+            )
+        });
+        assert!(
+            !second_receipt_id.is_empty(),
+            "the reuse arm returned an empty receipt_id; LocalAppScaffold cannot consume it"
+        );
+        let second_receipt_id = second_receipt_id.to_string();
+
+        // The sealed journal must be untouched — still Approved, not
+        // downgraded back to Prepared by a rebuilt candidate.
+        let journal_after =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("journal must still exist after the reuse call");
+        assert_eq!(
+            journal_after.stage,
+            local_apps::McpAuthoringStage::Approved,
+            "the reuse arm must not rewrite the sealed Approved journal back to Prepared"
+        );
+        assert_eq!(
+            journal_after.proposal_sha256, sealed_journal.proposal_sha256,
+            "the reuse arm must not mint a new candidate proposal over the sealed one"
+        );
+
+        // The reused receipt must actually be spendable by the scaffold step.
+        broker
+            .pending_mcp_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .claim_candidate(
+                &second_receipt_id,
+                &shell.id,
+                &workflow_run_id,
+                &journal_after.approval_contract_sha256,
+                &journal_after.proposal_sha256,
+                now_ms(),
+            )
+            .expect("the receipt handed back by the reuse arm must be claimable by LocalAppScaffold");
+
+        // With that claim now live (an in-flight scaffold), a THIRD call must
+        // still refuse to raise a native sheet: it fails fast with a named
+        // in-flight error instead of asking the user again only to throw the
+        // answer away on `receipt_in_use`.
+        let third_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(third_approval);
+        let third_error = tokio::select! {
+            result = &mut third_approval => result
+                .expect("third approval task did not panic")
+                .expect_err("a third call while the receipt is claimed must not hand out a second live receipt"),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                let pending = broker.pending_create_confirmations.lock().await.len();
+                panic!(
+                    "a create_without_mcp call for an already-Approved journal whose receipt is \
+                     claimed by an in-flight scaffold is still pending after 300ms \
+                     (pending_create_confirmations={pending}): it re-raised the native \
+                     create-confirmation sheet instead of failing fast"
+                );
+            }
+        };
+        assert!(
+            third_error.starts_with("create_approval_in_flight:"),
+            "the in-flight refusal must be named, got {third_error:?}"
+        );
+        assert!(
+            broker.pending_create_confirmations.lock().await.is_empty(),
+            "the in-flight refusal must not leave a native create-confirmation sheet outstanding"
+        );
+        assert_ne!(
+            second_receipt_id, first_receipt_id,
+            "the reuse arm must mint its own receipt: handing back the first one would collide \
+             with a scaffold that already claimed it"
+        );
+    }
+
+    /// WP-C gate (`r3-failure-paths-03`): a declined native create
+    /// confirmation must be TERMINAL in `local-app-build.js`. Before the
+    /// decline shape existed, `createApprovalSchema` demanded an approved
+    /// receipt, so the mcp-designer agent had no way to report the decline;
+    /// the script fell through to the unnamed
+    /// "create approval did not yield a unified scaffold receipt" throw, and
+    /// the agent's only remaining move was to call
+    /// `LocalAppApproveMcpProposal` again — re-raising the very sheet the user
+    /// had just dismissed.
+    ///
+    /// This runs the REAL plugin script through the REAL QuickJS workflow
+    /// runtime with a hermetic mcp-designer that declines, and asserts the run
+    /// ends in a declined terminal result having asked exactly ONCE. It does
+    /// not prove the schema admits the decline shape — the workflow runtime
+    /// only `JSON.parse`s a schema agent's answer (`workflow/src/lib.rs`);
+    /// validation is host-side in `agent::runner`.
+    #[test]
+    fn declined_create_confirmation_is_terminal_in_the_build_workflow() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let args = json!({
+            "operation": "create",
+            "app_id": "aaaa1111",
+            "spec": "A small form app",
+            "quality_level": "balanced",
+            "host_context": {
+                "source": "verified_host",
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "workflow_run_id": "wf_decline1",
+                "selector_capability": "sel_00000000000000000000000000000000",
+                "invocation_capability": "mcpv_00000000000000000000000000000000",
+                "template_catalog": {
+                    "catalog_digest": "digest",
+                    "available_template_ids": ["react-dom-r2"],
+                },
+                "staging": {"isolated": true, "final_publish": false},
+            },
+        });
+        let approval_calls = Arc::new(AtomicUsize::new(0));
+        let post_decline_calls = Arc::new(AtomicUsize::new(0));
+        let approval_counter = approval_calls.clone();
+        let post_decline_counter = post_decline_calls.clone();
+        let outcome = workflow::run_with_progress(
+            source,
+            move |prompts, options| {
+                prompts
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(_prompt, options)| {
+                        if options.contains("template-selector") {
+                            return json!({
+                                "catalog_digest": "digest",
+                                "template_id": "react-dom-r2",
+                                "reason": "ordinary form",
+                                "rejected": [],
+                                "validated_selection_handle":
+                                    "vsel_0123456789abcdef0123456789abcdef",
+                            })
+                            .to_string();
+                        }
+                        // Checked BEFORE "designer": the approval stage's
+                        // agentType IS `mcp-designer`.
+                        if options.contains("native-create-approval") {
+                            approval_counter.fetch_add(1, Ordering::SeqCst);
+                            return json!({
+                                "approved": false,
+                                "status": "create_declined",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("designer") {
+                            return json!({
+                                "runtime_family": "react_dom",
+                                "acceptance_checks": [],
+                                "summary": "design",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("builder-stage") {
+                            return json!({
+                                "ok": true,
+                                "dependency_input_sha256": "a".repeat(64),
+                                "summary": "staged",
+                            })
+                            .to_string();
+                        }
+                        // Any stage after the decline means the run kept going.
+                        post_decline_counter.fetch_add(1, Ordering::SeqCst);
+                        json!({"ok": false, "summary": "unreachable after a decline"}).to_string()
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        );
+        let after_decline = post_decline_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            after_decline, 0,
+            "a declined create confirmation must be terminal, but the workflow ran \
+             {after_decline} further agent stage(s) after the decline"
+        );
+        let asked = approval_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            asked, 1,
+            "a declined create confirmation must not be re-asked, but the workflow called the \
+             native-create-approval agent {asked} time(s)"
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => panic!(
+                "a declined create confirmation has no terminal contract in local-app-build.js: \
+                 the workflow threw instead of returning a declined result ({error})"
+            ),
+        };
+        let result = outcome
+            .result
+            .expect("the declined create run must produce a workflow result");
+        assert!(
+            result.contains("\"status\":\"create_declined\""),
+            "the declined create run must report status create_declined, got {result}"
+        );
+        assert!(
+            result.contains("\"ok\":false"),
+            "the declined create run must report ok=false, got {result}"
+        );
+    }
+
+    /// WP-C gate (`r3-failure-paths-03`, contradictory-shape half): widening
+    /// the create-approval contract must not let an APPROVED creation be
+    /// reported to the user as a decline. `createApprovalSchema` now makes the
+    /// contradictory shape unrepresentable (`anyOf` of the two whole shapes),
+    /// and `local-app-build.js` also checks `approved === false` before taking
+    /// the declined exit — keying the exit on `status` alone would turn
+    /// `{approved: true, status: 'create_declined'}` into
+    /// "The user declined the create confirmation."
+    #[test]
+    fn contradictory_create_approval_is_never_reported_as_a_user_decline() {
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let args = json!({
+            "operation": "create",
+            "app_id": "aaaa1111",
+            "spec": "A small form app",
+            "quality_level": "balanced",
+            "host_context": {
+                "source": "verified_host",
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "workflow_run_id": "wf_contradiction1",
+                "selector_capability": "sel_00000000000000000000000000000000",
+                "invocation_capability": "mcpv_00000000000000000000000000000000",
+                "template_catalog": {
+                    "catalog_digest": "digest",
+                    "available_template_ids": ["react-dom-r2"],
+                },
+                "staging": {"isolated": true, "final_publish": false},
+            },
+        });
+        let outcome = workflow::run_with_progress(
+            source,
+            move |prompts, options| {
+                prompts
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(_prompt, options)| {
+                        if options.contains("template-selector") {
+                            return json!({
+                                "catalog_digest": "digest",
+                                "template_id": "react-dom-r2",
+                                "reason": "ordinary form",
+                                "rejected": [],
+                                "validated_selection_handle":
+                                    "vsel_0123456789abcdef0123456789abcdef",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("native-create-approval") {
+                            return json!({
+                                "approved": true,
+                                "receipt_id": "mcp-create-receipt",
+                                "status": "create_declined",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("designer") {
+                            return json!({
+                                "runtime_family": "react_dom",
+                                "acceptance_checks": [],
+                                "summary": "design",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("builder-stage") {
+                            return json!({
+                                "ok": true,
+                                "dependency_input_sha256": "a".repeat(64),
+                                "summary": "staged",
+                            })
+                            .to_string();
+                        }
+                        json!({"ok": false, "summary": "unreachable"}).to_string()
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        );
+        // Refusing the contradictory answer outright is fine; silently
+        // relabelling an approval as a user decline is not.
+        if let Ok(outcome) = outcome {
+            let result = outcome.result.unwrap_or_default();
+            assert!(
+                !result.contains("create_declined"),
+                "an approval that also claims `create_declined` must never be reported to the \
+                 user as a decline, got {result}"
+            );
+        }
+    }
+
     /// WP4 gate: `stage_create` alone — never the `#[cfg(test)]`
     /// `write_initial_staging_flow_contexts` helper — must leave enough on
     /// disk for `approve_mcp_proposal(create_without_mcp=true)` to reach the
@@ -14781,6 +15400,221 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("report the drift"), "{error}");
+    }
+
+    /// r4-failure-paths-01: `ensure_dependency_install` transitions the
+    /// dependency record to `Installing` itself (its own
+    /// `start_dependency_install` call) and then spawns `run_dependency_install`
+    /// to do the actual work. That worker used to call the SAME transition
+    /// again through `install_scaffold_dependencies`, which always fails once
+    /// the state is already `Installing` -- so the install body never ran and
+    /// the record was stuck `Installing` forever, with `LocalAppBuild` polling
+    /// the full ten-minute timeout on every later attempt.
+    ///
+    /// Requeue an already-scaffolded (dependencies `Ready`) app to exercise a
+    /// route where `ensure_dependency_install` itself performs the
+    /// `Installing` transition and spawns the worker (a `Queued` or `Failed`
+    /// record reaches that same transition without any requeue), then assert
+    /// the install the worker was spawned to run actually completes to
+    /// `Ready` -- not merely that no error is returned.
+    #[tokio::test]
+    async fn ensure_dependency_install_runs_the_install_its_worker_owns() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "双重安装", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let after_scaffold = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record after scaffold");
+        assert_eq!(after_scaffold.state, AppDependencyState::Ready);
+
+        // The same requeue `ensure_dependency_install` performs itself when it
+        // detects a stale snapshot (local_apps_host.rs:3611-3616). This is the
+        // route this test simulates; a `Queued` or `Failed` record reaches the
+        // very same `start_dependency_install` at :3617 with no requeue at all.
+        service
+            .queue_dependency_install(&shell.id)
+            .await
+            .expect("requeue dependency install");
+
+        let started = broker
+            .ensure_dependency_install(&shell.id, false)
+            .await
+            .expect("ensure_dependency_install must accept a queued record");
+        assert_eq!(
+            started.state,
+            AppDependencyState::Installing,
+            "ensure_dependency_install must own the Queued -> Installing transition itself"
+        );
+
+        let mut observed = started.clone();
+        for _ in 0..200 {
+            observed = service
+                .dependency_record(&shell.id)
+                .await
+                .expect("poll dependency record");
+            if observed.state != AppDependencyState::Installing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The terminal state is the whole criterion, and it is load-bearing:
+        // `Ready` is only ever written by
+        // `complete_dependency_install_with_metadata`, which on this path is
+        // only reachable from `run_started_dependency_install`'s Ok arm --
+        // i.e. only after `dependency_install_once` actually ran and
+        // succeeded.
+        //
+        // Deliberately NOT asserted here, because neither discriminates the
+        // bug from the fix on this path:
+        //  - `install_attempts`: bumped by `start_dependency_install`, which
+        //    `ensure_dependency_install` calls itself at :3617 before the
+        //    worker is ever spawned, so it rises identically in the broken
+        //    build.
+        //  - a pnpm invocation count on the mock runtime: this requeue reuses
+        //    the scaffold's dependency snapshot, so `dependency_install_once`
+        //    takes the `snapshot_ready` fast path (:4455) and issues no
+        //    isolated command at all -- measured: zero requests even when the
+        //    install genuinely runs.
+        assert_eq!(
+            observed.state,
+            AppDependencyState::Ready,
+            "the worker spawned by ensure_dependency_install never completed the install it \
+             started -- record left at {:?} (last_error={:?}) after a 2s poll window instead of \
+             Ready; this is the double-start where the worker re-invokes \
+             start_dependency_install and always fails because the state is already Installing, \
+             so dependency_install_once is never reached and the app can never be built",
+            observed.state,
+            observed.last_error,
+        );
+    }
+
+    /// A `ReceiptClaim` guard dropped WITHOUT `commit_claimed_candidate` ever
+    /// running — the shape of a Stop, a panic, or the 529 non-streaming
+    /// fallback dropping `scaffold_shell_app_value`'s future mid-transaction
+    /// — must release the claim, leaving the app's receipt slot re-issuable.
+    ///
+    /// REGRESSION: before this guard existed, only the explicit `Err` arm at
+    /// the end of `scaffold_shell_app_value` called `release_claim`; any OTHER
+    /// exit (a dropped future among them) left the claim held forever, and
+    /// `McpReceiptBook::issue`'s in-use check answered `receipt_in_use` for
+    /// the life of the process — the app could never be created.
+    #[test]
+    fn a_dropped_receipt_claim_guard_leaves_the_slot_re_issuable() {
+        let digest = "0".repeat(64);
+        let claimed = local_apps::McpConfirmationReceipt::new(
+            "app",
+            "run-1",
+            digest.clone(),
+            digest.clone(),
+            0,
+        );
+        let receipt_id = claimed.receipt_id.clone();
+        let book = Arc::new(std::sync::Mutex::new(local_apps::McpReceiptBook::default()));
+        book.lock().unwrap().issue(claimed).unwrap();
+        book.lock()
+            .unwrap()
+            .claim_candidate(&receipt_id, "app", "run-1", &digest, &digest, 0)
+            .unwrap();
+
+        {
+            // Simulates the scaffold transaction's future being dropped mid-
+            // flight: the guard leaves scope WITHOUT `commit_claimed_candidate`
+            // (the only other place that used to clear `claimed`) ever running.
+            let _guard = ReceiptClaim::held(Arc::clone(&book), receipt_id.clone());
+        }
+
+        let reissued = local_apps::McpConfirmationReceipt::new(
+            "app",
+            "run-2",
+            digest.clone(),
+            digest,
+            0,
+        );
+        book.lock().unwrap().issue(reissued).expect(
+            "the dropped ReceiptClaim guard must have released the claim so a fresh \
+             receipt can be issued for this app -- otherwise the app can never be \
+             (re)created until the process restarts",
+        );
+    }
+
+    /// The guard is only worth having if the PRODUCTION transaction actually
+    /// holds one. The test above pins `ReceiptClaim`'s `Drop`; this one pins
+    /// the `let _receipt_claim = ReceiptClaim::held(..)` binding at the top of
+    /// `scaffold_shell_app_value` — delete that one line and this test goes
+    /// red while the one above stays green.
+    ///
+    /// The drop is placed strictly between `claim_candidate` and
+    /// `commit_claimed_candidate` WITHOUT a timing race: the test takes
+    /// `lock_app_build` out from under the transaction first, and
+    /// `land_scaffold` blocks on that lock, so the future can never reach the
+    /// commit while the contender is alive. What is dropped is the real
+    /// `scaffold_shell_app_value` future — the shape of a Stop, a panic
+    /// unwinding the caller, or the 529 non-streaming fallback abandoning it.
+    ///
+    /// It is also independent of the TTL escape hatch in
+    /// `McpReceiptBook::issue`: the re-issue below is minted at the same
+    /// `now_ms()` as the leaked slot, so the slot has NOT expired and the TTL
+    /// clause cannot be what lets the new receipt through.
+    #[tokio::test]
+    async fn dropping_the_scaffold_future_releases_the_claim_it_took() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let input = confirmed_scaffold_input(&broker, &shell.id, "打飞机", "b", "canvas").await;
+
+        // Hold the per-app build lock so the transaction parks inside
+        // `land_scaffold` instead of racing us to its commit point.
+        let contender = tokio::task::spawn_blocking({
+            let root = root.path().to_path_buf();
+            let app_id = shell.id.clone();
+            move || local_apps::storage::lock_app_build(&root, &app_id)
+        })
+        .await
+        .expect("join the contender")
+        .expect("the contender must take the build lock first");
+
+        {
+            let mut scaffolding = Box::pin(broker.scaffold_shell_app_value(input));
+            assert!(
+                timeout(Duration::from_millis(400), &mut scaffolding)
+                    .await
+                    .is_err(),
+                "the transaction must still be IN FLIGHT — past `claim_candidate` \
+                 and parked on the build lock, short of `commit_claimed_candidate` \
+                 — for its drop to be the thing under test"
+            );
+            // ...and here it is dropped, never polled again: nothing further
+            // in its body ever runs, `Err` arm included.
+        }
+
+        let digest = "0".repeat(64);
+        let reissued = local_apps::McpConfirmationReceipt::new(
+            shell.id.clone(),
+            "run-after-the-drop",
+            digest.clone(),
+            digest,
+            now_ms(),
+        );
+        broker
+            .pending_mcp_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .issue(reissued)
+            .expect(
+                "dropping `scaffold_shell_app_value`'s own future must release the receipt \
+                 claim it took -- otherwise `McpReceiptBook::issue` answers `receipt_in_use` \
+                 for this app for the life of the process and it can never be created",
+            );
+
+        drop(contender);
     }
 
     /// WP8 (corrector): the behavioural test above pins ONE of the three host

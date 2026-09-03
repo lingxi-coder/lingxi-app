@@ -217,8 +217,18 @@ pub struct McpReceiptBook {
 impl McpReceiptBook {
     /// Issue one receipt, superseding any outstanding receipt for this app.
     pub fn issue(&mut self, receipt: McpConfirmationReceipt) -> Result<(), GeneratedMcpIssue> {
+        // `receipt.issued_at_ms` IS "now" — every caller mints it via
+        // `McpConfirmationReceipt::new(..., now_ms())` immediately before
+        // calling `issue` — so a claimed-but-never-released slot (a scaffold
+        // whose future was dropped by a Stop, a panic, or the 529
+        // non-streaming fallback, before `ReceiptClaim`'s `Drop` guard could
+        // release it — or before that guard existed) self-clears once its TTL
+        // has passed instead of wedging the app until the process restarts.
         if self.slots.values().any(|existing| {
-            existing.app_id == receipt.app_id && existing.claimed && !existing.consumed
+            existing.app_id == receipt.app_id
+                && existing.claimed
+                && !existing.consumed
+                && receipt.issued_at_ms < existing.expires_at_ms
         }) {
             return Err(binding_issue(
                 "receipt_in_use",
@@ -2064,6 +2074,57 @@ mod tests {
                 .unwrap_err()
                 .code,
             "receipt_superseded"
+        );
+    }
+
+    /// A claimed slot that is never released (a scaffold whose future was
+    /// dropped by a Stop, a panic, or the 529 non-streaming fallback) must
+    /// only block a NEW receipt for as long as its own TTL — never forever.
+    ///
+    /// REGRESSION: `issue`'s in-use predicate used to ignore
+    /// `expires_at_ms` entirely, so a leaked claim wedged the app
+    /// `receipt_in_use` for the life of the process; only an engine restart
+    /// (which resets the in-memory `McpReceiptBook`) recovered it.
+    #[test]
+    fn issue_lets_an_expired_leaked_claim_self_clear() {
+        let digest = "0".repeat(64);
+        let mut book = McpReceiptBook::default();
+        let leaked =
+            McpConfirmationReceipt::new("app", "run-1", digest.clone(), digest.clone(), 0);
+        let leaked_id = leaked.receipt_id.clone();
+        book.issue(leaked).unwrap();
+        // Claim it and never release — the shape of the leak this fix exists
+        // to bound, independent of whatever guard now prevents it in
+        // practice.
+        book.claim_candidate(&leaked_id, "app", "run-1", &digest, &digest, 0)
+            .unwrap();
+
+        // Before the TTL elapses, the unreleased claim must still block —
+        // this predicate is not simply disabled.
+        let too_soon = McpConfirmationReceipt::new(
+            "app",
+            "run-2",
+            digest.clone(),
+            digest.clone(),
+            McpConfirmationReceipt::TTL_MS - 1,
+        );
+        assert_eq!(
+            book.issue(too_soon).unwrap_err().code,
+            "receipt_in_use",
+            "an unexpired claimed slot must still block a new receipt"
+        );
+
+        // Once the leaked slot's TTL has passed, a new receipt must be
+        // issuable — the escape hatch this fix adds.
+        let after_ttl = McpConfirmationReceipt::new(
+            "app",
+            "run-3",
+            digest.clone(),
+            digest,
+            McpConfirmationReceipt::TTL_MS,
+        );
+        book.issue(after_ttl).expect(
+            "an expired claimed slot must not block a new receipt from being issued",
         );
     }
 }

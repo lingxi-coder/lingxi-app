@@ -2805,20 +2805,32 @@ mod run_id_tests {
         let unexpected: Vec<&String> = injected.difference(&expected).collect();
         assert!(
             unexpected.is_empty(),
-            "the Host injected workflow arg key(s) {unexpected:?} that §19.3 has no \
+            "`apply_materialized_local_app_collections` -- this SEAM only, not the launcher \
+             that calls it -- injected workflow arg key(s) {unexpected:?} that §19.3 has no \
              caller-override test for. Every Host-injected key needs a companion test \
              proving a hostile caller value loses (see \
              `caller_supplied_runtime_profile_is_overridden_by_the_host` above) and an \
              `object.insert` — NOT `entry().or_insert_with`, which honours the caller. \
-             Add that test, then list the key in `expected` here. \
-             Host-injected keys seen: {injected:?}"
+             Add that test, then list the key in `expected` here. (A key injected by `launch` \
+             ITSELF rather than by this seam -- e.g. `workflow_run_id` -- is out of reach of \
+             this gate; see \
+             `launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys` below, \
+             which covers the launcher's local-app BUILD path ONLY. `launch`'s other \
+             injection site, `enrich_persisted_plugin_workflow_context` \
+             (workflow_support.rs:2023), writes these same key names for the use-test and \
+             mcp-authoring workflows and still has NO key-set gate at all.) Seam-injected \
+             keys seen: {injected:?}"
         );
         let missing: Vec<&String> = expected.difference(&injected).collect();
         assert!(
             missing.is_empty(),
-            "the Host stopped injecting the §19.3 key(s) {missing:?}; the workflow script \
-             would then run on whatever the caller supplied. \
-             Host-injected keys seen: {injected:?}"
+            "this seam stopped injecting the §19.3 key(s) {missing:?}; the workflow script \
+             would then run on whatever the caller supplied. This gate covers only \
+             `apply_materialized_local_app_collections`, not `launch` -- see \
+             `launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys` below for \
+             the launcher's local-app BUILD path; the launcher's other injection site, \
+             `enrich_persisted_plugin_workflow_context` (workflow_support.rs:2023), has no \
+             key-set gate at all. Seam-injected keys seen: {injected:?}"
         );
 
         // Listing a key in `expected` must not be a way to silence this gate.
@@ -4023,6 +4035,207 @@ mod run_id_tests {
             assert!(
                 minted.requires_workspace_lease(),
                 "a build scope is what takes the app's exclusive workspace lease"
+            );
+        }
+    }
+
+    /// r2-tests-honesty-006's launcher-level companion to
+    /// `host_injected_arg_keys_are_exactly_the_expected_set` above. That gate
+    /// only reaches `apply_materialized_local_app_collections` -- the SEAM --
+    /// and cannot see either of the two places `launch` itself injects
+    /// `workflow_run_id` (workflow_support.rs:1711, top-level, before the
+    /// seam runs; and :1732, inside `host_context`, after the seam runs --
+    /// the ONLY source of `host_context.workflow_run_id` on the `update`
+    /// path, since the seam's own `host_context` literal for `update` never
+    /// mentions the key), nor the create branch (:1303-1331), which returns
+    /// before the seam's `runtime_profile` / `expected_writable_collections`
+    /// inserts are reached at all.
+    ///
+    /// This drives the real `launch` end to end for both `operation`s and
+    /// pins, at the launcher layer:
+    /// - both `workflow_run_id` injections land the SAME id the workflow
+    ///   actually ran under (`launched.run_id`), read back off the persisted
+    ///   task row rather than off `spec` -- the row is what the workflow
+    ///   script and any resume actually see;
+    /// - the injected-key delta across the WHOLE launch path -- `launch`
+    ///   itself PLUS the seam it calls -- is EXACTLY the expected set per
+    ///   operation, using the same caller-key-snapshot-then-delta method as
+    ///   the seam-level gate; each expected key is carried with the layer
+    ///   that really writes it, so a key added or dropped fails loudly, by
+    ///   name, and against the RIGHT layer instead of silently passing the
+    ///   seam-level gate that cannot see the launcher.
+    ///
+    /// Scope, deliberately not over-claimed: this covers the launcher's
+    /// local-app BUILD path (`PLUGIN_BUILD_WORKFLOW_ID`) only. `launch`'s
+    /// other injection site, `enrich_persisted_plugin_workflow_context`
+    /// (workflow_support.rs:2023), writes the same four key names for the
+    /// use-test and mcp-authoring workflows and still has no key-set gate.
+    #[tokio::test]
+    async fn launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        for operation in ["update", "create"] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let app_id = "demo1234";
+            let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+            if operation == "create" {
+                // The create branch requires an UNscaffolded shell (it is the
+                // one operation allowed to start before manifest/profile
+                // persistence); see workflow_support.rs:1277-1298.
+                stamp_record_mirror(&layout, false);
+            } else {
+                let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Fixture");
+                stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+                local_apps::save_manifest(&layout, &manifest).expect("manifest");
+                stamp_record_mirror(&layout, true);
+            }
+
+            let registry = scope_test_registry();
+            let launcher = scope_test_launcher(root.path(), registry.clone());
+
+            let caller_args = serde_json::json!({
+                "app_id": app_id,
+                "operation": operation,
+            });
+            let caller_keys: std::collections::BTreeSet<String> = caller_args
+                .as_object()
+                .expect("caller args object")
+                .keys()
+                .cloned()
+                .collect();
+
+            let launched = launcher
+                .launch(tool_workflow::WorkflowLaunchSpec {
+                    name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+                    args: Some(caller_args),
+                    session_uuid: Some("session-scope".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("plugin build workflow must launch for operation {operation:?}: {error}")
+                });
+
+            let row = registry
+                .get(&launched.task_id)
+                .await
+                .expect("the launch really did create a task row");
+            let tasks::state::TaskState::LocalWorkflow(state) = row else {
+                panic!("operation {operation:?}: expected a LocalWorkflow task row")
+            };
+            let args_json = state.args.as_deref().unwrap_or_else(|| {
+                panic!("operation {operation:?}: the launcher must persist args onto the task row")
+            });
+            let after: serde_json::Value = serde_json::from_str(args_json)
+                .unwrap_or_else(|error| panic!("operation {operation:?}: persisted args are not valid json: {error}"));
+            let after_object = after
+                .as_object()
+                .unwrap_or_else(|| panic!("operation {operation:?}: persisted args are not an object"));
+
+            assert_eq!(
+                after_object
+                    .get("workflow_run_id")
+                    .and_then(serde_json::Value::as_str),
+                launched.run_id.as_deref(),
+                "operation {operation:?}: the top-level `workflow_run_id` `launch` injects at \
+                 workflow_support.rs:1711 must be the SAME id the launch actually ran under \
+                 (persisted args: {after_object:?})"
+            );
+            let host_context_run_id_provenance = if operation == "update" {
+                "`launch` at workflow_support.rs:1732 is its ONLY source on the `update` path \
+                 -- the seam's update-path `host_context` literal (:1448-1462) never mentions \
+                 the key"
+            } else {
+                "on `create` the seam writes it at workflow_support.rs:1331 and `launch` \
+                 overwrites it at :1732 -- both must be the id the launch actually ran under"
+            };
+            assert_eq!(
+                after_object
+                    .get("host_context")
+                    .and_then(|value| value.get("workflow_run_id"))
+                    .and_then(serde_json::Value::as_str),
+                launched.run_id.as_deref(),
+                "operation {operation:?}: `host_context.workflow_run_id` is absent or is not \
+                 the id this launch ran under. {host_context_run_id_provenance}. If that \
+                 injection is dropped the workflow script silently loses the run id from \
+                 `host_context` (persisted host_context: {:?})",
+                after_object.get("host_context")
+            );
+
+            let injected: std::collections::BTreeSet<String> = after_object
+                .keys()
+                .filter(|key| !caller_keys.contains(*key))
+                .cloned()
+                .collect();
+            // Verified against the source, not assumed. This delta spans BOTH
+            // layers of the launch path -- `launch` itself and the seam
+            // `apply_materialized_local_app_collections_with_identity` it
+            // calls -- so every expected key is carried together with the
+            // layer that really writes it, and a dropped key is reported
+            // against that layer instead of always being blamed on `launch`.
+            // The `create` branch (:1277-1347) returns before the seam's
+            // `runtime_profile` / `expected_writable_collections` inserts are
+            // reached at all; `selector_capability` is its mirror image,
+            // minted only on `create` (:1313-1320). So the two key sets are
+            // disjoint-ish, not superset/subset.
+            let expected_by_layer: std::collections::BTreeMap<String, &'static str> =
+                if operation == "create" {
+                    vec![
+                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "selector_capability",
+                            "the seam `apply_materialized_local_app_collections_with_identity`, \
+                             workflow_support.rs:1320 (create-only)",
+                        ),
+                        (
+                            "host_context",
+                            "the seam, workflow_support.rs:1331 (create-only); `launch` then \
+                             overwrites its `workflow_run_id` member at :1732",
+                        ),
+                    ]
+                } else {
+                    vec![
+                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "runtime_profile",
+                            "the seam `apply_materialized_local_app_collections_with_identity`, \
+                             workflow_support.rs:1433",
+                        ),
+                        (
+                            "expected_writable_collections",
+                            "the seam, workflow_support.rs:1435",
+                        ),
+                        (
+                            "host_context",
+                            "the seam, workflow_support.rs:1446; its `workflow_run_id` member \
+                             has no source other than `launch` at :1732",
+                        ),
+                    ]
+                }
+                .into_iter()
+                .map(|(key, layer)| (key.to_string(), layer))
+                .collect();
+            let expected: std::collections::BTreeSet<String> =
+                expected_by_layer.keys().cloned().collect();
+
+            let unexpected: Vec<&String> = injected.difference(&expected).collect();
+            assert!(
+                unexpected.is_empty(),
+                "operation {operation:?}: the launch path -- `launch` itself AND the seam \
+                 `apply_materialized_local_app_collections_with_identity` it calls -- injected \
+                 workflow arg key(s) {unexpected:?} this test does not account for; a further \
+                 injection at either layer needs its own coverage here, not silent acceptance \
+                 (seen: {injected:?})"
+            );
+            let missing: Vec<(&String, &&'static str)> = expected_by_layer
+                .iter()
+                .filter(|(key, _)| !injected.contains(*key))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "operation {operation:?}: the launch path stopped injecting the key(s) \
+                 {missing:?}, each listed with the layer that writes it -- on this operation \
+                 not all of them come from `launch` itself (seen: {injected:?})"
             );
         }
     }

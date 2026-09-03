@@ -283,21 +283,39 @@ impl Tool for LocalAppTool {
     /// parked until the budget expired. The MCP adapter these replaced
     /// returned `Cancel`; keep that.
     ///
-    /// `create` is the exception, and it is not a preference.
+    /// `create` and `scaffold` are the exception, and it is not a preference.
     ///
     /// On `Cancel` the turn loop races the token and DROPS the tool future.
-    /// Dropping this one does NOT undo it: `AppService::create_app*` runs its
-    /// mint/persist/commit on a DETACHED `tokio::spawn` precisely so a dropped
-    /// caller cannot leave a half-created app, so the record still lands while
-    /// the model is told the call was aborted. The model's only recovery from
-    /// "aborted" is to call create again — and create is not idempotent, so one
-    /// interrupted intent becomes two apps in the library. Blocking costs a
-    /// bounded wait (create is a few file writes plus a scaffold, not a
-    /// 30-minute build) and buys the guarantee that the model always learns the
-    /// id it just caused to exist.
+    /// For `create`, dropping it does NOT undo it: `AppService::create_app*`
+    /// runs its mint/persist/commit on a DETACHED `tokio::spawn` precisely so
+    /// a dropped caller cannot leave a half-created app, so the record still
+    /// lands while the model is told the call was aborted. The model's only
+    /// recovery from "aborted" is to call create again — and create is not
+    /// idempotent, so one interrupted intent becomes two apps in the library.
+    ///
+    /// `scaffold` (`LocalAppScaffold`) is worse under `Cancel`: by the time it
+    /// is running, the workspace has already been wiped and reseeded and the
+    /// FORMAL create contract has been written to disk — dropping its future
+    /// mid-transaction abandons that seeded workspace behind a
+    /// `scaffolded == false` record AND skips its own Err-path guards
+    /// (`recovery.rollback()` and the dependency-record restore), neither of
+    /// which runs when the future is dropped instead of awaited to
+    /// completion. (The receipt claim is the one piece that IS still released
+    /// on a drop, by `ReceiptClaim`'s `Drop` in `local_apps_host.rs` — the
+    /// seeded workspace and the dependency record have no such guard.)
+    /// `Block` routes the call through the
+    /// `_ => tool_call.await` arm instead, so the transaction always reaches
+    /// its own commit-or-rollback.
+    ///
+    /// Blocking costs a bounded wait for both — `create` is a few file writes
+    /// plus a scaffold, and `scaffold` is a wipe plus a template copy plus a
+    /// dependency install whose own ceiling is `DEPENDENCY_INSTALL_TIMEOUT`
+    /// (ten minutes), not an open-ended build — and buys the guarantee
+    /// that the model always learns the outcome of the mutation it just
+    /// caused, instead of leaving durable state an engine restart must repair.
     fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
         let _ = input;
-        if self.operation == "create" {
+        if self.operation == "create" || self.operation == "scaffold" {
             InterruptBehavior::Block
         } else {
             InterruptBehavior::Cancel
@@ -645,6 +663,58 @@ mod tests {
         assert!(out.data.get("type").is_none(), "not an image result");
         assert_eq!(out.data["records"], serde_json::json!([]));
         assert_eq!(out.model_content.as_deref(), Some("{\"records\":[]}"));
+    }
+
+    /// `LocalAppScaffold` must `Block` on interrupt, exactly like `create`.
+    ///
+    /// REGRESSION: it used to fall into the `Cancel` default, so a Stop mid-
+    /// scaffold dropped the transaction's future AFTER the workspace was
+    /// wiped and reseeded and the formal create contract was written to
+    /// disk — abandoning that seeded workspace behind a `scaffolded == false`
+    /// record, with its Err-path guards (rollback, dependency restore)
+    /// skipped because the future was dropped instead of run to completion.
+    /// (The receipt claim is separately covered on a drop by `ReceiptClaim`'s
+    /// `Drop`; these two are not.) Only an engine restart repaired it.
+    #[test]
+    fn scaffold_blocks_on_interrupt_like_create() {
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let scaffold = LocalAppTool::new(
+            "LocalAppScaffold",
+            "scaffold",
+            String::new(),
+            serde_json::json!({}),
+            false,
+            None,
+            false,
+            None,
+            Arc::clone(&transport),
+        );
+        assert!(
+            matches!(
+                scaffold.interrupt_behavior(&serde_json::json!({})),
+                InterruptBehavior::Block
+            ),
+            "LocalAppScaffold must report InterruptBehavior::Block, not the \
+             Cancel default, or a mid-scaffold Stop drops the tool future \
+             after the workspace and formal contract are already on disk"
+        );
+        // The sibling that must NOT have flipped: an ordinary read has no
+        // transaction to protect and should stay cheaply cancellable.
+        let list = LocalAppTool::new(
+            "LocalAppList",
+            "list",
+            String::new(),
+            serde_json::json!({}),
+            true,
+            None,
+            false,
+            None,
+            transport,
+        );
+        assert!(matches!(
+            list.interrupt_behavior(&serde_json::json!({})),
+            InterruptBehavior::Cancel
+        ));
     }
 
     /// Every entry in the rename table must resolve to a real provider

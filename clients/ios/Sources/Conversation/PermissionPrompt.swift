@@ -327,22 +327,28 @@ import SwiftUI
         var body: some View {
             if let pending {
                 let copy = Self.describe(pending.kind)
-                ZStack {
+                ZStack(alignment: .bottom) {
                     // Scrim: dims the chat behind the modal. Tapping it does NOT
                     // dismiss — a permission request must be answered explicitly
                     // (an accidental tap-away can't silently deny a tool).
-                    Color.black.opacity(0.32)
+                    Color.black.opacity(0.38)
                         .ignoresSafeArea()
+                        .accessibilityHidden(true)
 
                     VStack(spacing: 0) {
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Label {
+                                Text(copy.title)
+                                    .font(.headline)
+                                    .foregroundStyle(t.text)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } icon: {
+                                Image(systemName: "hand.raised.fill")
+                                    .foregroundStyle(t.accent)
+                            }
                             if let worker = pending.worker {
                                 workerChip(worker)
                             }
-                            Text(copy.title)
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(t.text)
-                                .fixedSize(horizontal: false, vertical: true)
                             if !copy.detail.isEmpty {
                                 detailBlock(copy.detail)
                             }
@@ -350,25 +356,26 @@ import SwiftUI
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 20)
                         .padding(.top, 20)
-                        .padding(.bottom, 16)
+                        .padding(.bottom, 20)
 
                         Divider().overlay(t.border)
 
-                        actionRow(
+                        actionStack(
                             requestId: pending.requestId,
                             suppressAlwaysAllowRule: pending.suppressAlwaysAllowRule,
                             autoModePrompt: pending.autoModePrompt
                         )
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .background(t.surface)
+                        .padding(20)
                     }
-                    .frame(maxWidth: 420)
-                    .background(t.windowBg)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(t.border, lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.34), radius: 24, x: 0, y: 18)
-                    .padding(.horizontal, 24)
+                    .frame(maxWidth: 520)
+                    .background(.regularMaterial, in: .rect(cornerRadius: 24))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 24)
+                            .stroke(t.border.opacity(0.7), lineWidth: 0.5)
+                    }
+                    .shadow(color: .black.opacity(0.28), radius: 28, y: 16)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
                 }
                 .transition(.opacity)
                 .accessibilityAddTraits(.isModal)
@@ -385,53 +392,65 @@ import SwiftUI
                     .fill(t.accent)
                     .frame(width: 7, height: 7)
                 Text(worker.team.map { "\(worker.name) · \($0)" } ?? worker.name)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(t.text3)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(t.text3)
             }
         }
 
         /// The monospaced, scrollable detail block (the tool-input preview / plan).
         private func detailBlock(_ detail: String) -> some View {
-            ScrollView(showsIndicators: true) {
-                Text(detail)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(t.text2)
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+            ScrollView {
+                detailText(detail)
             }
-            .frame(maxHeight: 180)
-            .background(t.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(t.border, lineWidth: 0.5))
+            .scrollIndicators(.visible)
+            .frame(height: 160)
+            .background(t.surface, in: .rect(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(t.border.opacity(0.72), lineWidth: 0.5)
+            }
         }
 
-        /// Deny / Allow always / Allow once — mirroring the Electron button order
-        /// and response mapping. A request that requires fresh human approval
-        /// omits the persistent actions. Allow-once is always available.
-        private func actionRow(
+        private func detailText(_ detail: String) -> some View {
+            Text(detail)
+                .font(.footnote.monospaced())
+                .foregroundStyle(t.text2)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+        }
+
+        /// iOS uses a vertical action hierarchy: the safest approval is the
+        /// prominent action, broader grants are secondary, and denial remains a
+        /// clearly destructive choice. Response mapping is unchanged.
+        private func actionStack(
             requestId: UInt64,
             suppressAlwaysAllowRule: Bool,
             autoModePrompt: AutoModePromptDto?
         ) -> some View {
-            HStack(spacing: 8) {
-                promptButton(String(localized: "permission_deny"), tint: t.danger, filled: false) {
-                    onDeny(requestId)
+            VStack(spacing: 10) {
+                promptButton(
+                    String(localized: "permission_allow"),
+                    prominent: true
+                ) {
+                    onApprove(requestId, .allowOnce)
                 }
                 if !suppressAlwaysAllowRule && autoModePrompt == nil {
-                    promptButton(String(localized: "permission_allow_always"), tint: t.text2, filled: false) {
+                    promptButton(String(localized: "permission_allow_always")) {
                         onApprove(requestId, .allowAlways)
                     }
                 }
                 if !suppressAlwaysAllowRule, let autoModePrompt {
-                    promptButton(autoModeApprovalLabel(autoModePrompt), tint: .white, filled: true) {
+                    promptButton(autoModeApprovalLabel(autoModePrompt)) {
                         onApprove(requestId, .allowAuto)
                     }
                 }
-                promptButton(String(localized: "permission_allow"), tint: .white, filled: true) {
-                    onApprove(requestId, .allowOnce)
+                promptButton(
+                    String(localized: "permission_deny"),
+                    role: .destructive
+                ) {
+                    onDeny(requestId)
                 }
             }
         }
@@ -445,23 +464,26 @@ import SwiftUI
             }
         }
 
+        @ViewBuilder
         private func promptButton(
-            _ label: String, tint: Color, filled: Bool, action: @escaping () -> Void
+            _ label: String,
+            role: ButtonRole? = nil,
+            prominent: Bool = false,
+            action: @escaping () -> Void
         ) -> some View {
-            Button(action: action) {
+            let button = Button(role: role, action: action) {
                 Text(label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(tint)
+                    .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(filled ? t.accent : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(filled ? t.accent : t.border, lineWidth: 0.5)
-                    )
             }
-            .buttonStyle(.plain)
+            .controlSize(.large)
+            .tint(role == .destructive ? .red : t.accent)
+
+            if prominent {
+                button.buttonStyle(.borderedProminent)
+            } else {
+                button.buttonStyle(.bordered)
+            }
         }
 
         // MARK: copy

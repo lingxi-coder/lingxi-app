@@ -2728,6 +2728,33 @@ mod desktop_fusion_price_book_test {
     }
 }
 
+#[cfg(test)]
+mod desktop_fusion_catalog_row_test {
+    use super::*;
+
+    /// WP11: `desktop_fusion_catalog_row` reads `structured_output` straight
+    /// off `ModelProfile.capabilities` — before WP11, `anthropic_model_profiles()`
+    /// hard-coded that bit `false` for every Anthropic model, so a pure-Anthropic
+    /// catalog row was always built with `structured_output: false`, which is
+    /// what made `resolve_analyst`'s judge filter reject every Anthropic model.
+    /// This pins the wiring itself, not just the upstream capability table.
+    #[test]
+    fn anthropic_rows_carry_structured_output_true() {
+        let profiles = llm_client::anthropic_model_profiles();
+        let opus = profiles
+            .iter()
+            .find(|m| m.request_model == "claude-opus-5")
+            .expect("claude-opus-5 present in anthropic_model_profiles()");
+        let row = desktop_fusion_catalog_row("anthropic", opus);
+        assert_eq!(row.profile, "anthropic");
+        assert_eq!(row.model, "claude-opus-5");
+        assert!(
+            row.structured_output,
+            "an Anthropic catalog row must carry structured_output: true"
+        );
+    }
+}
+
 /// Resolve the effective Fusion settings for one snapshot (F007).
 ///
 /// Routes through [`load_effective_settings_for_config`] — the SAME

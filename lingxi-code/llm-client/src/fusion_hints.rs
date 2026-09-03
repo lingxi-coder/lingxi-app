@@ -428,19 +428,19 @@ mod tests {
     /// `structured_output: false` can never actually be picked, silently
     /// shrinking the judge pool below what the hint table advertises.
     ///
-    /// This is knowingly loose (`<= 5`, not `== 0`): the checked-in
-    /// `anthropic_model_profiles()` hard-codes `structured_output: false`
-    /// for EVERY Anthropic model (llm-client/src/provider_settings.rs:787),
-    /// which is a signal for a narrower guarantee than "can receive
-    /// `stream_json_schema_with_thinking`" (the sidequery layer routes every
-    /// provider through that call unconditionally — see
-    /// `ProviderSideQueryBackend::Session` in
-    /// `sidequery/src/provider_side_query.rs`). Reconciling that flag's
-    /// semantics with `resolve_analyst`'s filter is a separate, broader
-    /// change than this hint-table test; ratchet this back to `== 0` once
-    /// it lands. Today's known offenders: anthropic/claude-opus-5,
-    /// anthropic/claude-sonnet-5, openai-chatgpt/gpt-5.6-sol,
-    /// openai-chatgpt/gpt-5.6-terra, github-copilot/claude-sonnet-5.
+    /// WP11 fixed the biggest offender — `anthropic_model_profiles()` used
+    /// to hard-code `structured_output: false` for EVERY Anthropic model,
+    /// which was a fill-in gap, not a real capability limit (see the comment
+    /// on that field in `provider_settings.rs`). The remaining three rows
+    /// are a DIFFERENT, narrower gap: the vendored models.dev data files for
+    /// `openai-chatgpt` and `github-copilot`
+    /// (`llm-client/data/models-dev/{openai-chatgpt,github-copilot}.json`)
+    /// simply have no `structured_output` field for these particular
+    /// entries, so `to_capabilities` defaults it to `false`
+    /// (`catalog/map.rs::to_capabilities`) — fixing that is a models.dev
+    /// data-file change outside WP11's scope. This assertion is now an
+    /// EXACT set, not a loose upper bound: any new mismatch (including a
+    /// regression on the ones WP11 just fixed) fails the test by name.
     #[test]
     fn judge_eligible_rows_mostly_have_a_structured_output_capable_model() {
         let catalog = builtin_presets();
@@ -467,11 +467,19 @@ mod tests {
                 mismatches.push(format!("{profile}/{model}"));
             }
         }
-        assert!(
-            mismatches.len() <= 5,
-            "new judge_eligible/structured_output mismatches beyond the known 5 \
-             (mismatches: {mismatches:?}) — either the hint row or the model's \
-             structured_output capability needs a look"
+        mismatches.sort();
+        let mut expected = vec![
+            "github-copilot/claude-sonnet-5".to_string(),
+            "openai-chatgpt/gpt-5.6-sol".to_string(),
+            "openai-chatgpt/gpt-5.6-terra".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            mismatches, expected,
+            "judge_eligible/structured_output mismatches changed — this must be \
+             the EXACT known set (models.dev data gaps for openai-chatgpt/\
+             github-copilot), not a superset (new gap) or a subset (a fix that \
+             needs this list trimmed to match)"
         );
     }
 }

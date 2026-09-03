@@ -143,6 +143,32 @@ fn catalog() -> Vec<CatalogModel> {
     .collect()
 }
 
+/// WP11: a catalog built the SAME way `desktop_fusion_catalog_row` builds it
+/// — `structured_output` read off the REAL, checked-in
+/// `llm_client::anthropic_model_profiles()` capability bit, not a hand-set
+/// `true` like the `catalog()` fixture above. `catalog()`'s panelists are all
+/// `structured_output: true` by fiat, which is exactly why the desktop
+/// wiring bug (every Anthropic model capability hard-coded `false`) never
+/// showed up in any orchestrator test before WP11.
+fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
+    let profiles = llm_client::anthropic_model_profiles();
+    models
+        .iter()
+        .map(|id| {
+            let profile = profiles
+                .iter()
+                .find(|m| m.request_model == *id)
+                .unwrap_or_else(|| panic!("anthropic_model_profiles() missing `{id}`"));
+            CatalogModel {
+                profile: "anthropic".into(),
+                model: (*id).into(),
+                hints: llm_client::hints_for("anthropic", id).unwrap_or_default(),
+                structured_output: profile.capabilities.structured_output,
+            }
+        })
+        .collect()
+}
+
 fn request(prompt: &str) -> FusionRequest {
     FusionRequest {
         schema_version: 1,
@@ -815,6 +841,75 @@ async fn min_panels_not_met() {
         .await
         .unwrap_err();
     assert!(matches!(err, platform_api::FusionError::MinPanelsNotMet));
+}
+
+/// WP11/F0xx: a purely-Anthropic install (no other provider credentialed)
+/// must not fail `resolve_analyst`'s structured-output preflight before any
+/// panel spawns. The catalog here mirrors `desktop_fusion_catalog_row`
+/// exactly (see `anthropic_only_catalog`), so this exercises the REAL
+/// `anthropic_model_profiles()` capability bit, not a fixture that assumes
+/// it away.
+#[tokio::test]
+async fn anthropic_only_catalog_clears_structured_output_preflight() {
+    let map = HashMap::from([
+        (
+            "claude-opus-5".to_string(),
+            FakePanel::Report(report("OPUS_ANSWER")),
+        ),
+        (
+            "claude-sonnet-5".to_string(),
+            FakePanel::Report(report("SONNET_ANSWER")),
+        ),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = FusionOrchestrator::new(
+        spawner.clone(),
+        side,
+        Arc::new(test_config()),
+        Arc::new(anthropic_only_catalog(&["claude-opus-5", "claude-sonnet-5"])),
+    );
+    let req = FusionRequest {
+        schema_version: 1,
+        origin: FusionOrigin::Slash,
+        prompt: "task".into(),
+        preset: FusionPreset::Quality,
+        models: Some(vec![
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "claude-opus-5".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "claude-sonnet-5".into(),
+            },
+        ]),
+        dimensions: DEFAULT_FUSION_DIMENSIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        partial_ok: true,
+        max_panel: None,
+        cross_provider: false,
+        parent_profile: "anthropic".into(),
+        parent_model: "claude-sonnet-5".into(),
+        conversation_id: None,
+        workflow_run_id: None,
+    };
+    let result = orch.run(req, inherit(), None).await;
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => panic!(
+            "an Anthropic-only catalog must not fail the structured-output \
+             preflight (StructuredOutputUnsupported), got: {err:?}"
+        ),
+    };
+    assert_eq!(
+        spawner.requests.lock().unwrap().len(),
+        2,
+        "both anthropic panels must have actually spawned, not merely resolved"
+    );
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
 }
 
 #[tokio::test]

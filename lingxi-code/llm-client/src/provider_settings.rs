@@ -784,7 +784,28 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
                 vision: true,
                 documents: true,
                 reasoning,
-                structured_output: false,
+                // WP11/F0xx: this was hard-coded `false` for every Anthropic
+                // model, but the Anthropic codec fully implements structured
+                // output — `providers/anthropic.rs::base_body` encodes
+                // `ResponseFormat::JsonSchema` as `output_config.format` and
+                // unconditionally lights the `structured-outputs-2025-12-15`
+                // beta whenever `request.response_format.is_some()`
+                // (`providers/anthropic.rs` beta-header block), and
+                // `sidequery::ProviderSideQueryClient::query_json_schema`
+                // routes EVERY provider (Anthropic included) through
+                // `ApiService::stream_json_schema_with_thinking` unconditionally
+                // — there is no Anthropic-specific skip anywhere in that path.
+                // The `false` here was a fill-in gap, not a real capability
+                // limit: `llm_client::protocol::validate_capabilities` reads
+                // this same bit to gate ANY `response_format` request (not
+                // just Fusion — `auto_mode_propose.rs` calls
+                // `stream_json_schema` too), so leaving it `false` silently
+                // broke every structured-output call against an Anthropic
+                // model, and (compounded by Fusion catalog-availability
+                // filtering) made a pure-Anthropic Fusion install fail its
+                // `resolve_analyst` preflight with `StructuredOutputUnsupported`
+                // on every run.
+                structured_output: true,
             },
         }
     }
@@ -954,6 +975,32 @@ mod tests {
             .position(|p| p.display_model == "claude-mythos-5")
             .expect("mythos-5 present");
         assert_eq!(mythos_idx, fable_idx + 1);
+    }
+
+    /// WP11: `anthropic_model_profiles()` previously hard-coded
+    /// `structured_output: false` for every Anthropic model — a fill-in gap,
+    /// not a real capability limit (the Anthropic codec fully encodes
+    /// `ResponseFormat::JsonSchema` via `output_config` and the
+    /// `structured-outputs-2025-12-15` beta). Pin every model's bit to
+    /// `true`, not just one, so a future regression that flips only some
+    /// rows back to `false` is caught.
+    #[test]
+    fn every_anthropic_model_supports_structured_output() {
+        let profiles = anthropic_model_profiles();
+        assert!(
+            !profiles.is_empty(),
+            "anthropic_model_profiles() must not be empty"
+        );
+        let unsupported: Vec<&str> = profiles
+            .iter()
+            .filter(|m| !m.capabilities.structured_output)
+            .map(|m| m.display_model.as_str())
+            .collect();
+        assert!(
+            unsupported.is_empty(),
+            "every Anthropic model must advertise structured_output: true, \
+             found unsupported: {unsupported:?}"
+        );
     }
 
     #[test]

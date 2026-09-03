@@ -929,14 +929,23 @@ impl FusionSettingsJson {
         // exceed the end-to-end deadline. Defaults here mirror
         // `fusion::FusionRuntimeConfig::defaults`.
         //
-        // Same per-file hazard as the `minSuccessfulPanels` check above: only
-        // run this comparison when at least one of the three stage fields is
-        // actually present IN THIS FILE. A tier that sets none of them has no
-        // opinion on the stage sum — filling in restrictive defaults for all
-        // three would reject a file whose merged view is fine.
-        if self.panel_total_timeout_ms.is_some()
-            || self.analyst_timeout_ms.is_some()
-            || self.synthesizer_timeout_ms.is_some()
+        // Same per-file hazard as the `minSuccessfulPanels` check above, in
+        // BOTH directions: only run this comparison when `totalTimeoutMs` is
+        // present IN THIS FILE *and* at least one of the three stage fields
+        // is too. A tier that sets stage fields but not `totalTimeoutMs` has
+        // no opinion on the total — it may be raised in a different tier —
+        // so defaulting `total` to the runtime's 1_200_000 here would reject
+        // a file whose merged view is fine (e.g. a project tier setting only
+        // `panelTotalTimeoutMs: 900000` while a user tier sets
+        // `totalTimeoutMs: 1800000`), and `read_layer_or_skip` would then
+        // silently drop that tier's unrelated `permissions`/`hooks`/`model`
+        // along with it. `FusionRuntimeConfig::from_settings` re-checks the
+        // identical invariant on the MERGED view and fails only the fusion
+        // run, which is the right blast radius for a genuine violation.
+        if self.total_timeout_ms.is_some()
+            && (self.panel_total_timeout_ms.is_some()
+                || self.analyst_timeout_ms.is_some()
+                || self.synthesizer_timeout_ms.is_some())
         {
             let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
             let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
@@ -1175,6 +1184,25 @@ mod tests {
         settings
             .validate()
             .expect("no stage field present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_stage_field_alone_in_a_file_does_not_trip_the_stage_sum_check() {
+        // Finding [15]: the mirror-image per-file hazard from the test
+        // above. A project-tier file that sets only `panelTotalTimeoutMs`
+        // has no opinion on `totalTimeoutMs` — it may be raised in a
+        // DIFFERENT tier (e.g. a user tier setting `totalTimeoutMs:
+        // 1800000`, under which 900_000 + 120_000*2 + 180_000 = 1_320_000
+        // fits easily). Defaulting `total` to the runtime's restrictive
+        // 1_200_000 here must not reject this file on its own
+        // (900_000 + 120_000*2 + 180_000 = 1_320_000 > 1_200_000) — that
+        // would silently drop the whole tier's unrelated
+        // permissions/hooks/model, not just the fusion block.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no totalTimeoutMs present in this file — must not be rejected");
     }
 
     #[test]

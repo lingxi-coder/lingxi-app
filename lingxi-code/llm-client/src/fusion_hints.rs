@@ -431,16 +431,24 @@ mod tests {
     /// WP11 fixed the biggest offender — `anthropic_model_profiles()` used
     /// to hard-code `structured_output: false` for EVERY Anthropic model,
     /// which was a fill-in gap, not a real capability limit (see the comment
-    /// on that field in `provider_settings.rs`). The remaining three rows
-    /// are a DIFFERENT, narrower gap: the vendored models.dev data files for
-    /// `openai-chatgpt` and `github-copilot`
-    /// (`llm-client/data/models-dev/{openai-chatgpt,github-copilot}.json`)
-    /// simply have no `structured_output` field for these particular
-    /// entries, so `to_capabilities` defaults it to `false`
-    /// (`catalog/map.rs::to_capabilities`) — fixing that is a models.dev
-    /// data-file change outside WP11's scope. This assertion is now an
-    /// EXACT set, not a loose upper bound: any new mismatch (including a
-    /// regression on the ones WP11 just fixed) fails the test by name.
+    /// on that field in `provider_settings.rs`). Finding [7] fixed the
+    /// remaining `openai-chatgpt` rows the same way: that profile is
+    /// `ProtocolFamily::OpenAiResponses` end to end, whose codec
+    /// (`providers/openai_responses.rs::encode_text_controls`) fully encodes
+    /// `ResponseFormat::JsonSchema` unconditionally for every model on the
+    /// protocol — the `false` was a vendored-data omission
+    /// (`llm-client/data/models-dev/openai-chatgpt.json` had no
+    /// `structured_output` field), not a codec limit, and left it as the
+    /// ONLY judge-eligible provider whose entire row set was unusable,
+    /// hard-failing every `/fusion` call on a ChatGPT-subscription-only
+    /// install. `github-copilot/claude-sonnet-5` remains: that profile's
+    /// OTHER judge-eligible rows (`gpt-5.6-sol`, `gpt-5.6-terra`) already
+    /// carry `structured_output: true` in the vendored data, so a
+    /// Copilot-only install still resolves an analyst — this one row is a
+    /// narrower, non-install-blocking gap left for a future models.dev sync.
+    /// This assertion is now an EXACT set, not a loose upper bound: any new
+    /// mismatch (including a regression on the ones already fixed) fails the
+    /// test by name.
     #[test]
     fn judge_eligible_rows_mostly_have_a_structured_output_capable_model() {
         let catalog = builtin_presets();
@@ -468,11 +476,7 @@ mod tests {
             }
         }
         mismatches.sort();
-        let mut expected = vec![
-            "github-copilot/claude-sonnet-5".to_string(),
-            "openai-chatgpt/gpt-5.6-sol".to_string(),
-            "openai-chatgpt/gpt-5.6-terra".to_string(),
-        ];
+        let mut expected = vec!["github-copilot/claude-sonnet-5".to_string()];
         expected.sort();
         assert_eq!(
             mismatches, expected,

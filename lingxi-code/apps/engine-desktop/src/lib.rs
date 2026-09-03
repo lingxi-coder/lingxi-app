@@ -2625,9 +2625,22 @@ fn desktop_fusion_catalog_row(
 /// provider with no credential (or a managed-barred model), and a panel
 /// burns turns before failing at request time (`LlmError::Authentication`)
 /// instead of failing the §4 preflight with zero provider calls.
+///
+/// `anthropic_probe_definitive` gives the availability half of this filter
+/// the same probe-blindness guard `connected_provider_fallback` has (see its
+/// doc comment). On a gateway / env-routed Bedrock/Vertex/Foundry install,
+/// `provider_availability["anthropic"] == false` reflects only that the local
+/// key/OAuth probe is BLIND, not that anthropic is disconnected — Claude
+/// models are served fine there, and the main turn loop routes them. Dropping
+/// anthropic rows on that signal emptied the Fusion catalog on every such
+/// install (`TooFewModels{eligible:0}` on every `/fusion` call) even though
+/// the same models work for the ordinary turn loop. When the probe is not
+/// definitive, anthropic rows are kept regardless of the availability map;
+/// every other profile's absence/`false` still means genuinely unavailable.
 fn filter_fusion_catalog(
     catalog: Vec<fusion::CatalogModel>,
     provider_availability: &std::collections::BTreeMap<String, bool>,
+    anthropic_probe_definitive: bool,
     session_model_restriction: Option<&(
         llm_client::model::allowlist::ModelEnforcement,
         Vec<String>,
@@ -2636,6 +2649,9 @@ fn filter_fusion_catalog(
     catalog
         .into_iter()
         .filter(|row| {
+            if row.profile == "anthropic" && !anthropic_probe_definitive {
+                return true;
+            }
             provider_availability
                 .get(&row.profile)
                 .copied()
@@ -7466,6 +7482,22 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         .entry("anthropic".to_string())
         .or_insert(has_api_key || has_oauth);
 
+    // The anthropic probe is DEFINITIVE only on the stock first-party API
+    // (`api_provider() == FirstParty`) with the default `api_base` and no
+    // gateway auth override. On an env-routed Bedrock/Vertex/Foundry install
+    // (`api_provider() != FirstParty`), a custom `api_base`
+    // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving Claude
+    // with no local key), or an `ANTHROPIC_AUTH_TOKEN`, anthropic models are
+    // served WITHOUT a local key/OAuth, so the forced
+    // `availability["anthropic"] = false` above is probe-BLINDNESS, not
+    // disconnection — both the default-model fallback below and
+    // `filter_fusion_catalog` (F011 item 1) must not treat it as
+    // disconnection (the same probe-blindness `connected_model_rows` guards
+    // in the TUI picker).
+    let anthropic_probe_definitive = api_provider() == ApiProvider::FirstParty
+        && cfg.api_base == DesktopConfig::default().api_base
+        && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
+
     // ── Boot-time connected-provider default-model fallback ─────────────────
     // (LingXi multi-provider divergence — upstream is Anthropic-only.) When the
     // configured default model's provider is definitively disconnected and
@@ -7485,16 +7517,6 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         && !cfg.default_model_env_pinned
         && api_provider() == ApiProvider::FirstParty
     {
-        // The anthropic probe is DEFINITIVE only on the stock first-party base
-        // URL with no gateway auth override. A custom `api_base`
-        // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving
-        // Claude with no local key) or an `ANTHROPIC_AUTH_TOKEN` works today
-        // with `has_api_key == has_oauth == false`, so the forced
-        // `availability["anthropic"] = false` above must not reroute those
-        // installs (the same probe-blindness `connected_model_rows` guards in
-        // the TUI picker).
-        let anthropic_probe_definitive = cfg.api_base == DesktopConfig::default().api_base
-            && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
         if let Some(fb) = connected_provider_fallback(
             &default_model_id,
             default_model_profile.as_deref(),
@@ -7698,6 +7720,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let fusion_catalog = filter_fusion_catalog(
         fusion_catalog,
         &provider_availability,
+        anthropic_probe_definitive,
         session_model_restriction.as_ref(),
     );
 
@@ -15287,9 +15310,50 @@ mod tests {
         let mut availability = std::collections::BTreeMap::new();
         availability.insert("anthropic".to_string(), true);
         availability.insert("openai".to_string(), false);
-        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].profile, "anthropic");
+    }
+
+    /// Finding [1]: a definitively-unavailable anthropic profile (stock
+    /// first-party API, real probe, no key/OAuth) must still be dropped —
+    /// the blindness guard only protects gateway/env-routed installs, not a
+    /// genuinely disconnected first-party anthropic.
+    #[test]
+    fn filter_fusion_catalog_drops_anthropic_when_probe_is_definitive() {
+        let catalog = vec![fusion_catalog_row("anthropic", "claude-sonnet-4-6")];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
+        assert!(filtered.is_empty(), "got: {filtered:?}");
+    }
+
+    /// Finding [1] (CRITICAL): on a gateway / env-routed Bedrock/Vertex/
+    /// Foundry install, `provider_availability["anthropic"] == false` is
+    /// PROBE-BLINDNESS, not disconnection — Claude models are served without
+    /// a local key/OAuth there and the main turn loop routes them fine. Before
+    /// this fix, `filter_fusion_catalog` dropped every anthropic row on that
+    /// signal, emptying the Fusion catalog (`TooFewModels{eligible:0}` on
+    /// every `/fusion` call) on an install whose main loop works.
+    #[test]
+    fn filter_fusion_catalog_keeps_anthropic_when_probe_is_blind() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        // Forced by the `or_insert(has_api_key || has_oauth)` at boot: a
+        // gateway install with neither reads as `false` even though anthropic
+        // is reachable via `LINGXI_API_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`.
+        availability.insert("anthropic".to_string(), false);
+        availability.insert("openai".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, false, None);
+        assert_eq!(filtered.len(), 2, "got: {filtered:?}");
+        assert!(filtered.iter().all(|row| row.profile == "anthropic"));
+        // openai is still genuinely dropped — the blindness guard is
+        // anthropic-only, not a blanket "absence means available".
+        assert!(!filtered.iter().any(|row| row.profile == "openai"));
     }
 
     /// F011 item 1: a row missing from the availability map entirely (not
@@ -15298,7 +15362,7 @@ mod tests {
     fn filter_fusion_catalog_drops_rows_missing_from_availability_map() {
         let catalog = vec![fusion_catalog_row("groq", "llama-3.3-70b-versatile")];
         let availability = std::collections::BTreeMap::new();
-        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
         assert!(filtered.is_empty(), "got: {filtered:?}");
     }
 
@@ -15321,7 +15385,7 @@ mod tests {
             overrides: std::collections::BTreeMap::new(),
         };
         let restriction = (enforcement, vec!["claude-sonnet-4-6".to_string()]);
-        let filtered = filter_fusion_catalog(catalog, &availability, Some(&restriction));
+        let filtered = filter_fusion_catalog(catalog, &availability, true, Some(&restriction));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model, "claude-sonnet-4-6");
     }
@@ -15335,7 +15399,7 @@ mod tests {
         ];
         let mut availability = std::collections::BTreeMap::new();
         availability.insert("anthropic".to_string(), true);
-        let filtered = filter_fusion_catalog(catalog, &availability, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
         assert_eq!(filtered.len(), 2);
     }
 

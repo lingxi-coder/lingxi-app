@@ -630,6 +630,55 @@ mod tests {
         }
     }
 
+    /// Finding [7]: an openai-chatgpt-ONLY install (ChatGPT-subscription
+    /// OAuth connected, no Anthropic credential, no OpenAI API key) must be
+    /// able to resolve a Fusion analyst from the REAL vendored catalog data
+    /// — not just the synthetic `hinted()` helper above, which always ties
+    /// `structured_output` to `judge`. Before the `openai-chatgpt.json` data
+    /// fix, every `judge_eligible` row in this profile had
+    /// `structured_output: false` (a vendored-data omission, not a real
+    /// codec limit — see the comment on that field in the JSON file), so
+    /// `resolve_analyst`'s `with_schema` filter was empty on every such
+    /// install and every `/fusion` call failed preflight with
+    /// `StructuredOutputUnsupported` before a single panel ran.
+    #[test]
+    fn resolves_analyst_on_a_real_openai_chatgpt_only_catalog() {
+        let providers = llm_client::builtin_presets().providers;
+        let chatgpt = providers
+            .iter()
+            .find(|p| p.profile_name == "openai-chatgpt")
+            .expect("openai-chatgpt preset must exist in the builtin catalog");
+        let catalog: Vec<CatalogModel> = chatgpt
+            .models
+            .iter()
+            .map(|m| CatalogModel {
+                profile: "openai-chatgpt".to_string(),
+                model: m.request_model.clone(),
+                hints: llm_client::hints_for("openai-chatgpt", &m.request_model)
+                    .unwrap_or_default(),
+                structured_output: m.capabilities.structured_output,
+            })
+            .collect();
+        assert!(
+            catalog.len() >= 3,
+            "expected the 3 vendored gpt-5.6-* rows, got {catalog:?}"
+        );
+        let mut request = req();
+        request.parent_profile = "openai-chatgpt".into();
+        request.parent_model = "gpt-5.6-sol".into();
+        // Same-provider install: no other credentialed provider to fall
+        // back on, exactly like a ChatGPT-subscription-only session.
+        request.cross_provider = false;
+        let resolved = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog)
+            .unwrap_or_else(|e| panic!("openai-chatgpt-only install must resolve, got {e:?}"));
+        assert_eq!(resolved.analyst.profile, "openai-chatgpt");
+        assert!(
+            resolved.analyst.model == "gpt-5.6-sol" || resolved.analyst.model == "gpt-5.6-terra",
+            "analyst must be one of the judge_eligible+structured_output rows, got {:?}",
+            resolved.analyst
+        );
+    }
+
     #[test]
     fn cross_provider_denied_for_agent_origin_by_default() {
         let mut request = req();

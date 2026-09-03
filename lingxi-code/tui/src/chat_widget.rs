@@ -2103,10 +2103,23 @@ impl ChatWidget {
         // belongs to a turn the user just cancelled (Esc/Ctrl-C on a
         // still-running turn cancels the token but leaves `current_turn`
         // `Some` until `TurnEnded` arrives).
-        if self
-            .current_turn
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+        //
+        // Finding 22 (blocking issue 2): this guard used to drop EVERY ask
+        // that raced the cancelled-but-not-yet-ended window, including one
+        // that does not belong to the turn being cancelled at all — a
+        // background `/fusion` panel's next tool call landing a few
+        // milliseconds after Ctrl-C. A `background_owned` (or
+        // worker-attributed, for an in-process teammate) ask has no
+        // relationship to `current_turn`'s cancellation and must open/queue
+        // normally regardless of that turn's state — mirroring the same
+        // exemption `on_pane_outcome`'s `Interrupt` arm gives these asks in
+        // `pending_prompts.retain` below.
+        if !exchange.background_owned
+            && exchange.worker.is_none()
+            && self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -4997,7 +5010,42 @@ impl ChatWidget {
                 // orchestrator emits TurnEnded; Block tools may still be safely
                 // finishing. Interactive requests are different: drop them now
                 // so a stale dialog cannot grant work after cancellation.
-                self.pending_prompts.clear();
+                //
+                // Finding 22: G006 (open_permission/open_ask_user_question/
+                // open_computer_access, above) removed the `accepts_turn_events`
+                // gate so an ask with NO owning turn — a background `/fusion`
+                // panel spawned outside the main loop entirely, or an
+                // in-process teammate — can open a dialog while a foreground
+                // turn is also running. `current_turn.cancel()` above only
+                // cancels THIS turn; it does not touch a Fusion panel's own,
+                // separately-owned cancellation token. Wiping every prompt here
+                // unconditionally therefore silently denied asks that do not
+                // belong to the turn being interrupted at all. Keep only a
+                // `background_owned` (real Fusion-panel marker — see
+                // `PermissionCheckContext::background_owned`) or
+                // worker-attributed (in-process teammate) `PendingPrompt::
+                // Permission` — the same "cancel only requests owned by one
+                // main turn, preserving child agents" distinction
+                // `AdapterPermissionGate::cancel_owner` already draws
+                // (client-adapter/src/permission_gate.rs) — and let
+                // `dismiss_turn_prompts` apply the identical rule to the
+                // currently OPEN dialog via `PermissionView::is_background`.
+                // NOTE: `exchange.worker.is_some()` alone is NOT sufficient for
+                // a Fusion panel — `worker` is populated only when
+                // `ctx.can_show_permission_prompts` is true (tool_invoker_impl.
+                // rs), which the single production `SubagentContext` literal
+                // for every pool spawn (agent/src/handle.rs) sets `false`; a
+                // Fusion panel's ask always has `worker: None` and is
+                // distinguished solely by `background_owned`.
+                // `AskUserQuestion`/`ComputerAccess` exchanges carry no owner
+                // signal today, so they are still cleared unconditionally.
+                self.pending_prompts.retain(|prompt| {
+                    matches!(
+                        prompt,
+                        PendingPrompt::Permission(exchange)
+                            if exchange.background_owned || exchange.worker.is_some()
+                    )
+                });
                 self.bottom_pane.dismiss_turn_prompts();
                 ChatOutcome::Continue
             }
@@ -8184,6 +8232,41 @@ mod tests {
                         }]),
                     ),
                 auto_mode_prompt: None,
+                background_owned: false,
+            },
+            resp_rx,
+        )
+    }
+
+    /// Like [`tool_exchange`] but `background_owned` (finding 22): the exact
+    /// shape a background `/fusion` panel's ask carries in production —
+    /// `RegistryToolInvoker::with_background_owned(true)` is the only thing
+    /// that sets `background_owned` on a dispatch
+    /// (`apps/engine-desktop/src/lib.rs`'s `fusion_invoker` wiring), and it
+    /// carries no `worker` attribution: `worker` comes from
+    /// `ctx.can_show_permission_prompts` (tool_invoker_impl.rs), which is
+    /// `false` for every pool-spawned one-shot subagent — Fusion panels
+    /// included — and `true` only for an in-process teammate. A test that
+    /// hand-sets `worker: Some(..)` here would pin a shape no Fusion panel
+    /// ever produces.
+    fn background_owned_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>)
+    {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let request = PermissionRequest::ToolUseConfirm {
+            tool_name: "WebFetch".to_string(),
+            tool_input: serde_json::json!({ "url": "https://example.com" }),
+            default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
+        };
+        (
+            PermissionExchange {
+                request,
+                resp_tx,
+                worker: None,
+                suppress_always_allow_rule: false,
+                permission_persistence: None,
+                auto_mode_prompt: None,
+                background_owned: true,
             },
             resp_rx,
         )
@@ -9003,6 +9086,136 @@ mod tests {
         widget.open_permission(late);
         assert!(late_rx.blocking_recv().is_err());
         assert!(!widget.has_open_permission());
+
+        // Finding 22 (reviewer round 1, blocking issue 2): a `late` ask that
+        // arrives in the SAME cancelled-but-not-yet-ended window is only
+        // supposed to be dropped when it belongs to the turn being
+        // cancelled. A `background_owned` ask (a real Fusion panel's next
+        // tool call landing a few milliseconds after Ctrl-C) does not
+        // belong to `current_turn` at all and must open instead of being
+        // silently denied here.
+        assert!(
+            widget
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled),
+            "current_turn is still Some(cancelled) — TurnEnded has not arrived"
+        );
+        let (late_background, mut late_background_rx) = background_owned_tool_exchange();
+        widget.open_permission(late_background);
+        assert!(
+            widget.has_open_permission(),
+            "a background_owned ask arriving after Ctrl-C, before TurnEnded, must still open"
+        );
+        assert!(
+            late_background_rx.try_recv().is_err(),
+            "the background_owned ask's resp_tx must not be touched"
+        );
+    }
+
+    /// Finding 22: G006 (`open_permission`) removed the `accepts_turn_events`
+    /// gate so an ask with no owning turn — a background `/fusion` panel
+    /// spawned outside the main loop entirely — can open its dialog while
+    /// the interactive turn is ALSO still running. Interrupting that
+    /// (unrelated) turn used to wipe the background-owned ask too, via the
+    /// same unconditional `pending_prompts.clear()` + `dismiss_turn_prompts()`
+    /// this test's sibling above exercises for a direct (turn-owned) ask.
+    /// `resp_tx` being dropped there denies a Fusion panel's tool call while
+    /// the run itself keeps burning turns and budget, per the finding's
+    /// evidence. `background_owned_tool_exchange` builds the exchange the
+    /// way production actually does (`RegistryToolInvoker::
+    /// with_background_owned(true)` -> `PermissionCheckContext::
+    /// background_owned` -> `TuiPermissionGate` -> `PermissionExchange::
+    /// background_owned`), NOT by hand-setting `worker`, which a Fusion
+    /// panel's ask never carries.
+    #[test]
+    fn cancellation_preserves_a_background_owned_permission_prompt() {
+        let mut widget = widget();
+        typ(&mut widget, "x");
+        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+
+        // The OPEN dialog is the background-owned (Fusion panel) ask.
+        let (background, mut background_rx) = background_owned_tool_exchange();
+        widget.open_permission(background);
+        assert!(widget.has_open_permission());
+
+        // A second, DIRECT (turn-owned) ask queues behind it — this one
+        // really does belong to the turn being interrupted.
+        let (direct, direct_rx) = tool_exchange();
+        widget.open_permission(direct);
+        assert_eq!(widget.pending_prompts.len(), 1);
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+
+        assert!(
+            widget
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled),
+            "the user's own turn is still cancelled"
+        );
+        assert!(
+            widget.has_open_permission(),
+            "a background_owned ask must survive interrupting an unrelated turn"
+        );
+        assert!(
+            background_rx.try_recv().is_err(),
+            "the background ask's resp_tx must not be touched by the interrupt"
+        );
+        assert!(
+            widget.pending_prompts.is_empty(),
+            "the direct (turn-owned) queued ask is still dropped"
+        );
+        assert!(
+            direct_rx.blocking_recv().is_err(),
+            "the direct queued ask is still denied by the interrupt"
+        );
+    }
+
+    /// Finding 22, isolating the `pending_prompts.retain` half of the fix
+    /// (as opposed to the sibling test above, which only exercises
+    /// `PermissionView::is_background` on the currently OPEN dialog): here
+    /// the OPEN dialog is the turn-owned ask and a background-owned ask sits
+    /// QUEUED behind it, so surviving the interrupt requires the `retain`
+    /// predicate itself to key on `background_owned`, not just the view
+    /// stack's dismissal rule.
+    #[test]
+    fn cancellation_preserves_a_queued_background_owned_permission_prompt() {
+        let mut widget = widget();
+        typ(&mut widget, "x");
+        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+
+        // The OPEN dialog is the DIRECT (turn-owned) ask.
+        let (direct, direct_rx) = tool_exchange();
+        widget.open_permission(direct);
+        assert!(widget.has_open_permission());
+
+        // A background-owned ask QUEUES behind it.
+        let (background, mut background_rx) = background_owned_tool_exchange();
+        widget.open_permission(background);
+        assert_eq!(widget.pending_prompts.len(), 1);
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+
+        assert!(
+            direct_rx.blocking_recv().is_err(),
+            "the open, turn-owned dialog is denied by the interrupt"
+        );
+        assert_eq!(
+            widget.pending_prompts.len(),
+            1,
+            "the queued background_owned ask must survive the interrupt's retain"
+        );
+        assert!(
+            background_rx.try_recv().is_err(),
+            "the surviving queued ask's resp_tx must not be touched by the interrupt"
+        );
     }
 
     #[test]
@@ -9270,6 +9483,7 @@ mod tests {
             suppress_always_allow_rule: false,
             permission_persistence: None,
             auto_mode_prompt: None,
+            background_owned: false,
         };
         widget.open_permission(first);
         widget.open_permission(plan);

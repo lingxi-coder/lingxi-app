@@ -90,7 +90,7 @@ impl PermissionGate for TuiPermissionGate {
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
-            .check_with_context_impl(name, input, worker, false, None, None)
+            .check_with_context_impl(name, input, worker, false, None, None, false)
             .await
         {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
@@ -125,6 +125,7 @@ impl PermissionGate for TuiPermissionGate {
                     )
                 }),
                 ctx.auto_mode_prompt,
+                ctx.background_owned,
             )
             .await
         {
@@ -148,6 +149,12 @@ impl TuiPermissionGate {
             permission::allow_suggestion::PermissionPersistenceSuggestion,
         >,
         auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
+        // Finding 22: `true` only when `ctx.background_owned` was set by an
+        // invoker the composition root built exclusively for a background
+        // task (see `PermissionCheckContext::background_owned`). `check`/
+        // `check_with_worker` (no `ctx`) always pass `false`, matching prior
+        // behavior for every main-thread / worker-only call.
+        background_owned: bool,
     ) -> PermissionOutcome {
         let auto_mode_prompt = match auto_mode_prompt {
             Some(permission::gate::AutoModePrompt::ExitPlanMode) if name == "ExitPlanMode" => {
@@ -226,6 +233,7 @@ impl TuiPermissionGate {
             suppress_always_allow_rule,
             permission_persistence: permission_persistence.clone(),
             auto_mode_prompt,
+            background_owned,
         };
         // G006: this deny reason can reach the calling MODEL as a tool-error
         // string (a background `/fusion` panel's Bash/WebFetch call denied

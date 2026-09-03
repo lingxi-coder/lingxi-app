@@ -49,4 +49,15 @@ pub struct PermissionExchange {
     /// Engine-computed optional Auto action. `None` means the transport must
     /// not render an Auto row; clients must not infer this from the request.
     pub auto_mode_prompt: Option<AutoModePrompt>,
+    /// (Finding 22) Mirrors
+    /// `platform_api::permission_gate::PermissionCheckContext::background_owned`:
+    /// `true` only for a dispatch issued through an invoker the composition
+    /// root built exclusively for a background task with no owning
+    /// interactive turn (as of writing, only the `/fusion` background task).
+    /// Deliberately NOT inferred from [`Self::worker`] — worker attribution
+    /// is a display concern (`can_show_permission_prompts`, `false` for
+    /// every pool-spawned one-shot subagent, Fusion panels included) and is
+    /// `None` on exactly the requests this field exists to mark. Default
+    /// `false` preserves prior behavior for every other caller.
+    pub background_owned: bool,
 }

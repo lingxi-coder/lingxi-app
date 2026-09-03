@@ -2435,18 +2435,19 @@ impl SubagentSpawner for PoolSubagentSpawner {
             }
         };
 
-        // Normal terminal path: deallocate explicitly and disarm the guard so
-        // it does not double-deallocate on drop.
-        dealloc_guard.armed = false;
-        // Best-effort deallocate; failures here don't change the surfaced
-        // result.
-        let _ = self.pool.deallocate(&agent_id).await;
-        // §24b (claude `Agr`'s `cleanup` — `runAgent`'s `finally`): tear down
-        // exactly the connections THIS spawn newly created, regardless of the
-        // terminal outcome (`Completed`/`Failed`/`Killed` all reach here).
-        crate::agent_mcp_tools::run_agent_mcp_cleanups(agent_mcp_cleanups, &resolved_agent_type)
-            .await;
-
+        // Normal terminal path. The caller-visible terminal observation is
+        // emitted FIRST, synchronously, with no `.await` between it and the
+        // guard disarm right below: `SpawnDeallocGuard::drop`'s early-drop
+        // path is the only OTHER producer of a terminal event for this
+        // spawn, so as long as nothing can suspend between "the event is
+        // emitted" and "the guard no longer would emit one on drop", a
+        // caller that drops this future can never observe zero terminal
+        // events. Emitting after `pool.deallocate`/`run_agent_mcp_cleanups`
+        // (as before) left exactly that window open: both are `.await`s the
+        // guard is already disarmed across, so a drop while suspended in
+        // either one produced no terminal event from either producer (a
+        // Fusion panel's `panel_total_timeout`, or the panel-bar
+        // `join_set.abort_all()`, racing a subagent that already finished).
         match &result {
             SubagentResult::Completed {
                 content,
@@ -2477,6 +2478,24 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 observer_events.emit_terminal(SubagentObservation::Killed { agent_id });
             }
         }
+
+        // Disarm the guard so it does not double-deallocate (or double-emit
+        // a `Killed`) on drop. `pool.deallocate` below is best-effort and no
+        // longer guarded by it, matching the guard's early-drop path, which
+        // also deallocates. `run_agent_mcp_cleanups` below is NOT mirrored by
+        // the drop path (`SpawnDeallocGuard::drop` only sends `UserInterrupt`,
+        // waits `SPAWN_CANCEL_GRACE`, deallocates, and emits `Killed` — see
+        // its impl above) — an MCP connection this spawn newly created can
+        // still leak if the future is dropped before reaching this line.
+        dealloc_guard.armed = false;
+        // Best-effort deallocate; failures here don't change the surfaced
+        // result.
+        let _ = self.pool.deallocate(&agent_id).await;
+        // §24b (claude `Agr`'s `cleanup` — `runAgent`'s `finally`): tear down
+        // exactly the connections THIS spawn newly created, regardless of the
+        // terminal outcome (`Completed`/`Failed`/`Killed` all reach here).
+        crate::agent_mcp_tools::run_agent_mcp_cleanups(agent_mcp_cleanups, &resolved_agent_type)
+            .await;
 
         if let (Some(spec), SubagentResult::Completed { content, .. }) =
             (observer_spec, &mut result)
@@ -3373,6 +3392,100 @@ mod tests {
         ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
             std::future::pending().await
         }
+    }
+
+    /// Finding 12: on the NORMAL terminal path, `SpawnDeallocGuard` is
+    /// disarmed (handle.rs, "Normal terminal path") two `.await`s before the
+    /// child's terminal `SubagentObservation` is actually emitted —
+    /// `pool.deallocate` and `run_agent_mcp_cleanups` both run in between. If
+    /// the caller drops the `spawn` future while suspended inside either of
+    /// those awaits (a Fusion panel's `panel_total_timeout` or the panel-bar
+    /// `join_set.abort_all()` racing a subagent that already finished), the
+    /// guard is already disarmed so its own `Drop` emits nothing either —
+    /// zero terminal observer events reach `SubagentSpawnObserver`, even
+    /// though the child genuinely completed. Reproduced deterministically
+    /// here via an injected MCP cleanup whose teardown future never
+    /// resolves, mirroring an agent definition with `required_mcp_servers`
+    /// whose server shutdown hangs.
+    #[tokio::test]
+    async fn dropped_spawn_future_during_mcp_cleanup_still_emits_one_terminal_event() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([text_response("done")])),
+            calls: AtomicUsize::new(0),
+        });
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+
+        // Teardown that never resolves — stalls `spawn_with_observer` inside
+        // `run_agent_mcp_cleanups` AFTER the child already delivered its
+        // terminal event, but (on the buggy code) after the guard was
+        // already disarmed.
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |_agent_id, _def| {
+                Box::pin(async move {
+                    let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                        server_name: "hangs".into(),
+                        run: Arc::new(|| Box::pin(std::future::pending())),
+                    };
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![],
+                        cleanups: vec![cleanup],
+                    }
+                })
+            });
+
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_spawn_observer(observer.clone())
+            .with_mcp_tool_builder(builder);
+
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "finish"
+        }))
+        .expect("minimal spawn request");
+
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging MCP cleanup must still be in flight when the caller times out"
+        );
+
+        // Let the event sink's background task drain whatever was already
+        // sent before the future was dropped.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let terminal_count = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SubagentObservation::Completed { .. }
+                        | SubagentObservation::Failed { .. }
+                        | SubagentObservation::Killed { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            terminal_count, 1,
+            "the child's terminal event must reach the observer even when the caller drops \
+             the spawn future while it is stuck in post-completion cleanup; got: {:?}",
+            observer.events.lock().unwrap()
+        );
     }
 
     /// G007 / F012: dropping the `spawn` future mid-flight (Fusion panel

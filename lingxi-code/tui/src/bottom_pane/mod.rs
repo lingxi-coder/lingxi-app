@@ -2265,11 +2265,27 @@ impl ViewStack {
     /// screens (help, settings, pickers). Dropping these views closes their
     /// one-shot response senders, so a cancelled turn cannot be approved by a
     /// stale dialog after its permission broker has already unwound.
+    ///
+    /// Finding 22: a `background_owned` or worker-attributed
+    /// [`PermissionView`] (a background `/fusion` panel spawned outside the
+    /// main loop entirely, or an in-process teammate) is preserved rather
+    /// than dismissed, mirroring `AdapterPermissionGate::cancel_owner`'s
+    /// "cancel only requests owned by one main turn, preserving child
+    /// agents" (client-adapter's own established policy for the exact same
+    /// distinction). `worker` alone is NOT sufficient for a Fusion panel —
+    /// it is populated only for `ctx.can_show_permission_prompts` dispatches
+    /// (in-process teammates), never for a pool-spawned one-shot subagent —
+    /// so [`PermissionView::is_background`] also checks the real Fusion
+    /// marker, `background_owned`. Only the interactive turn's OWN
+    /// unattributed permission ask — and every `AskUserQuestionView`/
+    /// `ComputerAccessView`, which carry no owner signal today — are dropped
+    /// here.
     pub fn dismiss_turn_prompts(&mut self) {
         self.views.retain(|view| {
-            !view.as_any().is::<PermissionView>()
-                && !view.as_any().is::<AskUserQuestionView>()
-                && !view.as_any().is::<ComputerAccessView>()
+            if let Some(permission) = view.as_any().downcast_ref::<PermissionView>() {
+                return permission.is_background();
+            }
+            !view.as_any().is::<AskUserQuestionView>() && !view.as_any().is::<ComputerAccessView>()
         });
     }
 

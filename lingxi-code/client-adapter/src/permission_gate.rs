@@ -601,21 +601,35 @@ impl AdapterPermissionGate {
         // closed to `Deny`. On timeout we also evict the now-stale parked entry
         // so a late `resolve()` is a no-op (and the map does not leak).
         let timeout_result = tokio::time::timeout(self.timeout, rx).await;
-        // The oneshot resolved (or the deadline elapsed) — from here the
-        // entry is either already removed (a normal `resolve()`/`drain()`/
-        // `cancel_owner()` beat us to it) or is about to be removed by the
-        // timeout branch below. Either way this early-drop backstop no
-        // longer applies.
-        parked_guard.armed = false;
+        // The oneshot resolved (or the deadline elapsed). Disarm the guard
+        // separately in each arm below, no earlier than the point where the
+        // entry is actually gone from `self.pending` — NOT unconditionally
+        // here, before the `Err(_elapsed)` arm's own eviction has run. This
+        // future can still be dropped between here and that arm's
+        // `self.pending.lock().await` (a genuine suspension point when
+        // another parked/resolving request contends the same map); an early
+        // disarm would leave that window uncovered by both the timeout
+        // eviction (never reached) and the guard (already disarmed) alike.
         let response = match timeout_result {
-            Ok(Ok(response)) => response,
+            Ok(Ok(response)) => {
+                // A normal `resolve()` already removed the entry before
+                // sending on `tx`.
+                parked_guard.armed = false;
+                response
+            }
             Ok(Err(_dropped)) => {
+                // The sender was dropped by `drain()`/`cancel_owner()`,
+                // which also already removed the entry.
+                parked_guard.armed = false;
                 return PermissionOutcome::Deny {
                     reason: "permission request dropped (connection closed)".to_string(),
                 };
             }
             Err(_elapsed) => {
                 let expired = self.pending.lock().await.remove(&request_id).is_some();
+                // Only now is the entry provably gone — disarm after the
+                // removal, not before it.
+                parked_guard.armed = false;
                 if expired {
                     self.emit_resolution(request_id, PermissionResolutionDto::Expired)
                         .await;
@@ -1318,6 +1332,85 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    /// Finding 14: `ParkedRequestGuard` used to be disarmed unconditionally
+    /// right after `tokio::time::timeout(...)` resolves — BEFORE the
+    /// `Err(_elapsed)` arm's own `self.pending.lock().await.remove(...)`
+    /// eviction ran. If the asker's future was dropped exactly while
+    /// suspended on that (contended) lock acquire, the entry stayed parked
+    /// forever: the guard was already disarmed (no backstop) and the
+    /// in-future eviction that would have removed it never got to run
+    /// (the future that contained it is gone). Reproduced deterministically
+    /// by holding the `pending` map lock from outside the checking task
+    /// across its timeout elapsing, then aborting it while it is blocked
+    /// trying to acquire that same lock — the exact window described by
+    /// finding 14 (a sibling parked/resolving request contending the map).
+    #[tokio::test]
+    async fn dropped_asker_after_timeout_evicts_parked_request_via_guard_backstop() {
+        let sink = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate = Arc::new(
+            AdapterPermissionGate::new(sink.clone())
+                .with_event_sink(events.clone())
+                .with_timeout(Duration::from_millis(30)),
+        );
+
+        let g = gate.clone();
+        let task = tokio::spawn(async move { g.check("Bash", &json!({"command": "ls"})).await });
+
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+
+        // Hold the `pending` map lock from OUTSIDE the checking task so its
+        // own timeout-eviction (`self.pending.lock().await.remove(...)`) is
+        // forced to actually suspend on a genuinely contended lock, rather
+        // than resolving on first poll.
+        let held = gate.pending.lock().await;
+
+        // Real wall-clock wait for the checking task's `tokio::time::timeout`
+        // to elapse and for it to reach (and block on) that lock acquire.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The asker vanishes exactly in that window — e.g. the panel-bar
+        // `join_set.abort_all()` racing a parked ask whose deadline just
+        // fired.
+        task.abort();
+        let _ = task.await;
+
+        drop(held);
+
+        for _ in 0..2000 {
+            if gate.pending_count().await == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            gate.pending_count().await,
+            0,
+            "a parked request whose asker was dropped exactly as its own timeout eviction \
+             was about to run must not be leaked forever"
+        );
+
+        for _ in 0..2000 {
+            if !events.events().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let seen = events.events().await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ClientEvent::PermissionRequestResolved {
+                    request_id,
+                    resolution: PermissionResolutionDto::Cancelled,
+                }] if *request_id == req.request_id
+            ),
+            "expected exactly one Cancelled resolution for request {}; got: {seen:?}",
+            req.request_id
+        );
     }
 
     /// `tool_use_confirm_constructed_with_default_allow` — the `tool_default` →

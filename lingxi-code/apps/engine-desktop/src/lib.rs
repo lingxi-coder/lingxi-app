@@ -11058,9 +11058,19 @@ pub async fn build(
             .with_gate(perms.clone()),
     ));
 
+    // Finding 22: this is the ONE invoker `LocalFusionHandler` uses for every
+    // `/fusion` background-task panel (`register_fusion_handler` above binds
+    // this exact `fusion_invoker` cell, and `tasks::handlers::local_fusion`
+    // clones it verbatim into `SubagentInheritance::tool_invoker` for each
+    // panel spawn — no other caller reaches this `Arc`). A FOREGROUND
+    // `Agent{subagent_type:"fusion"}` call (tools/agent/src/agent.rs
+    // `call_fusion`) never touches this cell either — it builds its own
+    // fresh `RegistryToolInvoker` per call. So marking this instance
+    // background-owned cannot mislabel a foreground direct tool call.
     fusion_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
     // Break the subagent construction cycle now that `tools` + `agent_catalog`

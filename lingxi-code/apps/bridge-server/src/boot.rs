@@ -773,6 +773,15 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
                 "empty_session".to_string(),
                 serde_json::Value::Bool(empty_session),
             );
+            if let Some(model) = row.resume_model.as_deref() {
+                object.insert(
+                    "resume_model".to_string(),
+                    serde_json::Value::String(platform_api::qualified_model_ref(
+                        model,
+                        row.resume_model_profile.as_deref(),
+                    )),
+                );
+            }
         }
         sessions.push(value);
     }
@@ -1254,6 +1263,81 @@ mod tests {
         assert_eq!(historical["empty_session"], false);
         assert_eq!(empty["message_count"], 0);
         assert_eq!(empty["empty_session"], true);
+    }
+
+    #[tokio::test]
+    async fn list_mode_exposes_the_private_resume_model_hint() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let session_id = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let transcript =
+            session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), session_id);
+        std::fs::create_dir_all(transcript.parent().expect("catalog dir"))
+            .expect("create catalog dir");
+        let user_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let assistant_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        let sidechain_id = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa";
+        let user = serde_json::json!({
+            "type": "user",
+            "uuid": user_id,
+            "parentUuid": null,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:00.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": false,
+            "message": {"role": "user", "content": "hello"},
+        });
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "uuid": assistant_id,
+            "parentUuid": user_id,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:01.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": false,
+            "modelProfile": "openrouter",
+            "message": {
+                "role": "assistant",
+                "model": "cohere/north-mini-code:free",
+                "content": [{"type": "text", "text": "hello"}]
+            },
+        });
+        let newer_sidechain = serde_json::json!({
+            "type": "assistant",
+            "uuid": sidechain_id,
+            "parentUuid": user_id,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:02.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": true,
+            "modelProfile": "deepseek",
+            "message": {
+                "role": "assistant",
+                "model": "deepseek-v4-flash",
+                "content": [{"type": "text", "text": "off branch"}]
+            },
+        });
+        std::fs::write(
+            &transcript,
+            format!("{user}\n{assistant}\n{newer_sidechain}\n"),
+        )
+        .expect("write transcript");
+
+        let json = list_sessions_json_from(cwd.path(), home.path())
+            .await
+            .expect("catalog succeeds");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
+        let row = value["sessions"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["uuid"] == session_id))
+            .expect("session row");
+        assert_eq!(
+            row["resume_model"],
+            "openrouter/cohere/north-mini-code:free"
+        );
     }
 
     #[test]

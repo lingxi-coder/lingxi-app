@@ -202,10 +202,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       settings.setBypassPermissionsAccepted(true);
       return true;
     },
-    launchConfig: async (ref: SessionRef) => {
+    launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const credentials = await resolveSessionLaunchCredentials(configured.model, {
+      const model = resumeModel ?? configured.model;
+      const credentials = await resolveSessionLaunchCredentials(model, {
         credentialBroker,
       });
       return {
@@ -213,7 +214,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
         ...credentials,
-        model: configured.model,
+        model,
         apiBaseUrl: configured.apiBaseUrl,
       };
     },

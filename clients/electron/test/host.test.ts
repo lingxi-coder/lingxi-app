@@ -479,24 +479,43 @@ test('session open accepts a matching UUID outside the bounded project list', as
   const sessionId = '55555555-6666-4777-8888-999999999999';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  let opened: { projectPath: string; sessionId: string } | undefined;
+  let opened: {
+    ref: { projectPath: string; sessionId: string };
+    empty?: boolean;
+    resumeModel?: string;
+  } | undefined;
   const host = new HostController(
     settings,
     {
       get: () => undefined,
-      openSession: async (ref: { projectPath: string; sessionId: string }) => { opened = ref; },
+      openSession: async (
+        ref: { projectPath: string; sessionId: string },
+        empty?: boolean,
+        resumeModel?: string,
+      ) => { opened = { ref, empty, resumeModel }; },
     } as any,
     new DiagnosticBuffer(),
     {
       list: async () => ({ sessions: [] }),
       find: async (_projectPath: string, requestedId: string) => requestedId === sessionId
-        ? { uuid: sessionId, title: 'Old session', modified_rfc3339: '', message_count: 1, path: 'old.jsonl' }
+        ? {
+          uuid: sessionId,
+          title: 'Old session',
+          modified_rfc3339: '',
+          message_count: 1,
+          path: 'old.jsonl',
+          resume_model: 'openrouter/cohere/north-mini-code:free',
+        }
         : undefined,
     } as any,
   );
   try {
     await host.openSessionAndActivate({ projectPath: project, sessionId });
-    assert.deepEqual(opened, { projectPath: project, sessionId });
+    assert.deepEqual(opened, {
+      ref: { projectPath: project, sessionId },
+      empty: false,
+      resumeModel: 'openrouter/cohere/north-mini-code:free',
+    });
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
   } finally {
     rmSync(userData, { recursive: true, force: true });

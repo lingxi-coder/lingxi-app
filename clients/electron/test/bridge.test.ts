@@ -233,16 +233,32 @@ test('first-prompt commit failures keep the draft recoverable and retry without 
   }
 });
 
-test('owned resume waits for a matching engine event and never exposes renderer lifecycle commands', async () => {
+test('owned resume loads the restored model provider credential before becoming ready', async () => {
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const commands: unknown[] = [];
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
-  client.sendCommand = (command) => { commands.push(command); };
+  client.sendCommand = (command) => {
+    commands.push(command);
+    const record = command as Record<string, unknown>;
+    if (record['type'] === 'set_provider_credential') {
+      queueMicrotask(() => client.emit('event', {
+        type: 'provider_credential_status',
+        operation_id: record['operation_id'],
+        configured_provider_ids: ['openrouter'],
+        storage_encrypted: false,
+        credential_previews: {},
+      }));
+    }
+  };
   const runtime = new SessionRuntime({
     sessionId,
     projectPath: '/workspace',
     sessionResumeTimeoutMs: 100,
     launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+    resolveProviderCredential: async (providerId) => {
+      assert.equal(providerId, 'openrouter');
+      return 'or-resumed-secret';
+    },
   });
   (runtime as any).activeWorkspace = '/workspace';
   (runtime as any).activeWorkspaceTrusted = true;
@@ -258,8 +274,45 @@ test('owned resume waits for a matching engine event and never exposes renderer 
   assert.deepEqual(commands, [{ type: 'resume_session', session_id: sessionId, cwd: '/workspace' }]);
 
   client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  await Promise.resolve();
+  assert.equal(settled, false, 'session_resumed precedes the authoritative restored model');
+  client.emit('event', { type: 'model_changed', model: 'openrouter/cohere/north-mini-code:free' });
   await resume;
   assert.equal(settled, true);
+  assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
+    'resume_session',
+    'set_provider_credential',
+  ]);
+  assert.equal((commands[1] as { credential: string }).credential, 'or-resumed-secret');
+});
+
+test('session runtime manager launches a restored session with its catalog model hint', async () => {
+  const ref = {
+    projectPath: '/workspace',
+    sessionId: '11111111-2222-4333-8444-555555555556',
+  };
+  const launchHints: Array<string | undefined> = [];
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () {
+    await (this as any).opts.launchConfig();
+    (this as any).state = { status: 'connected' };
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    launchConfig: (_candidate, modelHint) => {
+      launchHints.push(modelHint);
+      return { workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true, model: modelHint };
+    },
+  });
+  try {
+    await manager.openSession(ref, false, 'openrouter/cohere/north-mini-code:free');
+    assert.deepEqual(launchHints, ['openrouter/cohere/north-mini-code:free']);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
 });
 
 test('session runtime replay resets at resume and reconstructs later transcript events', () => {
@@ -654,6 +707,7 @@ test('background-running and active sessions are pinned above the idle cache lim
 
 test('openSession deduplicates concurrent opens by UUID and rejects a different project', async () => {
   const ref = { projectPath: '/workspace-a', sessionId: 'cccccccc-dddd-4eee-8fff-000000000000' };
+  const resumeModel = 'openrouter/cohere/north-mini-code:free';
   const gate = deferred<void>();
   const originalStart = SessionRuntime.prototype.start;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
@@ -671,12 +725,21 @@ test('openSession deduplicates concurrent opens by UUID and rejects a different 
     launchConfig: (candidate) => ({ workspace: candidate.projectPath, sessionId: candidate.sessionId, trusted: true }),
   });
   try {
-    const first = manager.openSession(ref);
-    const second = manager.openSession(ref);
+    const first = manager.openSession(ref, false, resumeModel);
+    const second = manager.openSession(ref, false, 'deepseek/deepseek-v4-flash');
     assert.strictEqual(first, second);
     assert.throws(
-      () => manager.openSession({ ...ref, projectPath: '/workspace-b' }),
+      () => manager.openSession(
+        { ...ref, projectPath: '/workspace-b' },
+        false,
+        'anthropic/claude-sonnet-5',
+      ),
       /owned by a different project/,
+    );
+    assert.equal(
+      (manager as any).sessionModelHints.get(ref.sessionId),
+      resumeModel,
+      'deduplicated or rejected opens cannot replace the model selected by the owning open',
     );
     assert.equal(starts, 1);
     assert.equal(resumes, 0);
@@ -1271,7 +1334,7 @@ test('provider credential writes cross only the authenticated bridge command pat
   await pending;
 });
 
-test('model switching hot-loads a missing provider credential once without restarting', async () => {
+test('provider switching hot-loads the destination credential once before set_model', async () => {
   const commands: Array<Record<string, unknown>> = [];
   let resolves = 0;
   const manager = new BridgeManager({
@@ -1284,6 +1347,7 @@ test('model switching hot-loads a missing provider credential once without resta
   });
   (manager as any).activeWorkspace = '/workspace';
   (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).runtimeCredentialProviders.add('deepseek');
   (manager as any).client = {
     sendCommand: (command: Record<string, unknown>) => {
       commands.push(command);
@@ -1309,7 +1373,7 @@ test('model switching hot-loads a missing provider credential once without resta
     'set_model',
   ]);
   assert.equal(commands[0]?.['credential'], 'or-session-secret');
-  assert.deepEqual(manager.activeCredentialProviderIds, ['openrouter']);
+  assert.deepEqual(manager.activeCredentialProviderIds, ['deepseek', 'openrouter']);
 });
 
 test('concurrent model switches share one broker credential load per session', async () => {

@@ -900,7 +900,13 @@ export class HostController {
     this.catalogRequestGenerations.set(projectPath, generation);
     try {
       const result = await this.sessionCatalog.list(projectPath);
-      const state = { sessions: result.sessions.map(({ empty_session: _emptySession, ...session }) => session) };
+      const state = {
+        sessions: result.sessions.map(({
+          empty_session: _emptySession,
+          resume_model: _resumeModel,
+          ...session
+        }) => session),
+      };
       if (this.catalogRequestGenerations.get(projectPath) === generation) this.catalogs.set(projectPath, state);
       return state;
     } catch (error) {
@@ -940,7 +946,11 @@ export class HostController {
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     const canonical = { projectPath: project, sessionId: ref.sessionId } satisfies SessionRef;
     const session = await this.assertSessionBelongsToProject(canonical);
-    await this.bridge.openSession(canonical, session?.empty_session === true);
+    await this.bridge.openSession(
+      canonical,
+      session?.empty_session === true,
+      session?.resume_model,
+    );
     // Persist navigation only after the engine has emitted a matching
     // session_resumed event. A failed/corrupt resume leaves the visible session
     // and selected Project unchanged.
@@ -981,13 +991,17 @@ export class HostController {
     }
     const catalog = await this.sessionCatalog.list(project);
     this.catalogs.set(project, {
-      sessions: catalog.sessions.map(({ empty_session: _emptySession, ...session }) => session),
+      sessions: catalog.sessions.map(({
+        empty_session: _emptySession,
+        resume_model: _resumeModel,
+        ...session
+      }) => session),
     });
     const first = catalog.sessions[0];
     const ref = first
       ? { projectPath: project, sessionId: first.uuid }
       : await this.bridge.newSession(project);
-    if (first) await this.bridge.openSession(ref, first.empty_session === true);
+    if (first) await this.bridge.openSession(ref, first.empty_session === true, first.resume_model);
     this.settings.activateProject(project);
     if (first) this.settings.setActiveSession(ref);
     else this.settings.setActiveSessionDraft(ref);

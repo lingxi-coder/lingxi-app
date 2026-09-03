@@ -762,6 +762,8 @@ mod tests {
             path: PathBuf::from("/home/u/.lingxi/sessions/abc.jsonl"),
             pr_number: None,
             custom_or_ai_title: Some("First chat".to_string()),
+            resume_model: None,
+            resume_model_profile: None,
         };
         let row = lower_session_metadata(&meta);
         assert_eq!(row.uuid, uuid.to_string());

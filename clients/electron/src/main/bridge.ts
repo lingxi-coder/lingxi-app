@@ -140,6 +140,9 @@ interface PendingAskUserQuestionRequest {
 interface PendingSessionResume {
   sessionId: string;
   generation: number;
+  sessionResumed: boolean;
+  model?: string;
+  hydrationStarted: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -618,7 +621,7 @@ export interface SessionRuntimeSummary {
 }
 
 export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
-  launchConfig: (ref: SessionRef) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
@@ -1348,7 +1351,10 @@ export class SessionRuntime {
         }
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
-        this.resolvePendingSessionResume();
+        if (this.pendingSessionResume) {
+          this.pendingSessionResume.sessionResumed = true;
+          this.completePendingSessionResumeIfReady();
+        }
       }
       if (event.type === 'error' && this.pendingSessionResume) {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
@@ -1367,6 +1373,15 @@ export class SessionRuntime {
       if (event.type === 'model_changed') {
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
+        const pending = this.pendingSessionResume;
+        if (pending) {
+          pending.model = event.model;
+          this.completePendingSessionResumeIfReady();
+        } else {
+          void this.ensureModelProviderCredential(event.model).catch((error: unknown) => {
+            this.diagnostics.add('warn', 'host', `failed to load model provider credential: ${sanitizeDiagnostic(error)}`);
+          });
+        }
       }
       if (event.type === 'ask_user_question') {
         if (this.cancellingTurn) return;
@@ -1684,8 +1699,7 @@ export class SessionRuntime {
       this.outstandingResponderRequests.delete(validated.request_id);
     }
     if (validated.type === 'set_model') {
-      const providerId = resolveProviderIdForModel(validated.model);
-      if (providerId) await this.ensureProviderCredentialCached(providerId);
+      await this.ensureModelProviderCredential(validated.model);
     }
     this.requireClient().sendCommand(validated);
   }
@@ -1710,6 +1724,11 @@ export class SessionRuntime {
     });
     this.pendingRuntimeCredentialLoads.set(providerId, loading);
     return loading;
+  }
+
+  private async ensureModelProviderCredential(model: string): Promise<void> {
+    const providerId = resolveProviderIdForModel(model);
+    if (providerId) await this.ensureProviderCredentialCached(providerId);
   }
 
   hasCachedProviderCredential(providerId: string): boolean {
@@ -1752,6 +1771,8 @@ export class SessionRuntime {
       this.pendingSessionResume = {
         sessionId: this.sessionId,
         generation,
+        sessionResumed: false,
+        hydrationStarted: false,
         resolve,
         reject,
         timer,
@@ -1766,6 +1787,18 @@ export class SessionRuntime {
         this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  private completePendingSessionResumeIfReady(): void {
+    const pending = this.pendingSessionResume;
+    if (!pending?.sessionResumed || !pending.model || pending.hydrationStarted) return;
+    pending.hydrationStarted = true;
+    void this.ensureModelProviderCredential(pending.model).then(
+      () => this.resolvePendingSessionResume(),
+      (error: unknown) => this.rejectPendingSessionResume(
+        error instanceof Error ? error : new Error(String(error)),
+      ),
+    );
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {
@@ -1991,6 +2024,7 @@ export class SessionRuntimeManager {
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
   private readonly lastUsed = new Map<string, number>();
+  private readonly sessionModelHints = new Map<string, string>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly maxCachedRuntimes: number;
   private activeSessionId: string | null = null;
@@ -2051,6 +2085,7 @@ export class SessionRuntimeManager {
       if (!victim) return;
       this.runtimes.delete(victim.sessionId);
       this.lastUsed.delete(victim.sessionId);
+      this.sessionModelHints.delete(victim.sessionId);
       const eviction = victim.dispose()
         .catch((error) => this.opts.diagnostics?.add('warn', 'host', `session cache eviction failed: ${sanitizeDiagnostic(error)}`))
         .finally(() => this.pendingEvictions.delete(eviction));
@@ -2095,7 +2130,7 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -2106,6 +2141,7 @@ export class SessionRuntimeManager {
       return existing;
     }
 
+    if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
     const runtime = new SessionRuntime(runtimeOptions);
     this.runtimes.set(ref.sessionId, runtime);
@@ -2123,12 +2159,13 @@ export class SessionRuntimeManager {
     } catch (error) {
       this.runtimes.delete(ref.sessionId);
       this.lastUsed.delete(ref.sessionId);
+      this.sessionModelHints.delete(ref.sessionId);
       await runtime.dispose().catch(() => undefined);
       throw error;
     }
   }
 
-  openSession(ref: SessionRef, empty = false): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -2140,6 +2177,7 @@ export class SessionRuntimeManager {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       return pending.promise;
     }
+    if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected') {
       this.activate(existing);
       return Promise.resolve(existing);
@@ -2169,24 +2207,25 @@ export class SessionRuntimeManager {
       if (!existing && runtime) {
         this.runtimes.delete(ref.sessionId);
         this.lastUsed.delete(ref.sessionId);
+        this.sessionModelHints.delete(ref.sessionId);
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
     }
   }
 
-  async newSession(projectPath: string, _model?: string): Promise<SessionRef> {
+  async newSession(projectPath: string, model?: string): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
     const pendingDraft = this.openingDraftSessions.get(projectPath);
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      const runtime = await this.ensure(draft, true);
+      const runtime = await this.ensure(draft, true, model);
       this.activate(runtime);
       return { ...draft };
     }
-    const promise = this.allocateDraftSession(projectPath);
+    const promise = this.allocateDraftSession(projectPath, model);
     const trackedPromise = promise.finally(() => {
       if (this.openingDraftSessions.get(projectPath) === trackedPromise) this.openingDraftSessions.delete(projectPath);
     });
@@ -2194,7 +2233,7 @@ export class SessionRuntimeManager {
     return trackedPromise;
   }
 
-  private async allocateDraftSession(projectPath: string): Promise<SessionRef> {
+  private async allocateDraftSession(projectPath: string, model?: string): Promise<SessionRef> {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
@@ -2206,7 +2245,7 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      const runtime = await this.ensure(ref, true);
+      const runtime = await this.ensure(ref, true, model);
       this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
@@ -2233,6 +2272,7 @@ export class SessionRuntimeManager {
     // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
     this.lastUsed.delete(ref.sessionId);
+    this.sessionModelHints.delete(ref.sessionId);
     if (this.activeSessionId === ref.sessionId) this.activeSessionId = null;
     this.clearDraftSession(ref);
     await runtime.dispose();
@@ -2250,6 +2290,7 @@ export class SessionRuntimeManager {
     // runtime whose child is already being torn down.
     for (const runtime of projectRuntimes) this.runtimes.delete(runtime.sessionId);
     for (const runtime of projectRuntimes) this.lastUsed.delete(runtime.sessionId);
+    for (const runtime of projectRuntimes) this.sessionModelHints.delete(runtime.sessionId);
     if (projectRuntimes.some((runtime) => runtime.sessionId === this.activeSessionId)) this.activeSessionId = null;
     try {
       await Promise.all(projectRuntimes.map((runtime) => runtime.dispose()));
@@ -2291,6 +2332,7 @@ export class SessionRuntimeManager {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
     this.lastUsed.clear();
+    this.sessionModelHints.clear();
     this.activeSessionId = null;
     this.openingSessions.clear();
     this.draftSessions.clear();
@@ -2365,9 +2407,12 @@ export class SessionRuntimeManager {
       projectPath: ref.projectPath,
       envelopeEvents: true,
       registerIpc: false,
-      launchConfig: () => launchConfig(ref),
+      launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
-      ...(onModelChanged ? { onModelChanged: (model: string) => onModelChanged(ref, model) } : {}),
+      onModelChanged: (model: string) => {
+        this.sessionModelHints.set(ref.sessionId, model);
+        onModelChanged?.(ref, model);
+      },
       onActivityChanged: () => this.scheduleCacheTrim(ref.sessionId),
       onFirstPromptSent: () => {
         if (!onFirstPromptSent) {

@@ -6287,6 +6287,8 @@ mod tests {
             path: PathBuf::from("x.jsonl"),
             pr_number: None,
             custom_or_ai_title: Some("shared".to_string()),
+            resume_model: None,
+            resume_model_profile: None,
         };
         let matches = vec![row(2, 1_700_000_001), row(1, 1_700_000_000)];
         assert_eq!(
@@ -6316,6 +6318,8 @@ mod tests {
             path: PathBuf::from(format!("{id}.jsonl")),
             pr_number: None,
             custom_or_ai_title: Some(searchable.to_string()),
+            resume_model: None,
+            resume_model_profile: None,
         }
     }
 

@@ -86,6 +86,12 @@ pub struct SessionMetadata {
     /// `None` when the session has neither title kind, which the oracle skips
     /// outright (`if (!p) return !1`).
     pub custom_or_ai_title: Option<String>,
+    /// Last real assistant model recovered from the transcript. This stays
+    /// private to launch/catalog consumers and is not part of the public
+    /// session listing protocol.
+    pub resume_model: Option<String>,
+    /// Provider profile persisted beside [`Self::resume_model`].
+    pub resume_model_profile: Option<String>,
 }
 
 /// A resumable-session catalog plus the number of UUID-named transcript files
@@ -812,6 +818,7 @@ async fn enrich_candidate_uncached(
         .get(sid)
         .and_then(|value| SessionMode::from_str(value))
         .unwrap_or(SessionMode::Code);
+    let (resume_model, resume_model_profile) = persisted_model_ref(&loaded, tip);
 
     Ok(Some(SessionMetadata {
         uuid,
@@ -828,7 +835,73 @@ async fn enrich_candidate_uncached(
         mode,
         path,
         pr_number,
+        resume_model,
+        resume_model_profile,
     }))
+}
+
+/// Recover the same last real assistant model/profile pair used by resume.
+/// Synthetic assistant rows never replace the model; an explicit profile
+/// field remains last-write-wins, including `null` clearing an older profile.
+fn persisted_model_ref(
+    loaded: &LoadedTranscript,
+    tip: Option<&JsonlMessage>,
+) -> (Option<String>, Option<String>) {
+    let mut model = None;
+    let mut profile = None;
+    let mut profile_seen = false;
+    let mut seen = HashSet::new();
+    let reparent = preserved_tail_reparents(loaded);
+    let mut current = tip;
+    while let Some(message) = current {
+        if !seen.insert(message.uuid.as_str()) {
+            break;
+        }
+        if message.message_type == "assistant" {
+            if model.is_none() {
+                model = message
+                    .message
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= 256
+                            && !value.contains('\0')
+                            && !(value.starts_with('<') && value.ends_with('>'))
+                    })
+                    .map(str::to_owned);
+            }
+            if !profile_seen {
+                if let Some(value) = message.extra.get("modelProfile") {
+                    profile = value
+                        .as_str()
+                        .filter(|profile| valid_provider_profile(profile))
+                        .map(str::to_owned);
+                    profile_seen = true;
+                }
+            }
+            if model.is_some() && profile_seen {
+                break;
+            }
+        }
+        let parent = reparent
+            .get(message.uuid.as_str())
+            .map(String::as_str)
+            .or(message.parent_uuid.as_deref());
+        current = parent.and_then(|parent| loaded.by_uuid.get(parent));
+    }
+    (model, profile)
+}
+
+fn valid_provider_profile(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    value.bytes().enumerate().all(|(index, byte)| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+    })
 }
 
 /// Cheap first-line hide for the resume picker. Matches the first-message
@@ -3118,6 +3191,8 @@ mod tests {
             path: PathBuf::from("z.jsonl"),
             pr_number: None,
             custom_or_ai_title: None,
+            resume_model: None,
+            resume_model_profile: None,
         };
         let newer = SessionMetadata {
             uuid: Uuid::from_u128(2),
@@ -3129,6 +3204,8 @@ mod tests {
             path: PathBuf::from("a.jsonl"),
             pr_number: None,
             custom_or_ai_title: None,
+            resume_model: None,
+            resume_model_profile: None,
         };
         // Insert oldest-created first to prove the sort (not insertion order)
         // drives the result.
@@ -3193,6 +3270,8 @@ mod tests {
             path: PathBuf::from(format!("{id}.jsonl")),
             pr_number: None,
             custom_or_ai_title: searchable.map(str::to_string),
+            resume_model: None,
+            resume_model_profile: None,
         }
     }
 

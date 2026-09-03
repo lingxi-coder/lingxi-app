@@ -71,6 +71,8 @@ fn session_metadata_parity() {
         // Search-only field; `lower_session_metadata` does not map it, so the
         // DTO assertions below are unaffected by its value.
         custom_or_ai_title: Some("hello".to_string()),
+        resume_model: None,
+        resume_model_profile: None,
     };
 
     let dto = lower_session_metadata(&meta);

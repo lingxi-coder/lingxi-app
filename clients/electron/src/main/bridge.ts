@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
@@ -344,6 +344,26 @@ function argumentBetween(command: string, start: string, end: string): string | 
   return value || undefined;
 }
 
+function processCommandArgument(command: string, name: string): string | undefined {
+  const marker = ` --${name} `;
+  const startIndex = command.indexOf(marker);
+  if (startIndex < 0) return undefined;
+  const valueStart = startIndex + marker.length;
+  const nextFlag = command.indexOf(' --', valueStart);
+  const value = command.slice(valueStart, nextFlag < 0 ? undefined : nextFlag).trim();
+  return value || undefined;
+}
+
+function processCommandHasFlag(command: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)--${escaped}(?=\\s|$)`).test(command);
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
+}
+
 export function discoverExternalReusableBridge(
   ref: SessionRef,
   processes: readonly ProcessCommand[] = listProcessCommands(),
@@ -362,6 +382,96 @@ export function discoverExternalReusableBridge(
     if (reusable) return reusable;
   }
   return undefined;
+}
+
+/**
+ * Find only pre-broker Desktop bridges that launchd inherited after their
+ * parent exited. Current packaged bridges always carry the stdin-only marker;
+ * constraining candidates to this private Desktop root avoids terminating CLI,
+ * TUI, test, or another app installation's background sessions.
+ */
+export function discoverLegacyOrphanBridges(
+  bridgeRoot: string,
+  processes: readonly ProcessCommand[] = listProcessCommands(),
+): ReusableBridge[] {
+  if (!privateOwnedPath(bridgeRoot, 'directory')) return [];
+  const candidates: ReusableBridge[] = [];
+  const seen = new Set<number>();
+  for (const processInfo of processes) {
+    if (processInfo.ppid !== 1 || seen.has(processInfo.pid)) continue;
+    if (processCommandHasFlag(processInfo.command, 'packaged-credential-stdin-only')) continue;
+    const workspace = processCommandArgument(processInfo.command, 'cwd');
+    const launchDir = processCommandArgument(processInfo.command, 'bridge-dir');
+    const sessionId = processCommandArgument(processInfo.command, 'session-id');
+    if (!workspace || !launchDir || !sessionId || !isSessionId(sessionId)) continue;
+    if (!pathIsWithin(bridgeRoot, launchDir)) continue;
+    if (!processCommandOwnsSession(processInfo.command, sessionId)) continue;
+    const reusable = reusableBridgeInLaunchDirectory(
+      launchDir,
+      { projectPath: workspace, sessionId },
+      processInfo.pid,
+      true,
+    );
+    if (!reusable) continue;
+    seen.add(processInfo.pid);
+    candidates.push(reusable);
+  }
+  return candidates;
+}
+
+interface StopLegacyOrphanBridgesOptions {
+  processes?: readonly ProcessCommand[];
+  signalProcess?: (pid: number, signal: NodeJS.Signals) => boolean;
+  processIsAlive?: (pid: number) => boolean;
+  wait?: (milliseconds: number) => Promise<void>;
+  stopTimeoutMs?: number;
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export async function stopLegacyOrphanBridges(
+  bridgeRoot: string,
+  options: StopLegacyOrphanBridgesOptions = {},
+): Promise<number[]> {
+  const signalProcess = options.signalProcess ?? signalProcessGroup;
+  const isAlive = options.processIsAlive ?? processIsAlive;
+  const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolveWait) => {
+    const timer = setTimeout(resolveWait, milliseconds);
+    timer.unref();
+  }));
+  const stopped: number[] = [];
+  for (const candidate of discoverLegacyOrphanBridges(bridgeRoot, options.processes)) {
+    if (!signalProcess(candidate.pid, 'SIGINT')) continue;
+    const deadline = Date.now() + (options.stopTimeoutMs ?? 1_000);
+    while (isAlive(candidate.pid) && Date.now() < deadline) await wait(50);
+    if (isAlive(candidate.pid)) {
+      signalProcess(candidate.pid, 'SIGKILL');
+      await wait(25);
+    }
+    if (!isAlive(candidate.pid)) stopped.push(candidate.pid);
+  }
+  return stopped;
 }
 
 function urlOrigin(raw: string): string | undefined {
@@ -1808,12 +1918,7 @@ export class SessionRuntime {
   }
 
   private processIsAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
+    return processIsAlive(pid);
   }
 
   private async stopAdoptedBridge(pid: number): Promise<void> {

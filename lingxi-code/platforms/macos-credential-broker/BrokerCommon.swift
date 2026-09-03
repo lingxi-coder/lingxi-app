@@ -258,6 +258,27 @@ func validateStaticCode(
     }
 }
 
+func codeDirectoryHash(at url: URL) throws -> Data {
+    var staticCode: SecStaticCode?
+    let createStatus = SecStaticCodeCreateWithPath(url as CFURL, SecCSFlags(), &staticCode)
+    guard createStatus == errSecSuccess, let staticCode else {
+        throw BrokerFailure.permission(securityMessage(createStatus, action: "read code directory hash"))
+    }
+    var info: CFDictionary?
+    let infoStatus = SecCodeCopySigningInformation(
+        staticCode,
+        SecCSFlags(rawValue: kSecCSSigningInformation),
+        &info
+    )
+    guard infoStatus == errSecSuccess,
+          let info = info as? [String: Any],
+          let hash = info[kSecCodeInfoUnique as String] as? Data,
+          !hash.isEmpty else {
+        throw BrokerFailure.permission(securityMessage(infoStatus, action: "read code directory hash"))
+    }
+    return hash
+}
+
 func compareSemanticVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
     let left = parseSemanticVersion(lhs)
     let right = parseSemanticVersion(rhs)

@@ -9,10 +9,12 @@ import { BridgeClient } from '@lingxi/bridge-client';
 import {
   BridgeManager,
   discoverExternalReusableBridge,
+  discoverLegacyOrphanBridges,
   discoverReusableBridge,
   processCommandOwnsSession,
   SessionRuntime,
   SessionRuntimeManager,
+  stopLegacyOrphanBridges,
 } from '../src/main/bridge';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
@@ -428,6 +430,96 @@ test('process command matching does not accept a session id prefix or another fl
     `/bridge-server --label ${sessionId} --trusted-workspace`,
     sessionId,
   ), false);
+});
+
+test('legacy orphan discovery is limited to the current private Desktop bridge root', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-legacy');
+  const workspace = '/workspace';
+  const sessionId = '55555555-aaaa-4bbb-8ccc-dddddddddddd';
+  const pid = 43_127;
+  mkdirSync(launchDir, { mode: 0o700 });
+  const lockfilePath = join(launchDir, '43127.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const legacyCommand = `/bridge-server --cwd ${workspace} --bridge-dir ${launchDir} --session-id ${sessionId} --trusted-workspace`;
+
+  try {
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{ pid, ppid: 1, command: legacyCommand }]),
+      [{ launchDir, lockfilePath, pid, ownedProcess: true }],
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{ pid, ppid: 42, command: legacyCommand }]),
+      [],
+      'a bridge with a live parent remains owned by that host',
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{
+        pid,
+        ppid: 1,
+        command: `${legacyCommand} --packaged-credential-stdin-only`,
+      }]),
+      [],
+      'a current stdin-only packaged bridge is never considered legacy',
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{
+        pid,
+        ppid: 1,
+        command: legacyCommand.replace(launchDir, join(bridgeRoot, '..', 'outside-root')),
+      }]),
+      [],
+      'a bridge outside this Desktop installation is out of scope',
+    );
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
+test('legacy orphan cleanup gracefully stops only validated legacy candidates', async () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-legacy');
+  const workspace = '/workspace';
+  const sessionId = '44444444-aaaa-4bbb-8ccc-dddddddddddd';
+  const pid = 43_128;
+  mkdirSync(launchDir, { mode: 0o700 });
+  writeFileSync(join(launchDir, '43128.lock'), JSON.stringify({
+    pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  let alive = true;
+
+  try {
+    assert.deepEqual(await stopLegacyOrphanBridges(bridgeRoot, {
+      processes: [{
+        pid,
+        ppid: 1,
+        command: `/bridge-server --cwd ${workspace} --bridge-dir ${launchDir} --session-id ${sessionId}`,
+      }],
+      signalProcess: (targetPid, signal) => {
+        signals.push({ pid: targetPid, signal });
+        alive = false;
+        return true;
+      },
+      processIsAlive: () => alive,
+      wait: async () => undefined,
+    }), [pid]);
+    assert.deepEqual(signals, [{ pid, signal: 'SIGINT' }]);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
 });
 
 test('opening a session adopts its detached bridge instead of spawning a duplicate UUID', async () => {

@@ -573,8 +573,10 @@ test('the permission dialog keeps the compact macOS hierarchy without changing i
 
   assert.match(html, /aria-labelledby="lingxi-permission-title"/);
   assert.match(html, /<h2[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h2>/);
-  assert.match(html, /class="permission-prompt-titlebar"/);
-  assert.match(html, /class="permission-prompt-content"/);
+  assert.match(html, /class="desktop-dialog-header"/);
+  assert.match(html, /class="desktop-dialog-body"/);
+  assert.match(html, /class="permission-prompt-request-card"/);
+  assert.match(html, /id="lingxi-permission-risk"/);
   assert.doesNotMatch(html, />Permission request</);
   assert.doesNotMatch(html, />Requested input</);
   assert.match(
@@ -614,6 +616,9 @@ test('session prompts are non-modal and do not install a global Tab trap', () =>
   ];
   for (const html of rendered) {
     assert.match(html, /role="dialog"/);
+    assert.match(html, /class="desktop-dialog-overlay"/);
+    assert.match(html, /class="desktop-dialog-panel desktop-dialog-panel--/);
+    assert.match(html, /class="desktop-dialog-actions"/);
     assert.doesNotMatch(html, /aria-modal=/);
   }
 
@@ -621,7 +626,24 @@ test('session prompts are non-modal and do not install a global Tab trap', () =>
     const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /document\.addEventListener\(['"]keydown['"]/);
     assert.doesNotMatch(source, /event\.key !== ['"]Tab['"]/);
-    assert.match(source, /onKeyDown=/);
+    assert.match(source, /<DesktopDialog/);
+    assert.match(source, /onEscape=/);
+  }
+  const dialogSource = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
+  assert.match(dialogSource, /onKeyDown=/);
+});
+
+test('session interaction prompts share the global Desktop dialog shell', () => {
+  const shell = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
+  assert.match(shell, /desktop-dialog-overlay/);
+  assert.match(shell, /desktop-dialog-panel/);
+  assert.match(shell, /desktop-dialog-footer/);
+  assert.match(shell, /desktop-dialog-action--/);
+
+  for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
+    const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
+    assert.match(source, /DesktopDialogActions/);
+    assert.match(source, /DesktopDialogButton/);
   }
 });
 

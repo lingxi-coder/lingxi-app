@@ -13,11 +13,13 @@
  * request is pending.
  */
 
-import { useEffect, useRef, type CSSProperties } from 'react';
+import { useEffect, useRef } from 'react';
 import type { PermissionRequest } from '@lingxi/bridge-client';
 // Subpath, not the barrel — see the note in `bridge/conversation.ts`.
 import { redactSensitiveText } from '@lingxi/bridge-client/toolview';
 import { useT } from '../theme/ThemeContext';
+import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
+import { Icon } from './Icon';
 
 /**
  * Execution-bearing keys, shown FIRST. These are what the user is actually
@@ -78,6 +80,9 @@ export function permissionDetail(toolInputJson: string): string {
 
 interface PermissionDescription {
   title: string;
+  summary: string;
+  detailLabel: string;
+  detailCaption: string;
   detail: string;
 }
 
@@ -88,6 +93,9 @@ function describe(request: PermissionRequest): PermissionDescription {
     case 'tool_use_confirm':
       return {
         title: `Allow ${kind.tool_name}?`,
+        summary: `LingXi wants to use ${kind.tool_name}. Review the requested input before continuing.`,
+        detailLabel: 'Requested action',
+        detailCaption: kind.tool_name,
         // The FULL redacted payload — never a preview, and never a single
         // probed key. This dialog is a security decision, so showing MORE is
         // the safe failure mode; see `permissionDetail`.
@@ -96,20 +104,39 @@ function describe(request: PermissionRequest): PermissionDescription {
     case 'exit_plan_mode':
       return {
         title: 'Exit plan mode and proceed?',
+        summary: 'LingXi wants to leave plan mode and begin working from this plan.',
+        detailLabel: 'Plan to execute',
+        detailCaption: 'May run commands or modify files',
         detail: kind.plan,
       };
     case 'bypass_permissions_mode':
       return {
         title: 'Enable bypass-permissions mode?',
+        summary: 'LingXi will be able to act without asking for further confirmation.',
+        detailLabel: 'Permission scope',
+        detailCaption: 'Commands, files, and connected services',
         detail: 'The agent will act without asking for further confirmation.',
       };
     default:
       // Exhaustiveness guard — a new kind shows a generic prompt rather than nothing.
       return {
         title: 'Permission requested',
+        summary: 'LingXi needs your approval before it can continue.',
+        detailLabel: 'Requested action',
+        detailCaption: 'Current session',
         detail: '',
       };
   }
+}
+
+function requestIcon(request: PermissionRequest): string {
+  if (request.kind.type === 'exit_plan_mode') return 'tasks';
+  if (request.kind.type === 'bypass_permissions_mode') return 'shieldAlert';
+  if (request.kind.type !== 'tool_use_confirm') return 'box';
+  const name = request.kind.tool_name.toLowerCase();
+  if (/(bash|shell|terminal|command|exec)/.test(name)) return 'terminal';
+  if (/(read|write|edit|file|folder)/.test(name)) return 'file';
+  return 'box';
 }
 
 export interface PermissionPromptProps {
@@ -137,105 +164,103 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
   }, [request]);
   if (!request) return null;
 
-  const { title, detail } = describe(request);
+  const description = describe(request);
+  const { title, summary, detailLabel, detailCaption, detail } = description;
   const worker = request.worker;
   const showPersistentRule = !request.suppress_always_allow_rule && !request.auto_mode_prompt;
   const showAutoMode = Boolean(request.auto_mode_prompt && !request.suppress_always_allow_rule);
-  const themeVariables = {
-    '--permission-overlay': 'rgba(0, 0, 0, .32)',
-    '--permission-window': t.windowBg,
-    '--permission-surface': t.surface,
-    '--permission-surface-hover': t.surfaceHover,
-    '--permission-border': t.border,
-    '--permission-border-strong': t.borderStrong,
-    '--permission-text': t.text,
-    '--permission-text-2': t.text2,
-    '--permission-text-3': t.text3,
-    '--permission-accent': t.accent,
-    '--permission-accent-border': t.accentBorder,
-    '--permission-danger': t.danger,
-  } as CSSProperties;
+  const elevatedRisk = request.kind.type === 'bypass_permissions_mode';
+  const riskCopy = elevatedRisk
+    ? 'This can expose or modify sensitive data. Continue only if you trust the current session.'
+    : showAutoMode
+      ? 'Auto mode can approve future actions without asking. Review the requested scope carefully.'
+      : showPersistentRule
+        ? '“Allow matching actions” saves a rule for this workspace. Use it only when you trust future matching requests.'
+        : 'This decision applies only to the current request.';
 
   return (
-    <div
-      className="permission-prompt-overlay"
-      style={themeVariables}
+    <DesktopDialog
+      title={title}
+      summary={summary}
+      icon={elevatedRisk ? 'shieldAlert' : 'hand'}
+      size="wide"
+      tone={elevatedRisk ? 'danger' : 'default'}
+      titleId="lingxi-permission-title"
+      summaryId="lingxi-permission-summary"
+      ariaLabelledBy="lingxi-permission-title"
+      ariaDescribedBy={`lingxi-permission-summary${detail ? ' lingxi-permission-detail' : ''} lingxi-permission-risk`}
+      className="permission-prompt-panel"
+      onFocusCapture={() => { promptHasFocus.current = true; }}
+      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+      onEscape={() => onDeny(request.request_id)}
+      footer={(
+        <DesktopDialogActions>
+          <DesktopDialogButton
+            variant="cancel"
+            onClick={() => onDeny(request.request_id)}
+          >
+            Deny
+          </DesktopDialogButton>
+          {showPersistentRule && (
+            <DesktopDialogButton
+              variant="secondary"
+              onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
+            >
+              Allow matching actions
+            </DesktopDialogButton>
+          )}
+          {showAutoMode && (
+            <DesktopDialogButton
+              variant="secondary"
+              onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
+            >
+              {request.auto_mode_prompt === 'workflow_bash'
+                ? 'Yes, and switch to auto mode'
+                : 'Yes, and use auto mode'}
+            </DesktopDialogButton>
+          )}
+          <DesktopDialogButton
+            ref={primaryRef}
+            variant="primary"
+            onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
+          >
+            Allow once
+          </DesktopDialogButton>
+        </DesktopDialogActions>
+      )}
     >
-      <div
-        role="dialog"
-        aria-labelledby="lingxi-permission-title"
-        aria-describedby={detail ? 'lingxi-permission-detail' : undefined}
-        className="permission-prompt-panel"
-        onFocusCapture={() => { promptHasFocus.current = true; }}
-        onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
-        onKeyDown={(event) => {
-          if (event.key !== 'Escape') return;
-          event.preventDefault();
-          onDeny(request.request_id);
-        }}
-      >
-        <header className="permission-prompt-titlebar">
-          <h2 id="lingxi-permission-title">{title}</h2>
-        </header>
-
-        <section className="permission-prompt-content">
+      <div className="permission-prompt-request-card">
+        <div className="permission-prompt-request-heading">
+          <span className="permission-prompt-request-icon" aria-hidden="true">
+            <Icon name={requestIcon(request)} size={20} stroke={1.7} />
+          </span>
+          <span className="permission-prompt-request-copy">
+            <strong>{detailLabel}</strong>
+            <small>{detailCaption}</small>
+          </span>
           {worker && (
-            <div className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
+            <span className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
               <span style={{ background: worker.color || t.text3 }} />
               {worker.name}
               {worker.team ? ` · ${worker.team}` : ''}
-            </div>
+            </span>
           )}
-          {detail && (
-            <div
-              id="lingxi-permission-detail"
-              className="permission-prompt-detail mono"
-            >
-              {detail}
-            </div>
-          )}
-        </section>
+        </div>
 
-        <footer className="permission-prompt-footer">
-          <div className="permission-prompt-actions">
-            <button
-              type="button"
-              className="permission-prompt-action permission-prompt-action--deny"
-              onClick={() => onDeny(request.request_id)}
-            >
-              Deny
-            </button>
-            {showPersistentRule && (
-              <button
-                type="button"
-                className="permission-prompt-action permission-prompt-action--secondary"
-                onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
-              >
-                Allow matching actions
-              </button>
-            )}
-            {showAutoMode && (
-              <button
-                type="button"
-                className="permission-prompt-action permission-prompt-action--secondary"
-                onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
-              >
-                {request.auto_mode_prompt === 'workflow_bash'
-                  ? 'Yes, and switch to auto mode'
-                  : 'Yes, and use auto mode'}
-              </button>
-            )}
-            <button
-              ref={primaryRef}
-              type="button"
-              className="permission-prompt-action permission-prompt-action--primary"
-              onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
-            >
-              Allow once
-            </button>
+        {detail && (
+          <div
+            id="lingxi-permission-detail"
+            className="permission-prompt-detail mono"
+          >
+            {detail}
           </div>
-        </footer>
+        )}
       </div>
-    </div>
+
+      <p id="lingxi-permission-risk" className="permission-prompt-risk">
+        <Icon name="info" size={16} stroke={1.7} />
+        <span>{riskCopy}</span>
+      </p>
+    </DesktopDialog>
   );
 }

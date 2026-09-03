@@ -1351,10 +1351,25 @@ where
 
         // `args` global (the Workflow tool's `args` input / a `workflow()` call's
         // args). Set BEFORE the prelude so its `if (!('args' in globalThis))`
-        // default is skipped. The value is already a JSON string (a valid JS
-        // initializer).
+        // default is skipped.
+        //
+        // Parsed with `JSON.parse`, NOT interpolated as an object literal. The
+        // two are not equivalent: in a literal, `__proto__` is a PROTOTYPE
+        // SETTER, not an own property. Splicing caller JSON in directly meant
+        // `{"__proto__": {"x": 1}}` gave an `args` whose `Object.keys` and
+        // `hasOwnProperty` both showed nothing while `args.x` still read back
+        // `1` — so a script that allow-lists its input by enumerating keys
+        // passes values it never saw. `JSON.parse` treats the key as ordinary
+        // data, so enumeration and property access agree again.
+        //
+        // The JSON is re-encoded as a JS STRING literal, which also removes the
+        // "is this JSON also a valid JS expression" question the old comment
+        // rested on.
         if let Some(args_json) = &args {
-            ctx.eval::<(), _>(format!("globalThis.args = {args_json};").as_bytes())
+            let literal = serde_json::to_string(args_json).map_err(|e| {
+                WorkflowError::Engine(format!("could not encode workflow args: {e}"))
+            })?;
+            ctx.eval::<(), _>(format!("globalThis.args = JSON.parse({literal});").as_bytes())
                 .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         }
 

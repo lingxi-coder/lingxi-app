@@ -188,8 +188,8 @@ export function DesktopCommandPalette({
       {
         id: 'open-provider-credentials',
         title: '打开 Provider 凭据',
-        description: '编辑安全存储、API base URL 与模型相关联的密钥。',
-        keywords: ['provider', 'credential', 'keychain', 'apiBaseUrl'],
+        description: '管理内置 Provider 安全存储的 API Key。',
+        keywords: ['provider', 'credential', 'keychain', 'api key'],
         kind: 'local',
         run: () => onOpenSettingsPage('provider-credentials'),
       },

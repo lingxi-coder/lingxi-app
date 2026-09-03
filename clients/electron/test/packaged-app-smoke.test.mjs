@@ -7,6 +7,7 @@ import { afterEach, test } from 'node:test';
 import {
   APP_USER_DATA_SUBPATH,
   createPackagedSettings,
+  isExpectedBootstrapPromptPlaceholder,
   isSafeProviderCredentialSnapshot,
   runtimePathsForHome,
   sanitizePackagedAppEnvironment,
@@ -77,6 +78,12 @@ test('packaged bootstrap accepts configured providers but rejects secret-bearing
     { providerId: 'openai', configured: true, encryptionAvailable: true, apiKey: 'secret' },
   ]), false);
   assert.equal(isSafeProviderCredentialSnapshot(undefined), false);
+});
+
+test('packaged renderer accepts both expected pre-ready credential states', () => {
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Connect a provider in Settings to start coding…'), true);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Waiting for the local engine…'), true);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Ready'), false);
 });
 
 test('packaged settings preseed a trusted active project without secrets', () => {

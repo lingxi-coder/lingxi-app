@@ -19,6 +19,12 @@ async function waitFor(webContents, expression, timeout = 8000) {
 }
 
 async function runCloseScenario(webContents) {
+  await webContents.executeJavaScript('window.__settingsTransactionTest.startConnectionTest()');
+  await waitFor(webContents, 'window.__settingsTransactionTest.connectionTestErrorVisible()');
+  const connectionTestErrorBeforeDelete = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestErrorVisible()');
+  await webContents.executeJavaScript('window.__settingsTransactionTest.clearStoredCredential()');
+  await waitFor(webContents, '!window.__settingsTransactionTest.connectionTestErrorVisible()');
+  const connectionTestErrorAfterDelete = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestErrorVisible()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.startSave()');
   await waitFor(webContents, 'window.__settingsTransactionTest.state().persistencePending');
   const busyState = await webContents.executeJavaScript(`({
@@ -33,7 +39,7 @@ async function runCloseScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsTransactionTest.resolvePersistence()');
   await waitFor(webContents, '!window.__settingsTransactionTest.state().persistencePending');
   const afterLateResult = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
-  return { busyState, afterClose, afterLateResult };
+  return { connectionTestErrorBeforeDelete, connectionTestErrorAfterDelete, busyState, afterClose, afterLateResult };
 }
 
 async function runRecoveryScenario(webContents) {

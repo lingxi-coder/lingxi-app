@@ -57,6 +57,13 @@ test('search finds a page by a settings key it owns', () => {
   );
 });
 
+test('base URL search belongs to custom providers, not built-in credentials', () => {
+  assert.deepEqual(
+    searchNav('baseUrl').map((page) => page.id),
+    ['custom-providers'],
+  );
+});
+
 test('search finds nothing for a key no page declares', () => {
   assert.deepEqual(
     searchNav('zzzzz-not-a-setting'), [],

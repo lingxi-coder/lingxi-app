@@ -9,9 +9,9 @@ import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 /**
  * Whether a failing host IPC call reaches the page that asked for it.
  *
- * Every settings page renders its own inline error by hanging a `.catch()`
- * off a `bridge.*` method — `ProviderCredentials`' `apiBaseUrlError` row,
- * `Plugins`' `saveError`, `Projects`' `error`, `RawJson`'s `saveError`. All
+ * Settings pages render inline errors by hanging a `.catch()` off a
+ * `bridge.*` method — for example `Plugins`' `saveError`, `Projects`'
+ * `error`, and `RawJson`'s `saveError`. All
  * of them depend on one thing being true of `useBridge`'s private `capture`
  * helper: it sets the global `error` AND RETHROWS. If it ever stopped
  * rethrowing, every one of those rows would go silent at once — the write
@@ -48,10 +48,9 @@ function bridgeWithHost(host: Record<string, unknown>): UseBridge {
   return captured as unknown as UseBridge;
 }
 
-test('a rejected host updateSettings reaches the caller, so the API base URL row can show it', async () => {
-  // The scenario: a turn is in flight and the user edits the custom API base
-  // URL. `host.ts`'s `assertNoActiveTurn` throws, because changing
-  // `apiBaseUrl` restarts the bridge.
+test('a rejected legacy API base URL update reaches its caller', async () => {
+  // The setter remains for backward-compatible callers even though built-in
+  // Provider settings no longer expose a custom endpoint editor.
   const bridge = bridgeWithHost({
     updateSettings: async () => { throw new Error('A turn is in progress.'); },
   });
@@ -59,8 +58,7 @@ test('a rejected host updateSettings reaches the caller, so the API base URL row
   await assert.rejects(
     () => bridge.setApiBaseUrl('https://example.test'),
     /A turn is in progress\./,
-    'ProviderCredentials renders its apiBaseUrlError from a `.catch()` on this promise; '
-    + 'if it resolves, the row silently shows nothing and the save silently does nothing',
+    'capture must rethrow host update failures to every bridge caller',
   );
 });
 

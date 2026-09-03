@@ -204,6 +204,11 @@ const SAFE_CREDENTIAL_METADATA_KEYS = new Set([
   'providerId',
 ]);
 
+const SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS = new Set([
+  'Connect a provider in Settings to start coding…',
+  'Waiting for the local engine…',
+]);
+
 export function isSafeProviderCredentialSnapshot(providerCredentials) {
   return Array.isArray(providerCredentials)
     && providerCredentials.length > 0
@@ -217,6 +222,10 @@ export function isSafeProviderCredentialSnapshot(providerCredentials) {
         && entry.credentialPreview.startsWith('••••')
         && Array.from(entry.credentialPreview.slice(4)).length <= 4;
     });
+}
+
+export function isExpectedBootstrapPromptPlaceholder(placeholder) {
+  return SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS.has(placeholder);
 }
 
 function writeJson(path, value) {
@@ -549,7 +558,11 @@ async function assertRendererContract(page, leakPatterns) {
   assert.match(details.bodyText, /CODE/);
   assert.match(details.bodyText, /Projects/);
   assert.match(details.bodyText, /workspace/);
-  assert.equal(details.promptPlaceholder, 'Connect a provider in Settings to start coding…');
+  assert.equal(
+    isExpectedBootstrapPromptPlaceholder(details.promptPlaceholder),
+    true,
+    `unexpected pre-ready prompt placeholder: ${details.promptPlaceholder}`,
+  );
   assert.doesNotMatch(details.bodyText, /MLPlatform|Dispatching Task 1|Placeholder for the desktop mock/);
   const leaks = collectLeakMatches(details.bodyText, leakPatterns);
   assert.equal(leaks.length, 0, `renderer leaked forbidden content: ${leaks.map((pattern) => pattern.source).join(', ')}`);

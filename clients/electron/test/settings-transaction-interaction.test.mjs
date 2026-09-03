@@ -61,6 +61,8 @@ test('Settings can close during pending credential persistence and ignores the l
       });
     });
 
+    assert.equal(result.connectionTestErrorBeforeDelete, true);
+    assert.equal(result.connectionTestErrorAfterDelete, false);
     assert.deepEqual(result.busyState, {
       closeDisabled: false,
       state: { persistencePending: true, restartCalls: 0, restartTargets: [], restartAttempts: [], restartErrors: 0, closeCalls: 0, activeSessionId: 'session-a', activeWork: false },

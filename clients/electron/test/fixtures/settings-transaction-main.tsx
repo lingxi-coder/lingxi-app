@@ -34,7 +34,7 @@ const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
     runtimes: [],
     projectCatalogs: {},
-    providerCredentials: [{ providerId: 'anthropic', configured: false, encryptionAvailable: true }],
+    providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true, credentialPreview: '••••test' }],
     connection: { status: 'connected' as const },
     diagnostics: [],
   },
@@ -64,6 +64,7 @@ const bridge = {
   },
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
+  testProviderConnection: async () => { throw new Error('test credential rejected'); },
   refreshProviderCredential: async () => undefined,
   setApiBaseUrl: async () => undefined,
   copyDiagnostics: async () => undefined,
@@ -80,8 +81,8 @@ function Fixture() {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, 'sk-pending-save');
         input?.dispatchEvent(new Event('input', { bubbles: true }));
-        const connect = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '连接');
-        connect?.click();
+        const save = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '保存');
+        save?.click();
       },
       resolvePersistence: () => {
         resolvePersistence?.({ credential: { providerId: 'anthropic', configured: true, encryptionAvailable: true }, settings: bridge.bootstrap.settings });
@@ -100,6 +101,15 @@ function Fixture() {
         const retry = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '重试引擎连接');
         retry?.click();
       },
+      startConnectionTest: () => {
+        const test = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '测试连接');
+        test?.click();
+      },
+      clearStoredCredential: () => {
+        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '删除 API Key');
+        remove?.click();
+      },
+      connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),
       state: () => ({ persistencePending, restartCalls, restartTargets: [...restartTargets], restartAttempts: [...restartAttempts], restartErrors, closeCalls, activeSessionId, activeWork }),
     };
     return () => { delete window.__settingsTransactionTest; };
@@ -128,6 +138,9 @@ declare global {
       switchSessionAndStartWork(): void;
       setSessionState(sessionId: string, work: boolean): void;
       clickRetry(): void;
+      startConnectionTest(): void;
+      clearStoredCredential(): void;
+      connectionTestErrorVisible(): boolean;
       state(): { persistencePending: boolean; restartCalls: number; restartTargets: string[]; restartAttempts: string[]; restartErrors: number; closeCalls: number; activeSessionId: string; activeWork: boolean };
     };
   }

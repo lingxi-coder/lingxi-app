@@ -25,10 +25,10 @@ export function initialProviderSelection(initialProviderId?: string): string {
 }
 
 export type CredentialStatusKind = 'runtime' | 'secure' | 'fallback-configured' | 'fallback-unconfigured' | 'unavailable' | 'none';
-export type ProviderConnectionKind = 'connected' | 'runtime' | 'disconnected' | 'unavailable' | 'unknown';
+export type ProviderCredentialStatusKind = 'configured' | 'runtime' | 'unconfigured' | 'unavailable';
 
-export interface ProviderConnectionStatus {
-  kind: ProviderConnectionKind;
+export interface ProviderCredentialStatus {
+  kind: ProviderCredentialStatusKind;
   label: string;
 }
 
@@ -47,39 +47,23 @@ export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata,
   return 'none';
 }
 
-/** The list reports engine-authoritative credential state, never edit selection. */
-export function providerConnectionStatus(
+/** The list reports authoritative credential configuration, not a persistent network connection. */
+export function providerCredentialStatus(
   metadata: Pick<ProviderCredentialMetadata, 'configured' | 'runtimeOnly' | 'storageError'> | undefined,
-  engineConnected: boolean,
   providerAvailable: boolean,
-): ProviderConnectionStatus {
+): ProviderCredentialStatus {
   if (!providerAvailable) return { kind: 'unavailable', label: 'CLI / TUI' };
   if (metadata?.storageError) return { kind: 'unavailable', label: '安全存储不可用' };
-  if (!engineConnected) return { kind: 'unknown', label: '状态不可用' };
-  if (metadata?.runtimeOnly) return { kind: 'runtime', label: '运行时连接' };
-  if (metadata?.configured) return { kind: 'connected', label: '已连接' };
-  return { kind: 'disconnected', label: '未连接' };
+  if (metadata?.runtimeOnly) return { kind: 'runtime', label: '仅运行时' };
+  if (metadata?.configured) return { kind: 'configured', label: '已配置' };
+  return { kind: 'unconfigured', label: '未配置' };
 }
 
-/**
- * The connect/replace/use-entered-key button's label, in the same priority
- * order the old settings modal used: an in-flight connect or model-apply wins over
- * anything else so the button never invites a second click mid-transaction;
- * otherwise `runtimeOnly` offers "use entered key" (there's a live value to
- * override), and plain `configured` offers "replace" instead of "connect".
- */
-export function connectButtonLabel(state: { connecting: boolean; modelApplying: boolean; runtimeOnly?: boolean; configured?: boolean }): string {
-  if (state.connecting) return '连接中…';
+/** Saving a new value replaces any existing credential; the action name stays stable. */
+export function credentialSaveButtonLabel(state: { saving: boolean; modelApplying: boolean }): string {
+  if (state.saving) return '保存中…';
   if (state.modelApplying) return '应用模型中…';
-  if (state.runtimeOnly) return '使用输入的密钥';
-  if (state.configured) return '替换';
-  return '连接';
-}
-
-/** An empty/whitespace-only base URL means "clear the override", not "set it to empty string" — `main/settings.ts` treats `''`/`null` identically, this just picks one before it reaches the wire. */
-export function apiBaseUrlPatch(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return '保存';
 }
 
 export function shouldRequestCredentialPreview(
@@ -96,6 +80,10 @@ export function shouldRequestCredentialPreview(
     && !requestedProviderIds.has(providerId);
 }
 
+export function shouldShowProviderEngineRecovery(connected: boolean, credentialTransactionInProgress: boolean): boolean {
+  return !connected && !credentialTransactionInProgress;
+}
+
 /**
  * Restore the engine through the session-opening path. A failed first launch
  * removes its runtime from the main-process map, so `restartBridge` cannot
@@ -108,42 +96,11 @@ export async function ensureProviderEngineConnected(
   openSession: (projectPath: string, sessionId: string) => Promise<void>,
 ): Promise<void> {
   if (connected) return;
-  if (!session) throw new Error('打开一个会话后才能连接 Provider。');
+  if (!session) throw new Error('打开一个会话后才能保存 Provider 凭据。');
   await openSession(session.projectPath, session.sessionId);
 }
 
-function invoke(action: () => Promise<unknown>): void {
-  void action().catch(() => undefined);
-}
-
-/**
- * Lifted from the old settings modal's "Providers" section in
- * `BetaDesktop.tsx` (retired in Task 20; it lived at ~lines 1852-2119):
- * connecting/replacing/disconnecting a credential, the
- * four Keychain-availability/runtime-source status states
- * (`credentialStatusKind` above), the pending-model banner and its "use
- * model and return to chat" recovery, the post-persist recovery UI for when
- * a credential saves but the engine restart doesn't finish, and — added in
- * fix round 1, dropped in the first pass — the deep-link autofocus: moving
- * focus into the credential input via `requestAnimationFrame` when both
- * `initialProviderId` and the requested model are set
- * (that modal's own lines 1923-1926). None of that logic was rewritten —
- * `isCurrentCredentialTransaction` and `persistProviderCredentialAndApplyModel`
- * (`bridge/providerCredentials.ts`) are the same already-tested functions
- * that modal called.
- *
- * One thing this page adds that the old modal's Providers section did NOT
- * have: an editor for `apiBaseUrl`. The brief for this task listed
- * `apiBaseUrl` among the state lifted from that modal, but grepping
- * `BetaDesktop.tsx` turned up no such UI — `apiBaseUrl` exists only as a
- * `PublicSettings` field and a `host.updateSettings` patch key
- * (`lingxi.d.ts`, `main/settings.ts`, `main/host.ts`), wired end-to-end on
- * the main-process side but never exposed to a person. `nav.ts` lists
- * `apiBaseUrl` as this page's own search keyword, so rather than silently
- * dropping it (the exact failure mode this task's brief warns about), this
- * builds the minimal new editor on top of that already-working, already-
- * tested plumbing — see this task's report for the full correction.
- */
+/** Built-in Provider credentials use their declared official API endpoints. */
 export function ProviderCredentials({ bridge, initialProviderId, pendingModelReference: requestedModelReference, onClose }: PageContentProps) {
   const t = useT();
   const snapshot = bridge.bootstrap;
@@ -157,9 +114,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const [applyError, setApplyError] = useState<string | null>(null);
   const [modelApplying, setModelApplying] = useState(false);
   const [postPersistRecovery, setPostPersistRecovery] = useState(false);
-  const [apiBaseUrlInput, setApiBaseUrlInput] = useState(bridge.bootstrap?.settings.apiBaseUrl ?? '');
-  const [apiBaseUrlSaving, setApiBaseUrlSaving] = useState(false);
-  const [apiBaseUrlError, setApiBaseUrlError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -168,11 +122,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
   const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
-  const statusKind = selectedMetadata?.storageError
-    ? 'unavailable'
-    : bridge.connected
-      ? credentialStatusKind(selectedMetadata)
-      : 'none';
+  const statusKind = credentialStatusKind(selectedMetadata);
 
   const mountedRef = useRef(true);
   const transactionGenerationRef = useRef(0);
@@ -206,15 +156,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     if (!requestedModelReference || !initialProviderId) return;
     window.requestAnimationFrame(() => credentialRef.current?.focus());
   }, [initialProviderId, requestedModelReference]);
-
-  // A person may navigate away from this page and back without a fresh
-  // deep link; only sync the local base-URL draft from bootstrap when it
-  // has not been hand-edited into a different pending value already.
-  useEffect(() => {
-    setApiBaseUrlInput((current) => (
-      apiBaseUrlSaving ? current : (bridge.bootstrap?.settings.apiBaseUrl ?? '')
-    ));
-  }, [apiBaseUrlSaving, bridge.bootstrap?.settings.apiBaseUrl]);
 
   // The provider list asks only for account attributes. Fetch one masked
   // preview lazily after selection; masking happens inside the native broker,
@@ -277,7 +218,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     const restartSession = bridge.activeSession ?? bridge.bootstrap?.activeSession;
     const restartSessionId = restartSession?.sessionId;
     if (!restartSession || !restartSessionId) {
-      setSaveError('打开一个会话后才能连接 Provider。');
+      setSaveError('打开一个会话后才能保存 Provider 凭据。');
       return;
     }
     const transactionGeneration = ++transactionGenerationRef.current;
@@ -313,7 +254,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       recoverySessionIdRef.current = null;
     } catch (cause) {
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
-        setSaveError(cause instanceof Error ? cause.message : '无法连接该 Provider。');
+        setSaveError(cause instanceof Error ? cause.message : '无法保存该 Provider 凭据。');
         setPostPersistRecovery(persisted && !restartCompleted);
         if (!persisted || restartCompleted) recoverySessionIdRef.current = null;
       }
@@ -376,14 +317,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     }
   };
 
-  const saveApiBaseUrl = () => {
-    setApiBaseUrlSaving(true);
-    setApiBaseUrlError(null);
-    void bridge.setApiBaseUrl(apiBaseUrlPatch(apiBaseUrlInput))
-      .catch((cause) => setApiBaseUrlError(cause instanceof Error ? cause.message : '无法保存自定义 API 地址。'))
-      .finally(() => setApiBaseUrlSaving(false));
-  };
-
   const testConnection = async () => {
     if (testingConnection || bridge.running || !bridge.connected) return;
     const providerId = selectedProvider.id;
@@ -407,6 +340,20 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     } finally {
       if (mountedRef.current && generation === connectionTestGenerationRef.current) {
         setTestingConnection(false);
+      }
+    }
+  };
+
+  const clearCredential = async () => {
+    ++connectionTestGenerationRef.current;
+    setConnectionTestResult(null);
+    setConnectionTestError(null);
+    setSaveError(null);
+    try {
+      await bridge.clearProviderCredential(selectedProvider.id);
+    } catch (cause) {
+      if (mountedRef.current) {
+        setSaveError(cause instanceof Error ? cause.message : '无法删除该 Provider 凭据。');
       }
     }
   };
@@ -449,7 +396,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
   return (
     <>
-      {!bridge.connected && (
+      {shouldShowProviderEngineRecovery(bridge.connected, connecting) && (
         <div data-testid="provider-engine-recovery">
           <Card title="连接状态">
             <Row title="引擎未连接" desc="可以先输入密钥；保存时会先恢复引擎连接，再写入安全凭据存储。" align="center">
@@ -467,20 +414,18 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       )}
       {selectedProviderId === null ? (
         <Card title="Provider">
-          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项查看或修改连接设置。" align="center">
+          <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项查看或修改 API Key。" align="center">
             <span />
           </Row>
           {PROVIDERS.map((provider) => {
             const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
-            const status = providerConnectionStatus(metadata, bridge.connected, provider.available);
-            const connected = status.kind === 'connected' || status.kind === 'runtime';
-            const statusColor = connected
+            const status = providerCredentialStatus(metadata, provider.available);
+            const configured = status.kind === 'configured' || status.kind === 'runtime';
+            const statusColor = configured
               ? t.ok
               : metadata?.storageError
                 ? t.danger
-                : status.kind === 'unknown'
-                  ? t.warn
-                  : t.text3;
+                : t.text3;
             return (
               <button
                 key={provider.id}
@@ -542,7 +487,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
           <Card title={selectedProvider.label}>
         {pendingModelReference && (
-          <Row title="待应用的模型" desc={`连接 ${selectedProvider.label} 以使用 ${modelReference(pendingModelReference).label}。`} align="center">
+          <Row title="待应用的模型" desc={`保存 ${selectedProvider.label} API Key 以使用 ${modelReference(pendingModelReference).label}。`} align="center">
             <Icon name="spark" size={15} color={t.accent} />
           </Row>
         )}
@@ -564,35 +509,25 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
           <Row title="存储方式" desc="安全存储当前处于本地回退模式；保存时会优先尝试 macOS 登录钥匙串。" align="center"><span /></Row>
         )}
         {selectedProvider.available ? (
-          <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新密钥以替换现有凭据。' : undefined} align="center">
+          <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新的 API Key 并保存，即可更新现有凭据。' : undefined} align="center">
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 7 }}>
-              <div style={{ display: 'flex', gap: 7 }}>
-                <input
-                  ref={credentialRef}
-                  type="password"
-                  autoComplete="off"
-                  disabled={credentialWriteDisabled}
-                  value={key}
-                  onChange={(event) => {
-                    setKey(event.target.value);
-                    setConnectionTestResult(null);
-                    setConnectionTestError(null);
-                  }}
-                  onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }}
-                  placeholder={selectedMetadata?.configured ? (selectedMetadata.credentialPreview ?? '••••••••') : selectedProvider.keyPlaceholder}
-                  aria-label={selectedProvider.keyLabel}
-                  data-testid="provider-credential-preview"
-                  style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
-                />
-                <button type="button" disabled={!key.trim() || credentialWriteDisabled} onClick={() => void save()} style={ghostButtonStyle(t, !key.trim() || credentialWriteDisabled)}>
-                  {connectButtonLabel({ connecting, modelApplying, runtimeOnly: selectedMetadata?.runtimeOnly, configured: selectedMetadata?.configured })}
-                </button>
-                {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
-                  <button type="button" disabled={credentialWriteDisabled} onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>
-                    断开连接
-                  </button>
-                )}
-              </div>
+              <input
+                ref={credentialRef}
+                type="password"
+                autoComplete="off"
+                disabled={credentialWriteDisabled}
+                value={key}
+                onChange={(event) => {
+                  setKey(event.target.value);
+                  setConnectionTestResult(null);
+                  setConnectionTestError(null);
+                }}
+                onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void save(); } }}
+                placeholder={selectedMetadata?.configured ? (selectedMetadata.credentialPreview ?? '••••••••') : selectedProvider.keyPlaceholder}
+                aria-label={selectedProvider.keyLabel}
+                data-testid="provider-credential-preview"
+                style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
+              />
               <a
                 href={selectedProvider.credentialManagementUrl}
                 target="_blank"
@@ -604,7 +539,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             </div>
           </Row>
         ) : (
-          <Row title={selectedProvider.keyLabel} desc={`${selectedProvider.label} 目前只能通过 CLI/TUI 的登录流程连接。`} align="center"><span /></Row>
+          <Row title={selectedProvider.keyLabel} desc={`${selectedProvider.label} 目前只能通过 CLI/TUI 配置凭据。`} align="center"><span /></Row>
         )}
         {selectedProvider.available && (
           <Row
@@ -633,6 +568,37 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             </button>
           </Row>
         )}
+        {selectedProvider.available && (
+          <Row
+            title="凭据操作"
+            desc={selectedMetadata?.configured
+              ? '保存新的 API Key，或删除已保存的凭据。'
+              : '将输入的 API Key 保存到安全凭据存储。'}
+            align="center"
+          >
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 7 }}>
+              <button
+                type="button"
+                disabled={!key.trim() || credentialWriteDisabled}
+                onClick={() => void save()}
+                style={{
+                  ...ghostButtonStyle(t, !key.trim() || credentialWriteDisabled),
+                  width: 88,
+                  boxSizing: 'border-box',
+                  justifyContent: 'center',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {credentialSaveButtonLabel({ saving: connecting, modelApplying })}
+              </button>
+              {selectedMetadata?.configured && !selectedMetadata.runtimeOnly && (
+                <button type="button" disabled={credentialWriteDisabled} onClick={() => void clearCredential()} style={ghostButtonStyle(t, credentialWriteDisabled, true)}>
+                  删除 API Key
+                </button>
+              )}
+            </div>
+          </Row>
+        )}
         {statusMessage && (
           <Row title="错误" align="center">
             <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{statusMessage}</span>
@@ -649,32 +615,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         {applyError && pendingModelReference && (
           <Row title="应用模型" align="center">
             <button type="button" disabled={busy} onClick={() => void applyPendingModel()} style={ghostButtonStyle(t, busy)}>使用该模型并返回对话</button>
-          </Row>
-        )}
-          </Card>
-
-          <Card title="高级">
-        <Row title="自定义 API 地址" desc="覆盖引擎连接的默认 API 端点；留空以恢复默认值。修改后引擎会自动重启。" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
-            <input
-              value={apiBaseUrlInput}
-              onChange={(event) => {
-                setApiBaseUrlInput(event.target.value);
-                setConnectionTestResult(null);
-                setConnectionTestError(null);
-              }}
-              placeholder="https://…"
-              aria-label="自定义 API 地址"
-              style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, minWidth: 220 }}
-            />
-            <button type="button" disabled={apiBaseUrlSaving || bridge.running} onClick={saveApiBaseUrl} style={ghostButtonStyle(t, apiBaseUrlSaving || bridge.running)}>
-              {apiBaseUrlSaving ? '保存中…' : '保存'}
-            </button>
-          </div>
-        </Row>
-        {apiBaseUrlError && (
-          <Row title="错误" align="center">
-            <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{apiBaseUrlError}</span>
           </Row>
         )}
           </Card>

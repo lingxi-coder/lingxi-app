@@ -34,6 +34,13 @@ serde_json.workspace = true
 # actual engine->DTO lowering is a `client-adapter` (Task 2) concern, not a
 # prod dependency of this crate.
 platform-api = { path = "../platform-api" }
+# DEV-ONLY, under `--features uniffi` only (see `[features]` below): decodes
+# a `#[derive(uniffi::Record)]` type's compile-time metadata buffer so a test
+# can assert a field actually carries a UniFFI constructor default, instead of
+# trusting that a `#[uniffi(default = …)]` attribute compiled. Pinned to the
+# same 0.28.3 release as the `uniffi` dep itself (this crate embeds the reader
+# half of the same wire format `uniffi_macros` 0.28.3 writes).
+uniffi_meta = "=0.28.3"
 
 [features]
 default = []

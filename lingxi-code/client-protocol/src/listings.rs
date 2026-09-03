@@ -612,7 +612,14 @@ pub struct TaskRowDto {
     /// `local_fusion` only (F005): the run's current progress-stage label
     /// (e.g. "Running panels 2/3"), lowered from `TaskRecord.stage`. `None`
     /// for every other task type, and before the first progress event lands.
+    ///
+    /// `uniffi(default = None)` (the `images: Vec<..>` precedent at
+    /// `message.rs:27`) keeps this ADDITIVE field additive for the generated
+    /// Kotlin/Swift constructors too: without it, every existing hand-written
+    /// `TaskRowDto(...)` call site — 6 positional args, one per field before
+    /// this one — stops compiling the moment mobile bindings are regenerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub stage: Option<String>,
 }
 

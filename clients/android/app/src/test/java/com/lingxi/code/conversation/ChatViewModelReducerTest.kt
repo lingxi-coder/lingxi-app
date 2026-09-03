@@ -617,7 +617,7 @@ class ChatViewModelReducerTest {
         )
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null),
+                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null, null),
             ),
         )
         val waiting = TurnRecoverySnapshotDto(
@@ -841,7 +841,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null, null),
             ),
         )
         runCurrent()
@@ -849,7 +849,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null, null),
             ),
         )
         runCurrent()

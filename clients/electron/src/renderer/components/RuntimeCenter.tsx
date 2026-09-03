@@ -212,7 +212,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       </div>
       <OverviewSection section="tasks" open={section('tasks')} onToggle={() => bridge.toggleRuntimeCenterSection('tasks')} count={tasks.length}>
         {tasks.length === 0 ? <EmptyRow>No background tasks.</EmptyRow> : tasks.map((task) => (
-          <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={shorten(task.description)} status={task.status.type} onClick={() => open({ kind: 'task', id: task.task_id })} />
+          <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)} status={task.status.type} onClick={() => open({ kind: 'task', id: task.task_id })} />
         ))}
       </OverviewSection>
       <OverviewSection section="agents" open={section('agents')} onToggle={() => bridge.toggleRuntimeCenterSection('agents')} count={agents.length}>
@@ -295,13 +295,14 @@ function InspectorTabs({ bridge }: { bridge: UseBridge }) {
   );
 }
 
-function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bridge: UseBridge }) {
+export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bridge: UseBridge }) {
   const t = useT();
   const output = task ? bridge.desktop.taskOutput[task.task_id] : undefined;
   if (!task) return <EmptyRow>Task is no longer available.</EmptyRow>;
   return (
     <div style={{ padding: 15, overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, task.status.type), fontSize: 11 }}><Icon name="activity" size={14} /><span>{task.status.type}</span></div>
+      {task.stage && <div style={{ marginTop: 6, color: t.text3, fontSize: 11 }}>{task.stage}</div>}
       <p style={{ margin: '12px 0', color: t.text, fontSize: 13, lineHeight: 1.55 }}>{task.description}</p>
       {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…${output.totalLines} lines total` : ''}</pre> : <EmptyRow>Loading task output…</EmptyRow>}
     </div>

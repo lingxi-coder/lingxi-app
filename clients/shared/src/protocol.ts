@@ -935,6 +935,8 @@ export interface TaskRowDto {
   description: string;
   can_resume?: boolean;
   started_at_ms?: number;
+  /** `local_fusion` only (F005): the run's current progress-stage label. */
+  stage?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

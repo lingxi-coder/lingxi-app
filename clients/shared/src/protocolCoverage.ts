@@ -38,6 +38,7 @@ import type {
   LocalAppPluginErrorCodeDto,
   ManagedLocalAppMcpStatusDto,
   PluginCommandDto,
+  TaskRowDto,
 } from './protocol.js';
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
@@ -215,6 +216,26 @@ export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpSt
   enabled: true,
   needs_revalidation: true,
   error: true,
+};
+
+/**
+ * The same closure as above, over `TaskRowDto`'s FIELD names rather than a
+ * union's `type` tags — `listings.rs`'s `TaskRowDto` gained a 7th field,
+ * `stage` (F005, `/fusion` progress), and nothing tied this
+ * hand-maintained interface to the Rust struct it mirrors: dropping a field
+ * here is a silent `npm test` pass (`tsx` transpiles without type-checking)
+ * with no runtime symptom until a consumer tries to read the missing member.
+ * A literal missing a `TaskRowDto` key fails with "Property '<x>' is
+ * missing"; a literal key `TaskRowDto` doesn't have fails on the excess key.
+ */
+export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
+  task_id: true,
+  task_type: true,
+  status: true,
+  description: true,
+  can_resume: true,
+  started_at_ms: true,
+  stage: true,
 };
 
 export const ALL_LOCAL_APP_PLUGIN_ERROR_CODES: Record<LocalAppPluginErrorCodeDto, true> = {

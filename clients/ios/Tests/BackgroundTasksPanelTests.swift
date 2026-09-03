@@ -41,7 +41,8 @@ visionDelegationEnabled: true
                 status: status,
                 description: description,
                 canResume: false,
-                startedAtMs: nil
+                startedAtMs: nil,
+                stage: nil
             )
         }
 

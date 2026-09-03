@@ -2038,24 +2038,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                   );
                 })}
 
-                <div aria-hidden="true" style={{ height: 1, margin: '7px 9px', background: t.border }} />
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={!ready || bridge.running}
-                  onClick={() => {
-                    invoke(() => bridge.setReasoningSelection({ type: 'automatic' }));
-                    invoke(() => bridge.setFastMode(false));
-                    setModelSubmenu(null);
-                  }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', minHeight: 42, padding: '7px 9px', border: 0, borderRadius: 8, background: 'transparent', color: !ready || bridge.running ? t.text4 : t.text3, textAlign: 'left', cursor: !ready || bridge.running ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 13, opacity: !ready || bridge.running ? .6 : 1 }}
-                  onMouseEnter={(event) => { if (ready && !bridge.running) event.currentTarget.style.background = t.surfaceHover; }}
-                  onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
-                >
-                  <span style={{ flex: 1 }}>Reset to default</span>
-                  <span aria-hidden="true" style={{ color: t.text3, fontSize: 22, fontWeight: 300, lineHeight: 1 }}>↻</span>
-                </button>
-
                 {modelSubmenu === 'model' && (
                   <div className="model-picker-model-submenu" style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
                     <div style={{ flexShrink: 0, padding: '5px 10px 7px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>

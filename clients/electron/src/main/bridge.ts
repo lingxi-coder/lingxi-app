@@ -29,6 +29,7 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
+import { resolveProviderIdForModel } from './credential-broker.js';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -99,6 +100,10 @@ export interface BridgeManagerOptions {
   registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
+  /** Resolve a broker-owned credential only when this session first selects its provider. */
+  resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
+  /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
+  onActivityChanged?: () => void;
   onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
@@ -334,15 +339,19 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
   launchConfig: (ref: SessionRef) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   sessionIdAvailable?: (ref: SessionRef) => boolean | Promise<boolean>;
+  /** Maximum retained runtimes when enough idle sessions are evictable. */
+  maxCachedRuntimes?: number;
 }
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_MAX_CACHED_RUNTIMES = 6;
+const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 
 export function isSessionId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
@@ -375,6 +384,7 @@ export class SessionRuntime {
   private credentialStorageEncrypted = false;
   private nextCredentialOperationId = 1;
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
+  private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private activeTurn = false;
   private activeTurnId: number | undefined;
@@ -610,6 +620,10 @@ export class SessionRuntime {
   private clearPendingAskUserQuestion(requestId: number): void {
     this.pendingAskUserQuestionRequests.delete(requestId);
     this.pendingAskUserQuestionIds.delete(requestId);
+  }
+
+  private notifyActivityChanged(): void {
+    this.opts.onActivityChanged?.();
   }
 
   /**
@@ -1052,6 +1066,13 @@ export class SessionRuntime {
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
       }
+      if (
+        event.type === 'turn_started'
+        || event.type === 'turn_ended'
+        || event.type === 'session_ended'
+        || event.type === 'ask_user_question'
+        || event.type === 'ask_user_question_resolved'
+      ) this.notifyActivityChanged();
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
@@ -1062,6 +1083,7 @@ export class SessionRuntime {
           return;
         }
         this.pendingPermissionIds.add(request.request_id);
+        this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
       }
     });
@@ -1076,6 +1098,7 @@ export class SessionRuntime {
           return;
         }
         this.pendingComputerAccessIds.add(request.request_id);
+        this.notifyActivityChanged();
         this.broadcast(CH_COMPUTER_ACCESS, request);
       }
     });
@@ -1170,6 +1193,7 @@ export class SessionRuntime {
       this.activeTurn = true;
       this.activeTurnId = undefined;
       this.cancellingTurn = false;
+      this.notifyActivityChanged();
     }
   }
 
@@ -1179,6 +1203,7 @@ export class SessionRuntime {
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
       this.cancellingTurn = true;
       this.clearTurnInteractions();
+      this.notifyActivityChanged();
     }
   }
 
@@ -1188,6 +1213,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().approvePermission(id, permissionResponse);
     this.pendingPermissionIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   denyPermission(requestId: number): void {
@@ -1195,6 +1221,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().denyPermission(id);
     this.pendingPermissionIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   approveComputerAccess(requestId: number, response: unknown): void {
@@ -1203,6 +1230,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().approveComputerAccess(id, computerAccessResponse);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   denyComputerAccess(requestId: number): void {
@@ -1210,6 +1238,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().denyComputerAccess(id);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   answerAskUserQuestion(requestId: number, answers: unknown): void {
@@ -1218,6 +1247,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().answerAskUserQuestion(id, validatedAnswers);
     this.clearPendingAskUserQuestion(id);
+    this.notifyActivityChanged();
   }
 
   cancelAskUserQuestion(requestId: number): void {
@@ -1225,6 +1255,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().cancelAskUserQuestion(id);
     this.clearPendingAskUserQuestion(id);
+    this.notifyActivityChanged();
   }
 
   private registerIpc(): void {
@@ -1331,7 +1362,58 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
+    if (validated.type === 'set_model') {
+      const providerId = resolveProviderIdForModel(validated.model);
+      if (providerId) await this.ensureProviderCredentialCached(providerId);
+    }
     this.requireClient().sendCommand(validated);
+  }
+
+  private async ensureProviderCredentialCached(providerId: string): Promise<void> {
+    if (this.runtimeCredentialProviders.has(providerId) || !this.opts.resolveProviderCredential) return;
+    const existing = this.pendingRuntimeCredentialLoads.get(providerId);
+    if (existing) return existing;
+    const generation = this.generation;
+    const client = this.requireClient();
+    let loading!: Promise<void>;
+    loading = (async () => {
+      const credential = await this.opts.resolveProviderCredential!(providerId);
+      if (generation !== this.generation || client !== this.client) {
+        throw new Error('provider credential loading was interrupted');
+      }
+      if (credential) await this.cacheProviderCredential(providerId, credential);
+    })().finally(() => {
+      if (this.pendingRuntimeCredentialLoads.get(providerId) === loading) {
+        this.pendingRuntimeCredentialLoads.delete(providerId);
+      }
+    });
+    this.pendingRuntimeCredentialLoads.set(providerId, loading);
+    return loading;
+  }
+
+  hasCachedProviderCredential(providerId: string): boolean {
+    return this.runtimeCredentialProviders.has(providerId);
+  }
+
+  async cacheProviderCredential(providerId: string, credential: string): Promise<void> {
+    await this.setProviderCredential(providerId, credential);
+    this.persistedCredentialProviders.delete(providerId);
+    this.runtimeCredentialProviders.add(providerId);
+    this.activeCredentialProviders = new Set([
+      ...this.runtimeCredentialProviders,
+      ...this.persistedCredentialProviders,
+    ]);
+  }
+
+  async clearCachedProviderCredential(providerId: string): Promise<void> {
+    if (!this.runtimeCredentialProviders.has(providerId)) return;
+    await this.deleteProviderCredential(providerId);
+    this.runtimeCredentialProviders.delete(providerId);
+    this.persistedCredentialProviders.delete(providerId);
+    this.activeCredentialProviders = new Set([
+      ...this.runtimeCredentialProviders,
+      ...this.persistedCredentialProviders,
+    ]);
   }
 
   /** Resume the one session owned by this runtime and wait for engine proof. */
@@ -1436,6 +1518,7 @@ export class SessionRuntime {
     }
     this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
     this.broadcast(CH_STATE_CHANGED, next);
+    this.notifyActivityChanged();
   }
 
   private fail(error: unknown): void {
@@ -1459,6 +1542,7 @@ export class SessionRuntime {
       pending.reject(new Error('bridge credential operation was interrupted'));
     }
     this.pendingCredentialOperations.clear();
+    this.pendingRuntimeCredentialLoads.clear();
     for (const pending of this.pendingProviderConnectionTests.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('provider connection test was interrupted'));
@@ -1554,9 +1638,21 @@ export class SessionRuntimeManager {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
+  private readonly lastUsed = new Map<string, number>();
+  private readonly pendingEvictions = new Set<Promise<void>>();
+  private readonly maxCachedRuntimes: number;
+  private activeSessionId: string | null = null;
+  private accessSequence = 0;
+  private cacheTrimScheduled = false;
   private registered = false;
 
-  constructor(private readonly opts: SessionRuntimeManagerOptions) {}
+  constructor(private readonly opts: SessionRuntimeManagerOptions) {
+    const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_CONFIGURED_CACHED_RUNTIMES) {
+      throw new Error(`maxCachedRuntimes must be between 1 and ${MAX_CONFIGURED_CACHED_RUNTIMES}`);
+    }
+    this.maxCachedRuntimes = requestedLimit;
+  }
 
   get size(): number {
     return this.runtimes.size;
@@ -1572,6 +1668,52 @@ export class SessionRuntimeManager {
 
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
+  }
+
+  private touch(sessionId: string): void {
+    if (this.runtimes.has(sessionId)) this.lastUsed.set(sessionId, ++this.accessSequence);
+  }
+
+  private activate(runtime: SessionRuntime): void {
+    this.activeSessionId = runtime.sessionId;
+    this.touch(runtime.sessionId);
+    this.trimCache();
+  }
+
+  private runtimeIsPinned(runtime: SessionRuntime): boolean {
+    const status = runtime.connectionState.status;
+    return runtime.sessionId === this.activeSessionId
+      || runtime.turnActive
+      || runtime.pendingInteractions > 0
+      || status === 'spawning'
+      || status === 'restarting'
+      || status === 'connecting'
+      || this.openingSessions.has(runtime.sessionId);
+  }
+
+  private trimCache(): void {
+    while (this.runtimes.size > this.maxCachedRuntimes) {
+      const victim = [...this.runtimes.values()]
+        .filter((runtime) => !this.runtimeIsPinned(runtime))
+        .sort((left, right) => (this.lastUsed.get(left.sessionId) ?? 0) - (this.lastUsed.get(right.sessionId) ?? 0))[0];
+      if (!victim) return;
+      this.runtimes.delete(victim.sessionId);
+      this.lastUsed.delete(victim.sessionId);
+      const eviction = victim.dispose()
+        .catch((error) => this.opts.diagnostics?.add('warn', 'host', `session cache eviction failed: ${sanitizeDiagnostic(error)}`))
+        .finally(() => this.pendingEvictions.delete(eviction));
+      this.pendingEvictions.add(eviction);
+    }
+  }
+
+  private scheduleCacheTrim(sessionId?: string): void {
+    if (sessionId) this.touch(sessionId);
+    if (this.cacheTrimScheduled) return;
+    this.cacheTrimScheduled = true;
+    queueMicrotask(() => {
+      this.cacheTrimScheduled = false;
+      this.trimCache();
+    });
   }
 
   require(ref: SessionRef): SessionRuntime {
@@ -1608,12 +1750,14 @@ export class SessionRuntimeManager {
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (start) await existing.start();
+      this.touch(existing.sessionId);
       return existing;
     }
 
     const runtimeOptions = this.runtimeOptions(ref);
     const runtime = new SessionRuntime(runtimeOptions);
     this.runtimes.set(ref.sessionId, runtime);
+    this.touch(ref.sessionId);
     for (const [webContents, origins] of this.targets) {
       if (webContents.isDestroyed()) {
         this.detachWindow(webContents);
@@ -1626,6 +1770,7 @@ export class SessionRuntimeManager {
       return runtime;
     } catch (error) {
       this.runtimes.delete(ref.sessionId);
+      this.lastUsed.delete(ref.sessionId);
       await runtime.dispose().catch(() => undefined);
       throw error;
     }
@@ -1643,7 +1788,10 @@ export class SessionRuntimeManager {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       return pending.promise;
     }
-    if (existing?.connectionState.status === 'connected') return Promise.resolve(existing);
+    if (existing?.connectionState.status === 'connected') {
+      this.activate(existing);
+      return Promise.resolve(existing);
+    }
 
     const promise = this.openSessionInternal(ref, existing, empty);
     const trackedPromise = promise.finally(() => {
@@ -1663,10 +1811,12 @@ export class SessionRuntimeManager {
         runtime = await this.ensure(ref, true);
       }
       if (!empty) await runtime.resumeOwnedSession();
+      this.activate(runtime);
       return runtime;
     } catch (error) {
       if (!existing && runtime) {
         this.runtimes.delete(ref.sessionId);
+        this.lastUsed.delete(ref.sessionId);
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
@@ -1680,7 +1830,8 @@ export class SessionRuntimeManager {
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      await this.ensure(draft, true);
+      const runtime = await this.ensure(draft, true);
+      this.activate(runtime);
       return { ...draft };
     }
     const promise = this.allocateDraftSession(projectPath);
@@ -1703,7 +1854,8 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      await this.ensure(ref, true);
+      const runtime = await this.ensure(ref, true);
+      this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
       throw error;
@@ -1728,6 +1880,8 @@ export class SessionRuntimeManager {
     // instead of resolving silently — surfacing a failure for a settings or
     // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
+    this.lastUsed.delete(ref.sessionId);
+    if (this.activeSessionId === ref.sessionId) this.activeSessionId = null;
     this.clearDraftSession(ref);
     await runtime.dispose();
   }
@@ -1743,6 +1897,8 @@ export class SessionRuntimeManager {
     // arriving while disposal is in progress must fail instead of entering a
     // runtime whose child is already being torn down.
     for (const runtime of projectRuntimes) this.runtimes.delete(runtime.sessionId);
+    for (const runtime of projectRuntimes) this.lastUsed.delete(runtime.sessionId);
+    if (projectRuntimes.some((runtime) => runtime.sessionId === this.activeSessionId)) this.activeSessionId = null;
     try {
       await Promise.all(projectRuntimes.map((runtime) => runtime.dispose()));
     } finally {
@@ -1761,13 +1917,34 @@ export class SessionRuntimeManager {
     ));
   }
 
+  async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
+    const runtimes = [...this.runtimes.values()]
+      .filter((runtime) => (
+        runtime.connectionState.status === 'connected'
+        && runtime.hasCachedProviderCredential(providerId)
+      ));
+    await Promise.all(runtimes.map((runtime) => runtime.cacheProviderCredential(providerId, credential)));
+  }
+
+  async clearCachedProviderCredential(providerId: string): Promise<void> {
+    const runtimes = [...this.runtimes.values()]
+      .filter((runtime) => (
+        runtime.connectionState.status === 'connected'
+        && runtime.hasCachedProviderCredential(providerId)
+      ));
+    await Promise.all(runtimes.map((runtime) => runtime.clearCachedProviderCredential(providerId)));
+  }
+
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
+    this.lastUsed.clear();
+    this.activeSessionId = null;
     this.openingSessions.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
+    await Promise.all([...this.pendingEvictions]);
     this.unregisterIpc();
     for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
   }
@@ -1827,6 +2004,7 @@ export class SessionRuntimeManager {
       accessState,
       onModelChanged,
       onFirstPromptSent,
+      maxCachedRuntimes: _maxCachedRuntimes,
       ...base
     } = this.opts;
     return {
@@ -1838,6 +2016,7 @@ export class SessionRuntimeManager {
       launchConfig: () => launchConfig(ref),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       ...(onModelChanged ? { onModelChanged: (model: string) => onModelChanged(ref, model) } : {}),
+      onActivityChanged: () => this.scheduleCacheTrim(ref.sessionId),
       onFirstPromptSent: () => {
         if (!onFirstPromptSent) {
           this.clearDraftSession(ref);
@@ -1864,6 +2043,7 @@ export class SessionRuntimeManager {
     if (!isSessionId(value)) throw new Error('invalid session id');
     const runtime = this.runtimes.get(value);
     if (!runtime) throw new Error(`session runtime is not open: ${value}`);
+    this.touch(runtime.sessionId);
     return runtime;
   }
 

@@ -42,27 +42,6 @@ async function runCloseScenario(webContents) {
   return { connectionTestErrorBeforeDelete, connectionTestErrorAfterDelete, busyState, afterClose, afterLateResult };
 }
 
-async function runRecoveryScenario(webContents) {
-  await webContents.executeJavaScript('window.__settingsTransactionTest.startSave()');
-  await waitFor(webContents, 'window.__settingsTransactionTest.state().persistencePending');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.setSessionState("session-b", true)');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.resolvePersistence()');
-  await waitFor(
-    webContents,
-    'window.__settingsTransactionTest.state().restartErrors === 1 && Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "重试引擎连接"))',
-  );
-  const afterFirstFailure = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.setSessionState("session-b", false)');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.clickRetry()');
-  await waitFor(webContents, 'window.__settingsTransactionTest.state().restartErrors === 2');
-  const afterWrongSessionRetry = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.setSessionState("session-a", false)');
-  await webContents.executeJavaScript('window.__settingsTransactionTest.clickRetry()');
-  await waitFor(webContents, 'window.__settingsTransactionTest.state().restartCalls === 1');
-  const afterRecoveredRetry = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
-  return { afterFirstFailure, afterWrongSessionRetry, afterRecoveredRetry };
-}
-
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 900, height: 700, webPreferences: { sandbox: true } });
@@ -71,10 +50,7 @@ async function main() {
     const { webContents } = window;
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsTransactionTest && document.querySelector(\'[role="dialog"]\'))');
-    const scenario = process.env.LINGXI_SETTINGS_SCENARIO ?? 'close';
-    const result = scenario === 'recovery'
-      ? await runRecoveryScenario(webContents)
-      : await runCloseScenario(webContents);
+    const result = await runCloseScenario(webContents);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();

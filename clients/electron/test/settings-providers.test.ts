@@ -13,11 +13,9 @@ import {
 import {
   credentialSaveButtonLabel,
   credentialStatusKind,
-  ensureProviderEngineConnected,
   initialProviderSelection,
   providerCredentialStatus,
   ProviderCredentials,
-  shouldShowProviderEngineRecovery,
   shouldRequestCredentialPreview,
 } from '../src/renderer/components/settings/pages/ProviderCredentials';
 import { rowState, type SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
@@ -212,34 +210,7 @@ test('credential save button uses save terminology for new and replacement keys'
   assert.equal(credentialSaveButtonLabel({ saving: false, modelApplying: false }), '保存');
 });
 
-test('provider recovery opens the current session when its runtime is missing', async () => {
-  const calls: Array<[string, string]> = [];
-  await ensureProviderEngineConnected(
-    false,
-    { projectPath: '/test/project', sessionId: 'session-a' },
-    async (projectPath, sessionId) => { calls.push([projectPath, sessionId]); },
-  );
-  assert.deepEqual(calls, [['/test/project', 'session-a']]);
-});
-
-test('provider recovery does not reopen an already connected engine', async () => {
-  let opened = false;
-  await ensureProviderEngineConnected(
-    true,
-    { projectPath: '/test/project', sessionId: 'session-a' },
-    async () => { opened = true; },
-  );
-  assert.equal(opened, false);
-});
-
-test('engine recovery card ignores the transient disconnect caused by credential saving', () => {
-  assert.equal(shouldShowProviderEngineRecovery(false, false), true);
-  assert.equal(shouldShowProviderEngineRecovery(false, true), false);
-  assert.equal(shouldShowProviderEngineRecovery(true, false), false);
-  assert.equal(shouldShowProviderEngineRecovery(true, true), false);
-});
-
-test('disconnected provider settings renders the real form with an engine recovery action', () => {
+test('disconnected provider settings keeps credential storage independent from engine state', () => {
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
     bootstrap: {
@@ -274,8 +245,8 @@ test('disconnected provider settings renders the real form with an engine recove
     }),
   ));
 
-  assert.match(markup, /data-testid="provider-engine-recovery"/);
-  assert.match(markup, /连接引擎/);
+  assert.doesNotMatch(markup, /data-testid="provider-engine-recovery"/);
+  assert.doesNotMatch(markup, /连接状态|连接引擎/);
   assert.match(markup, /data-testid="provider-list-back"/);
   assert.match(markup, /aria-label="Anthropic API key"/);
   const credentialMarker = markup.indexOf('aria-label="Anthropic API key"');
@@ -404,7 +375,7 @@ test('configured provider detail shows only the masked suffix returned by the en
   assert.doesNotMatch(markup, /sk-test-secret|sk-shared-secret/);
 });
 
-test('configured provider detail keeps its storage row while the engine restarts', () => {
+test('configured provider detail keeps its storage row while the engine is disconnected', () => {
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
     bootstrap: {

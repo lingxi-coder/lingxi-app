@@ -329,6 +329,79 @@ test('opening another session leaves the running session alive', async () => {
   }
 });
 
+test('idle session runtimes use a bounded least-recently-used cache', async () => {
+  const refs = [
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000003' },
+  ];
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    maxCachedRuntimes: 2,
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    await manager.openSession(refs[0]!);
+    await manager.openSession(refs[1]!);
+    await manager.openSession(refs[2]!);
+
+    assert.equal(manager.size, 2);
+    assert.equal(manager.get(refs[0]!.sessionId), undefined);
+    assert.ok(manager.get(refs[1]!.sessionId));
+    assert.ok(manager.get(refs[2]!.sessionId));
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('background-running and active sessions are pinned above the idle cache limit', async () => {
+  const refs = [
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000003' },
+  ];
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    maxCachedRuntimes: 2,
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const background = await manager.openSession(refs[0]!);
+    (background as any).activeTurn = true;
+    await manager.openSession(refs[1]!);
+    await manager.openSession(refs[2]!);
+
+    assert.equal(manager.size, 2);
+    assert.strictEqual(manager.get(refs[0]!.sessionId), background);
+    assert.equal(manager.get(refs[1]!.sessionId), undefined);
+    assert.ok(manager.get(refs[2]!.sessionId));
+
+    const secondBackground = manager.get(refs[2]!.sessionId)!;
+    (secondBackground as any).activeTurn = true;
+    await manager.openSession(refs[1]!);
+    assert.equal(manager.size, 3, 'protected background sessions may temporarily exceed the idle cache limit');
+
+    (background as any).activeTurn = false;
+    (background as any).notifyActivityChanged();
+    await Promise.resolve();
+    assert.equal(manager.size, 2, 'the cache trims again as soon as a background turn becomes idle');
+    assert.strictEqual(manager.get(refs[2]!.sessionId), secondBackground, 'a still-running background session stays cached');
+    assert.ok(manager.get(refs[1]!.sessionId), 'the active session stays cached');
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
 test('openSession deduplicates concurrent opens by UUID and rejects a different project', async () => {
   const ref = { projectPath: '/workspace-a', sessionId: 'cccccccc-dddd-4eee-8fff-000000000000' };
   const gate = deferred<void>();
@@ -946,6 +1019,113 @@ test('provider credential writes cross only the authenticated bridge command pat
     credential_previews: { deepseek: '••••cret' },
   });
   await pending;
+});
+
+test('model switching hot-loads a missing provider credential once without restarting', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  let resolves = 0;
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (providerId) => {
+      resolves += 1;
+      assert.equal(providerId, 'openrouter');
+      return 'or-session-secret';
+    },
+  });
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).client = {
+    sendCommand: (command: Record<string, unknown>) => {
+      commands.push(command);
+      if (command['type'] === 'set_provider_credential') {
+        queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
+          type: 'provider_credential_status',
+          operation_id: command['operation_id'],
+          configured_provider_ids: ['openrouter'],
+          storage_encrypted: false,
+          credential_previews: {},
+        }));
+      }
+    },
+  };
+
+  await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
+  await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
+
+  assert.equal(resolves, 1);
+  assert.deepEqual(commands.map((command) => command['type']), [
+    'set_provider_credential',
+    'set_model',
+    'set_model',
+  ]);
+  assert.equal(commands[0]?.['credential'], 'or-session-secret');
+  assert.deepEqual(manager.activeCredentialProviderIds, ['openrouter']);
+});
+
+test('concurrent model switches share one broker credential load per session', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const credential = deferred<string>();
+  let resolves = 0;
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async () => {
+      resolves += 1;
+      return credential.promise;
+    },
+  });
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).client = {
+    sendCommand: (command: Record<string, unknown>) => {
+      commands.push(command);
+      if (command['type'] === 'set_provider_credential') {
+        queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
+          type: 'provider_credential_status',
+          operation_id: command['operation_id'],
+          configured_provider_ids: ['openrouter'],
+          storage_encrypted: false,
+          credential_previews: {},
+        }));
+      }
+    },
+  };
+
+  const first = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
+  const second = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
+  assert.equal(resolves, 1);
+  credential.resolve('or-session-secret');
+  await Promise.all([first, second]);
+
+  assert.equal(commands.filter((command) => command['type'] === 'set_provider_credential').length, 1);
+  assert.equal(commands.filter((command) => command['type'] === 'set_model').length, 2);
+});
+
+test('credential refresh skips disconnected cached runtimes that will reload on their next start', async () => {
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  const connected = await manager.ensure({
+    projectPath: '/workspace',
+    sessionId: '30000000-0000-4000-8000-000000000001',
+  }, false);
+  const disconnected = await manager.ensure({
+    projectPath: '/workspace',
+    sessionId: '30000000-0000-4000-8000-000000000002',
+  }, false);
+  const refreshed: string[] = [];
+  (connected as any).state = { status: 'connected' };
+  (connected as any).runtimeCredentialProviders.add('openrouter');
+  (connected as any).cacheProviderCredential = async () => { refreshed.push('connected'); };
+  (disconnected as any).state = { status: 'disconnected' };
+  (disconnected as any).runtimeCredentialProviders.add('openrouter');
+  (disconnected as any).cacheProviderCredential = async () => { refreshed.push('disconnected'); };
+
+  try {
+    await manager.refreshCachedProviderCredential('openrouter', 'replacement');
+    assert.deepEqual(refreshed, ['connected']);
+  } finally {
+    await manager.dispose();
+  }
 });
 
 test('provider connection test keeps stored credentials engine-side and correlates the result', async () => {

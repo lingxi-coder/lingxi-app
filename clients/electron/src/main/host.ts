@@ -334,13 +334,15 @@ export class HostController {
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
       if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice')) throw new Error('unsupported setting');
-      const restartsBridge = 'model' in patch || 'apiBaseUrl' in patch;
+      const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
-      // `voice` never restarts the bridge: recognition/synthesis read
+      // `model` is applied to a live session through `set_model`, then mirrored
+      // here by `onModelChanged`; persisting the default must not restart any
+      // session. `voice` also never restarts the bridge: recognition/synthesis read
       // `bootstrap.settings.voice` fresh on every audio request
       // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
-      // effect on the NEXT request with no engine restart needed — unlike
-      // `model`/`apiBaseUrl`, which change what the running engine talks to.
+      // effect on the NEXT request. Only the legacy Anthropic API base changes
+      // the construction of an already-running provider client.
       const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown });
       if (restartsBridge) await this.restartIfConfigured();
       return result;
@@ -466,7 +468,6 @@ export class HostController {
       const credentialMetadata = this.credentialBroker
         ? await this.setCredentialThroughBroker(provider.id, credential)
         : await this.setCredentialThroughRuntime(provider.id, credential);
-      if (provider.defaultModel) this.updateProviderDefaultModel(provider.defaultModel);
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
@@ -478,7 +479,6 @@ export class HostController {
         this.requireWorkspace();
         await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
       }
-      await this.restartIfConfigured();
       return this.providerCredentialMetadata(provider.id);
     });
     this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
@@ -798,6 +798,7 @@ export class HostController {
   private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
     const stored = await this.credentialBroker!.set(providerId, credential);
     if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
+    await this.bridge.refreshCachedProviderCredential(providerId, credential);
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.add(providerId);
     if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
@@ -811,6 +812,7 @@ export class HostController {
   }
 
   private async clearCredentialThroughBroker(providerId: string): Promise<void> {
+    await this.bridge.clearCachedProviderCredential(providerId);
     await this.credentialBroker!.delete(providerId);
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
@@ -885,17 +887,6 @@ export class HostController {
     const ref = this.settings.getPublic().activeSession;
     if (!ref || !this.bridge.get(ref.sessionId)) return;
     await this.bridge.restart(ref);
-  }
-
-  private updateProviderDefaultModel(model: string): void {
-    try {
-      this.settings.update({ model });
-    } catch (error) {
-      // The credential write is already authoritative. A settings mirror
-      // failure is recoverable and must not turn a successful credential write
-      // into a renderer-visible persistence failure.
-      this.diagnostics.add('error', 'host', `provider credential persisted but default model update failed: ${sanitizeDiagnostic(error)}`);
-    }
   }
 
   private requireCurrentRuntime() {

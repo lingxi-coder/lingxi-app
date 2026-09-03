@@ -6,7 +6,6 @@ import type { PageContentProps } from '../SettingsScreen';
 import { PROVIDERS, providerById } from '../../../../shared/providers';
 import type { ProviderCredentialMetadata } from '../../../bridge/lingxi';
 import type { ProviderConnectionTestResult } from '../../../bridge/lingxi';
-import type { SessionRef } from '../../../../shared/settings.js';
 import { isCurrentCredentialTransaction, persistProviderCredentialAndApplyModel } from '../../../bridge/providerCredentials';
 import { modelReference, waitForModelSelection } from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
@@ -80,26 +79,6 @@ export function shouldRequestCredentialPreview(
     && !requestedProviderIds.has(providerId);
 }
 
-export function shouldShowProviderEngineRecovery(connected: boolean, credentialTransactionInProgress: boolean): boolean {
-  return !connected && !credentialTransactionInProgress;
-}
-
-/**
- * Restore the engine through the session-opening path. A failed first launch
- * removes its runtime from the main-process map, so `restartBridge` cannot
- * recover it; `openSession` handles both a missing runtime and an existing
- * disconnected one.
- */
-export async function ensureProviderEngineConnected(
-  connected: boolean,
-  session: SessionRef | undefined,
-  openSession: (projectPath: string, sessionId: string) => Promise<void>,
-): Promise<void> {
-  if (connected) return;
-  if (!session) throw new Error('打开一个会话后才能保存 Provider 凭据。');
-  await openSession(session.projectPath, session.sessionId);
-}
-
 /** Built-in Provider credentials use their declared official API endpoints. */
 export function ProviderCredentials({ bridge, initialProviderId, pendingModelReference: requestedModelReference, onClose }: PageContentProps) {
   const t = useT();
@@ -113,9 +92,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const [saveError, setSaveError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [modelApplying, setModelApplying] = useState(false);
-  const [postPersistRecovery, setPostPersistRecovery] = useState(false);
-  const [reconnecting, setReconnecting] = useState(false);
-  const [reconnectError, setReconnectError] = useState<string | null>(null);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<ProviderConnectionTestResult | null>(null);
   const [connectionTestError, setConnectionTestError] = useState<string | null>(null);
@@ -128,7 +104,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const transactionGenerationRef = useRef(0);
   const applyGenerationRef = useRef(0);
   const applyAbortRef = useRef<AbortController | null>(null);
-  const recoverySessionIdRef = useRef<string | null>(null);
   const currentModelRef = useRef<string | null>(bridge.desktop.currentModel);
   const credentialRef = useRef<HTMLInputElement>(null);
   const requestedPreviewProvidersRef = useRef(new Set<string>());
@@ -212,51 +187,28 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const save = async () => {
     const submitted = key;
     if (!submitted.trim() || connecting || !mountedRef.current) return;
-    // Capture the session before persistence yields — it can change while
-    // the secure-store write is pending, and a late completion must never
-    // restart whichever session happens to be active then.
-    const restartSession = bridge.activeSession ?? bridge.bootstrap?.activeSession;
-    const restartSessionId = restartSession?.sessionId;
-    if (!restartSession || !restartSessionId) {
-      setSaveError('打开一个会话后才能保存 Provider 凭据。');
-      return;
-    }
     const transactionGeneration = ++transactionGenerationRef.current;
-    let restartCompleted = false;
-    let persisted = false;
     setConnecting(true);
     setSaveError(null);
     setApplyError(null);
     setConnectionTestResult(null);
     setConnectionTestError(null);
-    setPostPersistRecovery(false);
     try {
-      recoverySessionIdRef.current = restartSessionId;
-      await ensureProviderEngineConnected(bridge.connected, restartSession, bridge.openSession);
       await persistProviderCredentialAndApplyModel(
         selectedProvider.id,
         submitted,
         bridge.setProviderCredential,
         () => {
-          persisted = true;
           if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
             setKey((current) => current === submitted ? '' : current);
           }
         },
-        async (sessionId) => {
-          await bridge.restartBridge(sessionId);
-          restartCompleted = true;
-        },
-        restartSessionId,
         pendingModelReference,
         () => applyPendingModel(true, transactionGeneration),
       );
-      recoverySessionIdRef.current = null;
     } catch (cause) {
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
         setSaveError(cause instanceof Error ? cause.message : '无法保存该 Provider 凭据。');
-        setPostPersistRecovery(persisted && !restartCompleted);
-        if (!persisted || restartCompleted) recoverySessionIdRef.current = null;
       }
     } finally {
       if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
@@ -266,7 +218,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const selectProvider = (providerId: string) => {
-    if (connecting || modelApplying || testingConnection || postPersistRecovery) return;
+    if (connecting || modelApplying || testingConnection) return;
     setSelectedProviderId(providerId);
     setKey('');
     // A manual provider change cancels the model intent from the picker.
@@ -287,34 +239,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     setApplyError(null);
     setConnectionTestResult(null);
     setConnectionTestError(null);
-  };
-
-  const retryPostPersistRecovery = async () => {
-    if (!postPersistRecovery || connecting || modelApplying) return;
-    const transactionGeneration = transactionGenerationRef.current;
-    const recoverySessionId = recoverySessionIdRef.current;
-    if (!recoverySessionId) {
-      setSaveError('原会话已不可用，无法重启。');
-      setPostPersistRecovery(false);
-      return;
-    }
-    setConnecting(true);
-    setSaveError(null);
-    try {
-      await bridge.restartBridge(recoverySessionId);
-      if (!isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) return;
-      recoverySessionIdRef.current = null;
-      setPostPersistRecovery(false);
-      if (pendingModelReference) await applyPendingModel(true, transactionGeneration);
-    } catch (cause) {
-      if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
-        setSaveError(cause instanceof Error ? cause.message : '引擎无法重启。');
-      }
-    } finally {
-      if (isCurrentCredentialTransaction(mountedRef.current, transactionGeneration, transactionGenerationRef.current)) {
-        setConnecting(false);
-      }
-    }
   };
 
   const testConnection = async () => {
@@ -358,28 +282,10 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     }
   };
 
-  const reconnectEngine = async () => {
-    if (reconnecting) return;
-    const session = bridge.activeSession ?? bridge.bootstrap?.activeSession;
-    if (!session) {
-      setReconnectError('请先打开一个会话，再连接引擎。');
-      return;
-    }
-    setReconnecting(true);
-    setReconnectError(null);
-    try {
-      await ensureProviderEngineConnected(bridge.connected, session, bridge.openSession);
-    } catch (cause) {
-      setReconnectError(cause instanceof Error ? cause.message : '引擎连接失败。');
-    } finally {
-      setReconnecting(false);
-    }
-  };
-
   const statusMessage = saveError ?? applyError;
   const busy = connecting || modelApplying;
-  const transactionLocked = busy || testingConnection || postPersistRecovery;
-  const credentialWriteDisabled = reconnecting || transactionLocked || bridge.running;
+  const transactionLocked = busy || testingConnection;
+  const credentialWriteDisabled = transactionLocked || bridge.running;
   const canTestConnection = selectedProvider.available
     && bridge.connected
     && !bridge.running
@@ -396,22 +302,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
 
   return (
     <>
-      {shouldShowProviderEngineRecovery(bridge.connected, connecting) && (
-        <div data-testid="provider-engine-recovery">
-          <Card title="连接状态">
-            <Row title="引擎未连接" desc="可以先输入密钥；保存时会先恢复引擎连接，再写入安全凭据存储。" align="center">
-              <button type="button" disabled={reconnecting} onClick={() => void reconnectEngine()} style={ghostButtonStyle(t, reconnecting)}>
-                {reconnecting ? '连接中…' : '连接引擎'}
-              </button>
-            </Row>
-            {reconnectError && (
-              <Row title="连接失败" align="center">
-                <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{reconnectError}</span>
-              </Row>
-            )}
-          </Card>
-        </div>
-      )}
       {selectedProviderId === null ? (
         <Card title="Provider">
           <Row title="选择 Provider" desc="凭据与 Desktop、CLI、TUI 共享；选择一项查看或修改 API Key。" align="center">
@@ -602,14 +492,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         {statusMessage && (
           <Row title="错误" align="center">
             <span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{statusMessage}</span>
-          </Row>
-        )}
-        {postPersistRecovery && (
-          <Row title="凭据已保存" desc="但引擎重启未完成。重试连接，或保留已保存的凭据并离开此页。" align="center">
-            <div style={{ display: 'flex', gap: 7 }}>
-              <button type="button" disabled={busy} onClick={() => void retryPostPersistRecovery()} style={ghostButtonStyle(t, busy)}>重试引擎连接</button>
-              <button type="button" disabled={busy} onClick={onClose} style={ghostButtonStyle(t, busy)}>保留凭据并关闭</button>
-            </div>
           </Row>
         )}
         {applyError && pendingModelReference && (

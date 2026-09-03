@@ -77,6 +77,17 @@ impl MultiCredentialProvider {
     }
 
     async fn load_anthropic_api_key(&self) -> Result<Credential, LlmError> {
+        // A signed Desktop host can rotate the session's broker-owned key at
+        // runtime. That process-local value must supersede the immutable boot
+        // snapshot, while the normal static/helper/persistent precedence below
+        // remains unchanged for CLI and TUI.
+        if let Some(key) = self
+            .credentials
+            .get_provider_key_ephemeral("anthropic-api-key")
+            .await
+        {
+            return Ok(Credential::ApiKey(key.expose_secret().clone()));
+        }
         if let Some(key) = self.anthropic_api_key.clone() {
             return Ok(Credential::ApiKey(key));
         }
@@ -302,6 +313,31 @@ mod tests {
             .await
             .expect("api-key dispatch");
         assert_eq!(got, Credential::ApiKey("sk-ant-test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn ephemeral_anthropic_key_replaces_the_boot_snapshot() {
+        let credentials = manager();
+        let provider = MultiCredentialProvider::new(
+            credentials.clone(),
+            Vec::new(),
+            Some("boot-key".to_string()),
+            None,
+            Default::default(),
+        );
+        credentials
+            .set_provider_key_ephemeral("anthropic", "rotated-key")
+            .await;
+
+        let got = provider
+            .load(&scope(
+                ProviderId::AnthropicFirstParty,
+                "anthropic",
+                "anthropic-api-key",
+            ))
+            .await
+            .expect("rotated api-key dispatch");
+        assert_eq!(got, Credential::ApiKey("rotated-key".to_string()));
     }
 
     #[tokio::test]

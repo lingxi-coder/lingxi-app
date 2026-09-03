@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { SessionRuntimeManager, type SessionRef } from './bridge.js';
-import { createMacCredentialBrokerClient, resolveSessionLaunchCredentials } from './credential-broker.js';
+import { createMacCredentialBrokerClient, resolveProviderCredential, resolveSessionLaunchCredentials } from './credential-broker.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -162,6 +162,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       }
     },
     onModelChanged: (_ref, model) => { settings.update({ model }); },
+    resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {
       const catalog = await sessionCatalog.list(ref.projectPath);

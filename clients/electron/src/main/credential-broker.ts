@@ -117,7 +117,7 @@ function readStringField(value: Record<string, unknown>, field: string): string 
   return candidate;
 }
 
-function resolveProviderIdForModel(model: string | null | undefined): string | undefined {
+export function resolveProviderIdForModel(model: string | null | undefined): string | undefined {
   if (!model) return undefined;
   const separator = model.indexOf('/');
   if (separator > 0 && separator < model.length - 1) {
@@ -137,6 +137,18 @@ export function readProviderEnvironmentCredential(
   return typeof value === 'string' && value.length > 0 && value.length <= 16_384 ? value : undefined;
 }
 
+export async function resolveProviderCredential(
+  providerId: string,
+  options: {
+    credentialBroker?: ProviderCredentialBroker;
+    environment?: NodeJS.ProcessEnv;
+  } = {},
+): Promise<string | undefined> {
+  const id = validateProviderId(providerId);
+  return readProviderEnvironmentCredential(id, options.environment)
+    ?? await options.credentialBroker?.resolve(id);
+}
+
 export async function resolveSessionLaunchCredentials(
   model: string | null | undefined,
   options: {
@@ -146,8 +158,7 @@ export async function resolveSessionLaunchCredentials(
 ): Promise<{ apiKey?: string; providerCredentials?: Record<string, string> }> {
   const providerId = resolveProviderIdForModel(model);
   if (!providerId) return {};
-  const credential = readProviderEnvironmentCredential(providerId, options.environment)
-    ?? await options.credentialBroker?.resolve(providerId);
+  const credential = await resolveProviderCredential(providerId, options);
   if (!credential) return {};
   return providerId === 'anthropic'
     ? { apiKey: credential }

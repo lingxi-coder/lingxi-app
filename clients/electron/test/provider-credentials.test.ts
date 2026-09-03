@@ -49,19 +49,17 @@ test('closing Settings invalidates late credential transaction updates without c
   assert.equal(isCurrentCredentialTransaction(true, 4, generation), false);
 });
 
-test('credential persistence clears the secret before applying a deferred model', async () => {
+test('credential persistence clears the secret before applying a deferred model without restarting', async () => {
   const events: string[] = [];
   await persistProviderCredentialAndApplyModel(
     'deepseek',
     'sk-test-secret',
     async () => { events.push('persist'); },
     () => { events.push('clear'); },
-    async (sessionId) => { events.push(`restart:${sessionId}`); },
-    'session-1',
     'deepseek/deepseek-v4-flash',
     async (reference) => { events.push(`apply:${reference}`); },
   );
-  assert.deepEqual(events, ['persist', 'clear', 'restart:session-1', 'apply:deepseek/deepseek-v4-flash']);
+  assert.deepEqual(events, ['persist', 'clear', 'apply:deepseek/deepseek-v4-flash']);
 });
 
 test('credential persistence does not clear or apply when the host rejects the write', async () => {
@@ -72,8 +70,6 @@ test('credential persistence does not clear or apply when the host rejects the w
       'sk-test-secret',
       async () => { events.push('persist'); throw new Error('host unavailable'); },
       () => { events.push('clear'); },
-      async () => { events.push('restart'); },
-      'session-1',
       'deepseek/deepseek-v4-flash',
       async () => { events.push('apply'); },
     ),
@@ -82,7 +78,7 @@ test('credential persistence does not clear or apply when the host rejects the w
   assert.deepEqual(events, ['persist']);
 });
 
-test('restart failure happens after the secret is cleared and before model application', async () => {
+test('model application failure happens after the persisted secret leaves renderer state', async () => {
   const events: string[] = [];
   await assert.rejects(
     persistProviderCredentialAndApplyModel(
@@ -90,12 +86,10 @@ test('restart failure happens after the secret is cleared and before model appli
       'sk-test-secret',
       async () => { events.push('persist'); },
       () => { events.push('clear'); },
-      async () => { events.push('restart'); throw new Error('engine restart failed'); },
-      'session-1',
       'deepseek/deepseek-v4-flash',
-      async () => { events.push('apply'); },
+      async () => { events.push('apply'); throw new Error('model switch failed'); },
     ),
-    /engine restart failed/,
+    /model switch failed/,
   );
-  assert.deepEqual(events, ['persist', 'clear', 'restart']);
+  assert.deepEqual(events, ['persist', 'clear', 'apply']);
 });

@@ -634,8 +634,22 @@ fn sanitize_report(report: &mut PanelReport) {
     report.candidate_answer = sanitize_text(&report.candidate_answer);
     for claim in &mut report.claims {
         claim.statement = sanitize_text(&claim.statement);
+        // (finding [6]) `evidence_refs` are panel-authored strings that reach
+        // the analyst prompt verbatim via `analyst_user_message`'s whole-struct
+        // serialization, exactly like `statement` above — sanitize them the
+        // same way. `sanitize_text` is a pure function of its input, so a ref
+        // that names a real `evidence[].id` (sanitized identically below)
+        // stays byte-equal after sanitization and `validate_panel_report`'s
+        // referential-integrity check still passes.
+        for evidence_ref in &mut claim.evidence_refs {
+            *evidence_ref = sanitize_text(evidence_ref);
+        }
     }
     for evidence in &mut report.evidence {
+        // (finding [6]) `id` is panel-authored and, like `locator`/`excerpt`
+        // below, is serialized verbatim into the analyst prompt — it was the
+        // one field in this loop left unsanitized.
+        evidence.id = sanitize_text(&evidence.id);
         evidence.locator = sanitize_text(&evidence.locator);
         if let Some(excerpt) = evidence.excerpt.as_mut() {
             *excerpt = sanitize_text(excerpt);

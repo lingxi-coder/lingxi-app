@@ -23,8 +23,10 @@ import {
 import {
   BROKER_RESOURCE_DIRNAME,
   brokerIdentifiers,
+  findMachOFiles,
   verifyIdentifier,
   verifySignedEntitlements,
+  verifyTeamIdentifier,
 } from './credential-broker.mjs';
 
 function requirePath(path, kind = 'path') {
@@ -188,6 +190,9 @@ export function verifyPackage(root = packageRoot) {
       verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
       verifySignedEntitlements(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
       verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId);
+      for (const path of findMachOFiles(join(contents, 'Frameworks'))) {
+        verifyTeamIdentifier(path, teamId);
+      }
     }
   }
 

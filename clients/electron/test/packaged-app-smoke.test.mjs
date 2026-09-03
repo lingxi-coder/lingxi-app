@@ -7,7 +7,7 @@ import { afterEach, test } from 'node:test';
 import {
   APP_USER_DATA_SUBPATH,
   createPackagedSettings,
-  isKeylessProviderCredentialSnapshot,
+  isSafeProviderCredentialSnapshot,
   runtimePathsForHome,
   sanitizePackagedAppEnvironment,
   workspaceTrustFingerprint,
@@ -64,16 +64,19 @@ test('runtime paths stay inside the isolated HOME tree', () => {
   assert.equal(paths.diagnosticsPath, join(home, APP_USER_DATA_SUBPATH, 'logs', 'desktop.jsonl'));
 });
 
-test('keyless packaged bootstrap checks every provider credential', () => {
-  assert.equal(isKeylessProviderCredentialSnapshot([
+test('packaged bootstrap accepts configured providers but rejects secret-bearing metadata', () => {
+  assert.equal(isSafeProviderCredentialSnapshot([
     { providerId: 'anthropic', configured: false, encryptionAvailable: true },
-    { providerId: 'openai', configured: false, encryptionAvailable: true },
+    { providerId: 'openai', configured: true, encryptionAvailable: true, credentialPreview: '••••abcd' },
   ]), true);
-  assert.equal(isKeylessProviderCredentialSnapshot([
+  assert.equal(isSafeProviderCredentialSnapshot([
     { providerId: 'anthropic', configured: false, encryptionAvailable: true },
-    { providerId: 'openai', configured: true, encryptionAvailable: true },
+    { providerId: 'openai', configured: true, encryptionAvailable: true, credentialPreview: 'plain-secret' },
   ]), false);
-  assert.equal(isKeylessProviderCredentialSnapshot(undefined), false);
+  assert.equal(isSafeProviderCredentialSnapshot([
+    { providerId: 'openai', configured: true, encryptionAvailable: true, apiKey: 'secret' },
+  ]), false);
+  assert.equal(isSafeProviderCredentialSnapshot(undefined), false);
 });
 
 test('packaged settings preseed a trusted active project without secrets', () => {

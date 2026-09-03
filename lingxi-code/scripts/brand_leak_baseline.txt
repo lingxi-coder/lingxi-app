@@ -37,6 +37,7 @@ G1	clients/android/app/src/test/java/com/lingxi/code/localapps/LocalAppWebViewTe
 G1	clients/android/app/src/test/java/com/lingxi/code/secure/EngineCredentialsTest.kt	LINGXI_
 G1	clients/electron/scripts/package-desktop.mjs	LINGXI_
 G1	clients/electron/scripts/package-mac.mjs	LINGXI_
+G1	clients/electron/scripts/package-macos-flare.sh	LINGXI_
 G1	clients/electron/scripts/package-support.mjs	LINGXI_
 G1	clients/electron/scripts/packaged-app-smoke.mjs	CLAUDE\.local\.md
 G1	clients/electron/scripts/packaged-app-smoke.mjs	CLAUDE\.md
@@ -927,6 +928,7 @@ G3	clients/electron/src/renderer/components/CodeBlock.tsx	.lingxi
 G3	clients/electron/src/renderer/components/settings/pages/McpServers.tsx	.lingxi.json
 G3	clients/electron/src/shared/settings.ts	.lingxi
 G3	clients/electron/test/audio-request-interaction.test.mjs	.lingxi
+G3	clients/electron/test/desktop-packaging-targets.test.mjs	.lingxi
 G3	clients/electron/test/fixtures/audio-request-main.tsx	.lingxi
 G3	clients/electron/test/fixtures/microphone-permission-main.tsx	.lingxi
 G3	clients/electron/test/host-utils.test.ts	.lingxi

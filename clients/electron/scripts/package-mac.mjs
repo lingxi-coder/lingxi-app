@@ -34,11 +34,13 @@ import {
   brokerIdentifiers,
   buildCredentialBrokerResources,
   ensureBrokerResourceLayout,
+  findMachOFiles,
   signAppBundle,
   signBinary,
   validateProvisioningProfile,
   verifyIdentifier,
   verifySignedEntitlements,
+  verifyTeamIdentifier,
   writeEntitlements,
 } from './credential-broker.mjs';
 
@@ -51,8 +53,24 @@ function run(command, args, cwd = packageRoot) {
   execFileSync(command, args, { cwd, stdio: 'inherit' });
 }
 
-function signNestedFrameworks(frameworksDir, identity) {
+function writeHelperEntitlements(path, plugin = false) {
+  const pluginRows = plugin ? `
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>` : '';
+  writeFileSync(path, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>${pluginRows}
+</dict></plist>
+`, 'utf8');
+}
+
+function signNestedFrameworks(frameworksDir, identity, helperEntitlementsPath, pluginEntitlementsPath) {
   const timestamp = identity === '-' ? '--timestamp=none' : '--timestamp';
+  const nestedBinaries = findMachOFiles(frameworksDir);
+  for (const path of nestedBinaries) {
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', identity, timestamp, '--options', 'runtime', path], { stdio: 'inherit' });
+  }
   for (const entry of readdirSync(frameworksDir, { withFileTypes: true })) {
     const path = join(frameworksDir, entry.name);
     if (entry.isDirectory() && entry.name.endsWith('.framework')) {
@@ -60,9 +78,16 @@ function signNestedFrameworks(frameworksDir, identity) {
       continue;
     }
     if (entry.isDirectory() && entry.name.endsWith('.app')) {
-      execFileSync('/usr/bin/codesign', ['--force', '--sign', identity, '--options', 'runtime', timestamp, path], { stdio: 'inherit' });
+      const entitlementsPath = entry.name.includes('(Plugin).app')
+        ? pluginEntitlementsPath
+        : helperEntitlementsPath;
+      execFileSync('/usr/bin/codesign', [
+        '--force', '--sign', identity, '--options', 'runtime', timestamp,
+        '--entitlements', entitlementsPath, path,
+      ], { stdio: 'inherit' });
     }
   }
+  return nestedBinaries;
 }
 
 function signApplication(appPath, contents, appContainer, packagedSidecar, brokerResourceRoot, version, channel) {
@@ -101,8 +126,17 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
     teamId,
     bundleId: identifiers.brokerBundleId,
   });
+  const helperEntitlementsPath = join(appContainer, 'Electron-Helper.entitlements.plist');
+  const pluginEntitlementsPath = join(appContainer, 'Electron-Plugin-Helper.entitlements.plist');
+  writeHelperEntitlements(helperEntitlementsPath);
+  writeHelperEntitlements(pluginEntitlementsPath, true);
   ensureBrokerResourceLayout(brokerResourceRoot);
-  signNestedFrameworks(join(contents, 'Frameworks'), identity);
+  const nestedFrameworkBinaries = signNestedFrameworks(
+    join(contents, 'Frameworks'),
+    identity,
+    helperEntitlementsPath,
+    pluginEntitlementsPath,
+  );
   signBinary(packagedSidecar, identity, identifiers.bridgeServerIdentifier);
   signBinary(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identity, identifiers.clientIdentifier);
   signAppBundle(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identity, brokerEntitlementsPath);
@@ -113,6 +147,7 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   verifyIdentifier(appPath, identifiers.desktopBundleId, teamId);
   verifySignedEntitlements(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
   verifySignedEntitlements(appPath, teamId, identifiers.desktopBundleId);
+  for (const path of nestedFrameworkBinaries) verifyTeamIdentifier(path, teamId);
   log(`signed app and credential broker with ${identity} (${version})`);
 }
 

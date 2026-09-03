@@ -175,6 +175,14 @@ export function resolveSwiftTarget(targetTriple, fallbackArch = process.arch) {
   return null;
 }
 
+export function findMachOFiles(root) {
+  const output = execFileSync('/usr/bin/find', [root, '-type', 'f', '-print0']);
+  return output.toString('utf8').split('\0').filter(Boolean).filter((path) => {
+    const description = execFileSync('/usr/bin/file', ['-b', path], { encoding: 'utf8' });
+    return description.includes('Mach-O');
+  }).sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
 export function readProvisioningProfile(path) {
   const plist = execFileSync('/usr/bin/security', ['cms', '-D', '-i', path]);
   const scratch = mkdtempSync(join(tmpdir(), 'lingxi-profile-'));
@@ -186,6 +194,7 @@ export function readProvisioningProfile(path) {
     }).trim();
     return {
       TeamIdentifier: [read('TeamIdentifier:0')],
+      Platform: [read('Platform:0')],
       ExpirationDate: read('ExpirationDate'),
       Entitlements: {
         'com.apple.application-identifier': read('Entitlements:com.apple.application-identifier'),
@@ -196,20 +205,31 @@ export function readProvisioningProfile(path) {
   }
 }
 
-export function validateProvisioningProfile(profilePath, teamId, bundleId) {
-  const profile = readProvisioningProfile(profilePath);
+export function validateProvisioningProfileMetadata(profile, teamId, bundleId, now = Date.now()) {
   const profileTeams = Array.isArray(profile.TeamIdentifier) ? profile.TeamIdentifier : [];
+  const profilePlatforms = Array.isArray(profile.Platform) ? profile.Platform : [];
   const applicationIdentifier = profile.Entitlements?.['com.apple.application-identifier'];
   const expected = `${teamId}.${bundleId}`;
   const expiration = Date.parse(profile.ExpirationDate);
-  if (!Number.isFinite(expiration) || expiration <= Date.now()) {
-    throw new Error(`provisioning profile ${profilePath} is expired or has no valid expiration date`);
+  if (!profilePlatforms.includes('OSX')) {
+    throw new Error('provisioning profile is not authorized for macOS');
+  }
+  if (!Number.isFinite(expiration) || expiration <= now) {
+    throw new Error('provisioning profile is expired or has no valid expiration date');
   }
   if (!profileTeams.includes(teamId)) {
-    throw new Error(`provisioning profile ${profilePath} team does not match ${teamId}`);
+    throw new Error(`provisioning profile team does not match ${teamId}`);
   }
   if (applicationIdentifier !== expected && applicationIdentifier !== `${teamId}.*`) {
-    throw new Error(`provisioning profile ${profilePath} does not authorize ${expected}`);
+    throw new Error(`provisioning profile does not authorize ${expected}`);
+  }
+}
+
+export function validateProvisioningProfile(profilePath, teamId, bundleId) {
+  try {
+    validateProvisioningProfileMetadata(readProvisioningProfile(profilePath), teamId, bundleId);
+  } catch (error) {
+    throw new Error(`invalid provisioning profile ${profilePath}: ${formatError(error)}`);
   }
 }
 
@@ -282,6 +302,17 @@ export function verifyIdentifier(path, expectedIdentifier, expectedTeamId) {
   const combined = `${result.stdout || ''}${result.stderr || ''}`;
   if (!combined.includes(`Identifier=${expectedIdentifier}`)) {
     throw new Error(`unexpected identifier for ${path}: expected ${expectedIdentifier}`);
+  }
+  if (!combined.includes(`TeamIdentifier=${expectedTeamId}`)) {
+    throw new Error(`unexpected TeamIdentifier for ${path}: expected ${expectedTeamId}`);
+  }
+}
+
+export function verifyTeamIdentifier(path, expectedTeamId) {
+  const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', path], { encoding: 'utf8' });
+  const combined = `${result.stdout || ''}${result.stderr || ''}`;
+  if (result.status !== 0) {
+    throw new Error(`unable to read code signature for ${path}`);
   }
   if (!combined.includes(`TeamIdentifier=${expectedTeamId}`)) {
     throw new Error(`unexpected TeamIdentifier for ${path}: expected ${expectedTeamId}`);

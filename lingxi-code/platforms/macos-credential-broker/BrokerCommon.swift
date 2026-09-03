@@ -181,12 +181,17 @@ func currentTeamIdentifier() throws -> String {
         throw BrokerFailure.permission(securityMessage(staticStatus, action: "resolve current static code"))
     }
     var info: CFDictionary?
-    let infoStatus = SecCodeCopySigningInformation(staticCode, SecCSFlags(), &info)
-    guard infoStatus == errSecSuccess,
-          let info = info as? [String: Any],
-          let teamId = info[kSecCodeInfoTeamIdentifier as String] as? String,
-          !teamId.isEmpty else {
+    let infoStatus = SecCodeCopySigningInformation(
+        staticCode,
+        SecCSFlags(rawValue: kSecCSSigningInformation),
+        &info
+    )
+    guard infoStatus == errSecSuccess, let info = info as? [String: Any] else {
         throw BrokerFailure.permission(securityMessage(infoStatus, action: "resolve TeamIdentifier"))
+    }
+    guard let teamId = info[kSecCodeInfoTeamIdentifier as String] as? String,
+          !teamId.isEmpty else {
+        throw BrokerFailure.permission("current code signature does not contain a TeamIdentifier")
     }
     return teamId
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +12,7 @@ import {
   assertArm64Architecture,
   copyProductionDependencies,
   normalizeTimestamp,
+  repoRoot,
   rewriteInfoPlist,
   runtimePackageJson,
   scanTreeForForbiddenContent,
@@ -21,8 +22,10 @@ import {
   BROKER_ALLOWED_CALLERS,
   brokerIdentifiers,
   brokerManifest,
+  findMachOFiles,
   renderLaunchAgentTemplate,
   resolveSwiftTarget,
+  validateProvisioningProfileMetadata,
   validateSignedEntitlements,
 } from '../scripts/credential-broker.mjs';
 
@@ -128,6 +131,35 @@ test('credential broker packaging resolves Swift targets for both macOS CLI trip
   assert.equal(resolveSwiftTarget('x86_64-unknown-linux-musl'), null);
 });
 
+test('credential broker requests cryptographic signing information before reading TeamIdentifier', () => {
+  const source = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'BrokerCommon.swift',
+  ), 'utf8');
+  assert.match(
+    source,
+    /SecCodeCopySigningInformation\([\s\S]{0,160}SecCSFlags\(rawValue: kSecCSSigningInformation\)/,
+  );
+  assert.doesNotMatch(source, /SecCodeCopySigningInformation\(staticCode, SecCSFlags\(\), &info\)/);
+  assert.match(source, /current code signature does not contain a TeamIdentifier/);
+});
+
+test('nested signing discovery includes Mach-O binaries and excludes ordinary resources', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-macho-test-'));
+  try {
+    const binary = join(root, 'helper');
+    const resource = join(root, 'resource.txt');
+    copyFileSync('/bin/echo', binary);
+    writeFileSync(resource, 'not executable code');
+    assert.deepEqual(findMachOFiles(root), [binary]);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
 test('credential broker manifest stays metadata-only and caller allowlist stays narrow', () => {
   assert.deepEqual(brokerManifest('1.2.3'), {
     version: '1.2.3',
@@ -173,6 +205,29 @@ test('signed entitlement validation requires the exact team and application iden
     'ZZZZZZZZZZ',
     'com.lingxi.code.credential-broker',
   ), /signed entitlements/);
+});
+
+test('provisioning profile validation rejects an iOS profile before macOS signing starts', () => {
+  const profile = {
+    TeamIdentifier: ['ABCDEFGHIJ'],
+    Platform: ['OSX'],
+    ExpirationDate: '2030-01-01T00:00:00Z',
+    Entitlements: {
+      'com.apple.application-identifier': 'ABCDEFGHIJ.com.lingxi.code.development',
+    },
+  };
+  assert.doesNotThrow(() => validateProvisioningProfileMetadata(
+    profile,
+    'ABCDEFGHIJ',
+    'com.lingxi.code.development',
+    Date.parse('2029-01-01T00:00:00Z'),
+  ));
+  assert.throws(() => validateProvisioningProfileMetadata(
+    { ...profile, Platform: ['iOS'] },
+    'ABCDEFGHIJ',
+    'com.lingxi.code.development',
+    Date.parse('2029-01-01T00:00:00Z'),
+  ), /macOS/);
 });
 
 test('ZIP validation rejects traversal and entries outside the app', () => {

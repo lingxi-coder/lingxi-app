@@ -1,11 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { BridgeClient } from '@lingxi/bridge-client';
 
-import { BridgeManager, SessionRuntime, SessionRuntimeManager } from '../src/main/bridge';
+import {
+  BridgeManager,
+  discoverExternalReusableBridge,
+  discoverReusableBridge,
+  processCommandOwnsSession,
+  SessionRuntime,
+  SessionRuntimeManager,
+} from '../src/main/bridge';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
 function temporaryDirectory(): string {
@@ -326,6 +334,156 @@ test('opening another session leaves the running session alive', async () => {
     SessionRuntime.prototype.start = originalStart;
     SessionRuntime.prototype.resumeOwnedSession = originalResume;
     await manager.dispose();
+  }
+});
+
+test('reusable bridge discovery matches the exact session and workspace', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-existing');
+  const workspace = '/workspace';
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  mkdirSync(launchDir, { mode: 0o700 });
+  const lockfilePath = join(launchDir, '43123.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+
+  try {
+    const command = `/Applications/LingXi Code.app/Contents/Resources/bin/bridge-server --cwd ${workspace} --session-id ${sessionId} --trusted-workspace`;
+    assert.deepEqual(
+      discoverReusableBridge(
+        bridgeRoot,
+        { projectPath: workspace, sessionId },
+        () => command,
+      ),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
+    );
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: '/different', sessionId },
+      () => command,
+    ), undefined);
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: workspace, sessionId: '88888888-aaaa-4bbb-8ccc-dddddddddddd' },
+      () => command,
+    ), undefined);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
+test('external bridge discovery accepts only the exact process workspace and session', () => {
+  const launchDir = temporaryDirectory();
+  const ref = {
+    projectPath: '/workspace with spaces',
+    sessionId: '66666666-aaaa-4bbb-8ccc-dddddddddddd',
+  };
+  const lockfilePath = join(launchDir, '43125.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [ref.projectPath],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+
+  try {
+    const command = `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId} --trusted-workspace`;
+    assert.deepEqual(
+      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 42, command }]),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: false },
+    );
+    assert.equal(discoverExternalReusableBridge(
+      { ...ref, projectPath: '/different' },
+      [{ pid: process.pid, ppid: 42, command }],
+    ), undefined);
+    assert.deepEqual(
+      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 1, command }]),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
+      'an orphaned bridge is safe for the current Desktop to replace if adoption is incompatible',
+    );
+  } finally {
+    rmSync(launchDir, { recursive: true, force: true });
+  }
+});
+
+test('process command matching does not accept a session id prefix or another flag value', () => {
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --session-id ${sessionId} --trusted-workspace`,
+    sessionId,
+  ), true);
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --session-id ${sessionId}0 --trusted-workspace`,
+    sessionId,
+  ), false);
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --label ${sessionId} --trusted-workspace`,
+    sessionId,
+  ), false);
+});
+
+test('opening a session adopts its detached bridge instead of spawning a duplicate UUID', async () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = temporaryDirectory();
+  const ref = {
+    projectPath: '/workspace',
+    sessionId: '77777777-aaaa-4bbb-8ccc-dddddddddddd',
+  };
+  writeFileSync(join(launchDir, '43124.lock'), JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [ref.projectPath],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const originalConnect = BridgeClient.prototype.connect;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  let launchCalls = 0;
+  BridgeClient.prototype.connect = async function () {
+    return {
+      server_name: 'lingxi-bridge-server/0.9.0',
+      protocol_version: '0.2.0',
+      capabilities: { client_protocol_version: '11.0.0' },
+    } as any;
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    bridgeRoot,
+    listProcessCommands: () => [{
+      pid: process.pid,
+      ppid: 42,
+      command: `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId}`,
+    }],
+    launchConfig: () => {
+      launchCalls += 1;
+      throw new Error('adoption must not assemble another process');
+    },
+  });
+
+  try {
+    const runtime = await manager.openSession(ref);
+    assert.equal(launchCalls, 0);
+    assert.equal(runtime.connectionState.status, 'connected');
+    assert.strictEqual(manager.get(ref.sessionId), runtime);
+    (runtime as any).stopAdoptedBridge = async () => {
+      throw new Error('an externally owned bridge must not be terminated');
+    };
+  } finally {
+    BridgeClient.prototype.connect = originalConnect;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+    assert.equal(existsSync(launchDir), true, 'external launch state remains owned by its original host');
+    rmSync(bridgeRoot, { recursive: true, force: true });
+    rmSync(launchDir, { recursive: true, force: true });
   }
 });
 

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -99,6 +99,10 @@ export interface BridgeManagerOptions {
   /** Direct unit-test/legacy mode can keep the old runtime IPC registration. */
   registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
+  /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
+  readProcessCommand?: (pid: number) => string | undefined;
+  /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
+  listProcessCommands?: () => readonly ProcessCommand[];
   onModelChanged?: (model: string) => void;
   /** Resolve a broker-owned credential only when this session first selects its provider. */
   resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
@@ -194,6 +198,170 @@ function lockfiles(dir: string): string[] {
   } catch {
     return [];
   }
+}
+
+export interface ReusableBridge {
+  launchDir: string;
+  lockfilePath: string;
+  pid: number;
+  ownedProcess: boolean;
+}
+
+export interface ProcessCommand {
+  pid: number;
+  ppid?: number;
+  command: string;
+}
+
+function privateOwnedPath(path: string, kind: 'directory' | 'file'): boolean {
+  try {
+    const metadata = lstatSync(path);
+    if (kind === 'directory' ? !metadata.isDirectory() : !metadata.isFile()) return false;
+    if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) return false;
+    if (process.getuid && metadata.uid !== process.getuid()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function processCommandOwnsSession(command: string, sessionId: string): boolean {
+  if (!isSessionId(sessionId)) return false;
+  const escaped = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)--session-id(?:=|\\s+)${escaped}(?=\\s|$)`).test(command);
+}
+
+function readProcessCommand(pid: number): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024,
+      timeout: 1_000,
+    }).trim();
+    return command || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function listProcessCommands(): ProcessCommand[] {
+  if (process.platform === 'win32') return [];
+  try {
+    return execFileSync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], {
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 2_000,
+    }).split('\n').flatMap((line) => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function lockfilePort(name: string): number | undefined {
+  if (!name.endsWith('.lock') || name.startsWith('.')) return undefined;
+  const raw = name.slice(0, -'.lock'.length);
+  const port = Number(raw);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 && String(port) === raw
+    ? port
+    : undefined;
+}
+
+function reusableBridgeInLaunchDirectory(
+  launchDir: string,
+  ref: SessionRef,
+  pid: number,
+  ownedProcess: boolean,
+): ReusableBridge | undefined {
+  if (!privateOwnedPath(launchDir, 'directory')) return undefined;
+  for (const name of lockfiles(launchDir)) {
+    if (lockfilePort(name) === undefined) continue;
+    const lockfilePath = join(launchDir, name);
+    if (!privateOwnedPath(lockfilePath, 'file')) continue;
+    try {
+      const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
+      validateBridgeLockfile(body, pid, ref.projectPath);
+      return { launchDir, lockfilePath, pid, ownedProcess };
+    } catch {
+      // A stale or partially-written candidate is not reusable; keep looking.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Locate a still-running bridge-server previously detached from this exact
+ * Desktop user-data root. The private lockfile authenticates the connection;
+ * the process command supplies the missing session-id binding in the legacy
+ * lockfile schema without weakening its Claude-compatible wire format.
+ */
+export function discoverReusableBridge(
+  bridgeRoot: string,
+  ref: SessionRef,
+  processCommand: (pid: number) => string | undefined = readProcessCommand,
+): ReusableBridge | undefined {
+  if (!privateOwnedPath(bridgeRoot, 'directory')) return undefined;
+  let entries: string[];
+  try {
+    entries = readdirSync(bridgeRoot).sort((left, right) => right.localeCompare(left));
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith('launch-')) continue;
+    const launchDir = join(bridgeRoot, entry);
+    if (!privateOwnedPath(launchDir, 'directory')) continue;
+    for (const name of lockfiles(launchDir)) {
+      if (lockfilePort(name) === undefined) continue;
+      const lockfilePath = join(launchDir, name);
+      if (!privateOwnedPath(lockfilePath, 'file')) continue;
+      try {
+        const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
+        if (!Number.isSafeInteger(body.pid) || Number(body.pid) < 1) continue;
+        const pid = Number(body.pid);
+        const command = processCommand(pid);
+        if (!command || !processCommandOwnsSession(command, ref.sessionId)) continue;
+        const reusable = reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
+        if (reusable) return reusable;
+      } catch {
+        // A stale or partially-written candidate is not reusable; keep looking.
+      }
+    }
+  }
+  return undefined;
+}
+
+function argumentBetween(command: string, start: string, end: string): string | undefined {
+  const startIndex = command.indexOf(start);
+  if (startIndex < 0) return undefined;
+  const valueStart = startIndex + start.length;
+  const endIndex = command.indexOf(end, valueStart);
+  if (endIndex < 0) return undefined;
+  const value = command.slice(valueStart, endIndex).trim();
+  return value || undefined;
+}
+
+export function discoverExternalReusableBridge(
+  ref: SessionRef,
+  processes: readonly ProcessCommand[] = listProcessCommands(),
+): ReusableBridge | undefined {
+  for (const processInfo of processes) {
+    if (!processCommandOwnsSession(processInfo.command, ref.sessionId)) continue;
+    const workspace = argumentBetween(processInfo.command, ' --cwd ', ' --bridge-dir ');
+    const launchDir = argumentBetween(processInfo.command, ' --bridge-dir ', ' --session-id ');
+    if (workspace !== ref.projectPath || !launchDir) continue;
+    const reusable = reusableBridgeInLaunchDirectory(
+      launchDir,
+      ref,
+      processInfo.pid,
+      processInfo.ppid === 1,
+    );
+    if (reusable) return reusable;
+  }
+  return undefined;
 }
 
 function urlOrigin(raw: string): string | undefined {
@@ -375,6 +543,8 @@ export class SessionRuntime {
   private restartChain: Promise<void> = Promise.resolve();
   private generation = 0;
   private launchDir: string | null = null;
+  private adoptedPid: number | null = null;
+  private adoptedProcessOwned = false;
   private activeWorkspace: string | undefined;
   private activeWorkspaceTrusted = false;
   private runtimeCredentialProviders = new Set<string>();
@@ -705,6 +875,44 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    let generation = ++this.generation;
+    const bridgeRoot = this.opts.bridgeRoot;
+    if (bridgeRoot && this.projectPath) {
+      const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
+      const reusable = discoverReusableBridge(
+        bridgeRoot,
+        ref,
+        this.opts.readProcessCommand ?? readProcessCommand,
+      ) ?? discoverExternalReusableBridge(
+        ref,
+        (this.opts.listProcessCommands ?? listProcessCommands)(),
+      );
+      if (reusable) {
+        this.launchDir = reusable.launchDir;
+        this.adoptedPid = reusable.pid;
+        this.adoptedProcessOwned = reusable.ownedProcess;
+        this.activeWorkspace = this.projectPath;
+        const access = this.opts.accessState?.();
+        this.activeWorkspaceTrusted = Boolean(
+          access?.trusted
+          && (!access.workspace || access.workspace === this.projectPath),
+        );
+        try {
+          await this.connectBridgeClient(reusable.lockfilePath, generation);
+          this.diagnostics.add('info', 'host', diagnosticEvent('bridge_adopted', {
+            pid: reusable.pid,
+            sessionId: this.sessionId,
+          }));
+          return;
+        } catch (error) {
+          this.diagnostics.add('warn', 'host', `failed to adopt existing session runtime: ${sanitizeDiagnostic(error)}`);
+          await this.stopBridge();
+          if (!reusable.ownedProcess) throw error;
+          generation = ++this.generation;
+        }
+      }
+    }
+
     const launch = await this.opts.launchConfig();
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.activeWorkspace = launch.workspace;
@@ -721,7 +929,6 @@ export class SessionRuntime {
     this.credentialPreviews.clear();
     this.credentialStorageEncrypted = false;
     const bridgeDir = this.createLaunchDirectory();
-    const generation = ++this.generation;
 
     this.setState({ status: 'spawning' });
     let child: ChildProcess;
@@ -750,26 +957,7 @@ export class SessionRuntime {
     try {
       const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
       if (this.disposed) throw new Error('SessionRuntime is disposed');
-      this.setState({ status: 'connecting' });
-      const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
-      this.client = client;
-      this.wireClient(client, generation);
-      const hello = await client.connect();
-      if (generation !== this.generation || this.disposed) return;
-      this.lastRuntimeVersions = {
-        serverName: hello.server_name,
-        serverProtocol: hello.protocol_version,
-        clientProtocol: hello.capabilities.client_protocol_version,
-      };
-      this.diagnostics.add(
-        'info',
-        'bridge',
-        bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
-      );
-      this.setState({ status: 'connected' });
-      // Status refreshes use attribute-only broker queries; they do not
-      // decrypt every saved credential or expose secret bytes to the renderer.
-      void this.refreshProviderCredentials();
+      await this.connectBridgeClient(lockfilePath, generation);
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error);
@@ -777,6 +965,29 @@ export class SessionRuntime {
       }
       throw error;
     }
+  }
+
+  private async connectBridgeClient(lockfilePath: string, generation: number): Promise<void> {
+    this.setState({ status: 'connecting' });
+    const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
+    this.client = client;
+    this.wireClient(client, generation);
+    const hello = await client.connect();
+    if (generation !== this.generation || this.disposed) return;
+    this.lastRuntimeVersions = {
+      serverName: hello.server_name,
+      serverProtocol: hello.protocol_version,
+      clientProtocol: hello.capabilities.client_protocol_version,
+    };
+    this.diagnostics.add(
+      'info',
+      'bridge',
+      bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
+    );
+    this.setState({ status: 'connected' });
+    // Status refreshes use attribute-only broker queries; they do not
+    // decrypt every saved credential or expose secret bytes to the renderer.
+    void this.refreshProviderCredentials();
   }
 
   private async refreshProviderCredentials(): Promise<void> {
@@ -1587,7 +1798,43 @@ export class SessionRuntime {
       }, this.opts.stopTimeoutMs ?? 2_000);
       timer.unref();
     });
-    this.removeLaunchDirectory();
+    const adoptedPid = this.adoptedPid;
+    const adoptedProcessOwned = this.adoptedProcessOwned;
+    this.adoptedPid = null;
+    this.adoptedProcessOwned = false;
+    if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid);
+    if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
+    else this.launchDir = null;
+  }
+
+  private processIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  private async stopAdoptedBridge(pid: number): Promise<void> {
+    const signal = (value: NodeJS.Signals): boolean => {
+      try {
+        if (process.platform !== 'win32') process.kill(-pid, value);
+        else process.kill(pid, value);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!signal('SIGINT')) return;
+    const deadline = Date.now() + (this.opts.stopTimeoutMs ?? 2_000);
+    while (this.processIsAlive(pid) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 50);
+        timer.unref();
+      });
+    }
+    if (this.processIsAlive(pid)) signal('SIGKILL');
   }
 
   private signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {

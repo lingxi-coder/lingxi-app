@@ -147,6 +147,29 @@ test('credential broker requests cryptographic signing information before readin
   assert.match(source, /current code signature does not contain a TeamIdentifier/);
 });
 
+test('credential broker replaces a same-version installed bundle when its signed code changes', () => {
+  const commonSource = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'BrokerCommon.swift',
+  ), 'utf8');
+  const clientSource = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'CredentialClientMain.swift',
+  ), 'utf8');
+
+  assert.match(commonSource, /func codeDirectoryHash\([\s\S]*kSecCodeInfoUnique/);
+  assert.match(
+    clientSource,
+    /case \.orderedSame:[\s\S]*codeDirectoryHash\(at: installedBundle\)[\s\S]*codeDirectoryHash\(at: packaged\.appBundle\)/,
+  );
+});
+
 test('nested signing discovery includes Mach-O binaries and excludes ordinary resources', () => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-macho-test-'));
   try {

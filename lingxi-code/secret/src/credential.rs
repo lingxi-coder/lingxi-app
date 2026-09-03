@@ -207,6 +207,9 @@ impl CredentialManager {
     ///
     /// Returns `Ok(None)` when no key is present in storage.
     pub async fn get_anthropic_api_key(&self) -> Result<Option<Secret<String>>, CredentialError> {
+        if let Some(secret) = self.get_provider_key_ephemeral("anthropic-api-key").await {
+            return Ok(Some(secret));
+        }
         // Fast path: cached and fresh.
         if let Some((s, cached_at)) = self.api_key_cache.read().await.as_ref() {
             if self.clock.elapsed_since(*cached_at) < self.api_key_ttl {
@@ -351,10 +354,41 @@ impl CredentialManager {
     /// Rust secure storage. The desktop host has already persisted the key in
     /// its own OS Keychain and sends it over the one-shot stdin boundary.
     pub async fn set_provider_key_ephemeral(&self, id: &str, secret: &str) {
+        let id = if is_anthropic_api_key_id(id) {
+            "anthropic-api-key"
+        } else {
+            id
+        };
         self.provider_key_cache
             .write()
             .await
             .insert(id.to_string(), Secret::new(secret.to_string()));
+    }
+
+    /// Read a process-local provider key without consulting persistent storage.
+    pub async fn get_provider_key_ephemeral(&self, id: &str) -> Option<Secret<String>> {
+        let id = if is_anthropic_api_key_id(id) {
+            "anthropic-api-key"
+        } else {
+            id
+        };
+        self.provider_key_cache
+            .read()
+            .await
+            .get(id)
+            .map(|secret| Secret::new(secret.expose_secret().clone()))
+    }
+
+    /// Remove a process-local provider key without touching persistent storage.
+    pub async fn delete_provider_key_ephemeral(&self, id: &str) {
+        if is_anthropic_api_key_id(id) {
+            self.provider_key_cache
+                .write()
+                .await
+                .retain(|cached_id, _| !is_anthropic_api_key_id(cached_id));
+        } else {
+            self.provider_key_cache.write().await.remove(id);
+        }
     }
 
     /// Load the per-provider key stored under credential `id`. Returns `Ok(None)`
@@ -1290,6 +1324,34 @@ mod oauth_tests {
             .await
             .expect("retrieve")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_anthropic_key_overrides_only_process_memory() {
+        let (_storage, cm) = manager();
+        cm.store_anthropic_api_key("persisted-key")
+            .await
+            .expect("persist");
+        cm.set_provider_key_ephemeral("anthropic", "session-key")
+            .await;
+
+        assert_eq!(
+            cm.get_anthropic_api_key()
+                .await
+                .expect("read ephemeral")
+                .expect("present")
+                .expose_secret(),
+            "session-key"
+        );
+        cm.delete_provider_key_ephemeral("anthropic").await;
+        assert_eq!(
+            cm.get_anthropic_api_key()
+                .await
+                .expect("read persisted fallback")
+                .expect("present")
+                .expose_secret(),
+            "persisted-key"
+        );
     }
 
     #[tokio::test]

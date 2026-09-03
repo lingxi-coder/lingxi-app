@@ -206,6 +206,9 @@ pub struct EngineCommandRouter {
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
+    /// Packaged Desktop owns persistence in its signed credential broker; in
+    /// that mode bridge credential mutations update only this process cache.
+    provider_credentials_ephemeral: bool,
     /// HTTP transport used by provider connection probes. Production boot
     /// supplies the same guarded transport as the runtime's LLM clients.
     http: Option<Arc<dyn platform_api::HttpTransport>>,
@@ -468,6 +471,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             credentials: None,
+            provider_credentials_ephemeral: false,
             http: None,
             settings: None,
             mcp: None,
@@ -480,6 +484,14 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Keep provider credential writes process-local because the parent owns
+    /// the persistent Data Protection Keychain entry.
+    #[must_use]
+    pub fn with_ephemeral_provider_credentials(mut self, enabled: bool) -> Self {
+        self.provider_credentials_ephemeral = enabled;
         self
     }
 
@@ -1703,11 +1715,20 @@ impl CommandRouter for EngineCommandRouter {
                 {
                     Some("invalid provider credential".to_string())
                 } else if let Some(credentials) = self.credentials.as_ref() {
-                    credentials
-                        .set_provider_key(&provider_id, credential.expose_secret())
-                        .await
-                        .err()
-                        .map(|failure| format!("failed to store provider credential: {failure}"))
+                    if self.provider_credentials_ephemeral {
+                        credentials
+                            .set_provider_key_ephemeral(&provider_id, credential.expose_secret())
+                            .await;
+                        None
+                    } else {
+                        credentials
+                            .set_provider_key(&provider_id, credential.expose_secret())
+                            .await
+                            .err()
+                            .map(|failure| {
+                                format!("failed to store provider credential: {failure}")
+                            })
+                    }
                 } else {
                     Some("provider credential storage is unavailable".to_string())
                 };
@@ -1741,11 +1762,20 @@ impl CommandRouter for EngineCommandRouter {
                 let error = if !provider_id_is_valid(&provider_id) {
                     Some("invalid provider id".to_string())
                 } else if let Some(credentials) = self.credentials.as_ref() {
-                    credentials
-                        .delete_provider_key(&provider_id)
-                        .await
-                        .err()
-                        .map(|failure| format!("failed to delete provider credential: {failure}"))
+                    if self.provider_credentials_ephemeral {
+                        credentials
+                            .delete_provider_key_ephemeral(&provider_id)
+                            .await;
+                        None
+                    } else {
+                        credentials
+                            .delete_provider_key(&provider_id)
+                            .await
+                            .err()
+                            .map(|failure| {
+                                format!("failed to delete provider credential: {failure}")
+                            })
+                    }
                 } else {
                     Some("provider credential storage is unavailable".to_string())
                 };

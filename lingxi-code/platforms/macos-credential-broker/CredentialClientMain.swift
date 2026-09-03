@@ -242,10 +242,19 @@ private func installOrResolveBrokerLocked(
                 }
                 shouldInstall = true
             } else {
-                shouldInstall = compareSemanticVersions(
+                let versionComparison = compareSemanticVersions(
                     installedManifest.version,
                     packaged.manifest.version
-                ) == .orderedAscending
+                )
+                switch versionComparison {
+                case .orderedAscending:
+                    shouldInstall = true
+                case .orderedSame:
+                    shouldInstall = try codeDirectoryHash(at: installedBundle)
+                        != codeDirectoryHash(at: packaged.appBundle)
+                case .orderedDescending:
+                    shouldInstall = false
+                }
             }
         } catch let failure as BrokerFailure {
             if case .unavailable(let message) = failure, message.contains("newer and incompatible") {

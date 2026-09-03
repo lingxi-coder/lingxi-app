@@ -806,6 +806,10 @@ pub async fn assemble_with_provider_keys(
     mut cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
+    let provider_credentials_ephemeral = matches!(
+        cfg.credential_storage_policy,
+        platform_api::CredentialStoragePolicy::NativeOrMemory
+    );
     let live_session = initialize_live_session(&mut cfg)?;
     let connection = BridgeConnection::new();
 
@@ -1043,6 +1047,7 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
+        .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
         .with_session_store(session_store)
         .with_settings_context(settings_context)

@@ -3,9 +3,30 @@ import { test } from 'node:test';
 
 import {
   createMacCredentialBrokerClient,
+  resolveProviderCredential,
+  resolveProviderIdForModel,
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
 } from '../src/main/credential-broker';
+
+test('OpenRouter nested model references resolve to the OpenRouter credential', async () => {
+  const resolved: string[] = [];
+  const credential = await resolveProviderCredential('openrouter', {
+    environment: { OPENROUTER_API_KEY: '' },
+    credentialBroker: {
+      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+      listStatus: async () => [],
+      preview: async () => ({ providerId: 'openrouter', configured: true }),
+      resolve: async (providerId) => { resolved.push(providerId); return 'or-secret'; },
+      set: async () => ({ providerId: 'openrouter', configured: true }),
+      delete: async () => undefined,
+    },
+  });
+
+  assert.equal(resolveProviderIdForModel('openrouter/minimax/minimax-m3:free'), 'openrouter');
+  assert.equal(credential, 'or-secret');
+  assert.deepEqual(resolved, ['openrouter']);
+});
 
 test('session launch resolves only the current provider from the broker', async () => {
   const resolved: string[] = [];

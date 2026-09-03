@@ -1,11 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { BridgeClient } from '@lingxi/bridge-client';
 
-import { BridgeManager, SessionRuntime, SessionRuntimeManager } from '../src/main/bridge';
+import {
+  BridgeManager,
+  discoverExternalReusableBridge,
+  discoverLegacyOrphanBridges,
+  discoverReusableBridge,
+  processCommandOwnsSession,
+  SessionRuntime,
+  SessionRuntimeManager,
+  stopLegacyOrphanBridges,
+} from '../src/main/bridge';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
 function temporaryDirectory(): string {
@@ -322,6 +332,319 @@ test('opening another session leaves the running session alive', async () => {
     assert.equal(running.turnActive, true);
     assert.equal(manager.get(nextRef.sessionId), opened);
     assert.equal(opened.connectionState.status, 'connected');
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('reusable bridge discovery matches the exact session and workspace', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-existing');
+  const workspace = '/workspace';
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  mkdirSync(launchDir, { mode: 0o700 });
+  const lockfilePath = join(launchDir, '43123.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+
+  try {
+    const command = `/Applications/LingXi Code.app/Contents/Resources/bin/bridge-server --cwd ${workspace} --session-id ${sessionId} --trusted-workspace`;
+    assert.deepEqual(
+      discoverReusableBridge(
+        bridgeRoot,
+        { projectPath: workspace, sessionId },
+        () => command,
+      ),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
+    );
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: '/different', sessionId },
+      () => command,
+    ), undefined);
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: workspace, sessionId: '88888888-aaaa-4bbb-8ccc-dddddddddddd' },
+      () => command,
+    ), undefined);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
+test('external bridge discovery accepts only the exact process workspace and session', () => {
+  const launchDir = temporaryDirectory();
+  const ref = {
+    projectPath: '/workspace with spaces',
+    sessionId: '66666666-aaaa-4bbb-8ccc-dddddddddddd',
+  };
+  const lockfilePath = join(launchDir, '43125.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [ref.projectPath],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+
+  try {
+    const command = `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId} --trusted-workspace`;
+    assert.deepEqual(
+      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 42, command }]),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: false },
+    );
+    assert.equal(discoverExternalReusableBridge(
+      { ...ref, projectPath: '/different' },
+      [{ pid: process.pid, ppid: 42, command }],
+    ), undefined);
+    assert.deepEqual(
+      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 1, command }]),
+      { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
+      'an orphaned bridge is safe for the current Desktop to replace if adoption is incompatible',
+    );
+  } finally {
+    rmSync(launchDir, { recursive: true, force: true });
+  }
+});
+
+test('process command matching does not accept a session id prefix or another flag value', () => {
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --session-id ${sessionId} --trusted-workspace`,
+    sessionId,
+  ), true);
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --session-id ${sessionId}0 --trusted-workspace`,
+    sessionId,
+  ), false);
+  assert.equal(processCommandOwnsSession(
+    `/bridge-server --label ${sessionId} --trusted-workspace`,
+    sessionId,
+  ), false);
+});
+
+test('legacy orphan discovery is limited to the current private Desktop bridge root', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-legacy');
+  const workspace = '/workspace';
+  const sessionId = '55555555-aaaa-4bbb-8ccc-dddddddddddd';
+  const pid = 43_127;
+  mkdirSync(launchDir, { mode: 0o700 });
+  const lockfilePath = join(launchDir, '43127.lock');
+  writeFileSync(lockfilePath, JSON.stringify({
+    pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const legacyCommand = `/bridge-server --cwd ${workspace} --bridge-dir ${launchDir} --session-id ${sessionId} --trusted-workspace`;
+
+  try {
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{ pid, ppid: 1, command: legacyCommand }]),
+      [{ launchDir, lockfilePath, pid, ownedProcess: true }],
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{ pid, ppid: 42, command: legacyCommand }]),
+      [],
+      'a bridge with a live parent remains owned by that host',
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{
+        pid,
+        ppid: 1,
+        command: `${legacyCommand} --packaged-credential-stdin-only`,
+      }]),
+      [],
+      'a current stdin-only packaged bridge is never considered legacy',
+    );
+    assert.deepEqual(
+      discoverLegacyOrphanBridges(bridgeRoot, [{
+        pid,
+        ppid: 1,
+        command: legacyCommand.replace(launchDir, join(bridgeRoot, '..', 'outside-root')),
+      }]),
+      [],
+      'a bridge outside this Desktop installation is out of scope',
+    );
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
+test('legacy orphan cleanup gracefully stops only validated legacy candidates', async () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-legacy');
+  const workspace = '/workspace';
+  const sessionId = '44444444-aaaa-4bbb-8ccc-dddddddddddd';
+  const pid = 43_128;
+  mkdirSync(launchDir, { mode: 0o700 });
+  writeFileSync(join(launchDir, '43128.lock'), JSON.stringify({
+    pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  let alive = true;
+
+  try {
+    assert.deepEqual(await stopLegacyOrphanBridges(bridgeRoot, {
+      processes: [{
+        pid,
+        ppid: 1,
+        command: `/bridge-server --cwd ${workspace} --bridge-dir ${launchDir} --session-id ${sessionId}`,
+      }],
+      signalProcess: (targetPid, signal) => {
+        signals.push({ pid: targetPid, signal });
+        alive = false;
+        return true;
+      },
+      processIsAlive: () => alive,
+      wait: async () => undefined,
+    }), [pid]);
+    assert.deepEqual(signals, [{ pid, signal: 'SIGINT' }]);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
+test('opening a session adopts its detached bridge instead of spawning a duplicate UUID', async () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = temporaryDirectory();
+  const ref = {
+    projectPath: '/workspace',
+    sessionId: '77777777-aaaa-4bbb-8ccc-dddddddddddd',
+  };
+  writeFileSync(join(launchDir, '43124.lock'), JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [ref.projectPath],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const originalConnect = BridgeClient.prototype.connect;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  let launchCalls = 0;
+  BridgeClient.prototype.connect = async function () {
+    return {
+      server_name: 'lingxi-bridge-server/0.9.0',
+      protocol_version: '0.2.0',
+      capabilities: { client_protocol_version: '11.0.0' },
+    } as any;
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    bridgeRoot,
+    listProcessCommands: () => [{
+      pid: process.pid,
+      ppid: 42,
+      command: `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId}`,
+    }],
+    launchConfig: () => {
+      launchCalls += 1;
+      throw new Error('adoption must not assemble another process');
+    },
+  });
+
+  try {
+    const runtime = await manager.openSession(ref);
+    assert.equal(launchCalls, 0);
+    assert.equal(runtime.connectionState.status, 'connected');
+    assert.strictEqual(manager.get(ref.sessionId), runtime);
+    (runtime as any).stopAdoptedBridge = async () => {
+      throw new Error('an externally owned bridge must not be terminated');
+    };
+  } finally {
+    BridgeClient.prototype.connect = originalConnect;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+    assert.equal(existsSync(launchDir), true, 'external launch state remains owned by its original host');
+    rmSync(bridgeRoot, { recursive: true, force: true });
+    rmSync(launchDir, { recursive: true, force: true });
+  }
+});
+
+test('idle session runtimes use a bounded least-recently-used cache', async () => {
+  const refs = [
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', sessionId: '10000000-0000-4000-8000-000000000003' },
+  ];
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    maxCachedRuntimes: 2,
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    await manager.openSession(refs[0]!);
+    await manager.openSession(refs[1]!);
+    await manager.openSession(refs[2]!);
+
+    assert.equal(manager.size, 2);
+    assert.equal(manager.get(refs[0]!.sessionId), undefined);
+    assert.ok(manager.get(refs[1]!.sessionId));
+    assert.ok(manager.get(refs[2]!.sessionId));
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('background-running and active sessions are pinned above the idle cache limit', async () => {
+  const refs = [
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000001' },
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000002' },
+    { projectPath: '/workspace', sessionId: '20000000-0000-4000-8000-000000000003' },
+  ];
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    maxCachedRuntimes: 2,
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const background = await manager.openSession(refs[0]!);
+    (background as any).activeTurn = true;
+    await manager.openSession(refs[1]!);
+    await manager.openSession(refs[2]!);
+
+    assert.equal(manager.size, 2);
+    assert.strictEqual(manager.get(refs[0]!.sessionId), background);
+    assert.equal(manager.get(refs[1]!.sessionId), undefined);
+    assert.ok(manager.get(refs[2]!.sessionId));
+
+    const secondBackground = manager.get(refs[2]!.sessionId)!;
+    (secondBackground as any).activeTurn = true;
+    await manager.openSession(refs[1]!);
+    assert.equal(manager.size, 3, 'protected background sessions may temporarily exceed the idle cache limit');
+
+    (background as any).activeTurn = false;
+    (background as any).notifyActivityChanged();
+    await Promise.resolve();
+    assert.equal(manager.size, 2, 'the cache trims again as soon as a background turn becomes idle');
+    assert.strictEqual(manager.get(refs[2]!.sessionId), secondBackground, 'a still-running background session stays cached');
+    assert.ok(manager.get(refs[1]!.sessionId), 'the active session stays cached');
   } finally {
     SessionRuntime.prototype.start = originalStart;
     SessionRuntime.prototype.resumeOwnedSession = originalResume;
@@ -946,6 +1269,113 @@ test('provider credential writes cross only the authenticated bridge command pat
     credential_previews: { deepseek: '••••cret' },
   });
   await pending;
+});
+
+test('model switching hot-loads a missing provider credential once without restarting', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  let resolves = 0;
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (providerId) => {
+      resolves += 1;
+      assert.equal(providerId, 'openrouter');
+      return 'or-session-secret';
+    },
+  });
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).client = {
+    sendCommand: (command: Record<string, unknown>) => {
+      commands.push(command);
+      if (command['type'] === 'set_provider_credential') {
+        queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
+          type: 'provider_credential_status',
+          operation_id: command['operation_id'],
+          configured_provider_ids: ['openrouter'],
+          storage_encrypted: false,
+          credential_previews: {},
+        }));
+      }
+    },
+  };
+
+  await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
+  await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
+
+  assert.equal(resolves, 1);
+  assert.deepEqual(commands.map((command) => command['type']), [
+    'set_provider_credential',
+    'set_model',
+    'set_model',
+  ]);
+  assert.equal(commands[0]?.['credential'], 'or-session-secret');
+  assert.deepEqual(manager.activeCredentialProviderIds, ['openrouter']);
+});
+
+test('concurrent model switches share one broker credential load per session', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const credential = deferred<string>();
+  let resolves = 0;
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async () => {
+      resolves += 1;
+      return credential.promise;
+    },
+  });
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).activeWorkspaceTrusted = true;
+  (manager as any).client = {
+    sendCommand: (command: Record<string, unknown>) => {
+      commands.push(command);
+      if (command['type'] === 'set_provider_credential') {
+        queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
+          type: 'provider_credential_status',
+          operation_id: command['operation_id'],
+          configured_provider_ids: ['openrouter'],
+          storage_encrypted: false,
+          credential_previews: {},
+        }));
+      }
+    },
+  };
+
+  const first = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
+  const second = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
+  assert.equal(resolves, 1);
+  credential.resolve('or-session-secret');
+  await Promise.all([first, second]);
+
+  assert.equal(commands.filter((command) => command['type'] === 'set_provider_credential').length, 1);
+  assert.equal(commands.filter((command) => command['type'] === 'set_model').length, 2);
+});
+
+test('credential refresh skips disconnected cached runtimes that will reload on their next start', async () => {
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  const connected = await manager.ensure({
+    projectPath: '/workspace',
+    sessionId: '30000000-0000-4000-8000-000000000001',
+  }, false);
+  const disconnected = await manager.ensure({
+    projectPath: '/workspace',
+    sessionId: '30000000-0000-4000-8000-000000000002',
+  }, false);
+  const refreshed: string[] = [];
+  (connected as any).state = { status: 'connected' };
+  (connected as any).runtimeCredentialProviders.add('openrouter');
+  (connected as any).cacheProviderCredential = async () => { refreshed.push('connected'); };
+  (disconnected as any).state = { status: 'disconnected' };
+  (disconnected as any).runtimeCredentialProviders.add('openrouter');
+  (disconnected as any).cacheProviderCredential = async () => { refreshed.push('disconnected'); };
+
+  try {
+    await manager.refreshCachedProviderCredential('openrouter', 'replacement');
+    assert.deepEqual(refreshed, ['connected']);
+  } finally {
+    await manager.dispose();
+  }
 });
 
 test('provider connection test keeps stored credentials engine-side and correlates the result', async () => {

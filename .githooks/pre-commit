@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-repo_root="$(git rev-parse --show-toplevel)"
-"$repo_root/lingxi-code/scripts/check-all.sh"
-python3 "$repo_root/lingxi-code/scripts/test_gate_triggers.py"

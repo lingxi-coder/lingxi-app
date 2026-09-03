@@ -6,9 +6,8 @@ hardcoded list that agrees with itself.
 WHY THIS EXISTS: a five-lens adversarial review of this branch found four
 gate scripts (check-brand-leaks, check-skill-frontmatter, check-i18n-pairing,
 lap-gate) checked in with ZERO automation trigger — nothing but a human (or
-an agent) remembering to run them. This session already lost a round to
-that exact gap: the brand gate went unrun across three content commits and
-eight legitimate entries sat red until an unrelated question surfaced them.
+an agent) remembering to run them. CI now owns that trigger without making
+every local commit wait for the full repository gate suite.
 A unit test on the gate ENGINES cannot catch this — every one of them
 passes today with zero production callers, which is the whole finding.
 
@@ -209,21 +208,19 @@ def every_checked_in_gate_has_an_execution_trigger() -> list:
             f"gate outcomes {standalone_results}"
         )
 
-    # This regression test must itself be on both checked-in trigger paths;
-    # otherwise it can pass forever while nobody runs it.
+    # This regression test must itself be on the checked-in CI trigger path;
+    # otherwise it can pass forever while nobody runs it. Local commits stay
+    # hook-free so the complete repository gate suite is paid once in CI.
     ci = REPO_ROOT.joinpath(".github/workflows/ci.yml").read_text()
-    hook_path = REPO_ROOT.joinpath(".githooks/pre-commit")
-    hook = hook_path.read_text() if hook_path.is_file() else ""
-    for label, content in (("ci.yml", ci), (".githooks/pre-commit", hook)):
-        executable_lines = [
-            line.strip()
-            for line in content.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-        if not any("scripts/check-all.sh" in line for line in executable_lines):
-            failures.append(f"{label} does not execute scripts/check-all.sh")
-        if not any("scripts/test_gate_triggers.py" in line for line in executable_lines):
-            failures.append(f"{label} does not execute scripts/test_gate_triggers.py")
+    executable_lines = [
+        line.strip()
+        for line in ci.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not any("scripts/check-all.sh" in line for line in executable_lines):
+        failures.append("ci.yml does not execute scripts/check-all.sh")
+    if not any("scripts/test_gate_triggers.py" in line for line in executable_lines):
+        failures.append("ci.yml does not execute scripts/test_gate_triggers.py")
 
     return failures
 
@@ -238,8 +235,8 @@ def main() -> int:
     discovered = sorted(discover_gates())
     print(
         "OK: every_checked_in_gate_has_an_execution_trigger -- %d gate(s) discovered under "
-        "scripts/ (%s), each has a real execution trigger (git hook -> check-all.sh -> the "
-        "gate; ci.yml registers the same chain)" % (len(discovered), ", ".join(discovered))
+        "scripts/ (%s), each has a real execution trigger (ci.yml -> check-all.sh -> the "
+        "gate)" % (len(discovered), ", ".join(discovered))
     )
     return 0
 

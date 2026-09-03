@@ -764,6 +764,70 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
 }
 
 #[tokio::test]
+async fn externally_owned_provider_credentials_stay_process_local() {
+    let (router, credentials, _temp) = router_with_credentials().await;
+    let router = router.with_ephemeral_provider_credentials(true);
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 41,
+                provider_id: "openrouter".into(),
+                credential: ProviderCredentialSecretDto::new("or-session-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("read process cache")
+            .expect("cached key")
+            .expose_secret(),
+        "or-session-secret"
+    );
+    credentials
+        .delete_provider_key_ephemeral("openrouter")
+        .await;
+    assert!(
+        credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("inspect persistent fallback")
+            .is_none(),
+        "the packaged Desktop route must not persist the broker-owned secret"
+    );
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 42,
+                provider_id: "openrouter".into(),
+                credential: ProviderCredentialSecretDto::new("replacement-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+    router
+        .route(
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 43,
+                provider_id: "openrouter".into(),
+            },
+            sink,
+        )
+        .await;
+    assert!(credentials
+        .get_provider_key("openrouter")
+        .await
+        .expect("read after process-cache delete")
+        .is_none());
+}
+
+#[tokio::test]
 async fn provider_credential_listing_reports_partial_success_without_erasing_unknown_state() {
     let credentials = Arc::new(secret::CredentialManager::new(
         Arc::new(SelectiveFailureStorage::default()),

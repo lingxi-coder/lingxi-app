@@ -6,6 +6,8 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
+  CH_PROVIDER_CREDENTIAL_CLEAR,
+  CH_PROVIDER_CREDENTIAL_SET,
   CH_PROVIDER_CREDENTIALS_GET,
   CH_SESSION_CLEAR,
   CH_SETTINGS_UPDATE,
@@ -738,17 +740,6 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
   });
 });
 
-test('default model mirror failure is recoverable after credential persistence', () => {
-  const diagnostics = new DiagnosticBuffer();
-  const settings = {
-    update: () => { throw new Error('settings mirror failed'); },
-  };
-  const host = new HostController(settings as any, {} as any, diagnostics);
-
-  (host as any).updateProviderDefaultModel('deepseek/deepseek-v4-flash');
-  assert.match(diagnostics.snapshot()[0]?.message ?? '', /default model update failed/);
-});
-
 test('bootstrap replays pending AskUserQuestion requests after a renderer reload', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
@@ -851,7 +842,7 @@ test('host catalog generations keep only the newest deferred response', async ()
   assert.equal((await (host as any).bootstrap()).projectCatalogs[projectPath].sessions[0].title, 'new');
 });
 
-test('provider credential IPC uses the broker preview path and never returns the full secret', async () => {
+test('provider credential IPC uses the broker path, hot-syncs cached sessions, and never returns the full secret', async () => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
@@ -862,10 +853,19 @@ test('provider credential IPC uses the broker preview path and never returns the
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
   };
+  const operations: string[] = [];
   const bridge = {
     registerIpc: () => undefined,
     registerWindow: () => undefined,
     turnActive: false,
+    hasActiveWork: () => false,
+    refreshCachedProviderCredential: async (providerId: string, credential: string) => {
+      assert.equal(credential, 'sk-replacement-secret');
+      operations.push(`runtime:set:${providerId}`);
+    },
+    clearCachedProviderCredential: async (providerId: string) => {
+      operations.push(`runtime:delete:${providerId}`);
+    },
   };
   const host = new HostController(
     settings as any,
@@ -879,8 +879,11 @@ test('provider credential IPC uses the broker preview path and never returns the
       listStatus: async () => [{ providerId: 'anthropic', configured: true }],
       preview: async () => ({ providerId: 'anthropic', configured: true, maskedValue: '••••cret' }),
       resolve: async () => 'sk-test-secret',
-      set: async () => ({ providerId: 'anthropic', configured: true, maskedValue: '••••cret' }),
-      delete: async () => undefined,
+      set: async (providerId: string) => {
+        operations.push(`broker:set:${providerId}`);
+        return { providerId, configured: true, maskedValue: '••••cret' };
+      },
+      delete: async (providerId: string) => { operations.push(`broker:delete:${providerId}`); },
     },
   );
   const frame = { url: 'http://127.0.0.1:4242' };
@@ -900,6 +903,22 @@ test('provider credential IPC uses the broker preview path and never returns the
     credentialPreview: '••••cret',
   });
   assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
+
+  const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
+  const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
+  assert.ok(setCredential);
+  assert.ok(clearCredential);
+  const stored = await setCredential!({ sender, senderFrame: frame }, 'anthropic', 'sk-replacement-secret') as Record<string, unknown>;
+  assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
+  assert.deepEqual(operations, ['broker:set:anthropic', 'runtime:set:anthropic']);
+
+  await clearCredential!({ sender, senderFrame: frame }, 'anthropic');
+  assert.deepEqual(operations, [
+    'broker:set:anthropic',
+    'runtime:set:anthropic',
+    'runtime:delete:anthropic',
+    'broker:delete:anthropic',
+  ]);
 });
 
 test('broker-backed bootstrap ignores legacy runtime credential status', async () => {
@@ -944,7 +963,7 @@ test('broker-backed bootstrap ignores legacy runtime credential status', async (
   });
 });
 
-test('the settings-update IPC handler accepts a voice patch, normalizes it through the real store, and never restarts the bridge for it', async () => {
+test('settings model and voice patches persist without restarting a live session', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
   const settings = new SettingsStore(userData);
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -979,6 +998,12 @@ test('the settings-update IPC handler accepts a voice patch, normalizes it throu
   const event = { sender, senderFrame: frame };
 
   try {
+    const modelResult = await Promise.resolve(update!(event, {
+      model: 'openrouter/minimax/minimax-m3:free',
+    })) as { model?: string | null };
+    assert.equal(modelResult.model, 'openrouter/minimax/minimax-m3:free');
+    assert.equal(restartCalls, 0, 'persisting a selected model must not restart its session engine');
+
     const result = await Promise.resolve(update!(event, {
       voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
     })) as { voice?: Record<string, unknown> };

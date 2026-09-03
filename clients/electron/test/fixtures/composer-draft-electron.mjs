@@ -53,6 +53,9 @@ async function main() {
 
     await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
     await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
+    const modelSettings = await webContents.executeJavaScript(`({
+      resetToDefaultVisible: document.querySelector('[aria-label="Model settings"]')?.textContent?.includes('Reset to default') ?? false,
+    })`);
     await webContents.executeJavaScript(`document.querySelector('[aria-label="Model settings"] button').click()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Search models"]') === document.activeElement`);
     const initialPicker = await webContents.executeJavaScript(`(() => ({
@@ -158,7 +161,7 @@ async function main() {
     await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === ''`);
 
-    process.stdout.write(`${JSON.stringify({ initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
+    process.stdout.write(`${JSON.stringify({ modelSettings, initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

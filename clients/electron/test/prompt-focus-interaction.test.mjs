@@ -158,6 +158,9 @@ test('real Electron restores an independent unsent composer draft for each sessi
     });
 
     assert.deepEqual(result, {
+      modelSettings: {
+        resetToDefaultVisible: false,
+      },
       initialPicker: {
         sections: ['Paid', 'Free'],
         models: ['OpenRouter Auto', 'Anthropic: Claude Opus Latest', 'OpenRouter Free', 'InclusionAI: Ling 3.0 Flash Fin (free)'],

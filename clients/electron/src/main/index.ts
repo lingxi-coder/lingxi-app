@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { SessionRuntimeManager, type SessionRef } from './bridge.js';
-import { createMacCredentialBrokerClient, resolveSessionLaunchCredentials } from './credential-broker.js';
+import { SessionRuntimeManager, stopLegacyOrphanBridges, type SessionRef } from './bridge.js';
+import { createMacCredentialBrokerClient, resolveProviderCredential, resolveSessionLaunchCredentials } from './credential-broker.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -123,10 +123,17 @@ function createWindow(): BrowserWindow {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-if (hasSingleInstanceLock) void app.whenReady().then(() => {
+if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
+  const bridgeRoot = join(userData, 'bridge-runtime');
+  if (process.platform === 'darwin' && app.isPackaged) {
+    const stoppedLegacyPids = await stopLegacyOrphanBridges(bridgeRoot);
+    if (stoppedLegacyPids.length > 0) {
+      diagnostics.add('warn', 'host', `stopped legacy orphan bridge processes: ${stoppedLegacyPids.join(', ')}`);
+    }
+  }
   const credentialBroker = createMacCredentialBrokerClient({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -143,7 +150,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   bridge = new SessionRuntimeManager({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
-    bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
+    bridgeRoot,
     // Runtime assembly includes live MCP discovery before publishing the
     // bridge lockfile. A healthy project can exceed the generic 15s default
     // on a cold network; keep the test-injected short timeout untouched while
@@ -162,6 +169,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       }
     },
     onModelChanged: (_ref, model) => { settings.update({ model }); },
+    resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {
       const catalog = await sessionCatalog.list(ref.projectPath);

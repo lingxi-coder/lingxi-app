@@ -52,6 +52,7 @@
 use std::path::{Path, PathBuf};
 
 use client_protocol::commands::McpScopeDto;
+use mcp::{ConfigScope, McpRegistry};
 use migrations::global_config::{
     get_project_config, project_path_for_config, read_map as read_global_map, save_map,
     save_project_config,
@@ -344,6 +345,65 @@ pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result
             verify_server_absent(&after_proj, name)
         }
     }
+}
+
+/// Reconcile the live registry against the three writable on-disk MCP scopes.
+///
+/// Plugin/managed/agent registrations are preserved by scope and are never
+/// removed here.
+pub async fn reconcile_writable_servers(
+    registry: &McpRegistry,
+    paths: &McpPaths,
+) -> Result<(), String> {
+    let desired = mcp::load_mcp_servers(
+        &project_mcp_path(&paths.project_dir),
+        &paths.global_config_path,
+        &paths.project_dir,
+    );
+    let desired_names: std::collections::BTreeSet<String> =
+        desired.iter().map(|config| config.name.clone()).collect();
+
+    let mut failures = Vec::new();
+    for config in desired {
+        if let Some(current) = registry.get_config(&config.name).await {
+            if !matches!(
+                current.scope,
+                ConfigScope::User | ConfigScope::Local | ConfigScope::Project
+            ) {
+                // Plugin/managed/agent/dynamic servers own their registry slot.
+                // A writable definition with the same name stays on disk but
+                // cannot displace the runtime-injected owner.
+                continue;
+            }
+        }
+        if let Err(error) = registry.replace_config_atomically(config.clone()).await {
+            failures.push(format!("{}: {error}", config.name));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "failed to build replacement MCP server state: {}",
+            failures.join("; ")
+        ));
+    }
+
+    for name in registry.server_names().await {
+        let Some(current) = registry.get_config(&name).await else {
+            continue;
+        };
+        if matches!(
+            current.scope,
+            ConfigScope::User | ConfigScope::Local | ConfigScope::Project
+        ) && !desired_names.contains(&name)
+        {
+            registry
+                .remove_without_revoking_auth_if_config(&name, &current)
+                .await
+                .map_err(|error| format!("failed to retire MCP server `{name}`: {error}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

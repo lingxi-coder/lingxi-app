@@ -231,6 +231,11 @@ pub struct CredentialEnvelope {
     /// Provider id to API key/bearer token mappings.
     #[serde(default)]
     pub provider_keys: BTreeMap<String, String>,
+    /// Sensitive plugin configuration, keyed by plugin identity then manifest
+    /// field name. Values are injected into the runtime's process-local
+    /// credential cache before plugin discovery.
+    #[serde(default)]
+    pub plugin_secrets: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Read and validate the one-line JSON envelope used by the packaged desktop.
@@ -271,6 +276,36 @@ pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<Credential
         }
         if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
             return Err("invalid provider credential in credential envelope".to_string());
+        }
+    }
+    let plugin_secret_count: usize = envelope.plugin_secrets.values().map(BTreeMap::len).sum();
+    if plugin_secret_count > 256 {
+        return Err("credential envelope contains too many plugin secrets".to_string());
+    }
+    for (plugin, values) in &envelope.plugin_secrets {
+        if plugin.is_empty()
+            || plugin.len() > 128
+            || !plugin
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@'))
+        {
+            return Err("invalid plugin id in credential envelope".to_string());
+        }
+        for (field, secret) in values {
+            if field.is_empty()
+                || field.len() > 128
+                || !field.chars().enumerate().all(|(index, ch)| {
+                    ch.is_ascii_alphabetic()
+                        || ch == '_'
+                        || (index > 0 && (ch.is_ascii_digit() || matches!(ch, '.' | '-')))
+                })
+            {
+                return Err("invalid plugin secret key in credential envelope".to_string());
+            }
+            if secret.is_empty() || secret.len() > MAX_STDIN_API_KEY_BYTES || secret.contains('\0')
+            {
+                return Err("invalid plugin secret in credential envelope".to_string());
+            }
         }
     }
     Ok(envelope)
@@ -386,6 +421,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         } else {
             CredentialStoragePolicy::NativePreferred
         },
+        injected_plugin_secrets: BTreeMap::new(),
         api_key_helper,
         // (M13) The bridge host does not resolve managed login-method forcing
         // (the Electron parent owns credential policy) and passes no
@@ -869,7 +905,7 @@ pub async fn assemble_with_provider_keys(
         let active = active_settings_baseline(&paths, &managed);
         SettingsContext {
             paths,
-            active,
+            active: Arc::new(std::sync::RwLock::new(active)),
             managed,
         }
     };
@@ -1060,7 +1096,12 @@ pub async fn assemble_with_provider_keys(
         .with_http(runtime.http.clone())
         .with_session_store(session_store)
         .with_settings_context(settings_context)
-        .with_mcp_paths(mcp_paths),
+        .with_mcp_paths(mcp_paths)
+        .with_mcp_registry(runtime.mcp_registry.clone())
+        .with_plugin_runtime(runtime.plugin_runtime.clone())
+        .with_hook_registry(runtime.hook_registry.clone())
+        .with_repo_root_reloader(runtime.repo_root_reloader.clone())
+        .with_file_changed_watcher(runtime.file_changed_watcher.controller()),
     );
 
     let connection = connection
@@ -1458,7 +1499,7 @@ mod tests {
     #[test]
     fn credential_envelope_accepts_provider_keys_without_echoing_secrets() {
         let mut input = std::io::Cursor::new(
-            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"}}"#
+            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"},"plugin_secrets":{"weather@official":{"API_KEY":"plugin-secret"}}}"#
                 .to_vec(),
         );
         let envelope = read_credential_envelope(&mut input).expect("envelope parses");
@@ -1467,6 +1508,14 @@ mod tests {
             Some("sk-secret")
         );
         assert_eq!(envelope.provider_keys.len(), 2);
+        assert_eq!(
+            envelope
+                .plugin_secrets
+                .get("weather@official")
+                .and_then(|values| values.get("API_KEY"))
+                .map(String::as_str),
+            Some("plugin-secret")
+        );
 
         let secret = "x".repeat(MAX_STDIN_CREDENTIAL_BYTES + 1);
         let mut oversized = std::io::Cursor::new(
@@ -1598,7 +1647,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
-            isolated_credential_storage: false,
+            // This unit test must not require the signed macOS Credential
+            // Broker or inherit a developer login keychain.
+            isolated_credential_storage: true,
             credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
@@ -1624,6 +1675,7 @@ mod tests {
             deny_unresolved_ask: false,
             is_tty: false,
             injected_permission_gate: None,
+            injected_plugin_secrets: BTreeMap::new(),
             ask_user_question_tx: None,
             computer_access_tx: None,
             session_agent_observer: None,

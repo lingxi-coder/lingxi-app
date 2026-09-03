@@ -39,6 +39,16 @@ export interface CredentialBrokerPreview extends CredentialBrokerStatus {
   maskedValue?: string;
 }
 
+export interface PluginSecretRef {
+  pluginId: string;
+  key: string;
+}
+
+export interface PluginSecretPreview extends PluginSecretRef {
+  configured: boolean;
+  maskedValue?: string;
+}
+
 export interface ProviderCredentialBroker {
   health(): Promise<CredentialBrokerHealth>;
   listStatus(providerIds: readonly string[]): Promise<CredentialBrokerStatus[]>;
@@ -46,7 +56,14 @@ export interface ProviderCredentialBroker {
   resolve(providerId: string): Promise<string | undefined>;
   set(providerId: string, secret: string): Promise<CredentialBrokerPreview>;
   delete(providerId: string): Promise<void>;
+  listPluginSecrets(): Promise<PluginSecretRef[]>;
+  previewPluginSecret(pluginId: string, key: string): Promise<PluginSecretPreview>;
+  resolvePluginSecret(pluginId: string, key: string): Promise<string | undefined>;
+  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretPreview>;
+  deletePluginSecret(pluginId: string, key: string): Promise<void>;
 }
+
+type ProviderCredentialResolver = Pick<ProviderCredentialBroker, 'resolve'>;
 
 type BrokerRequest = {
   op: 'health' | 'store' | 'retrieve' | 'contains' | 'delete' | 'list' | 'preview';
@@ -103,6 +120,56 @@ function validateProviderId(providerId: string): string {
   return providerId;
 }
 
+function validatePluginSecretRef(pluginId: string, key: string): PluginSecretRef {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$/.test(pluginId)) {
+    throw new Error('invalid plugin id');
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(key)) {
+    throw new Error('invalid plugin secret key');
+  }
+  return { pluginId, key };
+}
+
+function pluginSecretAccount(pluginId: string, key: string): string {
+  const validated = validatePluginSecretRef(pluginId, key);
+  return `${encodeURIComponent(validated.pluginId)}/${encodeURIComponent(validated.key)}`;
+}
+
+function parsePluginSecretAccount(account: string): PluginSecretRef | undefined {
+  const separator = account.indexOf('/');
+  if (separator <= 0 || separator === account.length - 1 || account.indexOf('/', separator + 1) !== -1) {
+    return undefined;
+  }
+  try {
+    return validatePluginSecretRef(
+      decodeURIComponent(account.slice(0, separator)),
+      decodeURIComponent(account.slice(separator + 1)),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve all broker-owned plugin secrets for the one-shot engine envelope. */
+export async function resolveSessionLaunchPluginSecrets(
+  credentialBroker?: ProviderCredentialBroker,
+): Promise<Record<string, Record<string, string>>> {
+  if (!credentialBroker) return {};
+  const refs = await credentialBroker.listPluginSecrets();
+  if (refs.length > 256) throw new Error('credential broker contains too many plugin secrets');
+  const entries = await Promise.all(refs.map(async ({ pluginId, key }) => ({
+    pluginId,
+    key,
+    value: await credentialBroker.resolvePluginSecret(pluginId, key),
+  })));
+  const result: Record<string, Record<string, string>> = {};
+  for (const { pluginId, key, value } of entries) {
+    if (value === undefined) continue;
+    (result[pluginId] ??= {})[key] = value;
+  }
+  return result;
+}
+
 function truncateStderr(stderr: string): string {
   const trimmed = stderr.trim();
   if (!trimmed) return '';
@@ -140,7 +207,7 @@ export function readProviderEnvironmentCredential(
 export async function resolveProviderCredential(
   providerId: string,
   options: {
-    credentialBroker?: ProviderCredentialBroker;
+    credentialBroker?: ProviderCredentialResolver;
     environment?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<string | undefined> {
@@ -152,7 +219,7 @@ export async function resolveProviderCredential(
 export async function resolveSessionLaunchCredentials(
   model: string | null | undefined,
   options: {
-    credentialBroker?: ProviderCredentialBroker;
+    credentialBroker?: ProviderCredentialResolver;
     environment?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<{ apiKey?: string; providerCredentials?: Record<string, string> }> {
@@ -168,7 +235,7 @@ export async function resolveSessionLaunchCredentials(
 export async function resolveProviderTestCredential(
   providerId: string,
   credentialOverride: string | undefined,
-  credentialBroker?: ProviderCredentialBroker,
+  credentialBroker?: ProviderCredentialResolver,
 ): Promise<string | undefined> {
   if (credentialOverride !== undefined) return credentialOverride;
   return credentialBroker?.resolve(validateProviderId(providerId));
@@ -347,6 +414,69 @@ class CredentialBrokerClient implements ProviderCredentialBroker {
     });
   }
 
+  async listPluginSecrets(): Promise<PluginSecretRef[]> {
+    await this.health();
+    const response = await this.requestChecked({ op: 'list', service: this.pluginSecretServiceName() });
+    return readAccounts(response).flatMap((account) => {
+      const parsed = parsePluginSecretAccount(account);
+      return parsed ? [parsed] : [];
+    });
+  }
+
+  async previewPluginSecret(pluginId: string, key: string): Promise<PluginSecretPreview> {
+    await this.health();
+    const ref = validatePluginSecretRef(pluginId, key);
+    const response = await this.requestChecked({
+      op: 'preview',
+      service: this.pluginSecretServiceName(),
+      account: pluginSecretAccount(pluginId, key),
+    });
+    const maskedValue = readMaskedPreview(response);
+    return {
+      ...ref,
+      configured: response.present === true,
+      ...(maskedValue ? { maskedValue } : {}),
+    };
+  }
+
+  async resolvePluginSecret(pluginId: string, key: string): Promise<string | undefined> {
+    await this.health();
+    const response = await this.requestChecked({
+      op: 'retrieve',
+      service: this.pluginSecretServiceName(),
+      account: pluginSecretAccount(pluginId, key),
+    });
+    if (response.present !== true) return undefined;
+    const secret = response.payload;
+    if (typeof secret !== 'string' || !secret || secret.length > 16_384 || secret.includes('\0')) {
+      throw new Error('credential broker returned an invalid plugin secret payload');
+    }
+    return secret;
+  }
+
+  async setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretPreview> {
+    if (!secret || secret.length > 16_384 || secret.includes('\0')) {
+      throw new Error('invalid plugin secret');
+    }
+    await this.health();
+    await this.requestChecked({
+      op: 'store',
+      service: this.pluginSecretServiceName(),
+      account: pluginSecretAccount(pluginId, key),
+      payload: secret,
+    });
+    return this.previewPluginSecret(pluginId, key);
+  }
+
+  async deletePluginSecret(pluginId: string, key: string): Promise<void> {
+    await this.health();
+    await this.requestChecked({
+      op: 'delete',
+      service: this.pluginSecretServiceName(),
+      account: pluginSecretAccount(pluginId, key),
+    });
+  }
+
   private async loadHealth(): Promise<CredentialBrokerHealth> {
     const result = await this.requestChecked({ op: 'health' });
     return {
@@ -373,6 +503,12 @@ class CredentialBrokerClient implements ProviderCredentialBroker {
     return this.channel === 'production'
       ? 'com.lingxi.provider-credentials.v1'
       : 'com.lingxi.provider-credentials.v1.development';
+  }
+
+  private pluginSecretServiceName(): string {
+    return this.channel === 'production'
+      ? 'com.lingxi.plugin-secrets.v1'
+      : 'com.lingxi.plugin-secrets.v1.development';
   }
 }
 

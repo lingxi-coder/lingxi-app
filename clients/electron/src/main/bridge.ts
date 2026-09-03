@@ -64,6 +64,8 @@ export interface BridgeLaunchConfig {
   sessionId?: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
+  /** Broker-owned sensitive plugin options, passed only over child stdin. */
+  pluginSecrets?: Record<string, Record<string, string>>;
   trusted: boolean;
   model?: string;
   apiBaseUrl?: string;
@@ -1053,7 +1055,12 @@ export class SessionRuntime {
       throw error;
     }
     this.child = child;
-    this.captureLogs(child, [launch.apiKey, ...Object.values(launch.providerCredentials ?? {})].filter((value): value is string => Boolean(value)));
+    const pluginSecretValues = Object.values(launch.pluginSecrets ?? {}).flatMap((values) => Object.values(values));
+    this.captureLogs(child, [
+      launch.apiKey,
+      ...Object.values(launch.providerCredentials ?? {}),
+      ...pluginSecretValues,
+    ].filter((value): value is string => Boolean(value)));
 
     child.once('exit', (code, signal) => {
       this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, generation));
@@ -1132,7 +1139,8 @@ export class SessionRuntime {
       bridgeDir,
       model: launch.model,
       hasApiKey: Boolean(launch.apiKey),
-      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0,
+      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0
+        || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
@@ -1145,7 +1153,7 @@ export class SessionRuntime {
       detached: process.platform !== 'win32',
     });
     const providerCredentials = launch.providerCredentials ?? {};
-    if (Object.keys(providerCredentials).length > 0) {
+    if (Object.keys(providerCredentials).length > 0 || Object.keys(launch.pluginSecrets ?? {}).length > 0) {
       child.stdin?.end(buildCredentialEnvelope(launch));
     } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
     else child.stdin?.end();

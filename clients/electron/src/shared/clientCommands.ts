@@ -72,6 +72,10 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   update_workspace_directories: 'exposed',
   upsert_mcp_server: 'exposed',
   remove_mcp_server: 'exposed',
+  skill_admin: 'exposed',
+  mcp_admin: 'exposed',
+  plugin_admin: 'exposed',
+  hook_admin: 'exposed',
   audio_response: 'exposed',
 } as const satisfies Record<ClientCommand['type'], DesktopDisposition>;
 
@@ -126,6 +130,11 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   fast_mode_changed: 'exposed',
   provider_credential_status: 'host_private',
   provider_connection_tested: 'host_private',
+  configuration_operation: 'exposed',
+  skill_catalog: 'exposed',
+  skill_document: 'exposed',
+  mcp_configuration_snapshot: 'exposed',
+  plugin_catalog: 'exposed',
   mcp_servers: 'exposed',
   skills: 'exposed',
   hooks: 'exposed',
@@ -232,6 +241,10 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'update_workspace_directories',
   'upsert_mcp_server',
   'remove_mcp_server',
+  'skill_admin',
+  'mcp_admin',
+  'plugin_admin',
+  'hook_admin',
   // The renderer's answer to `ClientEvent::AudioRequest` — the client side of
   // `audio_bridge.rs`'s `AudioBridge`. Unlike every other entry here it is
   // never sent because a user clicked something: the engine PARKS a call on a

@@ -213,6 +213,49 @@ pub struct McpServerDto {
     pub transport: String,
 }
 
+/// Configuration-management domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationDomainDto {
+    /// Skills catalog and documents.
+    Skill,
+    /// MCP configuration and approval state.
+    Mcp,
+    /// Plugin catalogs, lifecycle, and configuration.
+    Plugin,
+    /// Hook configuration and registry state.
+    Hook,
+}
+
+/// One configuration-operation lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationOperationStatusDto {
+    /// The operation was accepted and began executing.
+    Started,
+    /// The operation emitted an intermediate progress update.
+    Progress,
+    /// Persistence and any requested runtime application succeeded.
+    Succeeded,
+    /// The operation failed without publishing a partial runtime state.
+    Failed,
+}
+
+/// Whether a persisted configuration change was applied live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationEffectDto {
+    /// The persisted change was also applied to the live runtime.
+    Applied,
+    /// The change is durable but needs a restart to affect the runtime.
+    RestartRequired,
+    /// Runtime application does not apply to this operation.
+    NotApplicable,
+}
+
 /// Connection status for an MCP server — the lowered `McpStatus`
 /// (`platform-api/src/orchestrator.rs:133`).
 ///
@@ -275,6 +318,36 @@ pub struct HookDto {
     pub matcher: Option<String>,
     /// Timeout in milliseconds (default `60_000` if unset on the engine side).
     pub timeout_ms: u64,
+    /// Executor kind (`command`, `http`, `agent`, `prompt`, `mcp_tool`, `builtin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_type: Option<String>,
+    /// Human-readable origin/source label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Primary executor content (command line, URL, prompt, or handler id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Optional custom runtime status message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
+    /// Whether the hook blocks the foreground action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<bool>,
+    /// Whether the hook runs in the background without blocking.
+    #[serde(default, rename = "async", skip_serializing_if = "Option::is_none")]
+    pub is_async: Option<bool>,
+    /// Hook priority within the event bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    /// Whether the hook re-wakes the agent loop after async completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_rewake: Option<bool>,
+    /// Async timeout in milliseconds, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_timeout_ms: Option<u64>,
+    /// Raw `if` condition, if declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_condition: Option<String>,
 }
 
 // ── Agents ───────────────────────────────────────────────────────────────────

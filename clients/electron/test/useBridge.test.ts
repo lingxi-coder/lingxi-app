@@ -316,6 +316,31 @@ function useBridgeSource(): string {
   return readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
 }
 
+test('configuration admin waits for the terminal event with the same domain and operation id', () => {
+  const source = useBridgeSource();
+  const eventBody = sliceBetweenMarkers(
+    source,
+    "if (event.type === 'configuration_operation') {",
+    "if (event.type === 'error'",
+    'configuration operation event correlation',
+  );
+  assert.match(eventBody, /event\.status === 'succeeded' \|\| event\.status === 'failed'/);
+  assert.match(eventBody, /`\$\{event\.domain\}:\$\{event\.operation_id\}`/);
+  assert.match(eventBody, /pendingConfigurationOperations\.current\.get\(key\)/);
+  assert.match(eventBody, /pending\.resolve\(event\)/);
+  assert.match(eventBody, /pending\.reject\(new Error/);
+
+  const dispatchBody = sliceBetweenMarkers(
+    source,
+    'const runConfigurationAdmin = useCallback',
+    'const skillAdmin = useCallback',
+    'configuration admin dispatch waiter',
+  );
+  assert.match(dispatchBody, /pendingConfigurationOperations\.current\.set\(key, pending\)/);
+  assert.match(dispatchBody, /await command\(envelope\)/);
+  assert.match(dispatchBody, /return terminal/);
+});
+
 test('a failed pending prompt does not release the turn already in progress', () => {
   const sendPromptBody = sliceBetweenMarkers(
     useBridgeSource(),

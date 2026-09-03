@@ -141,6 +141,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         deny_unresolved_ask: false,
         is_tty: false,
         injected_permission_gate: None,
+        injected_plugin_secrets: Default::default(),
         ask_user_question_tx: None,
         computer_access_tx: None,
         session_agent_observer: None,

@@ -2514,7 +2514,7 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
             lingxi_home: home,
             project_dir: project.clone(),
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed,
     });
     let sink = CapturingSink::arc();
@@ -2654,7 +2654,7 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2705,7 +2705,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2754,7 +2754,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2838,7 +2838,7 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2890,7 +2890,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2944,7 +2944,7 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2996,7 +2996,7 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -3047,7 +3047,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -3111,7 +3111,7 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();

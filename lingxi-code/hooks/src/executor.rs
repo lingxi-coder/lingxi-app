@@ -39,6 +39,7 @@ use crate::hook_payload::{
     WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor, HttpHookPolicy};
+use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
 use crate::prompt_executor::{
     HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
 };
@@ -226,6 +227,8 @@ pub struct HookExecutorImpl {
     /// [`platform_api::SandboxedCommand`] the runner accepts. Attached via
     /// [`Self::with_process_runner`].
     sandbox: Option<Arc<dyn Sandbox>>,
+    /// Optional name-addressed MCP invoker for `mcp_tool` hooks.
+    mcp_invoker: Option<Arc<dyn HookMcpInvoker>>,
     /// Optional background registry for non-blocking (`blocking == false`)
     /// hooks (B5). Attached via [`Self::with_async_registry`]. When `None`, a
     /// non-blocking hook falls back to running synchronously (so its result is
@@ -288,6 +291,7 @@ impl HookExecutorImpl {
             prompt_runner: None,
             process: None,
             sandbox: None,
+            mcp_invoker: None,
             async_registry: None,
             policy_disable_all_hooks: false,
             hook_observer: None,
@@ -445,6 +449,14 @@ impl HookExecutorImpl {
         self
     }
 
+    /// Attach a name-addressed MCP invoker so the `mcp_tool` arm can call an
+    /// already-connected server owned by the composition root.
+    #[must_use]
+    pub fn with_mcp_invoker(mut self, invoker: Arc<dyn HookMcpInvoker>) -> Self {
+        self.mcp_invoker = Some(invoker);
+        self
+    }
+
     /// Register a builtin handler. Subsequent hook definitions referencing
     /// `h.id()` via [`HookExecutor::Builtin`] will dispatch to this handler.
     pub fn register_builtin(&mut self, h: Arc<dyn BuiltinHookHandler>) {
@@ -471,6 +483,7 @@ impl HookExecutorImpl {
             prompt_runner: self.prompt_runner.clone(),
             process: self.process.clone(),
             sandbox: self.sandbox.clone(),
+            mcp_invoker: self.mcp_invoker.clone(),
             async_registry: self.async_registry.clone(),
             attachment_sink: self.attachment_sink.clone(),
             hook_observer: self.hook_observer.clone(),
@@ -1204,6 +1217,7 @@ struct Dispatcher {
     prompt_runner: Option<Arc<dyn HookPromptRunner>>,
     process: Option<Arc<dyn ProcessRunner>>,
     sandbox: Option<Arc<dyn Sandbox>>,
+    mcp_invoker: Option<Arc<dyn HookMcpInvoker>>,
     /// P2-09: background registry for the runtime `{"async":true}` marker
     /// fold-back. When a `Command` hook prints the marker its first stdout line,
     /// the runner backgrounds it and hands back an eventual-output handle; the
@@ -1790,24 +1804,102 @@ impl Dispatcher {
                 outcome.result
             }
             HookExecutor::McpTool { server, tool, .. } => {
-                // `mcp_tool` hook (oracle `McpToolHookSchema`). The loader now
-                // LOADS the entry instead of dropping it silently, but calling a
-                // tool on a named MCP server needs an invoker this crate has no
-                // seam for. Mirror the `Command` / `Prompt` "not wired" shape
-                // exactly: a structured `Error` with no parsed response, so the
-                // hook never contributes a `Block` and never gates the turn.
-                tracing::warn!(
-                    hook_id = %hook.id,
-                    server = %server,
-                    tool = %tool,
-                    "mcp_tool hook loaded but not executed: no MCP invoker is wired into the hooks crate",
-                );
-                HookResult {
-                    outcome: HookOutcome::Error,
-                    stdout: String::new(),
-                    stderr: format!("Hook {} failed: mcp_tool executor not wired", hook.id),
-                    exit_code: None,
-                    response: None,
+                let Some(invoker) = &self.mcp_invoker else {
+                    tracing::warn!(
+                        hook_id = %hook.id,
+                        server = %server,
+                        tool = %tool,
+                        "mcp_tool hook loaded but not executed: no MCP invoker is wired into the hooks crate",
+                    );
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!("Hook {} failed: mcp_tool executor not wired", hook.id),
+                        exit_code: None,
+                        response: None,
+                    };
+                };
+                let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Hook {} failed: mcp_tool arm does not support {:?}",
+                            hook.id,
+                            event.event_type()
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
+                };
+                let body_value: Value = match serde_json::from_str(&body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return HookResult {
+                            outcome: HookOutcome::Error,
+                            stdout: String::new(),
+                            stderr: format!(
+                                "Hook {} failed: invalid hook payload: {error}",
+                                hook.id
+                            ),
+                            exit_code: None,
+                            response: None,
+                        };
+                    }
+                };
+                let HookExecutor::McpTool { input, .. } = &hook.executor else {
+                    unreachable!("matched McpTool executor");
+                };
+                let effective_timeout = match hook.timeout {
+                    Some(timeout) if !timeout.is_zero() => timeout,
+                    _ => Duration::from_millis(HOOK_COMMAND_TIMEOUT_MS),
+                };
+                match invoker
+                    .invoke(HookMcpInvocation {
+                        server: server.clone(),
+                        tool: tool.clone(),
+                        input: expand_mcp_hook_input_map(input, &body_value),
+                        timeout: effective_timeout,
+                    })
+                    .await
+                {
+                    HookMcpInvocationResult::Success { text_content } => {
+                        let (result, _) = map_text_hook_output(
+                            hook,
+                            join_mcp_text_content(&text_content),
+                            String::new(),
+                            0,
+                            expected_event,
+                        );
+                        result
+                    }
+                    HookMcpInvocationResult::Error {
+                        text_content,
+                        message,
+                    } => HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: join_mcp_text_content(&text_content),
+                        stderr: message,
+                        exit_code: Some(1),
+                        response: None,
+                    },
+                    HookMcpInvocationResult::NotConnected { message } => HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: message,
+                        exit_code: Some(1),
+                        response: None,
+                    },
+                    HookMcpInvocationResult::Timeout { text_content } => {
+                        emit_mcp_timeout(hook, effective_timeout);
+                        HookResult {
+                            outcome: HookOutcome::Timeout,
+                            stdout: join_mcp_text_content(&text_content),
+                            stderr: format!("Hook {} failed: mcp_tool timed out", hook.id),
+                            exit_code: None,
+                            response: None,
+                        }
+                    }
                 }
             }
         }
@@ -3304,171 +3396,226 @@ fn map_command_output(
             },
             true,
         ),
-        Ok(o) => {
-            // Layer (a): JSON stdout. A leading `{` opts the output into JSON
-            // parsing/validation. A malformed or schema-invalid response is a
-            // hook error for every status other than 2. Exit 2 is deliberately
-            // retained for the blocking stderr fallback below.
-            if o.stdout.trim_start().starts_with('{') {
-                match parse_response(&o.stdout, expected_event) {
-                    Ok(parsed) => {
-                        if expected_event == "PostModelSwitch" && o.exit_code != 0 {
-                            return (
-                                HookResult {
-                                    outcome: HookOutcome::Error,
-                                    stdout: o.stdout,
-                                    stderr: o.stderr,
-                                    exit_code: Some(o.exit_code),
-                                    response: None,
-                                },
-                                false,
-                            );
-                        }
-                        let outcome = if o.exit_code == 0 {
+        Ok(o) => map_text_hook_output(hook, o.stdout, o.stderr, o.exit_code, expected_event),
+    }
+}
+
+fn map_text_hook_output(
+    hook: &HookDefinition,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    expected_event: &'static str,
+) -> (HookResult, bool) {
+    if stdout.trim_start().starts_with('{') {
+        match parse_response(&stdout, expected_event) {
+            Ok(parsed) => {
+                if expected_event == "PostModelSwitch" && exit_code != 0 {
+                    return (
+                        HookResult {
+                            outcome: HookOutcome::Error,
+                            stdout,
+                            stderr,
+                            exit_code: Some(exit_code),
+                            response: None,
+                        },
+                        false,
+                    );
+                }
+                return (
+                    HookResult {
+                        outcome: if exit_code == 0 {
                             HookOutcome::Success
                         } else {
                             HookOutcome::Error
-                        };
-                        return (
-                            HookResult {
-                                outcome,
-                                stdout: o.stdout,
-                                stderr: o.stderr,
-                                exit_code: Some(o.exit_code),
-                                response: Some(parsed),
-                            },
-                            false,
-                        );
-                    }
-                    Err(error) if o.exit_code != 2 => {
-                        // Keep the parser's established, actionable error
-                        // wording (e.g. `hook response is not valid JSON:
-                        // ...` or the event-name mismatch).
-                        return (
-                            HookResult {
-                                outcome: HookOutcome::Error,
-                                stdout: o.stdout,
-                                stderr: error.to_string(),
-                                exit_code: Some(o.exit_code),
-                                response: None,
-                            },
-                            false,
-                        );
-                    }
-                    // Claude Code reserves exit 2 as the explicit blocking
-                    // signal even when JSON parsing/validation failed. Let the
-                    // plain-text arm below synthesize its stderr block.
-                    Err(_) => {}
-                }
-            }
-            // PermissionRequest uses its own decision union. In 2.1.251 an
-            // exit-2 command without a valid JSON decision is not the generic
-            // hook blocking signal: the request hook simply contributes no
-            // decision, and its stderr is not promoted to the hook reason.
-            // Keep the raw process streams on HookResult for diagnostics while
-            // leaving `response` absent so aggregation remains a no-op.
-            if expected_event == "PermissionRequest" && o.exit_code == 2 {
-                return (
-                    HookResult {
-                        outcome: HookOutcome::Error,
-                        stdout: o.stdout,
-                        stderr: o.stderr,
-                        exit_code: Some(2),
-                        response: None,
-                    },
-                    false,
-                );
-            }
-            // PostModelSwitch is best-effort: even an explicit exit-2 status
-            // cannot undo the model mutation. Preserve the process failure for
-            // diagnostics/attachments, but do not synthesize a blocking
-            // decision as the generic command arm does for pre-action hooks.
-            if expected_event == "PostModelSwitch" && o.exit_code != 0 {
-                return (
-                    HookResult {
-                        outcome: HookOutcome::Error,
-                        stdout: o.stdout,
-                        stderr: o.stderr,
-                        exit_code: Some(o.exit_code),
-                        response: None,
-                    },
-                    false,
-                );
-            }
-            // Layer (b): exit-code fallback for plain-text output, plus JSON
-            // that failed validation while exiting with the explicit block code.
-            match o.exit_code {
-                0 => (
-                    HookResult {
-                        outcome: HookOutcome::Success,
-                        stdout: o.stdout,
-                        stderr: o.stderr,
-                        exit_code: Some(0),
-                        response: None,
-                    },
-                    false,
-                ),
-                2 => {
-                    // exit 2 ⇒ BLOCK. Binary `hooks.ts`:
-                    //   blockingError = `[${getHookDisplayText(hook)}]: ${stderr||"No stderr output"}`
-                    // — the hook display text in brackets, then the RAW stderr
-                    // (NOT trimmed); the "No stderr output" placeholder applies
-                    // only when stderr is empty (JS `||`, an empty string is
-                    // falsy; a whitespace-only stderr is used verbatim).
-                    // `getHookDisplayText` (binary `rCe`) for a command hook is
-                    // `args ? [command, ...args].join(" ") : command`.
-                    let display = match &hook.executor {
-                        HookExecutor::Command { command, args, .. } if !args.is_empty() => {
-                            std::iter::once(command.as_str())
-                                .chain(args.iter().map(String::as_str))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        }
-                        HookExecutor::Command { command, .. } => command.clone(),
-                        // Non-command executors do not reach this process path;
-                        // fall back to the human-readable name defensively.
-                        _ => hook.name.clone(),
-                    };
-                    let body = if o.stderr.is_empty() {
-                        "No stderr output"
-                    } else {
-                        o.stderr.as_str()
-                    };
-                    let reason = format!("[{display}]: {body}");
-                    (
-                        HookResult {
-                            outcome: HookOutcome::Error,
-                            stdout: o.stdout,
-                            stderr: o.stderr,
-                            exit_code: Some(2),
-                            response: Some(HookResponse {
-                                decision: Some(HookDecision::Block),
-                                reason: Some(reason),
-                                // O2: `command:te` on this arm — `te=iSe(q)`,
-                                // the SAME display text bracketed above, which
-                                // never consults `statusMessage` (unlike the
-                                // JSON arm's `ee=qq(q)`). BIN off 237805098.
-                                block_command: Some(display),
-                                ..HookResponse::default()
-                            }),
                         },
-                        false,
-                    )
-                }
-                other => (
-                    // Any other non-zero ⇒ non-blocking error: NO Block
-                    // decision (`hooks.ts:2670-2696`).
+                        stdout,
+                        stderr,
+                        exit_code: Some(exit_code),
+                        response: Some(parsed),
+                    },
+                    false,
+                );
+            }
+            Err(error) if exit_code != 2 => {
+                return (
                     HookResult {
                         outcome: HookOutcome::Error,
-                        stdout: o.stdout,
-                        stderr: o.stderr,
-                        exit_code: Some(other),
+                        stdout,
+                        stderr: error.to_string(),
+                        exit_code: Some(exit_code),
                         response: None,
                     },
                     false,
-                ),
+                );
             }
+            Err(_) => {}
         }
+    }
+    if expected_event == "PermissionRequest" && exit_code == 2 {
+        return (
+            HookResult {
+                outcome: HookOutcome::Error,
+                stdout,
+                stderr,
+                exit_code: Some(2),
+                response: None,
+            },
+            false,
+        );
+    }
+    if expected_event == "PostModelSwitch" && exit_code != 0 {
+        return (
+            HookResult {
+                outcome: HookOutcome::Error,
+                stdout,
+                stderr,
+                exit_code: Some(exit_code),
+                response: None,
+            },
+            false,
+        );
+    }
+    match exit_code {
+        0 => (
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout,
+                stderr,
+                exit_code: Some(0),
+                response: None,
+            },
+            false,
+        ),
+        2 => {
+            let display = match &hook.executor {
+                HookExecutor::Command { command, args, .. } if !args.is_empty() => {
+                    std::iter::once(command.as_str())
+                        .chain(args.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+                HookExecutor::Command { command, .. } => command.clone(),
+                HookExecutor::McpTool { server, tool, .. } => format!("{server}/{tool}"),
+                _ => hook.name.clone(),
+            };
+            let body = if stderr.is_empty() {
+                "No stderr output"
+            } else {
+                stderr.as_str()
+            };
+            let reason = format!("[{display}]: {body}");
+            (
+                HookResult {
+                    outcome: HookOutcome::Error,
+                    stdout,
+                    stderr,
+                    exit_code: Some(2),
+                    response: Some(HookResponse {
+                        decision: Some(HookDecision::Block),
+                        reason: Some(reason),
+                        block_command: Some(display),
+                        ..HookResponse::default()
+                    }),
+                },
+                false,
+            )
+        }
+        other => (
+            HookResult {
+                outcome: HookOutcome::Error,
+                stdout,
+                stderr,
+                exit_code: Some(other),
+                response: None,
+            },
+            false,
+        ),
+    }
+}
+
+fn join_mcp_text_content(content: &[String]) -> String {
+    content.join("\n")
+}
+
+fn expand_mcp_hook_input_map(
+    input: &HashMap<String, Value>,
+    payload: &Value,
+) -> HashMap<String, Value> {
+    input
+        .iter()
+        .map(|(key, value)| (key.clone(), expand_mcp_hook_value(value, payload)))
+        .collect()
+}
+
+fn expand_mcp_hook_value(value: &Value, payload: &Value) -> Value {
+    match value {
+        Value::String(text) => expand_mcp_hook_string(text, payload),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| expand_mcp_hook_value(item, payload))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.clone(), expand_mcp_hook_value(item, payload)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn expand_mcp_hook_string(text: &str, payload: &Value) -> Value {
+    if text.starts_with("${") && text.ends_with('}') && text.matches("${").count() == 1 {
+        let path = &text[2..text.len() - 1];
+        if let Some(value) = lookup_mcp_hook_path(payload, path) {
+            return value.clone();
+        }
+    }
+    let mut out = String::new();
+    let mut cursor = 0;
+    while let Some(start_rel) = text[cursor..].find("${") {
+        let start = cursor + start_rel;
+        out.push_str(&text[cursor..start]);
+        let path_start = start + 2;
+        let Some(close_rel) = text[path_start..].find('}') else {
+            out.push_str(&text[start..]);
+            return Value::String(out);
+        };
+        let path_end = path_start + close_rel;
+        let replacement = lookup_mcp_hook_path(payload, &text[path_start..path_end])
+            .map(render_mcp_hook_value)
+            .unwrap_or_default();
+        out.push_str(&replacement);
+        cursor = path_end + 1;
+    }
+    out.push_str(&text[cursor..]);
+    Value::String(out)
+}
+
+fn lookup_mcp_hook_path<'a>(payload: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = payload;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        match current {
+            Value::Object(map) => current = map.get(segment)?,
+            Value::Array(items) => current = items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn render_mcp_hook_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(boolean) => boolean.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
     }
 }
 
@@ -3695,6 +3842,17 @@ fn emit_command_timeout(hook: &HookDefinition, timeout: Duration) {
         event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
         hook_id = %hook.id,
         hook_kind = "command",
+        timeout_ms = timeout_ms,
+    );
+}
+
+fn emit_mcp_timeout(hook: &HookDefinition, timeout: Duration) {
+    #[allow(clippy::cast_possible_truncation)]
+    let timeout_ms = timeout.as_millis() as u64;
+    tracing::info!(
+        event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+        hook_id = %hook.id,
+        hook_kind = "mcp_tool",
         timeout_ms = timeout_ms,
     );
 }

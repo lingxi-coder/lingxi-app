@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.api_key = api_key;
         }
         provider_keys = envelope.provider_keys;
+        cfg.injected_plugin_secrets = envelope.plugin_secrets;
     }
     if args.api_key_stdin {
         cfg.api_key = boot::read_api_key_line(&mut std::io::stdin().lock())

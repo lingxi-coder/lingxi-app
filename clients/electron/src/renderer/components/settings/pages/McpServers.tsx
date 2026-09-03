@@ -1,185 +1,471 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { McpScopeDto } from '@lingxi/bridge-client';
-import { Card, ProvenanceBadge, Row } from '../rows';
+import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { parseJsonObjectInput } from '../jsonInput';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
+import {
+  adminRecordCommand,
+  asRecord,
+  asString,
+  asStringArray,
+  detailGridStyle,
+  DomainOperationBanner,
+  EmptyDetail,
+  Field,
+  managerDetailStyle,
+  managerShellStyle,
+  managerSidebarStyle,
+  nextConfigurationOperationId,
+  noteStyle,
+  parseEventEnvelope,
+  prettyJson,
+  searchInputStyle,
+  secondaryMetaStyle,
+  sidebarButtonStyle,
+  sidebarListStyle,
+  sidebarSectionTitleStyle,
+  SourcePill,
+  textareaStyle,
+} from './configurationAdmin';
 
-// Re-exported so callers that used to import this FROM this file (including
-// `settings-coding-pages.test.ts`) keep working now that the canonical
-// definition lives in `../jsonInput` (Task 18 fix round 1, Minor — a
-// generic JSON-object parser should not create a page-to-page dependency,
-// which is what `Plugins.tsx` importing it from here did).
 export { parseJsonObjectInput };
 
-const SCOPES: { id: McpScopeDto; label: string }[] = [
-  { id: 'user', label: '用户 (~/.lingxi.json)' },
-  { id: 'local', label: '本地 (~/.lingxi.json projects[…])' },
-  { id: 'project', label: '项目 (<project>/.mcp.json)' },
-];
+interface ScopeSnapshot {
+  scope: McpScopeDto;
+  path: string;
+  revision_sha256: string;
+  raw_json: string;
+}
 
-/**
- * MCP is NOT layered (`nav.ts` marks it `layered: false`) — it owns three
- * storage locations of its own (`mcp_bridge.rs`'s table: User/Local both in
- * `~/.lingxi.json`, Project in `<project>/.mcp.json`), unrelated to the
- * settings-file layer stack the shell's switcher targets. This page carries
- * its OWN scope selector as page-local state, never reads/writes
- * `editingLayer`.
- *
- * **A real data gap, disclosed rather than papered over**: the read side
- * (`refresh_listings{mcp}` → `ClientEvent::McpServers`, pre-existing, Task 6
- * left it untouched) reports a MERGED, currently-running view — name,
- * connection status, transport — with NO scope field
- * (`client-protocol/src/listings.rs`'s `McpServerDto` carries exactly those
- * three fields; `platform_api::orchestrator::McpServerInfo` it's lowered from
- * carries no more). There is also no read command for "what does scope X's
- * OWN file currently contain" — `mcp_bridge.rs` is write-only
- * (`upsert_server`/`remove_server`), by design (its own module doc: the
- * read side is the live registry snapshot, not a per-scope file reader).
- * Two consequences this page cannot engineer around without a wire change
- * (out of scope here — `lingxi-code/` is not touched by this task):
- * - the "运行状态" list below cannot be split into per-scope tabs, and
- *   cannot tell a `Dynamic` (plugin) or `Enterprise` (managed) entry apart
- *   from a `User`/`Local`/`Project` one — so instead of a false per-row
- *   "来源: xxx" badge, this page says plainly that the list is scope-blind
- *   and that add/remove below is a blind write, not an edit of a visible
- *   row.
- * - there is no way to show "what's currently in scope X" before writing;
- *   add/remove act on a name the user types, and `remove_mcp_server` is
- *   idempotent server-side, so removing a name that never existed in that
- *   scope is a safe no-op rather than an error.
- *
- * **Task 18 fix round 1, Important**: the gap above is worse than the first
- * cut of this page said. A project-scope server held at
- * `McpServerBlockReason::ProjectPendingApproval` (`mcp/src/server_gate.rs`)
- * still enters the registry with `McpServerConfig.disabled = true`
- * (`mcp/src/connection.rs`) and is seeded as `Disconnected` — which renders
- * in the "运行状态" list below as `stdio · disconnected`, byte-identical to
- * a server that connected once and shut down cleanly, or one that was never
- * reachable. The prose warning inside the "添加 / 更新服务器" card only
- * shows up when someone actually selects Project scope there; a person who
- * never touches that selector would see an ambiguous row and nothing else.
- * The disclosure in the "运行状态" card header below is UNCONDITIONAL for
- * exactly that reason.
- */
+interface McpRuntimeServer {
+  name: string;
+  status: unknown;
+  transport?: string;
+  source?: string;
+  writable?: boolean;
+  read_only_reason?: string;
+}
+
+interface McpSnapshotEnvelope {
+  scopes?: ScopeSnapshot[];
+  runtime_servers?: McpRuntimeServer[];
+  approval?: {
+    enabled_servers?: string[];
+    disabled_servers?: string[];
+    enable_all_project_servers?: boolean;
+    legacy_source_present?: boolean;
+    revision_sha256?: string;
+  };
+}
+
+interface McpEntry {
+  id: string;
+  scope: McpScopeDto;
+  name: string;
+  config: Record<string, unknown>;
+  path: string;
+  revision_sha256: string;
+}
+
+type Selection = { kind: 'server'; id: string } | { kind: 'create'; scope: McpScopeDto };
+
+function callMcpAdmin(bridge: PageContentProps['bridge'], command: unknown) {
+  const admin = (bridge as { mcpAdmin?: (payload: unknown) => Promise<unknown> }).mcpAdmin;
+  return typeof admin === 'function' ? admin(command as never) : Promise.resolve();
+}
+
+function parseSnapshot(bridge: PageContentProps['bridge']): McpSnapshotEnvelope {
+  return parseEventEnvelope<McpSnapshotEnvelope>(bridge.mcpConfigurationSnapshotEvent?.snapshot_json, {
+    scopes: [],
+    runtime_servers: (bridge.mcpServersEvent?.servers ?? []).map((server) => ({
+      name: server.name,
+      status: server.status,
+      transport: server.transport,
+    })),
+    approval: {},
+  });
+}
+
+function parseEntries(snapshot: McpSnapshotEnvelope): McpEntry[] {
+  return (snapshot.scopes ?? []).flatMap((scope) => {
+    try {
+      const parsed = JSON.parse(scope.raw_json) as Record<string, unknown>;
+      const servers = asRecord(parsed.mcpServers);
+      return Object.entries(servers).map(([name, config]) => ({
+        id: `${scope.scope}:${name}`,
+        scope: scope.scope,
+        name,
+        config: asRecord(config),
+        path: scope.path,
+        revision_sha256: scope.revision_sha256,
+      }));
+    } catch {
+      return [];
+    }
+  });
+}
+
+function inferTransport(config: Record<string, unknown>): string {
+  if (asString(config.type)) return asString(config.type);
+  if (asString(config.transport)) return asString(config.transport);
+  if (asString(config.url)) return 'http';
+  if (asString(config.command)) return 'stdio';
+  return 'custom';
+}
+
+function JsonPropertyEditor({
+  t,
+  label,
+  value,
+  onCommit,
+}: {
+  t: ReturnType<typeof useT>;
+  label: string;
+  value: unknown;
+  onCommit: (value: unknown) => void;
+}) {
+  const [text, setText] = useState(prettyJson(value ?? {}));
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setText(prettyJson(value ?? {}));
+    setError(null);
+  }, [value]);
+  return (
+    <Field t={t} label={label}>
+      <textarea
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          try {
+            onCommit(JSON.parse(text) as unknown);
+            setError(null);
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : 'JSON 无效');
+          }
+        }}
+        rows={5}
+        style={textareaStyle(t, 5)}
+        aria-label={`mcp-${label}`}
+      />
+      {error && <div role="alert" style={secondaryMetaStyle(t)}>{error}</div>}
+    </Field>
+  );
+}
+
 export function McpServers({ bridge }: PageContentProps) {
   const t = useT();
-  const [scope, setScope] = useState<McpScopeDto>('user');
-  const [name, setName] = useState('');
-  const [configText, setConfigText] = useState('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
-  const [formError, setFormError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [removeName, setRemoveName] = useState('');
-  const [removing, setRemoving] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const adminAvailable = typeof (bridge as { mcpAdmin?: unknown }).mcpAdmin === 'function';
+  const snapshot = useMemo(() => parseSnapshot(bridge), [bridge.mcpConfigurationSnapshotEvent?.snapshot_json, bridge.mcpServersEvent?.servers]);
+  const operation = bridge.configurationOperations?.mcp ?? null;
+  const entries = useMemo(() => parseEntries(snapshot), [snapshot]);
+  const scopes = snapshot.scopes ?? [];
+  const approval = snapshot.approval ?? {};
+  const [selection, setSelection] = useState<Selection>({ kind: 'create', scope: 'user' });
+  const [search, setSearch] = useState('');
+  const [draftScope, setDraftScope] = useState<McpScopeDto>('user');
+  const [draftName, setDraftName] = useState('');
+  const [draftConfigText, setDraftConfigText] = useState('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [pendingSelection, setPendingSelection] = useState<Selection | null>(null);
 
-  useEffect(() => { void bridge.refreshMcpServers(); }, [bridge.refreshMcpServers]);
+  useEffect(() => {
+    if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'));
+    else void bridge.refreshMcpServers();
+  }, [adminAvailable, bridge.mcpAdmin, bridge.refreshMcpServers]);
 
-  const servers = bridge.mcpServersEvent?.servers ?? [];
+  useEffect(() => {
+    if (selection.kind === 'server' && entries.some((entry) => entry.id === selection.id)) return;
+    if (entries[0]) setSelection({ kind: 'server', id: entries[0].id });
+  }, [entries, selection]);
 
-  const handleUpsert = () => {
-    const trimmedName = name.trim();
-    if (!trimmedName) { setFormError('需要一个服务器名称。'); return; }
-    const parsed = parseJsonObjectInput(configText, '服务器配置');
-    if ('error' in parsed) { setFormError(parsed.error); return; }
-    setFormError(null);
-    setSaving(true);
-    setActionError(null);
-    void bridge.upsertMcpServer(scope, trimmedName, parsed.config)
-      .then(() => { setName(''); })
-      .catch((cause) => setActionError(cause instanceof Error ? cause.message : '无法保存 MCP 服务器。'))
-      .finally(() => setSaving(false));
+  const selected = selection.kind === 'server' ? entries.find((entry) => entry.id === selection.id) ?? null : null;
+  const currentScope = selected?.scope ?? (selection.kind === 'create' ? selection.scope : draftScope);
+
+  useEffect(() => {
+    if (selected) {
+      setDraftScope(selected.scope);
+      setDraftName(selected.name);
+      setDraftConfigText(prettyJson(selected.config));
+    } else if (selection.kind === 'create') {
+      setDraftScope(selection.scope);
+      setDraftName('');
+      setDraftConfigText('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+    }
+  }, [selected, selection]);
+
+  const dirty = selected
+    ? draftConfigText !== prettyJson(selected.config)
+    : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}';
+  const draftConfig = useMemo(() => {
+    try {
+      const parsed = JSON.parse(draftConfigText) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+    } catch {
+      return null;
+    }
+  }, [draftConfigText]);
+  const updateConfig = (key: string, value: unknown) => {
+    if (!draftConfig) {
+      setPageError('请先修复高级配置 JSON，才能使用结构化编辑器。');
+      return;
+    }
+    const next = { ...draftConfig };
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+    setDraftConfigText(prettyJson(next));
+    setPageError(null);
+  };
+  const transport = draftConfig ? inferTransport(draftConfig) : 'custom';
+  const setTransport = (nextTransport: string) => {
+    if (!draftConfig) return;
+    const next = { ...draftConfig };
+    if (nextTransport === 'stdio') {
+      delete next.type;
+      delete next.transport;
+      delete next.url;
+      delete next.headers;
+      delete next.headersHelper;
+      delete next.oauth;
+      delete next.discoveryCache;
+      next.command = asString(next.command);
+    } else {
+      next.type = nextTransport;
+      next.url = asString(next.url);
+      delete next.command;
+      delete next.args;
+      delete next.env;
+      if (!['http', 'streamable-http', 'sse'].includes(nextTransport)) delete next.discoveryCache;
+    }
+    setDraftConfigText(prettyJson(next));
+    setPageError(null);
   };
 
-  const handleRemove = () => {
-    const trimmedName = removeName.trim();
-    if (!trimmedName) return;
-    setRemoving(true);
-    setActionError(null);
-    void bridge.removeMcpServer(scope, trimmedName)
-      .then(() => setRemoveName(''))
-      .catch((cause) => setActionError(cause instanceof Error ? cause.message : '无法移除 MCP 服务器。'))
-      .finally(() => setRemoving(false));
+  const requestSelection = (next: Selection) => {
+    if (dirty) {
+      setPendingSelection(next);
+      return;
+    }
+    setPendingSelection(null);
+    setSelection(next);
+  };
+
+  const filtered = search.trim()
+    ? entries.filter((entry) => `${entry.scope} ${entry.name} ${entry.path}`.toLowerCase().includes(search.trim().toLowerCase()))
+    : entries;
+
+  const save = () => {
+    const parsed = parseJsonObjectInput(draftConfigText, '服务器配置');
+    if ('error' in parsed) {
+      setPageError(parsed.error);
+      return;
+    }
+    const scopeSnapshot = scopes.find((scope) => scope.scope === draftScope);
+    if (!scopeSnapshot) {
+      setPageError('当前没有该作用域的配置快照。');
+      return;
+    }
+    if (!draftName.trim()) {
+      setPageError('需要一个服务器名称。');
+      return;
+    }
+    setPageError(null);
+    void callMcpAdmin(bridge, adminRecordCommand('save_server', {
+      operation_id: nextConfigurationOperationId(),
+      scope: draftScope,
+      revision: scopeSnapshot.revision_sha256,
+      payload_json: JSON.stringify({ scope: draftScope, name: draftName.trim(), config: parsed.config }),
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 MCP 服务器。'));
+  };
+
+  const remove = () => {
+    if (!selected) return;
+    setPageError(null);
+    void callMcpAdmin(bridge, adminRecordCommand('remove_server', {
+      operation_id: nextConfigurationOperationId(),
+      scope: selected.scope,
+      revision: selected.revision_sha256,
+      payload_json: JSON.stringify({ scope: selected.scope, name: selected.name }),
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移除 MCP 服务器。'));
+  };
+
+  const setApproval = (decision: 'approve' | 'reject' | 'clear' | 'approve_all') => {
+    if (!approval.revision_sha256 || !selected?.name) return;
+    setPageError(null);
+    void callMcpAdmin(bridge, adminRecordCommand('set_approval', {
+      operation_id: nextConfigurationOperationId(),
+      scope: 'local',
+      revision: approval.revision_sha256,
+      payload_json: JSON.stringify({ name: selected.name, decision }),
+    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法更新审批。'));
   };
 
   return (
     <>
-      <Card title="运行状态">
-        <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-          这份列表反映当前实际连接的服务器（跨三个可写域，加上只读的 Dynamic / Enterprise 来源合并展示），引擎没有上报每一项具体来自哪个存储位置——所以这里不能按域拆分，也无法把插件（Dynamic）或托管策略（Enterprise）提供的只读条目单独标出。下方的新增/移除操作是对着你选的域「盲写」，不是对这份列表里某一行的编辑。
+      <Card title="MCP Servers">
+        <div style={managerShellStyle(t)}>
+          <div style={managerSidebarStyle(t)}>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 MCP 服务器" aria-label="搜索 MCP 服务器" style={searchInputStyle(t)} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} style={ghostButtonStyle(t)}>新建</button>
+                <button type="button" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers())} style={ghostButtonStyle(t)}>刷新</button>
+              </div>
+              <div style={noteStyle(t, 'warn')}>
+                运行时列表仍然是跨域合并视图。左侧目录按作用域展示磁盘定义，右侧保存时带 revision 防止覆盖外部修改。
+              </div>
+            </div>
+            <div style={sidebarListStyle()}>
+              {(['user', 'local', 'project'] as McpScopeDto[]).map((scope) => (
+                <div key={scope} style={{ display: 'grid', gap: 8 }}>
+                  <div style={sidebarSectionTitleStyle(t)}>{scope}</div>
+                  {filtered.filter((entry) => entry.scope === scope).map((entry) => (
+                    <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'server', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'server' && selection.id === entry.id)}>
+                      <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
+                        <SourcePill t={t} label={inferTransport(entry.config)} />
+                      </span>
+                      <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{entry.path}</span>
+                    </button>
+                  ))}
+                  {filtered.filter((entry) => entry.scope === scope).length === 0 && <div style={secondaryMetaStyle(t)}>没有匹配项。</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={managerDetailStyle()}>
+            <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
+            {pendingSelection && (
+              <div style={noteStyle(t, 'warn')}>
+                当前草稿未保存。
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" onClick={() => { setPendingSelection(null); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
+                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
+                </div>
+              </div>
+            )}
+            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+            {!selected && selection.kind !== 'create' && <EmptyDetail t={t} title="没有选中的服务器" body="从左侧选择一个条目，或者新建一个服务器。" />}
+            <div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selected?.name || '新建 MCP 服务器'}</div>
+                <SourcePill t={t} label={currentScope} />
+                {selected && <SourcePill t={t} label={inferTransport(selected.config)} />}
+              </div>
+              {selected && <div className="mono" style={secondaryMetaStyle(t)}>{selected.path}</div>}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
+              <Field t={t} label="作用域">
+                <select value={draftScope} onChange={(event) => { const next = event.target.value as McpScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label="mcp-scope">
+                  <option value="user">用户</option>
+                  <option value="local">本地</option>
+                  <option value="project">项目</option>
+                </select>
+              </Field>
+              <Field t={t} label="名称">
+                <input value={draftName} onChange={(event) => setDraftName(event.target.value)} disabled={Boolean(selected)} style={{ ...inputStyle(t), opacity: selected ? 0.65 : 1 }} aria-label="mcp-name" />
+              </Field>
+            </div>
+            <div style={noteStyle(t)}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>结构化配置</div>
+              <div style={detailGridStyle()}>
+                <Field t={t} label="Transport">
+                  <select value={transport} onChange={(event) => setTransport(event.target.value)} disabled={!draftConfig} style={inputStyle(t)} aria-label="mcp-transport">
+                    <option value="stdio">stdio</option>
+                    <option value="http">http</option>
+                    <option value="streamable-http">streamable-http</option>
+                    <option value="sse">sse</option>
+                    <option value="ws">ws</option>
+                    {transport === 'custom' && <option value="custom">内部 / 自定义（只读原值）</option>}
+                  </select>
+                </Field>
+                <Field t={t} label="Timeout (ms)">
+                  <input type="number" min={1} value={typeof draftConfig?.timeout === 'number' ? draftConfig.timeout : ''} onChange={(event) => updateConfig('timeout', event.target.value ? Number(event.target.value) : undefined)} style={inputStyle(t)} aria-label="mcp-timeout" />
+                </Field>
+              </div>
+              {transport === 'stdio' ? (
+                <>
+                  <Field t={t} label="Command">
+                    <input value={asString(draftConfig?.command)} onChange={(event) => updateConfig('command', event.target.value)} style={inputStyle(t)} aria-label="mcp-command" />
+                  </Field>
+                  <Field t={t} label="Args（每行一个）">
+                    <textarea value={Array.isArray(draftConfig?.args) ? draftConfig.args.map(String).join('\n') : ''} onChange={(event) => updateConfig('args', event.target.value.split('\n'))} rows={4} style={textareaStyle(t, 4)} aria-label="mcp-args" />
+                  </Field>
+                  <JsonPropertyEditor t={t} label="env JSON" value={draftConfig?.env ?? {}} onCommit={(value) => updateConfig('env', value)} />
+                </>
+              ) : transport !== 'custom' ? (
+                <>
+                  <Field t={t} label="URL">
+                    <input value={asString(draftConfig?.url)} onChange={(event) => updateConfig('url', event.target.value)} style={inputStyle(t)} aria-label="mcp-url" />
+                  </Field>
+                  <JsonPropertyEditor t={t} label="headers JSON" value={draftConfig?.headers ?? {}} onCommit={(value) => updateConfig('headers', value)} />
+                  <Field t={t} label="Headers helper">
+                    <input value={asString(draftConfig?.headersHelper)} onChange={(event) => updateConfig('headersHelper', event.target.value || undefined)} style={inputStyle(t)} aria-label="mcp-headers-helper" />
+                  </Field>
+                  <JsonPropertyEditor t={t} label="OAuth JSON" value={draftConfig?.oauth ?? {}} onCommit={(value) => updateConfig('oauth', value)} />
+                </>
+              ) : null}
+              <div style={detailGridStyle()}>
+                <Field t={t} label="Always load">
+                  <select value={draftConfig?.alwaysLoad === undefined ? '' : draftConfig.alwaysLoad ? 'true' : 'false'} onChange={(event) => updateConfig('alwaysLoad', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label="mcp-always-load">
+                    <option value="">默认</option><option value="true">开启</option><option value="false">关闭</option>
+                  </select>
+                </Field>
+                {['http', 'streamable-http', 'sse'].includes(transport) && (
+                  <Field t={t} label="Discovery cache">
+                    <select value={draftConfig?.discoveryCache === undefined ? '' : draftConfig.discoveryCache ? 'true' : 'false'} onChange={(event) => updateConfig('discoveryCache', event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label="mcp-discovery-cache">
+                      <option value="">默认</option><option value="true">开启</option><option value="false">关闭</option>
+                    </select>
+                  </Field>
+                )}
+              </div>
+              <JsonPropertyEditor t={t} label="tools JSON" value={draftConfig?.tools ?? []} onCommit={(value) => updateConfig('tools', value)} />
+              <JsonPropertyEditor t={t} label="toolPermissions JSON" value={draftConfig?.toolPermissions ?? {}} onCommit={(value) => updateConfig('toolPermissions', value)} />
+            </div>
+            <details>
+              <summary style={{ cursor: 'pointer', color: t.text3, fontSize: 12.5, fontWeight: 700 }}>高级配置 JSON</summary>
+              <Field t={t} label="完整服务器配置">
+                <textarea value={draftConfigText} onChange={(event) => setDraftConfigText(event.target.value)} rows={16} style={textareaStyle(t, 16)} aria-label="mcp-config-json" />
+              </Field>
+            </details>
+            {selected?.scope === 'project' && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                <button type="button" onClick={() => setApproval('approve')} style={ghostButtonStyle(t)}>批准</button>
+                <button type="button" onClick={() => setApproval('reject')} style={ghostButtonStyle(t, false, true)}>拒绝</button>
+                <button type="button" onClick={() => setApproval('clear')} style={ghostButtonStyle(t)}>撤销</button>
+                <button type="button" onClick={() => setApproval('approve_all')} style={ghostButtonStyle(t)}>批准全部</button>
+              </div>
+            )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <button type="button" onClick={save} style={ghostButtonStyle(t)}>保存</button>
+              <button type="button" onClick={remove} disabled={!selected} style={ghostButtonStyle(t, !selected, true)}>移除</button>
+            </div>
+            <div style={noteStyle(t)}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>项目审批摘要</div>
+              <div style={secondaryMetaStyle(t)}>批准：{asStringArray(approval.enabled_servers).join(', ') || '无'}</div>
+              <div style={secondaryMetaStyle(t)}>拒绝：{asStringArray(approval.disabled_servers).join(', ') || '无'}</div>
+              <div style={secondaryMetaStyle(t)}>批准全部：{approval.enable_all_project_servers ? '开启' : '关闭'}</div>
+              {approval.legacy_source_present && <div style={secondaryMetaStyle(t)}>检测到旧 ~/.lingxi.json 审批来源。</div>}
+            </div>
+          </div>
         </div>
-        <div style={{ padding: '8px 18px 0', fontSize: 12, color: t.warn, lineHeight: 1.6 }}>
-          一个卡在「待审批」状态的项目域服务器，在这份列表里显示为 <code className="mono">disconnected</code>
-          ——与一个正常连接后又断开、或从未连接过的服务器完全相同，本页无法把这两种情况区分开，不要把
-          「disconnected」直接读成「这个服务器干净地停止了」。
-        </div>
-        {servers.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有已连接的 MCP 服务器，或引擎尚未上报。</div>
+      </Card>
+
+      <Card title="Runtime 摘要">
+        {(snapshot.runtime_servers ?? []).length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>当前 runtime 没有已知 MCP 服务器。</div>
         )}
-        {servers.map((server) => (
+        {(snapshot.runtime_servers ?? []).map((server) => (
           <Row
-            key={server.name}
+            key={`${server.source ?? 'runtime'}:${server.name}`}
+            title={server.name}
+            desc={`${asString(server.transport, 'transport?')} · ${typeof server.status === 'string' ? server.status : JSON.stringify(server.status)}${server.read_only_reason ? ` · ${server.read_only_reason}` : ''}`}
             align="center"
-            title={<span className="mono" style={{ fontSize: 13 }}>{server.name}</span>}
-            desc={`${server.transport} · ${server.status.type}${server.status.type === 'error' ? `：${server.status.reason}` : ''}`}
           >
-            {null}
+            <SourcePill t={t} label={server.source ?? (server.writable ? 'config' : 'runtime')} />
           </Row>
         ))}
-      </Card>
-
-      <Card title="添加 / 更新服务器">
-        <Row title="域" desc="决定写入哪一个存储位置。" align="center">
-          <select value={scope} onChange={(e) => setScope(e.target.value as McpScopeDto)} aria-label="MCP 域" style={inputStyle(t)}>
-            {SCOPES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
-        </Row>
-        {scope === 'project' && (
-          <Row title="项目域的审批" align="start">
-            <div style={{ fontSize: 12, color: t.warn, maxWidth: 480, lineHeight: 1.6 }}>
-              项目域的服务器需要经过审批（`enabledMcpjsonServers` / `enableAllProjectMcpServers`）才会真正启用；
-              这两个审批开关已被迁移工具从唯一被读取的位置移除，导致任何跑过该迁移的机器上，项目域的服务器会永久停留在
-              「待审批」状态，且没有可用的审批入口。这是引擎已存在的问题，本页无法修复——这里写入的项目域条目会被保存，
-              但请不要期待它们会真正生效。
-            </div>
-          </Row>
-        )}
-        <Row title="名称" align="center">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="服务器名称" aria-label="MCP 服务器名称" style={{ ...inputStyle(t), width: 240 }} />
-        </Row>
-        <Row title="配置 (JSON)" align="start">
-          <textarea
-            value={configText}
-            onChange={(e) => setConfigText(e.target.value)}
-            aria-label="MCP 服务器配置"
-            rows={6}
-            className="mono"
-            style={{ ...inputStyle(t), width: 420, resize: 'vertical' }}
-          />
-        </Row>
-        {formError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{formError}</span></Row>}
-        <Row title="保存" align="center">
-          <button type="button" disabled={saving} onClick={handleUpsert} style={ghostButtonStyle(t, saving)}>{saving ? '保存中…' : '保存'}</button>
-        </Row>
-      </Card>
-
-      <Card title="移除服务器">
-        <Row title="按名称移除" desc="从上面选中的域移除；名称不存在时是安全的空操作。" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
-            <input value={removeName} onChange={(e) => setRemoveName(e.target.value)} placeholder="服务器名称" aria-label="要移除的 MCP 服务器名称" style={inputStyle(t)} />
-            <button type="button" disabled={removing || !removeName.trim()} onClick={handleRemove} style={ghostButtonStyle(t, removing || !removeName.trim(), true)}>
-              {removing ? '移除中…' : '移除'}
-            </button>
-          </div>
-        </Row>
-        {actionError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{actionError}</span></Row>}
-      </Card>
-
-      <Card title="只读来源">
-        <Row title="Dynamic / Enterprise" desc="由插件或托管策略提供，不能从这个页面编辑或删除。" align="center">
-          <ProvenanceBadge destination="managed" />
-        </Row>
       </Card>
     </>
   );

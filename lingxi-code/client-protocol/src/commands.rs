@@ -103,6 +103,98 @@ impl std::fmt::Debug for ProviderCredentialSecretDto {
     }
 }
 
+/// One nested Desktop skills-management command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SkillAdminCommandDto {
+    /// Operation verb, such as `get_catalog`, `save`, or `trash`.
+    pub action: String,
+    /// Correlation id for a mutating operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<u64>,
+    /// Stable skill or trash-entry identifier targeted by the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Writable source scope (`user` or `project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Expected SHA-256 revision used for compare-and-swap writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Action-specific JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+}
+
+/// One nested Desktop MCP-management command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct McpAdminCommandDto {
+    /// Operation verb, such as `get_snapshot`, `save_server`, or `set_approval`.
+    pub action: String,
+    /// Correlation id for a mutating operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<u64>,
+    /// Optional MCP server name targeted by the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Configuration scope (`user`, `local`, or `project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Expected SHA-256 revision used for compare-and-swap writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Action-specific JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+}
+
+/// One nested Desktop plugin-management command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PluginAdminCommandDto {
+    /// Operation verb, such as `get_catalog`, `preview_operation`, or `configure`.
+    pub action: String,
+    /// Correlation id for a mutating operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<u64>,
+    /// Plugin or marketplace identifier targeted by the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Optional configuration scope reserved for compatible clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Expected SHA-256 catalog or settings revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Action-specific JSON payload; sensitive values are forbidden here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+}
+
+/// One nested Desktop hooks-management command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HookAdminCommandDto {
+    /// Operation verb, such as `get_snapshot`, `preflight`, or `save`.
+    pub action: String,
+    /// Correlation id for a mutating operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<u64>,
+    /// Optional hook event or handler identifier targeted by the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Writable hook source scope (`user`, `local`, or `project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Expected SHA-256 revision used for compare-and-swap writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Action-specific JSON payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+}
+
 /// The inbound command envelope a client sends to the engine.
 ///
 /// `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`) so adding a command is
@@ -272,24 +364,6 @@ pub enum ClientCommand {
         operation_id: u64,
         // Provider/keychain id used by CLI, TUI, and Desktop.
         provider_id: String,
-    },
-
-    // Test DNS/TLS, authentication, and model availability without exposing a
-    // stored credential back to the client. An optional draft credential is
-    // used for this request only and is never persisted.
-    TestProviderConnection {
-        // Main-process correlator echoed by `ProviderConnectionTested`.
-        operation_id: u64,
-        // Provider/keychain id used to select authentication semantics.
-        provider_id: String,
-        // Provider API base selected from the built-in catalog (or the saved
-        // Anthropic override).
-        api_base: String,
-        // Model id to verify against a recognized model-list response.
-        model: String,
-        // Unsaved form value, when present. Omitted to use secure storage.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        credential_override: Option<ProviderCredentialSecretDto>,
     },
 
     // ── Model ─────────────────────────────────────────────────────────────
@@ -626,6 +700,27 @@ pub enum ClientCommand {
         command: PluginCommandDto,
     },
 
+    // ── Desktop settings managers ────────────────────────────────────────
+    // Structured skills manager for the Desktop settings screen.
+    SkillAdmin {
+        command: SkillAdminCommandDto,
+    },
+
+    // Structured MCP manager for the Desktop settings screen.
+    McpAdmin {
+        command: McpAdminCommandDto,
+    },
+
+    // Structured plugin manager for the Desktop settings screen.
+    PluginAdmin {
+        command: PluginAdminCommandDto,
+    },
+
+    // Structured hooks manager for the Desktop settings screen.
+    HookAdmin {
+        command: HookAdminCommandDto,
+    },
+
     // ── Settings ─────────────────────────────────────────────────────────
     // Apply a batch of shallow, top-level settings edits to one writable
     // layer. `patch_json` is a JSON **object**; a `null` value for a key
@@ -812,6 +907,25 @@ pub enum ClientCommand {
         session_id: String,
         // Capability profile the forked session should run under.
         target_mode: crate::listings::SessionModeDto,
+    },
+
+    // Test DNS/TLS, authentication, and model availability without exposing a
+    // stored credential back to the client. An optional draft credential is
+    // used for this request only and is never persisted. Appended to preserve
+    // every previously frozen UniFFI variant ordinal.
+    TestProviderConnection {
+        // Main-process correlator echoed by `ProviderConnectionTested`.
+        operation_id: u64,
+        // Provider/keychain id used to select authentication semantics.
+        provider_id: String,
+        // Provider API base selected from the built-in catalog (or the saved
+        // Anthropic override).
+        api_base: String,
+        // Model id to verify against a recognized model-list response.
+        model: String,
+        // Unsaved form value, when present. Omitted to use secure storage.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_override: Option<ProviderCredentialSecretDto>,
     },
 }
 

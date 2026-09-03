@@ -99,6 +99,457 @@ fn new_desktop_mcp_transport() -> Arc<DesktopMcpTransport> {
     Arc::new(DesktopMcpTransport::new())
 }
 
+/// Late-bound bridge from hook execution to the session's MCP registry.
+///
+/// Hooks are constructed before the MCP registry because the registry itself
+/// needs the hook dispatcher for elicitation. The `OnceLock` breaks that
+/// composition cycle without permitting hooks to discover or connect servers:
+/// invocation only uses `McpRegistry::get_client`, the already-live lookup.
+#[derive(Clone, Default)]
+struct DesktopHookMcpInvoker {
+    registry: Arc<OnceLock<Arc<mcp::McpRegistry>>>,
+}
+
+impl DesktopHookMcpInvoker {
+    fn bind(&self, registry: Arc<mcp::McpRegistry>) {
+        let _ = self.registry.set(registry);
+    }
+}
+
+fn hook_mcp_full_name(server: &str, tool: &str) -> String {
+    if tool.starts_with("mcp__") {
+        tool.to_string()
+    } else {
+        format!(
+            "mcp__{}__{}",
+            mcp::normalization::normalize_name_for_mcp(server),
+            tool
+        )
+    }
+}
+
+fn mcp_hook_text_content(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(text) => vec![text.clone()],
+        serde_json::Value::Array(items) => items
+            .iter()
+            .flat_map(mcp_hook_text_content)
+            .collect::<Vec<_>>(),
+        serde_json::Value::Object(object)
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("text") =>
+        {
+            object
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(|text| vec![text.to_string()])
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn map_hook_mcp_tool_result(
+    result: platform_api::McpToolResultDto,
+) -> hooks::HookMcpInvocationResult {
+    let text_content = mcp_hook_text_content(&result.content);
+    if result.is_error {
+        hooks::HookMcpInvocationResult::Error {
+            message: text_content
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "MCP tool returned isError".to_string()),
+            text_content,
+        }
+    } else {
+        hooks::HookMcpInvocationResult::Success { text_content }
+    }
+}
+
+fn map_hook_mcp_tool_error(error: mcp::McpClientError) -> hooks::HookMcpInvocationResult {
+    match error {
+        mcp::McpClientError::Timeout { .. } | mcp::McpClientError::IdleTimeout { .. } => {
+            hooks::HookMcpInvocationResult::Timeout {
+                text_content: Vec::new(),
+            }
+        }
+        other => hooks::HookMcpInvocationResult::Error {
+            text_content: Vec::new(),
+            message: other.to_string(),
+        },
+    }
+}
+
+#[async_trait::async_trait]
+impl hooks::HookMcpInvoker for DesktopHookMcpInvoker {
+    async fn invoke(&self, request: hooks::HookMcpInvocation) -> hooks::HookMcpInvocationResult {
+        let Some(registry) = self.registry.get() else {
+            return hooks::HookMcpInvocationResult::NotConnected {
+                message: "MCP registry is not ready".to_string(),
+            };
+        };
+        let Some(client) = registry.get_client(&request.server).await else {
+            return hooks::HookMcpInvocationResult::NotConnected {
+                message: format!("MCP server {:?} is not connected", request.server),
+            };
+        };
+
+        let full_name = hook_mcp_full_name(&request.server, &request.tool);
+        let input = serde_json::Value::Object(request.input.into_iter().collect());
+        match client
+            .call_tool_with_timeout(&full_name, input, request.timeout)
+            .await
+        {
+            Ok(result) => map_hook_mcp_tool_result(result),
+            Err(error) => map_hook_mcp_tool_error(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod desktop_hook_mcp_invoker_tests {
+    use super::{
+        hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result,
+        DesktopHookMcpInvoker,
+    };
+    use hooks::HookMcpInvoker;
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
+        McpHeaders, McpNotificationStream, McpProtocolEra, McpRawConnection, McpResourceContentDto,
+        McpResourceDto, McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind,
+        McpTransportSpec, ServerCapabilitiesDto,
+    };
+    use protocol::McpConnectionId;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct NoopTransport {
+        connect_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl McpTransport for NoopTransport {
+        async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            Err(McpError::Connection("unexpected connect".into()))
+        }
+
+        async fn connect_and_initialize(
+            &self,
+            spec: &McpTransportSpec,
+            _options: McpConnectOptions,
+        ) -> Result<McpConnectResult, McpError> {
+            let conn = self.connect(spec).await?;
+            let capabilities = self.initialize(&conn).await?;
+            Ok(McpConnectResult {
+                connection: conn,
+                capabilities,
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+            })
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            Ok(ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                logging: false,
+                directory_read: false,
+                experimental: HashMap::new(),
+                extensions: HashMap::new(),
+            })
+        }
+
+        async fn list_tools(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resource_templates(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            _tool: &str,
+            _input: serde_json::Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!("adapter no-lazy-dial test never calls transport tools")
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!("unused")
+        }
+
+        async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            Err(McpError::Connection("unused".into()))
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _req: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Ok(ElicitResultDto {
+                data: serde_json::json!({ "action": "cancel" }),
+            })
+        }
+
+        async fn disconnect(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Http]
+        }
+    }
+
+    fn http_cfg(name: &str) -> mcp::McpServerConfig {
+        mcp::McpServerConfig {
+            name: name.into(),
+            spec: McpTransportSpec::Http {
+                url: "https://mcp.example.com".into(),
+                headers: McpHeaders::default(),
+                headers_helper: None,
+                oauth: None,
+            },
+            scope: mcp::ConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            tools: Vec::new(),
+            tool_permissions: Default::default(),
+            config_error: None,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn hook_full_name_normalizes_server_and_respects_existing_prefix() {
+        assert_eq!(
+            hook_mcp_full_name("claude.ai Linear", "search"),
+            format!(
+                "mcp__{}__search",
+                mcp::normalization::normalize_name_for_mcp("claude.ai Linear")
+            )
+        );
+        assert_eq!(
+            hook_mcp_full_name("ignored", "mcp__docs__read"),
+            "mcp__docs__read"
+        );
+    }
+
+    #[test]
+    fn hook_result_mapping_extracts_text_and_preserves_is_error() {
+        let success = map_hook_mcp_tool_result(McpToolResultDto {
+            content: serde_json::json!([
+                {"type":"text","text":"first"},
+                "second",
+                {"ignored": true},
+                [{"type":"text","text":"third"}]
+            ]),
+            is_error: false,
+            meta: None,
+            structured_content: None,
+        });
+        assert_eq!(
+            success,
+            hooks::HookMcpInvocationResult::Success {
+                text_content: vec!["first".into(), "second".into(), "third".into()],
+            }
+        );
+
+        let is_error = map_hook_mcp_tool_result(McpToolResultDto {
+            content: serde_json::json!("boom"),
+            is_error: true,
+            meta: None,
+            structured_content: None,
+        });
+        assert_eq!(
+            is_error,
+            hooks::HookMcpInvocationResult::Error {
+                text_content: vec!["boom".into()],
+                message: "boom".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn hook_error_mapping_treats_timeouts_separately() {
+        assert_eq!(
+            map_hook_mcp_tool_error(mcp::McpClientError::Timeout {
+                server: "srv".into(),
+                tool: "read".into(),
+                secs: 3,
+            }),
+            hooks::HookMcpInvocationResult::Timeout {
+                text_content: Vec::new(),
+            }
+        );
+        assert_eq!(
+            map_hook_mcp_tool_error(mcp::McpClientError::IdleTimeout {
+                server: "srv".into(),
+                tool: "read".into(),
+                secs: 3,
+            }),
+            hooks::HookMcpInvocationResult::Timeout {
+                text_content: Vec::new(),
+            }
+        );
+        assert_eq!(
+            map_hook_mcp_tool_error(mcp::McpClientError::Rpc("bad".into())),
+            hooks::HookMcpInvocationResult::Error {
+                text_content: Vec::new(),
+                message: "JSON-RPC error: bad".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn invoker_is_late_bound_and_shared_across_clones() {
+        let invoker = DesktopHookMcpInvoker::default();
+        let first = invoker
+            .invoke(hooks::HookMcpInvocation {
+                server: "srv".into(),
+                tool: "tool".into(),
+                input: HashMap::new(),
+                timeout: Duration::from_secs(1),
+            })
+            .await;
+        assert_eq!(
+            first,
+            hooks::HookMcpInvocationResult::NotConnected {
+                message: "MCP registry is not ready".into(),
+            }
+        );
+
+        let transport = Arc::new(NoopTransport::default());
+        let registry = Arc::new(mcp::McpRegistry::new(transport));
+        let clone = invoker.clone();
+        clone.bind(registry);
+
+        let after_bind = invoker
+            .invoke(hooks::HookMcpInvocation {
+                server: "srv".into(),
+                tool: "tool".into(),
+                input: HashMap::new(),
+                timeout: Duration::from_secs(1),
+            })
+            .await;
+        assert_eq!(
+            after_bind,
+            hooks::HookMcpInvocationResult::NotConnected {
+                message: "MCP server \"srv\" is not connected".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
+        let transport = Arc::new(NoopTransport::default());
+        let registry = Arc::new(mcp::McpRegistry::new(
+            transport.clone() as Arc<dyn McpTransport>
+        ));
+        registry.connections.write().await.insert(
+            "srv".into(),
+            mcp::connection::McpConnectionState::Cached {
+                config: http_cfg("srv"),
+                connection_id: McpConnectionId::new(),
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    directory_read: false,
+                    experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                cache_saved_at_ms: 1,
+                age_ms: 1,
+            },
+        );
+
+        let invoker = DesktopHookMcpInvoker::default();
+        invoker.bind(registry);
+        let result = invoker
+            .invoke(hooks::HookMcpInvocation {
+                server: "srv".into(),
+                tool: "read".into(),
+                input: HashMap::new(),
+                timeout: Duration::from_secs(1),
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            hooks::HookMcpInvocationResult::NotConnected {
+                message: "MCP server \"srv\" is not connected".into(),
+            }
+        );
+        assert_eq!(
+            transport.connect_calls.load(Ordering::SeqCst),
+            0,
+            "hook invoker must not trigger lazy dial; it only uses get_client"
+        );
+    }
+
+    #[test]
+    fn invoker_preserves_caller_supplied_prefixed_full_name() {
+        assert_eq!(
+            hook_mcp_full_name("claude.ai Linear", "mcp__custom_server__search"),
+            "mcp__custom_server__search"
+        );
+    }
+}
+
 #[cfg(test)]
 mod mcp_transport_wiring_tests {
     use super::new_desktop_mcp_transport;
@@ -2936,6 +3387,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
 ///     credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+///     injected_plugin_secrets: BTreeMap::new(),
 ///     api_key_helper: None,
 ///     managed_oauth_only: false,
 ///     anthropic_key_fd_present: false,
@@ -3041,6 +3493,11 @@ pub struct DesktopConfig {
     /// unavailable. Production CLI/TUI/Desktop keep the owner-only plaintext
     /// sidecar; packaged bridge-server can switch to memory-only fallback.
     pub credential_storage_policy: CredentialStoragePolicy,
+    /// Sensitive plugin `userConfig` values injected by the packaged Desktop
+    /// parent. They are installed into the process-local credential cache
+    /// before plugin discovery and are never included in debug output.
+    pub injected_plugin_secrets:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
@@ -3603,6 +4060,14 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.api_key_helper.as_ref().map(|_| "<redacted>"),
             )
             .field("credential_storage_policy", &self.credential_storage_policy)
+            .field(
+                "injected_plugin_secret_count",
+                &self
+                    .injected_plugin_secrets
+                    .values()
+                    .map(std::collections::BTreeMap::len)
+                    .sum::<usize>(),
+            )
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
@@ -3721,6 +4186,7 @@ impl Default for DesktopConfig {
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
             credential_storage_policy: CredentialStoragePolicy::NativePreferred,
+            injected_plugin_secrets: std::collections::BTreeMap::new(),
             api_key_helper: None,
             // (M13) Default: no managed OAuth forcing, no FD-inherited key —
             // hosts that resolve either fill them in.
@@ -4374,6 +4840,11 @@ pub struct DesktopRuntime {
     /// (RAII teardown). An empty handle (no tasks) when no `FileChanged` hook is
     /// configured — the no-watch case is byte-identical to before.
     pub file_changed_watcher: file_changed_watch::FileChangedWatcherHandle,
+    /// Live hook registry shared by the orchestrator and plugin manager.
+    /// Bridge-server uses this handle for source-scoped atomic hot reloads.
+    pub hook_registry: Arc<RwLock<hooks::HookRegistry>>,
+    /// Live skill/plugin catalog refresher shared with runtime root reloads.
+    pub repo_root_reloader: Arc<dyn platform_api::RepoRootReloader>,
     /// Shared Claude.ai subscription snapshot (Task 4). Seeded at build time
     /// with the scope-derived `is_subscriber` flag; for subscribers a
     /// background OAuth profile + roles fetch overwrites it with the full
@@ -6747,6 +7218,18 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         storage: mcp_oauth_storage,
         credentials,
     } = build_shared_credential_stack_for_config(&cfg).await?;
+
+    // The packaged Electron parent owns durable plugin-secret persistence in
+    // a dedicated Keychain service. Seed the shared runtime manager before
+    // plugin discovery so `${user_config.*}` resolution uses the same path as
+    // CLI/TUI while never writing a duplicate plaintext or Keychain entry.
+    for (plugin, values) in &cfg.injected_plugin_secrets {
+        for (key, value) in values {
+            credentials
+                .set_plugin_secret_ephemeral(plugin, key, value)
+                .await;
+        }
+    }
 
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
@@ -9144,6 +9627,7 @@ pub async fn build(
     // `attach` fills the cell once `orch` exists (step 4.x below), the same
     // shape as `subagent_hook_executor_cell`.
     let hook_attachment_sink = Arc::new(orchestrator::JsonlHookAttachmentSink::new());
+    let hook_mcp_invoker = DesktopHookMcpInvoker::default();
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -9175,6 +9659,7 @@ pub async fn build(
         // configured. (`subagent_spawner` is an `Arc`; cloned here, still moved
         // into the tool context below.)
         .with_agent_spawner(subagent_spawner.clone())
+        .with_mcp_invoker(Arc::new(hook_mcp_invoker.clone()))
         // P4: wire the output stream as hook observer so --include-hook-events
         // and the SessionStart/Setup always-stream gate emit hook_started /
         // hook_response frames. Default no-op when the stream impl ignores them
@@ -9294,6 +9779,7 @@ pub async fn build(
         // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
         .with_additional_roots(mcp_additional_roots),
     );
+    hook_mcp_invoker.bind(mcp_registry.clone());
     // Subscribe before connecting: a server is allowed to invalidate a catalog
     // immediately after initialization, before the shared ToolRegistry exists.
     // Tokio's broadcast receiver retains those early notifications until the
@@ -10957,18 +11443,15 @@ pub async fn build(
     // orchestrator is about to take ownership of (mirrors the `cwd_changed_firer`
     // built from `hooks.clone()` at (5.5)). Captured BEFORE `hooks` is moved into
     // the orchestrator constructor below so the watcher (spawned at (7.3), after
-    // `hooks` is moved) reaches `orch.hooks` without a getter. Only built when at
-    // least one `FileChanged` matcher exists — otherwise it would be unused.
-    let file_changed_firer: Option<Arc<dyn hooks::FileChangedFirer>> =
-        if file_changed_matchers.is_empty() {
-            None
-        } else {
-            Some(Arc::new(orchestrator::OrchestratorFileChangedFirer::new(
-                hooks.clone(),
-                watch_cwd.clone(),
-                main_transcript_path.clone(),
-            )))
-        };
+    // `hooks` is moved) reaches `orch.hooks` without a getter. Keep this firer
+    // even for an initially empty matcher set so Desktop can install the first
+    // FileChanged hook without restarting the process.
+    let file_changed_firer: Arc<dyn hooks::FileChangedFirer> =
+        Arc::new(orchestrator::OrchestratorFileChangedFirer::new(
+            hooks.clone(),
+            watch_cwd.clone(),
+            main_transcript_path.clone(),
+        ));
     // (6.5-pre) Clone the registry Arcs the plugin bootstrap (below, after the
     //           command registry is filled at (6)) writes through, BEFORE they
     //           are moved into the orchestrator constructor. `Arc<RwLock<…>>`
@@ -11103,7 +11586,7 @@ pub async fn build(
         .with_analytics_bus(analytics_bus.clone())
         .with_mcp_registry(mcp_registry.clone())
         .with_ide_handle(ide_handle.clone())
-        .with_hook_registry(hook_registry)
+        .with_hook_registry(hook_registry.clone())
         .with_agent_catalog(agent_catalog)
         .with_repo_root_reloader(repo_root_reloader.clone())
         .with_output_style_registry(plugin_output_style_registry.clone())
@@ -12093,38 +12576,19 @@ pub async fn build(
     //       reaches `orch.hooks` without a dependency cycle. Best-effort: a
     //       failing/blocking `FileChanged` hook never breaks the watch loop.
     //
-    //       GATED: spawn ONLY when at least one `FileChanged` hook is registered
-    //       AND it resolves to a non-empty watch-path set (a matcher-less hook
-    //       watches nothing — claude-code's `if (paths.length === 0) return`).
-    //       With no `FileChanged` hook the matcher list is empty, the watcher
-    //       resolves to zero paths, and the empty handle is returned — the
-    //       no-watch case is byte-identical to before. As with the settings
-    //       watcher, the full `platform-posix` `FileSystem` is used (the engine's
-    //       `posix-minimal::watch` is an empty-stream stub).
-    let file_changed_watcher = match file_changed_firer {
-        None => file_changed_watch::FileChangedWatcherHandle::empty(),
-        Some(firer) => {
-            let matcher_refs: Vec<&str> =
-                file_changed_matchers.iter().map(String::as_str).collect();
-            let watcher =
-                file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, firer);
-            // Empty resolved-path set (matcher-less hooks only) ⇒ spawn returns
-            // an empty handle, so this stays a no-op even when a `FileChanged`
-            // hook is present but specifies no watch target.
-            if watcher.watch_paths().is_empty() {
-                file_changed_watch::FileChangedWatcherHandle::empty()
-            } else {
-                let watch_fs: Arc<dyn platform_api::FileSystem> =
-                    Arc::new(PosixFileSystem::new(watch_cwd.clone()));
-                watcher.spawn(watch_fs).await
-            }
-        }
-    };
+    //       An empty matcher set starts an idle supervisor with zero OS watch
+    //       handles; its control channel remains available for hot reload.
+    let matcher_refs: Vec<&str> = file_changed_matchers.iter().map(String::as_str).collect();
+    let watcher =
+        file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, file_changed_firer);
+    let watch_fs: Arc<dyn platform_api::FileSystem> =
+        Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    let file_changed_watcher = watcher.spawn(watch_fs).await;
     // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
     // exists (it spawns AFTER the firer is built). On a mid-session `cd` the
     // firer rebinds this watcher — the watcher-rebind half of `onCwdChanged`.
-    // An empty handle (no `FileChanged` hooks / no resolved paths) yields no
-    // rebinder, so the cell stays unset and the rebind remains a strict no-op.
+    // The idle supervisor also yields a rebinder, so future live-installed
+    // matchers follow cwd changes without a restart.
     if let Some(rebinder) = file_changed_watcher.rebinder() {
         file_changed_watcher_rebinder.set(rebinder);
     }
@@ -12173,6 +12637,7 @@ pub async fn build(
         enforcing_permission_gate,
         settings_watcher,
         file_changed_watcher,
+        repo_root_reloader: repo_root_reloader.clone(),
         subscription,
         sandbox_toggle,
         sandbox_desc_auto_allow,
@@ -12180,6 +12645,7 @@ pub async fn build(
         sandbox_desc_deps_ok,
         file_history,
         plugin_runtime,
+        hook_registry: hook_registry.clone(),
         provider_availability,
         default_model_fallback,
         model_provenance,
@@ -13741,6 +14207,7 @@ mod tests {
         let cfg = DesktopConfig {
             isolated_credential_storage: false,
             credential_storage_policy: platform_api::CredentialStoragePolicy::NativeOrMemory,
+            injected_plugin_secrets: std::collections::BTreeMap::new(),
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,

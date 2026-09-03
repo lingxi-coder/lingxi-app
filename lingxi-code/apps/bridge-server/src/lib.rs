@@ -30,9 +30,14 @@
 
 pub mod audio_bridge;
 pub mod boot;
+pub mod config_admin;
 pub mod driver;
+pub mod hook_admin;
+pub mod mcp_admin;
 pub mod mcp_bridge;
+pub mod plugin_admin;
 mod provider_connection;
 pub mod router;
 pub mod server;
 pub mod settings_bridge;
+pub mod skills_admin;

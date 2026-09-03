@@ -178,6 +178,11 @@ pub struct CredentialManager {
     /// writing them to the Rust keychain on every launch would re-trigger the
     /// macOS Keychain authorization for each ad-hoc desktop build.
     provider_key_cache: RwLock<HashMap<String, Secret<String>>>,
+    /// Sensitive plugin options injected by the packaged Desktop parent.
+    /// The parent owns durable Keychain persistence; this cache gives the
+    /// plugin loader the same `CredentialManager` API without writing a
+    /// second copy through Rust secure storage.
+    plugin_secret_cache: RwLock<HashMap<(String, String), Secret<String>>>,
     api_key_ttl: Duration,
 }
 
@@ -198,6 +203,7 @@ impl CredentialManager {
             session_meta_lock: Mutex::new(()),
             api_key_cache: RwLock::new(None),
             provider_key_cache: RwLock::new(HashMap::new()),
+            plugin_secret_cache: RwLock::new(HashMap::new()),
             api_key_ttl: Duration::from_secs(300),
         }
     }
@@ -472,7 +478,24 @@ impl CredentialManager {
         self.storage
             .store("lingxi", &plugin_secret_account(plugin, key), data)
             .await?;
+        self.plugin_secret_cache
+            .write()
+            .await
+            .remove(&(plugin.to_string(), key.to_string()));
         Ok(())
+    }
+
+    /// Inject a sensitive plugin option for this process only.
+    ///
+    /// Packaged Desktop persists these values in its dedicated plugin-secret
+    /// Keychain service, then supplies them over the bounded stdin envelope.
+    /// Keeping the override here prevents duplicate Keychain prompts and makes
+    /// the normal plugin loader observe the value without a special code path.
+    pub async fn set_plugin_secret_ephemeral(&self, plugin: &str, key: &str, secret: &str) {
+        self.plugin_secret_cache.write().await.insert(
+            (plugin.to_string(), key.to_string()),
+            Secret::new(secret.to_string()),
+        );
     }
 
     /// Load a sensitive plugin `userConfig` value stored under `(plugin, key)`.
@@ -483,6 +506,14 @@ impl CredentialManager {
         plugin: &str,
         key: &str,
     ) -> Result<Option<Secret<String>>, CredentialError> {
+        if let Some(value) = self
+            .plugin_secret_cache
+            .read()
+            .await
+            .get(&(plugin.to_string(), key.to_string()))
+        {
+            return Ok(Some(Secret::new(value.expose_secret().clone())));
+        }
         let Some(raw) = self
             .storage
             .retrieve("lingxi", &plugin_secret_account(plugin, key))
@@ -507,7 +538,17 @@ impl CredentialManager {
         self.storage
             .delete("lingxi", &plugin_secret_account(plugin, key))
             .await?;
+        self.delete_plugin_secret_ephemeral(plugin, key).await;
         Ok(())
+    }
+
+    /// Remove one process-local plugin secret without touching durable
+    /// storage owned by the Desktop parent.
+    pub async fn delete_plugin_secret_ephemeral(&self, plugin: &str, key: &str) {
+        self.plugin_secret_cache
+            .write()
+            .await
+            .remove(&(plugin.to_string(), key.to_string()));
     }
 
     /// Persist a full Anthropic OAuth credential set.
@@ -1489,6 +1530,54 @@ mod oauth_tests {
             .await
             .expect("get")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_plugin_secret_overrides_storage_without_persisting() {
+        let (storage, cm) = manager();
+        cm.set_plugin_secret("weather@acme", "API_KEY", "stored")
+            .await
+            .expect("set stored");
+        cm.set_plugin_secret_ephemeral("weather@acme", "API_KEY", "desktop")
+            .await;
+
+        let resolved = cm
+            .get_plugin_secret("weather@acme", "API_KEY")
+            .await
+            .expect("resolve")
+            .expect("present");
+        assert_eq!(resolved.expose_secret(), "desktop");
+        let persisted = storage
+            .retrieve("lingxi", "plugin-secret-weather@acme/API_KEY")
+            .await
+            .expect("retrieve")
+            .expect("persisted");
+        assert_eq!(persisted.expose_secret_bytes(), b"stored");
+
+        cm.delete_plugin_secret_ephemeral("weather@acme", "API_KEY")
+            .await;
+        let fallback = cm
+            .get_plugin_secret("weather@acme", "API_KEY")
+            .await
+            .expect("resolve fallback")
+            .expect("stored fallback");
+        assert_eq!(fallback.expose_secret(), "stored");
+    }
+
+    #[tokio::test]
+    async fn persisted_plugin_secret_replaces_ephemeral_override() {
+        let (_storage, cm) = manager();
+        cm.set_plugin_secret_ephemeral("weather@acme", "API_KEY", "desktop")
+            .await;
+        cm.set_plugin_secret("weather@acme", "API_KEY", "replacement")
+            .await
+            .expect("persist replacement");
+        let resolved = cm
+            .get_plugin_secret("weather@acme", "API_KEY")
+            .await
+            .expect("resolve")
+            .expect("present");
+        assert_eq!(resolved.expose_secret(), "replacement");
     }
 
     #[tokio::test]

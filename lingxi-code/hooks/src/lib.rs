@@ -27,9 +27,13 @@ pub mod hook_payload;
 mod http_executor;
 pub mod loader;
 pub mod matcher;
+/// Name-addressed MCP hook invocation seam.
+pub mod mcp_invoker;
 pub mod prompt_executor;
 pub mod registry;
 pub mod response;
+/// Strict parse/validate/serialize helpers for a settings-layer `hooks` object.
+pub mod settings_layer;
 pub mod ssrf_guard;
 pub mod task_completed_firer;
 pub mod task_created_firer;
@@ -66,14 +70,20 @@ pub use loader::{
     parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated, HookPolicyGate,
 };
 pub use matcher::{get_legacy_tool_names, matches_pattern, normalize_legacy_tool_name};
+pub use mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
 pub use prompt_executor::{
     HookPromptRunner, PromptHookError, PromptHookRequest, HOOK_PROMPT_TIMEOUT_MS,
 };
-pub use registry::{HookContext, HookRegistry};
+pub use registry::{HookContext, HookRegistry, HookSourceReplaceResult};
 pub use response::{
     truncate_utf16, AggregateHookResult, ClassifierHostContext, ElicitationHookResponse,
     HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite, PermissionRequestResult,
     CLASSIFIER_CONTEXT_CAP_UTF16,
+};
+pub use settings_layer::{
+    event_name_for_hook, file_changed_matchers_from_hooks, parse_hook_layer_strict,
+    parse_hook_layer_value_strict, serialize_hook_layer, HookLayerDocument, HookLayerError,
+    HookValidationIssue, ParsedHookLayer,
 };
 pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};

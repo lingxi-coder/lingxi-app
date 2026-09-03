@@ -49,6 +49,15 @@ export interface ProviderCredentialMetadata extends CredentialMetadata {
   providerId: string;
 }
 
+export interface PluginSecretMetadata {
+  pluginId: string;
+  key: string;
+  configured: boolean;
+  maskedValue?: string;
+  storageError?: string;
+  restartRequired?: boolean;
+}
+
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
 export const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
@@ -61,6 +70,9 @@ export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
 export const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
+export const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
+export const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
+export const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
 export const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 export const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -510,6 +522,73 @@ export class HostController {
         model,
         testCredential,
       );
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_GET, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
+      if (!this.credentialBroker) {
+        return { pluginId, key, configured: false, storageError: '安全凭据代理不可用。' } satisfies PluginSecretMetadata;
+      }
+      const preview = await this.credentialBroker.previewPluginSecret(pluginId, key);
+      return {
+        pluginId: preview.pluginId,
+        key: preview.key,
+        configured: preview.configured,
+        ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
+      } satisfies PluginSecretMetadata;
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_SET, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+      secret: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string' || typeof secret !== 'string') {
+        throw new Error('invalid plugin secret');
+      }
+      if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
+      const preview = await this.credentialBroker.setPluginSecret(pluginId, key, secret);
+      let restartRequired = this.hasActiveWork();
+      if (!restartRequired) {
+        try {
+          await this.restartIfConfigured();
+        } catch (error) {
+          restartRequired = true;
+          this.diagnostics.add('warn', 'host', error);
+        }
+      }
+      return {
+        pluginId: preview.pluginId,
+        key: preview.key,
+        configured: preview.configured,
+        ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
+        ...(restartRequired ? { restartRequired: true } : {}),
+      } satisfies PluginSecretMetadata;
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_CLEAR, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
+      if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
+      await this.credentialBroker.deletePluginSecret(pluginId, key);
+      let restartRequired = this.hasActiveWork();
+      if (!restartRequired) {
+        try {
+          await this.restartIfConfigured();
+        } catch (error) {
+          restartRequired = true;
+          this.diagnostics.add('warn', 'host', error);
+        }
+      }
+      return { pluginId, key, configured: false, ...(restartRequired ? { restartRequired: true } : {}) } satisfies PluginSecretMetadata;
     });
     this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -1036,6 +1115,7 @@ export class HostController {
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST,
+      CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
     ]) this.ipc.removeHandler(channel);

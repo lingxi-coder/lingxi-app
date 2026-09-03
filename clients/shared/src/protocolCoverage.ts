@@ -104,6 +104,10 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   update_workspace_directories: true,
   upsert_mcp_server: true,
   remove_mcp_server: true,
+  skill_admin: true,
+  mcp_admin: true,
+  plugin_admin: true,
+  hook_admin: true,
   audio_response: true,
 };
 
@@ -142,6 +146,11 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   fast_mode_changed: true,
   provider_credential_status: true,
   provider_connection_tested: true,
+  configuration_operation: true,
+  skill_catalog: true,
+  skill_document: true,
+  mcp_configuration_snapshot: true,
+  plugin_catalog: true,
   mcp_servers: true,
   skills: true,
   hooks: true,

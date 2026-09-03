@@ -235,12 +235,14 @@ test('credential envelope uses the bridge-server snake_case contract', () => {
   const payload = buildCredentialEnvelope({
     apiKey: 'anthropic-secret',
     providerCredentials: { deepseek: 'provider-secret' },
+    pluginSecrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
   });
   assert.deepEqual(JSON.parse(payload), {
     api_key: 'anthropic-secret',
     provider_keys: { deepseek: 'provider-secret' },
+    plugin_secrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
   });
-  assert.doesNotMatch(payload, /apiKey|providerKeys/);
+  assert.doesNotMatch(payload, /apiKey|providerKeys|pluginSecrets/);
 });
 
 test('diagnostics redact secrets, strip control characters, truncate, and remain bounded', () => {

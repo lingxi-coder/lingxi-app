@@ -355,6 +355,10 @@ export type ClientCommand =
   // ── MCP servers (persisted) ──────────────────────────────────────────────────
   | { type: 'upsert_mcp_server'; scope: McpScopeDto; name: string; config_json: string }
   | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string }
+  | { type: 'skill_admin'; command: SkillAdminCommandDto }
+  | { type: 'mcp_admin'; command: McpAdminCommandDto }
+  | { type: 'plugin_admin'; command: PluginAdminCommandDto }
+  | { type: 'hook_admin'; command: HookAdminCommandDto }
   // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
   /**
    * Answer to an engine `audio_request`, correlated by `request_id`. Mirrors
@@ -831,6 +835,35 @@ export interface McpServerDto {
   transport: string;
 }
 
+export type ConfigurationOperationStatusDto = 'started' | 'progress' | 'succeeded' | 'failed';
+
+export type ConfigurationEffectDto = 'applied' | 'restart_required' | 'not_applicable';
+
+export type ConfigurationDomainDto = 'skill' | 'mcp' | 'plugin' | 'hook';
+
+export interface ConfigurationOperationDto {
+  operation_id: number;
+  domain: ConfigurationDomainDto;
+  status: ConfigurationOperationStatusDto;
+  effect: ConfigurationEffectDto;
+  message?: string;
+  details_json?: string;
+}
+
+export interface ConfigurationAdminCommandDto {
+  action: string;
+  operation_id?: number;
+  target?: string;
+  scope?: string;
+  revision?: string;
+  payload_json?: string;
+}
+
+export type SkillAdminCommandDto = ConfigurationAdminCommandDto;
+export type McpAdminCommandDto = ConfigurationAdminCommandDto;
+export type PluginAdminCommandDto = ConfigurationAdminCommandDto;
+export type HookAdminCommandDto = ConfigurationAdminCommandDto;
+
 /** One discovered skill entry (listings.rs `SkillDto`). */
 export interface SkillDto {
   /** Skill display name (matches its directory name, not frontmatter). */
@@ -845,6 +878,16 @@ export interface HookDto {
   event: string;
   matcher?: string;
   timeout_ms: number;
+  hook_type?: string;
+  source?: string;
+  content?: string;
+  status_message?: string;
+  blocking?: boolean;
+  async?: boolean;
+  async_rewake?: boolean;
+  async_timeout_ms?: number;
+  priority?: number;
+  if_condition?: string;
 }
 
 /** One subagent entry (listings.rs `AgentDto`). */
@@ -1991,6 +2034,19 @@ export type ClientEvent =
       message: string;
       used_stored_credential: boolean;
     }
+  | {
+      type: 'configuration_operation';
+      domain: ConfigurationDomainDto;
+      operation_id: number;
+      status: ConfigurationOperationStatusDto;
+      effect: ConfigurationEffectDto;
+      message?: string;
+      details_json?: string;
+    }
+  | { type: 'skill_catalog'; catalog_json: string }
+  | { type: 'skill_document'; document_json: string }
+  | { type: 'mcp_configuration_snapshot'; snapshot_json: string }
+  | { type: 'plugin_catalog'; catalog_json: string }
   | { type: 'mcp_servers'; servers: McpServerDto[] }
   | { type: 'skills'; skills: SkillDto[] }
   | { type: 'hooks'; hooks: HookDto[] }

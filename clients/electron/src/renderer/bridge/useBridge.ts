@@ -6,8 +6,11 @@ import type {
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
+  ConfigurationDomainDto,
+  HookAdminCommandDto,
   HookDto,
   ImageRefDto,
+  McpAdminCommandDto,
   McpScopeDto,
   PermissionBehaviorDto,
   PermissionModeId,
@@ -15,6 +18,8 @@ import type {
   PermissionResponseDto,
   ReasoningSelectionDto,
   SettingsDestinationDto,
+  PluginAdminCommandDto,
+  SkillAdminCommandDto,
 } from '@lingxi/bridge-client';
 
 import { browserMicrophoneCaptureDeps, MicrophoneCapture } from '../audio/capture';
@@ -59,6 +64,7 @@ import type {
   BootstrapState,
   ConnectionState,
   DiagnosticEntry,
+  PluginSecretMetadata,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
   ProviderConnectionTestResult,
@@ -85,6 +91,11 @@ export type McpServersEvent = Extract<ClientEvent, { type: 'mcp_servers' }>;
 
 /** The wire shape of the discovered-skills listing (`ClientEvent::Skills`), unparsed. */
 export type SkillsEvent = Extract<ClientEvent, { type: 'skills' }>;
+export type ConfigurationOperationEvent = Extract<ClientEvent, { type: 'configuration_operation' }>;
+export type SkillCatalogEvent = Extract<ClientEvent, { type: 'skill_catalog' }>;
+export type SkillDocumentEvent = Extract<ClientEvent, { type: 'skill_document' }>;
+export type McpConfigurationSnapshotEvent = Extract<ClientEvent, { type: 'mcp_configuration_snapshot' }>;
+export type PluginCatalogEvent = Extract<ClientEvent, { type: 'plugin_catalog' }>;
 
 export interface UseBridge {
   readonly hosted: boolean;
@@ -93,6 +104,11 @@ export interface UseBridge {
   readonly settingsSnapshotEvent: SettingsSnapshotEvent | null;
   readonly mcpServersEvent: McpServersEvent | null;
   readonly skillsEvent: SkillsEvent | null;
+  readonly skillCatalogEvent: SkillCatalogEvent | null;
+  readonly skillDocumentEvent: SkillDocumentEvent | null;
+  readonly mcpConfigurationSnapshotEvent: McpConfigurationSnapshotEvent | null;
+  readonly pluginCatalogEvent: PluginCatalogEvent | null;
+  readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
   readonly activeSession: SessionRef | undefined;
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
@@ -153,6 +169,9 @@ export interface UseBridge {
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
   refreshProviderCredential(providerId: string): Promise<void>;
+  pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
+  clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
@@ -213,6 +232,14 @@ export interface UseBridge {
   upsertMcpServer(scope: McpScopeDto, name: string, config: Record<string, unknown>): Promise<void>;
   /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
   removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
+  /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
+  skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
+  /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
+  mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
+  /** Native Desktop plugin catalog/package/config administration. */
+  pluginAdmin(command: PluginAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
+  /** Native Desktop hook document validation and persistence. */
+  hookAdmin(command: HookAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   restartBridge(sessionId?: string): Promise<void>;
   refreshDiagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -256,6 +283,21 @@ export interface SessionRuntimeStatus {
   readonly pendingInteractions: number;
   readonly pendingAskUserQuestions: number;
   readonly error?: string;
+}
+
+interface PendingConfigurationOperation {
+  domain: ConfigurationDomainDto;
+  resolve: (event: ConfigurationOperationEvent) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const CONFIGURATION_OPERATION_TIMEOUT_MS = 5 * 60_000;
+
+function configurationOperationId(
+  command: SkillAdminCommandDto | McpAdminCommandDto | PluginAdminCommandDto | HookAdminCommandDto,
+): number | undefined {
+  return 'operation_id' in command && typeof command.operation_id === 'number' ? command.operation_id : undefined;
 }
 
 function getHost() {
@@ -613,6 +655,12 @@ export function useBridge(): UseBridge {
   // state either.
   const [mcpServersEvent, setMcpServersEvent] = useState<McpServersEvent | null>(null);
   const [skillsEvent, setSkillsEvent] = useState<SkillsEvent | null>(null);
+  const [skillCatalogEvent, setSkillCatalogEvent] = useState<SkillCatalogEvent | null>(null);
+  const [skillDocumentEvent, setSkillDocumentEvent] = useState<SkillDocumentEvent | null>(null);
+  const [mcpConfigurationSnapshotEvent, setMcpConfigurationSnapshotEvent] = useState<McpConfigurationSnapshotEvent | null>(null);
+  const [pluginCatalogEvent, setPluginCatalogEvent] = useState<PluginCatalogEvent | null>(null);
+  const [configurationOperations, setConfigurationOperations] = useState<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>({});
+  const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
   const turnActiveRefs = useRef(new Map<string, boolean>());
   const slashPendingRefs = useRef(new Map<string, boolean>());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
@@ -628,6 +676,14 @@ export function useBridge(): UseBridge {
   const catalogRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const catalogRequestGenerations = useRef(new Map<string, number>());
   const runtimeResourceSendSequence = useRef(0);
+
+  useEffect(() => () => {
+    for (const pending of pendingConfigurationOperations.current.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('configuration operation was interrupted'));
+    }
+    pendingConfigurationOperations.current.clear();
+  }, []);
 
   const persistedActiveSession = bootstrap?.activeSession ?? bootstrap?.settings.activeSession;
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
@@ -645,6 +701,11 @@ export function useBridge(): UseBridge {
   // values on screen until a fresh snapshot happened to arrive.
   useEffect(() => {
     setSettingsSnapshotEvent(null);
+    setSkillCatalogEvent(null);
+    setSkillDocumentEvent(null);
+    setMcpConfigurationSnapshotEvent(null);
+    setPluginCatalogEvent(null);
+    setConfigurationOperations({});
   }, [activeSessionId]);
 
   const capture = useCallback((cause: unknown) => {
@@ -979,6 +1040,25 @@ export function useBridge(): UseBridge {
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);
       if (event.type === 'skills' && activeSessionIdRef.current === sessionId) setSkillsEvent(event);
+      if (activeSessionIdRef.current === sessionId) {
+        if (event.type === 'skill_catalog') setSkillCatalogEvent(event);
+        if (event.type === 'skill_document') setSkillDocumentEvent(event);
+        if (event.type === 'mcp_configuration_snapshot') setMcpConfigurationSnapshotEvent(event);
+        if (event.type === 'plugin_catalog') setPluginCatalogEvent(event);
+        if (event.type === 'configuration_operation') {
+          setConfigurationOperations((previous) => ({ ...previous, [event.domain]: event }));
+          if (event.status === 'succeeded' || event.status === 'failed') {
+            const key = `${event.domain}:${event.operation_id}`;
+            const pending = pendingConfigurationOperations.current.get(key);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingConfigurationOperations.current.delete(key);
+              if (event.status === 'succeeded') pending.resolve(event);
+              else pending.reject(new Error(event.message ?? `${event.domain} configuration operation failed`));
+            }
+          }
+        }
+      }
       if (event.type === 'error' && !/^force_compact failed:\s*/i.test(event.message)) {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
@@ -1139,6 +1219,10 @@ export function useBridge(): UseBridge {
         which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
       }),
       host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
+      host.command(activeSessionId, { type: 'skill_admin', command: { action: 'get_catalog' } }),
+      host.command(activeSessionId, { type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      host.command(activeSessionId, { type: 'plugin_admin', command: { action: 'get_catalog' } }),
+      host.command(activeSessionId, { type: 'hook_admin', command: { action: 'get_document' } }),
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
@@ -1478,6 +1562,24 @@ export function useBridge(): UseBridge {
     } catch (cause) { return capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const pluginSecret = useCallback(async (pluginId: string, key: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try { return await host.pluginSecret(pluginId, key); }
+    catch (cause) { return capture(cause); }
+  }, [capture, host]);
+
+  const setPluginSecret = useCallback(async (pluginId: string, key: string, secret: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try { return await host.setPluginSecret(pluginId, key, secret); }
+    catch (cause) { return capture(cause); }
+  }, [capture, host]);
+
+  const clearPluginSecret = useCallback(async (pluginId: string, key: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try { return await host.clearPluginSecret(pluginId, key); }
+    catch (cause) { return capture(cause); }
+  }, [capture, host]);
+
   const setThemePreference = useCallback(async (theme: 'dark' | 'light' | 'system') => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
@@ -1551,6 +1653,10 @@ export function useBridge(): UseBridge {
         which: [{ type: 'auth' }, { type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'hooks' }, { type: 'agents' }],
       }),
       command({ type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
+      command({ type: 'skill_admin', command: { action: 'get_catalog' } }),
+      command({ type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      command({ type: 'plugin_admin', command: { action: 'get_catalog' } }),
+      command({ type: 'hook_admin', command: { action: 'get_document' } }),
       refreshDiagnostics(),
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
@@ -1751,6 +1857,60 @@ export function useBridge(): UseBridge {
     },
     [command, refreshMcpServers],
   );
+  const runConfigurationAdmin = useCallback(async (
+    domain: ConfigurationDomainDto,
+    envelope:
+      | { type: 'skill_admin'; command: SkillAdminCommandDto }
+      | { type: 'mcp_admin'; command: McpAdminCommandDto }
+      | { type: 'plugin_admin'; command: PluginAdminCommandDto }
+      | { type: 'hook_admin'; command: HookAdminCommandDto },
+  ): Promise<ConfigurationOperationEvent | void> => {
+    const operationId = configurationOperationId(envelope.command);
+    if (operationId === undefined) {
+      await command(envelope);
+      return;
+    }
+    if (sessionLoadingRef.current || !host || !activeSessionIdRef.current) {
+      throw new Error('Open a connected session before changing configuration.');
+    }
+    const key = `${domain}:${operationId}`;
+    if (pendingConfigurationOperations.current.has(key)) {
+      throw new Error(`configuration operation ${operationId} is already pending`);
+    }
+    let pending!: PendingConfigurationOperation;
+    const terminal = new Promise<ConfigurationOperationEvent>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingConfigurationOperations.current.delete(key);
+        reject(new Error(`Timed out waiting for the ${domain} configuration operation.`));
+      }, CONFIGURATION_OPERATION_TIMEOUT_MS);
+      pending = { domain, resolve, reject, timer };
+      pendingConfigurationOperations.current.set(key, pending);
+    });
+    try {
+      await command(envelope);
+    } catch (cause) {
+      clearTimeout(pending.timer);
+      pendingConfigurationOperations.current.delete(key);
+      throw cause;
+    }
+    return terminal;
+  }, [command, host]);
+  const skillAdmin = useCallback(
+    (adminCommand: SkillAdminCommandDto) => runConfigurationAdmin('skill', { type: 'skill_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
+  const mcpAdmin = useCallback(
+    (adminCommand: McpAdminCommandDto) => runConfigurationAdmin('mcp', { type: 'mcp_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
+  const pluginAdmin = useCallback(
+    (adminCommand: PluginAdminCommandDto) => runConfigurationAdmin('plugin', { type: 'plugin_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
+  const hookAdmin = useCallback(
+    (adminCommand: HookAdminCommandDto) => runConfigurationAdmin('hook', { type: 'hook_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
 
   return {
     hosted,
@@ -1759,6 +1919,11 @@ export function useBridge(): UseBridge {
     settingsSnapshotEvent,
     mcpServersEvent,
     skillsEvent,
+    skillCatalogEvent,
+    skillDocumentEvent,
+    mcpConfigurationSnapshotEvent,
+    pluginCatalogEvent,
+    configurationOperations,
     activeSession,
     sessionLoading,
     connection,
@@ -1805,6 +1970,9 @@ export function useBridge(): UseBridge {
     clearProviderCredential,
     testProviderConnection,
     refreshProviderCredential,
+    pluginSecret,
+    setPluginSecret,
+    clearPluginSecret,
     setThemePreference,
     setApiBaseUrl,
     setVoicePreferences,
@@ -1816,6 +1984,10 @@ export function useBridge(): UseBridge {
     refreshSkills,
     upsertMcpServer,
     removeMcpServer,
+    skillAdmin,
+    mcpAdmin,
+    pluginAdmin,
+    hookAdmin,
     restartBridge,
     refreshDiagnostics,
     copyDiagnostics,

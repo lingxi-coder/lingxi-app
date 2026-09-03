@@ -730,6 +730,16 @@ pub struct HookInfo {
     /// (hooks-detail-fields-divergent) Custom status message shown while the
     /// hook runs, if the definition set one.
     pub status_message: Option<String>,
+    /// Whether the hook blocks the foreground action.
+    pub blocking: bool,
+    /// Priority used to order hooks within one event.
+    pub priority: i32,
+    /// Whether this hook is configured as background/async.
+    pub async_rewake: bool,
+    /// Async timeout in milliseconds, if present.
+    pub async_timeout_ms: Option<u64>,
+    /// The raw `if` condition pattern, if present.
+    pub if_condition: Option<String>,
 }
 
 /// One subagent entry returned by [`OrchestratorHandle::list_agents`].

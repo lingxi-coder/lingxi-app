@@ -4,7 +4,12 @@ import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { SessionRuntimeManager, stopLegacyOrphanBridges, type SessionRef } from './bridge.js';
-import { createMacCredentialBrokerClient, resolveProviderCredential, resolveSessionLaunchCredentials } from './credential-broker.js';
+import {
+  createMacCredentialBrokerClient,
+  resolveProviderCredential,
+  resolveSessionLaunchCredentials,
+  resolveSessionLaunchPluginSecrets,
+} from './credential-broker.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -209,11 +214,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const credentials = await resolveSessionLaunchCredentials(model, {
         credentialBroker,
       });
+      const pluginSecrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
       return {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
         ...credentials,
+        pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
       };

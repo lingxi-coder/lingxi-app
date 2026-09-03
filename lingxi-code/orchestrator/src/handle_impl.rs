@@ -1235,6 +1235,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
                     source: hook_source_description(h.source),
                     content,
                     status_message: h.status_message.clone(),
+                    blocking: h.blocking,
+                    priority: h.priority,
+                    async_rewake: h.async_rewake,
+                    async_timeout_ms: h
+                        .async_timeout
+                        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+                    if_condition: h.if_pattern().map(ToOwned::to_owned),
                 }
             })
             .collect();

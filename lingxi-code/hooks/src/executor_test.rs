@@ -4517,6 +4517,7 @@ mod prompt_dispatch_tests {
     use super::*;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
+    use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
     use crate::prompt_executor::{HookPromptRunner, PromptHookError, PromptHookRequest};
     use crate::response::HookDecision;
     use protocol::{HookId, SessionId, ToolUseId};
@@ -4577,6 +4578,18 @@ mod prompt_dispatch_tests {
                 .unwrap()
                 .take()
                 .unwrap_or_else(|| Err(PromptHookError::Query("no script".into())))
+        }
+    }
+
+    struct RecordingMcpInvoker {
+        recorded: Mutex<Vec<HookMcpInvocation>>,
+        result: Mutex<Vec<HookMcpInvocationResult>>,
+    }
+    #[async_trait]
+    impl HookMcpInvoker for RecordingMcpInvoker {
+        async fn invoke(&self, request: HookMcpInvocation) -> HookMcpInvocationResult {
+            self.recorded.lock().unwrap().push(request);
+            self.result.lock().unwrap().remove(0)
         }
     }
 
@@ -4796,6 +4809,127 @@ mod prompt_dispatch_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert!(r.stderr.contains("mcp_tool executor not wired"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_hook_uses_text_content_as_stdout_and_interpolates_input() {
+        let invoker = Arc::new(RecordingMcpInvoker {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(vec![HookMcpInvocationResult::Success {
+                text_content: vec![r#"{"decision":"block","reason":"denied"}"#.into()],
+            }]),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(HookDefinition {
+            id: HookId::new(),
+            name: "audit/lint".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::McpTool {
+                server: "audit".into(),
+                tool: "lint".into(),
+                input: std::collections::HashMap::from([
+                    ("path".into(), json!("${tool_input.command}")),
+                    ("event".into(), json!("hook:${hook_event_name}")),
+                ]),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: Some(Duration::from_secs(12)),
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        });
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_mcp_invoker(invoker.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        let recorded = invoker.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].server, "audit");
+        assert_eq!(recorded[0].tool, "lint");
+        assert_eq!(recorded[0].timeout, Duration::from_secs(12));
+        assert_eq!(recorded[0].input.get("path"), Some(&json!("rm -rf /")));
+        assert_eq!(
+            recorded[0].input.get("event"),
+            Some(&json!("hook:PreToolUse"))
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_hook_not_connected_and_is_error_stay_non_blocking() {
+        let invoker = Arc::new(RecordingMcpInvoker {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(vec![
+                HookMcpInvocationResult::NotConnected {
+                    message: "server audit is not connected".into(),
+                },
+                HookMcpInvocationResult::Error {
+                    text_content: vec![r#"{"decision":"block","reason":"ignored"}"#.into()],
+                    message: "tool returned isError".into(),
+                },
+            ]),
+        });
+
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "audit/lint".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::McpTool {
+                server: "audit".into(),
+                tool: "lint".into(),
+                input: std::collections::HashMap::new(),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        };
+
+        let mut registry = HookRegistry::new();
+        registry.register(hook.clone());
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_mcp_invoker(invoker.clone());
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.decision, None);
+        assert!(matches!(agg.all_results[0].1.outcome, HookOutcome::Error));
+        assert!(agg.all_results[0].1.stderr.contains("not connected"));
+
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_mcp_invoker(invoker);
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.decision, None);
+        assert!(matches!(agg.all_results[0].1.outcome, HookOutcome::Error));
+        assert_eq!(
+            agg.all_results[0].1.stdout,
+            r#"{"decision":"block","reason":"ignored"}"#
+        );
+        assert!(agg.all_results[0].1.response.is_none());
     }
 }
 

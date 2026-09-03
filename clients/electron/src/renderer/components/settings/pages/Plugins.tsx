@@ -1,324 +1,526 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
-import { Toggle } from '../primitives';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
-import { parseJsonObjectInput } from '../jsonInput';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
+import {
+  adminRecordCommand,
+  asRecord,
+  asString,
+  DomainOperationBanner,
+  EmptyDetail,
+  Field,
+  managerDetailStyle,
+  managerShellStyle,
+  managerSidebarStyle,
+  nextConfigurationOperationId,
+  noteStyle,
+  parseEventEnvelope,
+  prettyJson,
+  searchInputStyle,
+  secondaryMetaStyle,
+  sidebarButtonStyle,
+  sidebarListStyle,
+  sidebarSectionTitleStyle,
+  SourcePill,
+  textareaStyle,
+} from './configurationAdmin';
 
-/**
- * Edits `enabledPlugins` (keyed by `plugin@marketplace` → truthy/config
- * value), `pluginConfigs` (keyed by `plugin@marketplace` → a config object),
- * and `additionalMarketplaces` (keyed by marketplace name → a source
- * declaration). All three are `DeepMerge` settings keys with no dedicated
- * command, so writes go through the generic `update_settings`
- * (`bridge.updateEngineSettings`), same shape as `CustomProviders`.
- *
- * `extraKnownMarketplaces` / `strictKnownMarketplaces` / `blockedMarketplaces`
- * are deliberately NOT on this page: their own doc comments in
- * `core/src/settings/schema.rs` describe them as the MANAGED counterparts
- * of `additionalMarketplaces` (an admin allow/deny list), not something a
- * desktop user adds to directly — out of scope, noted in the Task 18 report
- * rather than silently added or silently dropped.
- */
-/**
- * What this page must SAY about what it does not do, rendered next to the
- * `enabledPlugins` toggles.
- *
- * Spec A5.10 asked this page to reuse `cli/src/commands/plugin_settings.rs`.
- * It cannot: that module lives in `apps/cli`, and `bridge-server` — the only
- * process that can reach a settings file from here — genuinely cannot depend
- * on it. So this page writes `enabledPlugins` through the generic
- * `update_settings`, which does exactly what it is told and nothing more,
- * while the CLI's `plugin enable` / `plugin disable` do two extra things
- * (`plugin_settings.rs`: `collect_dependencies` transitively enables a
- * plugin's dependencies on enable; `enabled_dependents` HARD-REFUSES a
- * disable with `Plugin "X" is required by enabled plugin(s): …`).
- *
- * Concretely: with `child@mkt` depending on `parent@mkt` and both enabled,
- * toggling `parent@mkt` off here writes `{"parent@mkt": false,
- * "child@mkt": true}` and reports success, where the CLI would have refused;
- * and adding `child@mkt` here writes it alone, so it loads without its
- * dependency. Moving the resolver somewhere both callers can reach it is its
- * own task, deliberately not done in a fix round. Until then the page says
- * the true thing rather than implying the toggles are guarded.
- *
- * Kept as a pure exported function so a test can assert what this text
- * claims — the same reason `brokenLayerGuidance` is one in `RawJson.tsx`.
- */
+interface PluginCatalogEnvelope {
+  installed?: Array<{
+    id: string;
+    name: string;
+    display_name?: string;
+    version?: string;
+    path?: string;
+    default_enabled?: boolean;
+    description?: string;
+    dependencies?: string[];
+    config_schema_json?: string;
+    secret_configured?: Record<string, boolean>;
+  }>;
+  available?: Array<{
+    id: string;
+    name: string;
+    marketplace: string;
+    version?: string;
+    description?: string;
+    installed?: boolean;
+    upgrade_available?: boolean;
+  }>;
+  marketplaces?: Array<{
+    name: string;
+    source_json?: string;
+    install_location?: string;
+    last_updated?: string;
+  }>;
+  policies_json?: string;
+  revisions?: Record<string, string>;
+}
+
+type PluginSelection =
+  | { kind: 'plugin'; id: string }
+  | { kind: 'available'; id: string }
+  | { kind: 'marketplace'; name: string }
+  | { kind: 'marketplace-add' }
+  | { kind: 'policies' };
+
+interface PreparedPluginOperation {
+  payload: Record<string, unknown>;
+  summary: string;
+}
+
+interface PluginConfigField {
+  type?: 'string' | 'number' | 'boolean' | 'directory' | 'file';
+  title?: string;
+  description?: string;
+  sensitive?: boolean;
+  required?: boolean;
+  default?: unknown;
+  multiple?: boolean;
+  min?: number;
+  max?: number;
+}
+
 export function pluginDependencyCaveat(): string {
-  return '这里的开关只写入 enabledPlugins 本身，不解析插件之间的依赖关系：'
-    + '启用一个插件不会连带启用它依赖的插件，停用一个还被其它已启用插件依赖的插件也不会被拦下。'
-    + '命令行的 plugin enable / plugin disable 会做这两件事——需要依赖检查时请改用它。';
+  return '启用会递归启用已安装依赖；停用仍被其它已启用插件依赖的项目会被拒绝。所有生命周期操作先预检，再由用户确认执行。';
+}
+
+function callPluginAdmin(bridge: PageContentProps['bridge'], command: unknown) {
+  const admin = (bridge as { pluginAdmin?: (payload: unknown) => Promise<unknown> }).pluginAdmin;
+  return typeof admin === 'function' ? admin(command as never) : Promise.resolve();
+}
+
+function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLayer: EditableLayer): Record<string, unknown> {
+  const layer = snapshot?.layers?.[editingLayer] ?? {};
+  if ('extraKnownMarketplaces' in layer) return objectFromLayer(snapshot, editingLayer, 'extraKnownMarketplaces');
+  return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
 export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
   const t = useT();
-  const enabledPlugins = objectFromLayer(snapshot, editingLayer, 'enabledPlugins');
-  const pluginConfigs = objectFromLayer(snapshot, editingLayer, 'pluginConfigs');
-  const marketplaces = objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
+  const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
+  const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
+  const pluginOperation = bridge.configurationOperations?.plugin ?? null;
+  const enabledPlugins = useMemo(() => objectFromLayer(snapshot, editingLayer, 'enabledPlugins'), [editingLayer, snapshot]);
+  const pluginConfigs = useMemo(() => objectFromLayer(snapshot, editingLayer, 'pluginConfigs'), [editingLayer, snapshot]);
+  const marketplaces = useMemo(() => editableMarketplaces(snapshot, editingLayer), [editingLayer, snapshot]);
+  const revision = catalog.revisions?.[editingLayer] ?? '';
+  const pluginIds = [...new Set([...Object.keys(enabledPlugins), ...Object.keys(pluginConfigs), ...(catalog.installed ?? []).map((entry) => entry.id || entry.name)])].sort();
+  const availablePlugins = catalog.available ?? [];
+  const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
-  const [newPluginId, setNewPluginId] = useState('');
-  const [newMarketplaceName, setNewMarketplaceName] = useState('');
-  const [newMarketplaceSource, setNewMarketplaceSource] = useState('{\n  "source": "https://example.test/marketplace.json"\n}');
-  const [saving, setSaving] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<PluginSelection>(pluginIds[0] ? { kind: 'plugin', id: pluginIds[0] } : { kind: 'policies' });
+  const [search, setSearch] = useState('');
+  const [draftEnabled, setDraftEnabled] = useState(enabledPlugins);
+  const [draftConfigs, setDraftConfigs] = useState(pluginConfigs);
+  const [draftMarketplaces, setDraftMarketplaces] = useState(marketplaces);
+  const [configText, setConfigText] = useState('{}');
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [preparedOperation, setPreparedOperation] = useState<PreparedPluginOperation | null>(null);
+  const [pendingSelection, setPendingSelection] = useState<PluginSelection | null>(null);
+  const [marketplaceSource, setMarketplaceSource] = useState('');
+  const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
+  const [secretNotice, setSecretNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  // Hygiene, not a correctness fix like `PluginConfigRow`'s own effect below:
-  // these three are always-blank drafts (never seeded FROM a layer's data —
-  // there is no "load an existing marketplace/plugin id into this field to
-  // edit it" affordance on this page), so a stale value here cannot fork
-  // data across layers the way a SEEDED field could. Clearing them on layer
-  // switch just avoids "I typed this for `user`, forgot, switched to
-  // `project`, and it's still sitting there."
   useEffect(() => {
-    setNewPluginId('');
-    setNewMarketplaceName('');
-    setNewMarketplaceSource('{\n  "source": "https://example.test/marketplace.json"\n}');
-    setSaveError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingLayer]);
+    if (adminAvailable) void callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
+  }, [adminAvailable, bridge.pluginAdmin]);
 
-  const write = (patch: Record<string, unknown>, key: string) => {
-    setSaving(key);
-    setSaveError(null);
-    void bridge.updateEngineSettings(editingLayer, patch)
-      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存插件设置。'))
-      .finally(() => setSaving(null));
+  useEffect(() => {
+    setDraftEnabled(enabledPlugins);
+    setDraftConfigs(pluginConfigs);
+    setDraftMarketplaces(marketplaces);
+  }, [editingLayer, enabledPlugins, marketplaces, pluginConfigs]);
+
+  const selectedPlugin = selection.kind === 'plugin' ? selection.id : null;
+  const selectedAvailable = selection.kind === 'available'
+    ? availablePlugins.find((entry) => entry.id === selection.id) ?? null
+    : null;
+  const selectedMarketplace = selection.kind === 'marketplace' ? selection.name : null;
+
+  useEffect(() => {
+    if (selectedPlugin) setConfigText(prettyJson(asRecord(draftConfigs[selectedPlugin])));
+    else if (selectedMarketplace) setConfigText(prettyJson(asRecord(draftMarketplaces[selectedMarketplace])));
+  }, [draftConfigs, draftMarketplaces, selectedMarketplace, selectedPlugin]);
+
+  const dirty = JSON.stringify(draftEnabled) !== JSON.stringify(enabledPlugins)
+    || JSON.stringify(draftConfigs) !== JSON.stringify(pluginConfigs)
+    || JSON.stringify(draftMarketplaces) !== JSON.stringify(marketplaces);
+
+  const filteredPlugins = search.trim() ? pluginIds.filter((id) => id.toLowerCase().includes(search.trim().toLowerCase())) : pluginIds;
+  const filteredAvailable = search.trim()
+    ? availablePlugins.filter((entry) => `${entry.id} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
+    : availablePlugins;
+  const filteredMarketplaces = search.trim() ? marketplaceNames.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : marketplaceNames;
+
+  const persistPayload = JSON.stringify({
+    scope: editingLayer,
+    enabledPlugins: draftEnabled,
+    pluginConfigs: draftConfigs,
+    extraKnownMarketplaces: draftMarketplaces,
+  });
+
+  const requestSelection = (next: PluginSelection) => {
+    if (dirty) {
+      setPendingSelection(next);
+      return;
+    }
+    setPreparedOperation(null);
+    setSelection(next);
   };
 
-  const pluginNames = Object.keys(enabledPlugins).sort();
-  const marketplaceNames = Object.keys(marketplaces).sort();
+  const preview = () => {
+    setPageError(null);
+    void callPluginAdmin(bridge, adminRecordCommand('preview_operation', {
+      operation_id: nextConfigurationOperationId(),
+      scope: editingLayer,
+      revision,
+      payload_json: JSON.stringify({
+        action: 'save_config',
+        scope: editingLayer,
+        enabledPlugins: draftEnabled,
+        pluginConfigs: draftConfigs,
+        extraKnownMarketplaces: draftMarketplaces,
+      }),
+    }))
+      .then((result: unknown) => {
+        const details = result && typeof result === 'object' && 'details_json' in result ? asString((result as Record<string, unknown>).details_json) : '';
+        setPreparedOperation({
+          payload: { action: 'save_config', scope: editingLayer },
+          summary: details || '设置预检已完成。',
+        });
+      })
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法预检插件变更。'));
+  };
+
+  const save = () => {
+    if (!revision) {
+      setPageError('当前缺少 revision，无法保存。');
+      return;
+    }
+    setPageError(null);
+    setBusy(true);
+    void callPluginAdmin(bridge, adminRecordCommand('save_config', {
+      operation_id: nextConfigurationOperationId(),
+      scope: editingLayer,
+      revision,
+      payload_json: persistPayload,
+    }))
+      .then(() => setPreparedOperation(null))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存插件设置。'))
+      .finally(() => setBusy(false));
+  };
+
+  const previewLifecycle = (payload: Record<string, unknown>) => {
+    setPageError(null);
+    setBusy(true);
+    void callPluginAdmin(bridge, adminRecordCommand('preview_operation', {
+      operation_id: nextConfigurationOperationId(),
+      scope: editingLayer,
+      payload_json: JSON.stringify(payload),
+    }))
+      .then((result: unknown) => {
+        const details = result && typeof result === 'object' && 'details_json' in result
+          ? asString((result as Record<string, unknown>).details_json)
+          : '';
+        setPreparedOperation({ payload, summary: details || `已预检 ${asString(payload.action)}。` });
+      })
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法预检插件操作。'))
+      .finally(() => setBusy(false));
+  };
+
+  const confirmLifecycle = () => {
+    if (!preparedOperation || preparedOperation.payload.action === 'save_config' || !revision) return;
+    setPageError(null);
+    setBusy(true);
+    void callPluginAdmin(bridge, adminRecordCommand('apply_operation', {
+      operation_id: nextConfigurationOperationId(),
+      scope: editingLayer,
+      revision,
+      payload_json: JSON.stringify({ ...preparedOperation.payload, scope: editingLayer, confirmed: true }),
+    }))
+      .then(() => setPreparedOperation(null))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法执行插件操作。'))
+      .finally(() => setBusy(false));
+  };
+
+  const manifest = selectedPlugin
+    ? (catalog.installed ?? []).find((entry) => (entry.id || entry.name) === selectedPlugin) ?? null
+    : null;
+  const configSchema = useMemo(() => parseEventEnvelope<{ fields?: Record<string, PluginConfigField> }>(manifest?.config_schema_json, {}), [manifest?.config_schema_json]);
+  const selectedConfig = selectedPlugin ? asRecord(draftConfigs[selectedPlugin]) : {};
+  const selectedOptions = asRecord(selectedConfig.options);
+  const updateOption = (key: string, value: unknown) => {
+    if (!selectedPlugin) return;
+    setDraftConfigs((current) => {
+      const pluginConfig = asRecord(current[selectedPlugin]);
+      const options = { ...asRecord(pluginConfig.options) };
+      if (value === undefined) delete options[key];
+      else options[key] = value;
+      return { ...current, [selectedPlugin]: { ...pluginConfig, options } };
+    });
+  };
 
   return (
     <>
-      <Card title="已启用的插件 (enabledPlugins)">
+      <Card title="Plugins">
+        <div style={managerShellStyle(t)}>
+          <div style={managerSidebarStyle(t)}>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索插件或市场" aria-label="搜索插件与市场" style={searchInputStyle(t)} />
+              <div style={noteStyle(t, 'warn')} data-testid="plugin-dependency-caveat">{pluginDependencyCaveat()}</div>
+            </div>
+            <div style={sidebarListStyle()}>
+              <div style={sidebarSectionTitleStyle(t)}>Plugins</div>
+              {filteredPlugins.map((id) => (
+                <button key={id} type="button" onClick={() => requestSelection({ kind: 'plugin', id })} style={sidebarButtonStyle(t, selection.kind === 'plugin' && selection.id === id)}>
+                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{(catalog.installed ?? []).find((entry) => (entry.id || entry.name) === id)?.display_name ?? id}</span>
+                    {draftEnabled[id] !== false && <SourcePill t={t} label="on" tone="success" />}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{id}</span>
+                </button>
+              ))}
+              <div style={sidebarSectionTitleStyle(t)}>Available / Updates</div>
+              {filteredAvailable.map((entry) => (
+                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'available', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'available' && selection.id === entry.id)}>
+                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
+                    {entry.upgrade_available && <SourcePill t={t} label="update" tone="warn" />}
+                    {!entry.installed && <SourcePill t={t} label="available" />}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{entry.id}</span>
+                </button>
+              ))}
+              <div style={sidebarSectionTitleStyle(t)}>Marketplaces</div>
+              {filteredMarketplaces.map((name) => (
+                <button key={name} type="button" onClick={() => requestSelection({ kind: 'marketplace', name })} style={sidebarButtonStyle(t, selection.kind === 'marketplace' && selection.name === name)}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{name}</span>
+                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{asString(asRecord(draftMarketplaces[name]).source, 'source?')}</span>
+                </button>
+              ))}
+              <button type="button" onClick={() => requestSelection({ kind: 'marketplace-add' })} style={sidebarButtonStyle(t, selection.kind === 'marketplace-add')}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>＋ 添加 Marketplace</span>
+              </button>
+              <button type="button" onClick={() => requestSelection({ kind: 'policies' })} style={sidebarButtonStyle(t, selection.kind === 'policies')}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Policies</span>
+              </button>
+            </div>
+          </div>
+          <div style={managerDetailStyle()}>
+            <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
+            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+            {secretNotice && <div role="status" style={noteStyle(t, secretNotice.includes('重启') ? 'warn' : 'neutral')}>{secretNotice}</div>}
+            {pendingSelection && (
+              <div style={noteStyle(t, 'warn')}>
+                当前配置有未保存修改。请保存，或丢弃后切换。
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); setSelection(pendingSelection); setPendingSelection(null); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
+                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
+                </div>
+              </div>
+            )}
+            {preparedOperation && (
+              <div style={noteStyle(t, 'warn')}>
+                <div>{preparedOperation.summary}</div>
+                {preparedOperation.payload.action !== 'save_config' && (
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button type="button" disabled={busy} onClick={confirmLifecycle} style={ghostButtonStyle(t, busy)}>确认执行</button>
+                    <button type="button" disabled={busy} onClick={() => setPreparedOperation(null)} style={ghostButtonStyle(t, busy, true)}>取消</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {selection.kind === 'plugin' && selectedPlugin && (
+              <>
+                <div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{manifest?.display_name ?? selectedPlugin}</div>
+                    <SourcePill t={t} label={editingLayer} />
+                    {manifest?.version && <SourcePill t={t} label={manifest.version} />}
+                  </div>
+                  {manifest?.path && <div className="mono" style={secondaryMetaStyle(t)}>{manifest.path}</div>}
+                </div>
+                {manifest?.description && <div style={noteStyle(t)}>{manifest.description}</div>}
+                <Row title="运行状态" desc={pluginDependencyCaveat()} align="center">
+                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] === false ? 'enable' : 'disable', plugin: selectedPlugin, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>
+                    预检{draftEnabled[selectedPlugin] === false ? '启用' : '停用'}
+                  </button>
+                </Row>
+                {(manifest?.dependencies?.length ?? 0) > 0 && (
+                  <div style={noteStyle(t)}>依赖：{manifest?.dependencies?.join('、')}</div>
+                )}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'update', plugin: selectedPlugin, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>预检升级</button>
+                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'uninstall', plugin: selectedPlugin, scope: editingLayer })} style={ghostButtonStyle(t, busy, true)}>预检卸载</button>
+                </div>
+                {Object.entries(configSchema.fields ?? {}).filter(([, field]) => !field.sensitive).map(([key, field]) => {
+                  const currentValue = selectedOptions[key] ?? field.default;
+                  const label = `${field.title ?? key}${field.required ? ' *' : ''}`;
+                  if (field.multiple) {
+                    const values = Array.isArray(currentValue) ? currentValue : [];
+                    return (
+                      <Field key={key} t={t} label={label}>
+                        <textarea
+                          value={values.map(String).join('\n')}
+                          onChange={(event) => {
+                            const values = event.target.value
+                              .split('\n')
+                              .map((value) => value.trim())
+                              .filter(Boolean)
+                              .map((value) => field.type === 'number' ? Number(value) : field.type === 'boolean' ? value === 'true' : value);
+                            updateOption(key, values);
+                          }}
+                          rows={4}
+                          style={textareaStyle(t, 4)}
+                          aria-label={`${key} option`}
+                          placeholder="每行一个值"
+                        />
+                        {field.description && <div style={secondaryMetaStyle(t)}>{field.description}</div>}
+                      </Field>
+                    );
+                  }
+                  if (field.type === 'boolean') {
+                    return (
+                      <Field key={key} t={t} label={label}>
+                        <select value={currentValue === undefined ? '' : currentValue ? 'true' : 'false'} onChange={(event) => updateOption(key, event.target.value === '' ? undefined : event.target.value === 'true')} style={inputStyle(t)} aria-label={`${key} option`}>
+                          <option value="">未设置</option>
+                          <option value="true">开启</option>
+                          <option value="false">关闭</option>
+                        </select>
+                        {field.description && <div style={secondaryMetaStyle(t)}>{field.description}</div>}
+                      </Field>
+                    );
+                  }
+                  return (
+                    <Field key={key} t={t} label={label}>
+                      <input
+                        type={field.type === 'number' ? 'number' : 'text'}
+                        value={currentValue === undefined ? '' : String(currentValue)}
+                        min={field.min}
+                        max={field.max}
+                        onChange={(event) => updateOption(key, event.target.value === '' ? undefined : field.type === 'number' ? Number(event.target.value) : event.target.value)}
+                        style={inputStyle(t)}
+                        aria-label={`${key} option`}
+                        placeholder={field.type === 'directory' ? '/path/to/directory' : field.type === 'file' ? '/path/to/file' : undefined}
+                      />
+                      {field.description && <div style={secondaryMetaStyle(t)}>{field.description}</div>}
+                    </Field>
+                  );
+                })}
+                <Field t={t} label="pluginConfigs JSON">
+                  <textarea
+                    value={configText}
+                    onChange={(event) => {
+                      setConfigText(event.target.value);
+                      try {
+                        const parsed = JSON.parse(event.target.value) as unknown;
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                          setDraftConfigs((current) => ({ ...current, [selectedPlugin]: parsed }));
+                        }
+                      } catch {}
+                    }}
+                    rows={14}
+                    style={textareaStyle(t, 14)}
+                    aria-label={`${selectedPlugin} 配置`}
+                  />
+                </Field>
+                {Object.entries(configSchema.fields ?? {}).filter(([, field]) => field.sensitive).map(([key, field]) => (
+                  <Field key={key} t={t} label={field.title ?? key}>
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input type="password" value={secretDrafts[key] ?? ''} onChange={(event) => setSecretDrafts((current) => ({ ...current, [key]: event.target.value }))} placeholder={manifest?.secret_configured?.[key] ? '已配置（输入新值可替换）' : '输入敏感值'} style={{ flex: 1, minWidth: 0 }} aria-label={`${key} secret`} />
+                        <button type="button" disabled={!secretDrafts[key] || busy} onClick={() => { const secret = secretDrafts[key]; if (!secret) return; setBusy(true); setSecretNotice(null); void bridge.setPluginSecret(selectedPlugin, key, secret).then((metadata) => { setSecretDrafts((current) => ({ ...current, [key]: '' })); setSecretNotice(metadata.restartRequired ? '敏感配置已安全保存；当前有活动回合，重启后生效。' : '敏感配置已安全保存并应用。'); return callPluginAdmin(bridge, adminRecordCommand('get_catalog')); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存敏感配置。')).finally(() => setBusy(false)); }} style={ghostButtonStyle(t, !secretDrafts[key] || busy)}>安全保存</button>
+                        {manifest?.secret_configured?.[key] && <button type="button" disabled={busy} onClick={() => { setBusy(true); setSecretNotice(null); void bridge.clearPluginSecret(selectedPlugin, key).then((metadata) => { setSecretNotice(metadata.restartRequired ? '敏感配置已清除；当前有活动回合，重启后生效。' : '敏感配置已清除并应用。'); return callPluginAdmin(bridge, adminRecordCommand('get_catalog')); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法清除敏感配置。')).finally(() => setBusy(false)); }} style={ghostButtonStyle(t, busy, true)}>清除</button>}
+                        {manifest?.secret_configured?.[key] && <SourcePill t={t} label="configured" tone="success" />}
+                      </div>
+                      <div style={secondaryMetaStyle(t)}>{field.description ?? ''}{field.required ? ' · 必填' : ''}</div>
+                    </div>
+                  </Field>
+                ))}
+              </>
+            )}
+            {selection.kind === 'available' && selectedAvailable && (
+              <>
+                <div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedAvailable.name}</div>
+                    <SourcePill t={t} label={selectedAvailable.marketplace} />
+                    {selectedAvailable.version && <SourcePill t={t} label={selectedAvailable.version} />}
+                  </div>
+                  <div className="mono" style={secondaryMetaStyle(t)}>{selectedAvailable.id}</div>
+                </div>
+                {selectedAvailable.description && <div style={noteStyle(t)}>{selectedAvailable.description}</div>}
+                <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: selectedAvailable.installed ? 'update' : 'install', plugin: selectedAvailable.id, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>
+                  预检{selectedAvailable.installed ? '升级' : '安装'}
+                </button>
+              </>
+            )}
+            {selection.kind === 'marketplace' && selectedMarketplace && (
+              <>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedMarketplace}</div>
+                  <SourcePill t={t} label={editingLayer} />
+                </div>
+                <Field t={t} label="Marketplace JSON">
+                  <textarea
+                    value={configText}
+                    onChange={(event) => {
+                      setConfigText(event.target.value);
+                      try {
+                        const parsed = JSON.parse(event.target.value) as unknown;
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                          setDraftMarketplaces((current) => ({ ...current, [selectedMarketplace]: parsed }));
+                        }
+                      } catch {}
+                    }}
+                    rows={12}
+                    style={textareaStyle(t, 12)}
+                    aria-label="marketplace-json"
+                  />
+                </Field>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'marketplace_update', name: selectedMarketplace, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>预检更新</button>
+                  <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: 'marketplace_remove', name: selectedMarketplace, scope: editingLayer })} style={ghostButtonStyle(t, busy, true)}>预检移除</button>
+                </div>
+              </>
+            )}
+            {selection.kind === 'marketplace-add' && (
+              <>
+                <EmptyDetail t={t} title="添加 Marketplace" body="支持本地目录、owner/repo、Git URL 或 HTTPS marketplace.json。策略会在执行前校验。" />
+                <Field t={t} label="来源">
+                  <input value={marketplaceSource} onChange={(event) => setMarketplaceSource(event.target.value)} placeholder="owner/repo 或 https://…" aria-label="marketplace-source" style={{ width: '100%' }} />
+                </Field>
+                <button type="button" disabled={!marketplaceSource.trim() || busy} onClick={() => previewLifecycle({ action: 'marketplace_add', source: marketplaceSource.trim(), scope: editingLayer })} style={ghostButtonStyle(t, !marketplaceSource.trim() || busy)}>预检添加</button>
+              </>
+            )}
+            {selection.kind === 'policies' && (
+              <>
+                <EmptyDetail t={t} title="Policies" body="管理员策略仍保持只读展示。" />
+                <Field t={t} label="Policies JSON">
+                  <textarea value={catalog.policies_json ?? '{}'} readOnly rows={12} style={textareaStyle(t, 12)} aria-label="plugin-policies-json" />
+                </Field>
+              </>
+            )}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button type="button" disabled={!dirty || busy} onClick={preview} style={ghostButtonStyle(t, !dirty || busy)}>预检配置</button>
+              <button type="button" disabled={!dirty || busy} onClick={save} style={ghostButtonStyle(t, !dirty || busy)}>保存配置</button>
+              <button type="button" disabled={!dirty || busy} onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); }} style={ghostButtonStyle(t, !dirty || busy, true)}>取消修改</button>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card title="来源说明">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <div
-          data-testid="plugin-dependency-caveat"
-          role="note"
-          style={{ padding: '12px 18px', color: t.text3, fontSize: 12, lineHeight: 1.6, borderBottom: `0.5px solid ${t.border}` }}
-        >
-          {pluginDependencyCaveat()}
-        </div>
-        {pluginNames.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有启用任何插件。</div>
-        )}
-        {pluginNames.map((id) => (
-          <PluginToggleRow
-            key={id}
-            id={id}
-            value={enabledPlugins[id]}
-            editingLayer={editingLayer}
-            saving={saving === 'enabledPlugins'}
-            onChange={(next) => write({ enabledPlugins: { ...enabledPlugins, [id]: next } }, 'enabledPlugins')}
-            onRemove={() => {
-              const next = { ...enabledPlugins };
-              delete next[id];
-              write({ enabledPlugins: next }, 'enabledPlugins');
-            }}
-          />
-        ))}
-        <Row title="新增插件" desc="plugin@marketplace" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
-            <input value={newPluginId} onChange={(e) => setNewPluginId(e.target.value)} placeholder="my-plugin@my-marketplace" aria-label="新增插件 id" style={{ ...inputStyle(t), width: 240 }} />
-            <button
-              type="button"
-              disabled={saving === 'enabledPlugins' || !newPluginId.trim()}
-              onClick={() => { write({ enabledPlugins: { ...enabledPlugins, [newPluginId.trim()]: true } }, 'enabledPlugins'); setNewPluginId(''); }}
-              style={ghostButtonStyle(t, saving === 'enabledPlugins' || !newPluginId.trim())}
-            >
-              添加
-            </button>
-          </div>
-        </Row>
-      </Card>
-
-      <Card title="插件配置 (pluginConfigs)">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="pluginConfigs" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        {Object.keys(pluginConfigs).length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有插件配置。</div>
-        )}
-        {Object.entries(pluginConfigs).map(([id, config]) => (
-          <PluginConfigRow
-            key={id}
-            id={id}
-            config={config}
-            editingLayer={editingLayer}
-            saving={saving === 'pluginConfigs'}
-            onSave={(next) => write({ pluginConfigs: { ...pluginConfigs, [id]: next } }, 'pluginConfigs')}
-            onRemove={() => {
-              const next = { ...pluginConfigs };
-              delete next[id];
-              write({ pluginConfigs: next }, 'pluginConfigs');
-            }}
-          />
-        ))}
-      </Card>
-
-      <Card title="市场 (additionalMarketplaces)">
-        <FieldProvenanceNotice snapshot={snapshot} fieldKey="additionalMarketplaces" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        {marketplaceNames.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有额外的市场。</div>
-        )}
-        {marketplaceNames.map((name) => (
-          <Row key={name} align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{name}</span>} desc={JSON.stringify(marketplaces[name])}>
-            <button
-              type="button"
-              disabled={saving === 'additionalMarketplaces'}
-              onClick={() => {
-                const next = { ...marketplaces };
-                delete next[name];
-                write({ additionalMarketplaces: next }, 'additionalMarketplaces');
-              }}
-              style={ghostButtonStyle(t, saving === 'additionalMarketplaces', true)}
-            >
-              移除
-            </button>
-          </Row>
-        ))}
-        <Row title="新增市场" align="start">
-          <div style={{ display: 'grid', gap: 7 }}>
-            <input value={newMarketplaceName} onChange={(e) => setNewMarketplaceName(e.target.value)} placeholder="市场名称" aria-label="新增市场名称" style={inputStyle(t)} />
-            <textarea
-              value={newMarketplaceSource}
-              onChange={(e) => setNewMarketplaceSource(e.target.value)}
-              aria-label="新增市场来源 (JSON)"
-              rows={4}
-              className="mono"
-              style={{ ...inputStyle(t), width: 360, resize: 'vertical' }}
-            />
-            <button
-              type="button"
-              disabled={saving === 'additionalMarketplaces' || !newMarketplaceName.trim()}
-              onClick={() => {
-                const parsed = parseJsonObjectInput(newMarketplaceSource, '市场来源');
-                if ('error' in parsed) { setSaveError(parsed.error); return; }
-                write({ additionalMarketplaces: { ...marketplaces, [newMarketplaceName.trim()]: parsed.config } }, 'additionalMarketplaces');
-                setNewMarketplaceName('');
-              }}
-              style={ghostButtonStyle(t, saving === 'additionalMarketplaces' || !newMarketplaceName.trim())}
-            >
-              添加
-            </button>
-          </div>
-        </Row>
-      </Card>
-
-      {saveError && <div role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{saveError}</div>}
-    </>
-  );
-}
-
-/**
- * Task 18 fix round 1, Minor: `enabledPlugins[id]` is not always a plain
- * boolean — it can be a config-carrying object. The old inline toggle
- * (`enabledPlugins[id] !== false` for "on", writing a hardcoded `true` for
- * "on" and `false` for "off") treated any truthy value as indistinguishable
- * from `true`, so switching a config-object entry off and back on replaced
- * the object with the literal `true`, discarding it. This component
- * remembers the last truthy value it saw (a `ref`, not `state` — the
- * remembered value must survive the "off" render, where `value` itself is
- * `false` and so cannot be read back from props) and restores exactly that
- * value when toggled back on, rather than always writing `true`.
- */
-function PluginToggleRow({
-  id, value, editingLayer, saving, onChange, onRemove,
-}: { id: string; value: unknown; editingLayer: EditableLayer; saving: boolean; onChange(next: unknown): void; onRemove(): void }) {
-  const t = useT();
-  const lastEnabledValue = useRef<unknown>(value !== false ? value : true);
-  if (value !== false) lastEnabledValue.current = value;
-  // Task 18 fix round 2: belt-and-suspenders alongside `key={editingLayer}`
-  // on the PAGE component in `SettingsScreen.tsx` — that key already
-  // remounts this row (and everything else on the page) on a layer switch,
-  // which alone would reset this `ref`'s closure. This explicit reset
-  // exists so the row is STILL correct even if a future edit removes that
-  // key without understanding why it's there, the same reasoning
-  // `PluginConfigRow`'s sibling effect below already carries. Without it,
-  // this is exactly the bug round 2 was opened for: the ref primes to a
-  // truthy value in layer A (e.g. a config object), the SAME plugin id is
-  // `false` in layer B, switching layers does not clear a value of `false`
-  // (the render-time sync above only fires `value !== false`), and
-  // toggling on in layer B would write layer A's remembered value into
-  // layer B instead of a fresh `true`.
-  useEffect(() => {
-    lastEnabledValue.current = value !== false ? value : true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingLayer]);
-  const enabled = value !== false;
-  return (
-    <Row align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} desc="key 格式为 plugin@marketplace">
-      <div data-testid={`plugin-toggle-${id}`} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Toggle
-          value={enabled}
-          onChange={saving ? () => undefined : (next) => onChange(next ? lastEnabledValue.current : false)}
-        />
-        <button type="button" disabled={saving} onClick={onRemove} style={ghostButtonStyle(t, saving, true)}>
-          移除
-        </button>
-      </div>
-    </Row>
-  );
-}
-
-function PluginConfigRow({
-  id, config, editingLayer, saving, onSave, onRemove,
-}: {
-  id: string; config: unknown; editingLayer: EditableLayer; saving: boolean;
-  onSave(next: Record<string, unknown>): void; onRemove(): void;
-}) {
-  const t = useT();
-  const [text, setText] = useState(JSON.stringify(config, null, 2));
-  const [error, setError] = useState<string | null>(null);
-
-  // Task 18 fix round 1, Critical: this row is keyed by PLUGIN ID
-  // (`Plugins`' `.map` above), not by layer, and `useState`'s initializer
-  // only runs on first mount — so switching `editingLayer` while a row for
-  // the SAME id exists in both layers reused the existing component
-  // instance with the PREVIOUS layer's text still in the textarea, even
-  // though `config` (the prop) had already changed to the new layer's
-  // value. Saving from there would write the stale layer's config into the
-  // newly selected layer — the identical bug `ToolsAgent.tsx` carries a fix
-  // and a comment for, here triggered by two layers happening to share a
-  // plugin id instead of by `enabledTools`. Re-seeding on `editingLayer`
-  // change (not on every `config` change, which also fires right after
-  // THIS row's own successful save) closes it the same way.
-  useEffect(() => {
-    setText(JSON.stringify(config, null, 2));
-    setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingLayer]);
-
-  return (
-    <Row title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} align="start">
-      <div style={{ display: 'grid', gap: 7 }}>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          aria-label={`${id} 配置`}
-          rows={4}
-          className="mono"
-          style={{ ...inputStyle(t), width: 320, resize: 'vertical' }}
-        />
-        {error && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{error}</span>}
-        <div style={{ display: 'flex', gap: 7 }}>
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => {
-              const parsed = parseJsonObjectInput(text, '插件配置');
-              if ('error' in parsed) { setError(parsed.error); return; }
-              setError(null);
-              onSave(parsed.config);
-            }}
-            style={ghostButtonStyle(t, saving)}
-          >
-            保存
-          </button>
-          <button type="button" disabled={saving} onClick={onRemove} style={ghostButtonStyle(t, saving, true)}>移除</button>
+        <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+          非敏感配置写入当前层的 pluginConfigs；敏感字段仅通过系统 Credential Broker 保存，catalog 只返回 configured 状态。管理员市场策略只读。
         </div>
-      </div>
-    </Row>
+      </Card>
+    </>
   );
 }

@@ -1,6 +1,8 @@
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import '../../src/renderer/global.css';
+
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
 import type { SettingsSnapshotEvent } from '../../src/renderer/bridge/useBridge';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
@@ -15,6 +17,7 @@ async function noopAsyncNull(): Promise<null> { return null; }
 async function noopAsyncArray(): Promise<never[]> { return []; }
 
 function Fixture() {
+  const fixtureTheme = new URLSearchParams(window.location.search).get('theme') === 'dark' ? 'dark' : 'light';
   const [open, setOpen] = useState(true);
   const [hasProject, setHasProject] = useState(false);
   const [connected, setConnected] = useState(true);
@@ -114,6 +117,42 @@ function Fixture() {
     // exist here or selecting either page throws through the render.
     mcpServersEvent: null,
     skillsEvent: null,
+    skillCatalogEvent: {
+      type: 'skill_catalog' as const,
+      catalog_json: JSON.stringify({
+        entries: [
+          { id: '/test/home/.lingxi/skills/release-notes', name: 'release-notes', source: 'user', rootDir: '/test/home/.lingxi/skills', directory: '/test/home/.lingxi/skills/release-notes', writable: true, description: 'Generate polished release notes.' },
+          { id: '/test/project/.lingxi/skills/review', name: 'review', source: 'project', rootDir: '/test/project/.lingxi/skills', directory: '/test/project/.lingxi/skills/review', writable: true, description: 'Review the current project.' },
+          { id: '<plugin:design>', name: 'design', source: 'plugin', rootDir: '', directory: '<plugin:design>', writable: false, readonlyReason: 'Provided by plugin design@acme.' },
+        ],
+        trash: [],
+        sync_claude_ai_note: 'Stored only. Claude.ai cloud sync is not wired on desktop.',
+      }),
+    },
+    skillDocumentEvent: null,
+    mcpConfigurationSnapshotEvent: {
+      type: 'mcp_configuration_snapshot' as const,
+      snapshot_json: JSON.stringify({
+        scopes: [
+          { scope: 'user', path: '/test/home/.lingxi.json', revision_sha256: 'a'.repeat(64), raw_json: JSON.stringify({ mcpServers: { context7: { type: 'http', url: 'https://mcp.context7.com/mcp', timeout: 30000, alwaysLoad: true } } }) },
+          { scope: 'local', path: '/test/project/.lingxi/settings.local.json', revision_sha256: 'b'.repeat(64), raw_json: '{}' },
+          { scope: 'project', path: '/test/project/.mcp.json', revision_sha256: 'c'.repeat(64), raw_json: JSON.stringify({ mcpServers: { project_tools: { command: 'npx', args: ['-y', '@acme/project-tools'] } } }) },
+        ],
+        runtime_servers: [{ name: 'context7', transport: 'http', status: { type: 'connected' } }],
+        approval: { enabled_servers: ['project_tools'], disabled_servers: [], enable_all_project_servers: false, revision_sha256: 'd'.repeat(64) },
+      }),
+    },
+    pluginCatalogEvent: {
+      type: 'plugin_catalog' as const,
+      catalog_json: JSON.stringify({
+        installed: [{ id: 'secure@acme', name: 'secure', display_name: 'Secure Tools', version: '1.2.0', path: '/test/home/.lingxi/plugins/cache/acme/secure/1.2.0', description: 'Project automation with secure configuration.', dependencies: ['shared@acme'], config_schema_json: JSON.stringify({ fields: { TOKEN: { type: 'string', title: 'API token', description: 'Stored in the system credential manager.', sensitive: true, required: true }, REGION: { type: 'string', title: 'Region', description: 'Service region.' } } }), secret_configured: { TOKEN: true } }],
+        available: [{ id: 'review@acme', name: 'review', marketplace: 'acme', version: '2.0.0', description: 'Automated review workflows.', installed: false, upgrade_available: false }],
+        marketplaces: [{ name: 'acme', source_json: '"acme/plugins"', install_location: '/test/marketplaces/acme' }],
+        policies_json: JSON.stringify({ strictKnownMarketplaces: false, allowedMarketplaces: ['acme'] }, null, 2),
+        revisions: { user: 'a'.repeat(64), project: 'b'.repeat(64), local: 'c'.repeat(64) },
+      }),
+    },
+    configurationOperations: {},
     refreshMcpServers: noopAsyncVoid,
     refreshSkills: noopAsyncVoid,
     refreshAuth: noopAsyncVoid,
@@ -157,6 +196,11 @@ function Fixture() {
     updateWorkspaceDirectories: noopAsyncVoid,
     upsertMcpServer: noopAsyncVoid,
     removeMcpServer: noopAsyncVoid,
+    skillAdmin: noopAsyncVoid,
+    mcpAdmin: noopAsyncVoid,
+    pluginAdmin: noopAsyncVoid,
+    setPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: true, masked: '••••••••', restartRequired: false }),
+    clearPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: false, restartRequired: false }),
     runSlashCommand: noopAsyncVoid,
   };
 
@@ -263,13 +307,13 @@ function Fixture() {
   }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch]);
 
   return (
-    <Theme.Provider value={tokens('light')}>
+    <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
       <div>
         <button type="button" id="opener">Open settings</button>
         {open && (
           <SettingsScreen
             bridge={bridge as never}
-            theme="light"
+            theme={fixtureTheme}
             onTheme={() => {}}
             onClose={() => { setCloseCalls((n) => n + 1); setOpen(false); }}
           />

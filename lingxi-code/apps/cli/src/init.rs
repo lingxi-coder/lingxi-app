@@ -790,6 +790,7 @@ pub(crate) fn resolve_desktop_config(
         // credential sources here.
         isolated_credential_storage: false,
         credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+        injected_plugin_secrets: std::collections::BTreeMap::new(),
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
         api_key_helper: if restricted {

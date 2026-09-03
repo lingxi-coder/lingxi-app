@@ -7,7 +7,41 @@ import {
   resolveProviderIdForModel,
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
+  resolveSessionLaunchPluginSecrets,
 } from '../src/main/credential-broker';
+
+test('plugin secrets use an independent broker service and launch envelope map', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = createMacCredentialBrokerClient({
+    isPackaged: true,
+    transport: {
+      request: async (request) => {
+        requests.push(request);
+        if (request.op === 'health') {
+          return { ok: true, protocol_version: 1, build_version: 'test' };
+        }
+        if (request.op === 'list') {
+          return {
+            ok: true,
+            protocol_version: 1,
+            accounts: ['weather%40official/API_KEY'],
+          };
+        }
+        if (request.op === 'retrieve') {
+          return { ok: true, protocol_version: 1, present: true, payload: 'plugin-secret' };
+        }
+        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+      },
+    },
+  });
+
+  assert.deepEqual(await resolveSessionLaunchPluginSecrets(broker), {
+    'weather@official': { API_KEY: 'plugin-secret' },
+  });
+  assert.equal(requests[1]?.['service'], 'com.lingxi.plugin-secrets.v1');
+  assert.equal(requests[2]?.['service'], 'com.lingxi.plugin-secrets.v1');
+  assert.equal(requests[2]?.['account'], 'weather%40official/API_KEY');
+});
 
 test('OpenRouter nested model references resolve to the OpenRouter credential', async () => {
   const resolved: string[] = [];

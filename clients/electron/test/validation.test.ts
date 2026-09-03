@@ -174,6 +174,62 @@ test('the settings, permission, workspace, and MCP commands pass the runtime all
   );
 });
 
+test('configuration admin writes require correlated operations, object payloads, and SHA-256 revisions', () => {
+  const revision = 'a'.repeat(64);
+  const command = {
+    type: 'skill_admin',
+    command: {
+      action: 'save_document',
+      operation_id: 42,
+      target: '/workspace/.lingxi/skills/demo',
+      scope: 'project',
+      revision,
+      payload_json: '{"name":"demo","markdown":"---\\ndescription: demo\\n---\\n"}',
+    },
+  } as const;
+  assert.deepEqual(validateClientCommand(command), command);
+  assert.throws(
+    () => validateClientCommand({ ...command, command: { ...command.command, revision: 'stale' } }),
+    /invalid skill admin revision/,
+  );
+  assert.throws(
+    () => validateClientCommand({ ...command, command: { ...command.command, payload_json: '[]' } }),
+    /invalid skill admin payload/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'skill_admin', command: { action: 'get_catalog', operation_id: 1 } }),
+    /read action contains write fields/,
+  );
+});
+
+test('configuration preflight operations are correlated but do not pretend to be writes', () => {
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'hook_admin',
+      command: {
+        action: 'validate_document',
+        operation_id: 7,
+        payload_json: '{"scope":"project","hooks":{}}',
+      },
+    }),
+    {
+      type: 'hook_admin',
+      command: {
+        action: 'validate_document',
+        operation_id: 7,
+        payload_json: '{"scope":"project","hooks":{}}',
+      },
+    },
+  );
+  assert.throws(
+    () => validateClientCommand({
+      type: 'hook_admin',
+      command: { action: 'save_document', operation_id: 7, payload_json: '{}' },
+    }),
+    /invalid hook admin revision/,
+  );
+});
+
 test('a host-owned command that genuinely exists in the protocol is still rejected from the generic desktop command port', () => {
   assert.throws(() => validateClientCommand({ type: 'clear_session' }), /command is not allowed/);
 });

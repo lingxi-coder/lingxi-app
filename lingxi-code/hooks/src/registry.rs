@@ -154,6 +154,13 @@ pub struct HookRegistry {
     frontmatter_is_agent: HashMap<AgentId, bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookSourceReplaceResult {
+    pub replaced_count: usize,
+    pub file_changed_matchers_before: Vec<String>,
+    pub file_changed_matchers_after: Vec<String>,
+}
+
 impl HookRegistry {
     /// Create an empty registry.
     #[must_use]
@@ -171,6 +178,36 @@ impl HookRegistry {
     pub fn register(&mut self, hook: HookDefinition) {
         warn_if_bare_mcp_matcher(&hook);
         self.sources.entry(hook.source).or_default().push(hook);
+    }
+
+    /// Atomically replace one settings-backed source bucket without touching
+    /// plugin / session / frontmatter / other source families.
+    ///
+    /// Intended for desktop settings edits: user/project/local hooks can be
+    /// rebuilt off-thread, validated, then swapped in one write once the
+    /// candidate is known-good. Returns the pre/post `FileChanged` matcher sets
+    /// so the composition root can decide whether to restart the watcher.
+    pub fn replace_source_hooks(
+        &mut self,
+        source: HookSource,
+        hooks: Vec<HookDefinition>,
+    ) -> HookSourceReplaceResult {
+        let before = self.file_changed_matchers();
+        for hook in &hooks {
+            warn_if_bare_mcp_matcher(hook);
+        }
+        let replaced_count = self.sources.get(&source).map_or(0, Vec::len);
+        if hooks.is_empty() {
+            self.sources.remove(&source);
+        } else {
+            self.sources.insert(source, hooks);
+        }
+        let after = self.file_changed_matchers();
+        HookSourceReplaceResult {
+            replaced_count,
+            file_changed_matchers_before: before,
+            file_changed_matchers_after: after,
+        }
     }
 
     /// Register a batch of hooks owned by `plugin_id`. Replaces any previous
@@ -739,6 +776,18 @@ impl HookRegistry {
         out.extend(self.frontmatter.values().flatten());
         out
     }
+
+    /// Snapshot every `FileChanged` group matcher currently loaded across all
+    /// buckets. The desktop file watcher resolves this same matcher set into
+    /// watched paths.
+    #[must_use]
+    pub fn file_changed_matchers(&self) -> Vec<String> {
+        self.all_hooks()
+            .into_iter()
+            .filter(|hook| hook.events.contains(&HookEventType::FileChanged))
+            .filter_map(|hook| hook.matcher().map(ToString::to_string))
+            .collect()
+    }
 }
 
 /// Whether claude-code enables matcher "comma-mode" for `event_type` — the
@@ -854,9 +903,9 @@ impl Default for HookRegistry {
 #[cfg(test)]
 mod all_hooks_tests {
     use super::*;
-    use crate::definition::{HookExecutor, HookSource};
+    use crate::definition::{HookCondition, HookExecutor, HookSource};
     use crate::events::HookEventType;
-    use protocol::HookId;
+    use protocol::{HookId, PluginId};
 
     fn hk(name: &str, event: HookEventType, source: HookSource) -> HookDefinition {
         HookDefinition {
@@ -1056,6 +1105,80 @@ mod all_hooks_tests {
         assert_eq!(names, vec!["b1"]);
         // Clearing an unknown agent is a no-op.
         assert_eq!(r.clear_agent_hooks(AgentId::new()), 0);
+    }
+
+    #[test]
+    fn replace_source_hooks_only_swaps_target_bucket() {
+        let mut r = HookRegistry::new();
+        r.register(hk("user-stop", HookEventType::Stop, HookSource::User));
+        r.register(hk("project-stop", HookEventType::Stop, HookSource::Project));
+        r.register(hk("local-stop", HookEventType::Stop, HookSource::Local));
+        r.register_plugin_hooks(
+            PluginId::new(),
+            vec![hk("plugin-stop", HookEventType::Stop, HookSource::Plugin)],
+        );
+
+        let result = r.replace_source_hooks(
+            HookSource::Project,
+            vec![hk("project-new", HookEventType::Stop, HookSource::Project)],
+        );
+
+        assert_eq!(result.replaced_count, 1);
+        let names: Vec<&str> = r
+            .all_hooks()
+            .iter()
+            .map(|hook| hook.name.as_str())
+            .collect();
+        assert!(names.contains(&"user-stop"));
+        assert!(names.contains(&"project-new"));
+        assert!(names.contains(&"local-stop"));
+        assert!(names.contains(&"plugin-stop"));
+        assert!(!names.contains(&"project-stop"));
+    }
+
+    #[test]
+    fn replace_source_hooks_reports_file_changed_matcher_delta() {
+        let mut r = HookRegistry::new();
+        let mut user = hk("watch-user", HookEventType::FileChanged, HookSource::User);
+        user.if_condition = Some(HookCondition {
+            pattern: ".env".into(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        let mut project = hk(
+            "watch-project",
+            HookEventType::FileChanged,
+            HookSource::Project,
+        );
+        project.if_condition = Some(HookCondition {
+            pattern: ".envrc".into(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        r.register(user);
+        r.register(project);
+
+        let mut replacement = hk(
+            "watch-project-new",
+            HookEventType::FileChanged,
+            HookSource::Project,
+        );
+        replacement.if_condition = Some(HookCondition {
+            pattern: ".mise.toml".into(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        let result = r.replace_source_hooks(HookSource::Project, vec![replacement]);
+        let mut before = result.file_changed_matchers_before;
+        before.sort();
+        let mut after = result.file_changed_matchers_after;
+        after.sort();
+
+        assert_eq!(before, vec![".env".to_string(), ".envrc".to_string()]);
+        assert_eq!(after, vec![".env".to_string(), ".mise.toml".to_string()]);
     }
 
     #[test]

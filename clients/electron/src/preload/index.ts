@@ -13,7 +13,7 @@ import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } fr
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
-import type { WorkspaceFilePreview } from '../main/host.js';
+import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
 export type {
@@ -52,6 +52,9 @@ const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
 const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
+const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
+const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
+const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
 const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -144,6 +147,9 @@ export interface LingxiApi {
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
   testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
+  clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -216,6 +222,9 @@ const api: LingxiApi = {
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,
   testProviderConnection: (providerId, credentialOverride) => ipcRenderer.invoke(CH_PROVIDER_CONNECTION_TEST, providerId, credentialOverride) as Promise<ProviderConnectionTestResult>,
+  pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
+  setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
+  clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,
   restartBridge: (sessionId) => ipcRenderer.invoke(CH_BRIDGE_RESTART, sessionId) as Promise<void>,
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,

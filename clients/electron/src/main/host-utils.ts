@@ -447,10 +447,12 @@ export function buildBridgeArguments(config: {
 export function buildCredentialEnvelope(config: {
   apiKey?: string;
   providerCredentials?: Record<string, string>;
+  pluginSecrets?: Record<string, Record<string, string>>;
 }): string {
   return `${JSON.stringify({
     api_key: config.apiKey ?? null,
     provider_keys: config.providerCredentials ?? {},
+    plugin_secrets: config.pluginSecrets ?? {},
   })}\n`;
 }
 

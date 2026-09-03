@@ -34,7 +34,8 @@ async function runScenario(scenario) {
     await vite.listen();
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
-    const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html`;
+    const fixtureTheme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light';
+    const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html?theme=${fixtureTheme}`;
     child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
@@ -91,6 +92,19 @@ test('the layer switcher appears only on layered pages', async () => {
   assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
   assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
   assert.equal(rawJson.hasLayerSwitcher, true, 'raw-json is outside 编码 but IS layered');
+});
+
+test('the four configuration managers render without horizontal dialog overflow', async () => {
+  const result = await runScenario('visual-admin');
+  assert.deepEqual(result.pages, ['skills', 'mcp', 'plugins', 'hooks']);
+  for (const [page, state] of Object.entries(result.layout)) {
+    assert.equal(state.placeholderKind, null, `${page} must render its real settings page`);
+    assert.equal(state.horizontalOverflow, false, `${page} must fit the settings dialog horizontally`);
+  }
+  assert.equal(result.layout.hooks.structuredHookEditor, true, 'hooks must expose event/group/handler controls');
+  assert.equal(result.layout.hooks.advancedHookJson, true, 'hooks must retain the advanced JSON editor');
+  assert.equal(result.layout.mcp.structuredMcpEditor, true, 'MCP must expose transport-aware structured controls');
+  assert.equal(result.layout.plugins.manifestPluginEditor, true, 'plugins must render manifest-driven configuration fields');
 });
 
 test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
@@ -185,7 +199,6 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   const {
     toolsInitial, toolsDirty, toolsAfterSwitch,
     configInitial, configDirty, configAfterSwitch,
-    enabledPluginsToggle,
   } = await runScenario('layer-reseed');
 
   assert.equal(toolsInitial, 'Bash', 'the user layer set enabledTools to ["Bash"]');
@@ -200,18 +213,6 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   assert.equal(
     configAfterSwitch, JSON.stringify({ from: 'project' }, null, 2),
     'switching from user to project must re-seed the SAME plugin id\'s textarea with project\'s own config, not the dirty text or the stale user-layer value',
-  );
-
-  // Task 18 fix round 2, Critical: the THIRD instance of the same defect —
-  // `PluginToggleRow`'s `useRef` primed on `user`'s truthy config object,
-  // then (without the fix) surviving the switch to `project` where the
-  // same id is `false`. Toggling it ON in `project` must write a fresh
-  // `true`, not `user`'s remembered `{config:"A"}`.
-  assert.ok(enabledPluginsToggle, 'toggling the plugin on in the project layer must dispatch a write');
-  assert.equal(enabledPluginsToggle.destination, 'project', 'the write must target the layer actually being edited');
-  assert.deepEqual(
-    enabledPluginsToggle.patch, { enabledPlugins: { 'a@b': true } },
-    'toggling on in the project layer must write a fresh `true`, not the user layer\'s remembered config object',
   );
 });
 

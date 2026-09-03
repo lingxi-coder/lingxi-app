@@ -352,6 +352,16 @@ pub fn lower_hook_info(info: &HookInfo) -> HookDto {
         event: info.event.clone(),
         matcher: info.matcher.clone(),
         timeout_ms: info.timeout_ms,
+        hook_type: Some(info.hook_type.clone()),
+        source: Some(info.source.clone()),
+        content: Some(info.content.clone()),
+        status_message: info.status_message.clone(),
+        blocking: Some(info.blocking),
+        is_async: Some(!info.blocking),
+        priority: Some(info.priority),
+        async_rewake: Some(info.async_rewake),
+        async_timeout_ms: info.async_timeout_ms,
+        if_condition: info.if_condition.clone(),
     }
 }
 
@@ -806,6 +816,8 @@ mod tests {
         assert_eq!(dto.event, "PreToolUse");
         assert_eq!(dto.matcher.as_deref(), Some("Bash.*"));
         assert_eq!(dto.timeout_ms, 5_000);
+        assert_eq!(dto.blocking, Some(false));
+        assert_eq!(dto.is_async, Some(true));
 
         let without = HookInfo {
             matcher: None,

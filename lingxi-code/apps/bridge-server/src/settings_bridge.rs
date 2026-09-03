@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use client_protocol::commands::SettingsDestinationDto;
 use lingxi_core::settings::merger::merge_raw_layer;
@@ -549,11 +550,46 @@ pub struct SettingsContext {
     /// [`SettingsSnapshot::active`] for why managed is included: the engine
     /// loads it at startup too, so leaving it out would make a policy-pinned
     /// key look eternally "pending a restart" that no restart could apply.
-    pub active: BTreeMap<String, Value>,
+    pub active: Arc<RwLock<BTreeMap<String, Value>>>,
     /// The administrator's managed (policy) overlay, key → value. Its values
     /// win over every file layer, and its keys ARE the locked set reported on
     /// the wire.
     pub managed: BTreeMap<String, Value>,
+}
+
+impl SettingsContext {
+    /// Snapshot the active baseline without exposing the synchronization
+    /// primitive to protocol code. A poisoned lock degrades to the last inner
+    /// value rather than turning a settings listing into a process failure.
+    #[must_use]
+    pub fn active_snapshot(&self) -> BTreeMap<String, Value> {
+        self.active
+            .read()
+            .map(|active| active.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Mark a set of top-level settings keys as applied by a successful atomic
+    /// hot reload. Values come from a freshly merged disk snapshot; keys that
+    /// disappeared are removed so a lower layer can become the active value.
+    pub fn mark_keys_applied(&self, keys: &[&str]) {
+        let current = self.active_snapshot();
+        let effective = build_snapshot(&self.paths, current, self.managed.clone()).effective;
+        let mut active = self
+            .active
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for key in keys {
+            match effective.get(*key) {
+                Some(value) => {
+                    active.insert((*key).to_string(), value.clone());
+                }
+                None => {
+                    active.remove(*key);
+                }
+            }
+        }
+    }
 }
 
 /// A [`SettingsSnapshot`] lowered to the wire's payloads.

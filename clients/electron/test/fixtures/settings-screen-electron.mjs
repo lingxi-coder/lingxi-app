@@ -46,23 +46,11 @@ async function runProjectTabsScenario(webContents) {
   return { withoutProject, withProject };
 }
 
-async function runPendingBannerScenario(webContents) {
-  const noSnapshot = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+async function runNoEngineBannerScenario(webContents) {
   await webContents.executeJavaScript(
     'window.__settingsScreenTest.setSnapshot({ model: "opus", theme: "dark" }, { model: "sonnet", theme: "dark" })',
   );
-  const pending = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRunning(true)');
-  const midTurn = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRunning(false)');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().restartCalls === 1');
-  const afterRestart = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript(
-    'window.__settingsScreenTest.setSnapshot({ model: "opus" }, { model: "opus" })',
-  );
-  const resolved = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { noSnapshot, pending, midTurn, afterRestart, resolved };
+  return webContents.executeJavaScript('window.__settingsScreenTest.state()');
 }
 
 async function runMalformedSnapshotScenario(webContents) {
@@ -82,7 +70,7 @@ async function runSessionLoadingGuardScenario(webContents) {
   // Close and reopen while the session is loading: a naive `[activeSessionId]`
   // dependency would fire once here, find `command()` silently no-opping
   // (the host guard for a loading session), and never retry once loading
-  // finishes — leaving the snapshot, and the pending banner, permanently null.
+  // finishes — leaving the snapshot permanently null.
   await webContents.executeJavaScript('window.__settingsScreenTest.closeSettings()');
   await webContents.executeJavaScript('window.__settingsScreenTest.setSessionLoading(true)');
   await webContents.executeJavaScript('window.__settingsScreenTest.openSettings()');
@@ -95,24 +83,6 @@ async function runSessionLoadingGuardScenario(webContents) {
   await waitFor(webContents, `window.__settingsScreenTest.state().refreshCalls > ${whileLoading.refreshCalls}`);
   const afterReady = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { initial, whileLoading, afterReady };
-}
-
-async function runRestartErrorScenario(webContents) {
-  await webContents.executeJavaScript(
-    'window.__settingsScreenTest.setSnapshot({ model: "opus" }, { model: "sonnet" })',
-  );
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRestartShouldFail("cancel the active turn before changing engine settings")');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().hasRestartError');
-  const afterFailure = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-
-  // A later successful restart must clear the earlier error rather than
-  // leaving a stale failure banner next to a click that just worked.
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRestartShouldFail(null)');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, '!window.__settingsScreenTest.state().hasRestartError');
-  const afterSuccess = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { afterFailure, afterSuccess };
 }
 
 async function runPageContentScenario(webContents) {
@@ -339,10 +309,9 @@ async function main() {
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
     const result = scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
-      : scenario === 'pending-banner' ? await runPendingBannerScenario(webContents)
+      : scenario === 'no-engine-banner' ? await runNoEngineBannerScenario(webContents)
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)
-      : scenario === 'restart-error' ? await runRestartErrorScenario(webContents)
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)

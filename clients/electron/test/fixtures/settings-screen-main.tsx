@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
@@ -17,32 +17,17 @@ async function noopAsyncArray(): Promise<never[]> { return []; }
 function Fixture() {
   const [open, setOpen] = useState(true);
   const [hasProject, setHasProject] = useState(false);
-  const [running, setRunning] = useState(false);
   const [connected, setConnected] = useState(true);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [settingsSnapshotEvent, setSettingsSnapshotEvent] = useState<SettingsSnapshotEvent | null>(null);
-  const [restartCalls, setRestartCalls] = useState(0);
   const [refreshCalls, setRefreshCalls] = useState(0);
   const [closeCalls, setCloseCalls] = useState(0);
-  const [restartShouldFail, setRestartShouldFail] = useState<string | null>(null);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
   const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
-
-  // `restartBridge` below must stay referentially stable (see the next
-  // comment), so it cannot close over `restartShouldFail` state directly —
-  // an actual `useRef` (mutated in place, not a fresh object every render)
-  // gives it the LATEST value without becoming a new function every time the
-  // test driver flips it.
-  const restartShouldFailRef = useRef<string | null>(null);
-  restartShouldFailRef.current = restartShouldFail;
 
   // `useCallback` with empty deps keeps these referentially stable across
   // Fixture re-renders — `SettingsScreen` depends on `bridge.refreshSettingsSnapshot`'s
   // identity in an effect, and a fresh function every render would refire it forever.
-  const restartBridge = useCallback(async () => {
-    setRestartCalls((n) => n + 1);
-    if (restartShouldFailRef.current) throw new Error(restartShouldFailRef.current);
-  }, []);
   const refreshSettingsSnapshot = useCallback(async () => { setRefreshCalls((n) => n + 1); }, []);
   // Task 18 fix round 1, Important: records its call so a scenario can
   // prove `Permissions.tsx` dispatches through `capturePermissionEdit`'s
@@ -121,7 +106,7 @@ function Fixture() {
     retryState: null,
     connected: connected && !sessionLoading,
     sessionLoading,
-    running,
+    running: false,
     settingsSnapshotEvent,
     // Task 18 pages: `McpServers`/`Skills` call these on MOUNT (not just on
     // a button click), so — unlike the write-side commands below, which
@@ -134,7 +119,7 @@ function Fixture() {
     refreshAuth: noopAsyncVoid,
     refreshHooks: noopAsyncVoid,
     refreshAgents: noopAsyncVoid,
-    restartBridge,
+    restartBridge: noopAsyncVoid,
     refreshSettingsSnapshot,
     refresh: noopAsyncVoid,
     refreshDiagnostics: noopAsyncArray,
@@ -181,10 +166,8 @@ function Fixture() {
         (document.querySelector(`[data-nav-page="${id}"]`) as HTMLButtonElement | null)?.click();
       },
       setHasProject,
-      setRunning,
       setConnected,
       setSessionLoading,
-      setRestartShouldFail,
       setSnapshot: (effective: Record<string, unknown>, active: Record<string, unknown>) => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
@@ -254,9 +237,6 @@ function Fixture() {
           provenance_json: '{}',
         } as SettingsSnapshotEvent);
       },
-      clickRestart: () => {
-        (document.querySelector('[data-testid="settings-pending-banner"] button') as HTMLButtonElement | null)?.click();
-      },
       close: () => setCloseCalls((n) => n + 1),
       openSettings: () => setOpen(true),
       closeSettings: () => setOpen(false),
@@ -268,17 +248,11 @@ function Fixture() {
         localDisabled: (document.querySelector('[data-layer="local"]') as HTMLButtonElement | null)?.disabled ?? null,
         layerSwitcherReasonText: document.querySelector('[data-testid="layer-switcher-disabled-reason"]')?.textContent ?? null,
         hasBanner: Boolean(document.querySelector('[data-testid="settings-pending-banner"]')),
-        bannerText: document.querySelector('[data-testid="settings-pending-banner"] span')?.textContent ?? null,
-        restartButtonDisabled: (document.querySelector('[data-testid="settings-pending-banner"] button') as HTMLButtonElement | null)?.disabled ?? null,
-        restartDisabledReasonText: document.querySelector('[data-testid="restart-disabled-reason"]')?.textContent ?? null,
-        hasRestartError: Boolean(document.querySelector('[data-testid="settings-restart-error"]')),
-        restartErrorText: document.querySelector('[data-testid="settings-restart-error"]')?.textContent ?? null,
         placeholderKind: document.querySelector('[data-testid="page-placeholder"]')?.getAttribute('data-placeholder-kind') ?? null,
         hasSnapshotError: Boolean(document.querySelector('[data-testid="settings-snapshot-error"]')),
         activeElementAriaLabel: document.activeElement instanceof HTMLElement ? document.activeElement.getAttribute('aria-label') : null,
         activeElementId: document.activeElement instanceof HTMLElement ? document.activeElement.id : null,
         dialogPresent: Boolean(document.querySelector('[role="dialog"]')),
-        restartCalls,
         refreshCalls,
         closeCalls,
         lastPermissionRuleCall,
@@ -286,7 +260,7 @@ function Fixture() {
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [restartCalls, refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch]);
 
   return (
     <Theme.Provider value={tokens('light')}>
@@ -310,10 +284,8 @@ declare global {
     __settingsScreenTest?: {
       selectPage(id: string): void;
       setHasProject(value: boolean): void;
-      setRunning(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
-      setRestartShouldFail(message: string | null): void;
       setSnapshot(effective: Record<string, unknown>, active: Record<string, unknown>): void;
       setLayeredSnapshot(layers: Record<string, Record<string, unknown>>): void;
       clickLayerTab(layer: string): void;
@@ -322,7 +294,6 @@ declare global {
       markElement(selector: string, value: string): void;
       readElementMarker(selector: string): string | null;
       setMalformedSnapshot(): void;
-      clickRestart(): void;
       close(): void;
       openSettings(): void;
       closeSettings(): void;
@@ -334,17 +305,11 @@ declare global {
         localDisabled: boolean | null;
         layerSwitcherReasonText: string | null;
         hasBanner: boolean;
-        bannerText: string | null;
-        restartButtonDisabled: boolean | null;
-        restartDisabledReasonText: string | null;
-        hasRestartError: boolean;
-        restartErrorText: string | null;
         placeholderKind: string | null;
         hasSnapshotError: boolean;
         activeElementAriaLabel: string | null;
         activeElementId: string | null;
         dialogPresent: boolean;
-        restartCalls: number;
         refreshCalls: number;
         closeCalls: number;
         lastPermissionRuleCall: unknown;

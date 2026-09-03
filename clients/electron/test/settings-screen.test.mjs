@@ -111,23 +111,9 @@ test('project and local tabs are disabled with no project open, with the reason 
   assert.equal(withProject.layerSwitcherReasonText, null, 'once a project is open there is nothing to explain');
 });
 
-test('the pending-settings banner comes from pendingKeys alone, and its restart action respects a turn in flight', async () => {
-  const { noSnapshot, pending, midTurn, afterRestart, resolved } = await runScenario('pending-banner');
-  assert.equal(noSnapshot.hasBanner, false, 'with no snapshot yet there is nothing to diff, so no banner');
-  assert.equal(pending.hasBanner, true, 'effective and active disagree on `model`, so the banner must appear');
-  assert.match(pending.bannerText ?? '', /1 项/, 'exactly one key (`model`) differs, not `theme`');
-  assert.equal(pending.restartButtonDisabled, false);
-  assert.equal(midTurn.restartButtonDisabled, true, 'a turn in flight must disable restart, not fail silently on click');
-  assert.match(midTurn.restartDisabledReasonText ?? '', /对话|回合/, 'the reason must be visible text, not a title= tooltip');
-  assert.equal(afterRestart.restartCalls, 1, 'restart goes through bridge.restartBridge, the existing path');
-  assert.equal(resolved.hasBanner, false, 'once active catches up to effective, the banner must go away');
-});
-
-test('a rejected restart surfaces its error visibly instead of being swallowed, and a later success clears it', async () => {
-  const { afterFailure, afterSuccess } = await runScenario('restart-error');
-  assert.equal(afterFailure.hasRestartError, true, 'the shell covers <ErrorBanner>, so a caught restart failure must render its own visible error');
-  assert.match(afterFailure.restartErrorText ?? '', /cancel the active turn/, 'the ACTUAL host-provided reason must reach the user, not a generic message');
-  assert.equal(afterSuccess.hasRestartError, false, 'a later successful restart must clear the earlier failure banner');
+test('the settings shell never renders an engine restart banner', async () => {
+  const state = await runScenario('no-engine-banner');
+  assert.equal(state.hasBanner, false, 'runtime active/effective differences do not belong in settings chrome');
 });
 
 test('opening settings while the session is loading sends nothing, and the snapshot fetch retries once the session is ready — with no extra action', async () => {

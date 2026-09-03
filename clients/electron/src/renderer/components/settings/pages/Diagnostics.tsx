@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
-import { restartDisabledReason, type PageContentProps } from '../SettingsScreen';
+import type { PageContentProps } from '../SettingsScreen';
 import type { DiagnosticEntry } from '../../../bridge/lingxi';
 import { ghostButtonStyle } from './ghostButton';
 
@@ -11,15 +11,20 @@ function levelColor(t: ReturnType<typeof useT>, level: DiagnosticEntry['level'])
   return t.text4;
 }
 
+function restartDisabledReason(running: boolean, hasSession: boolean): string | null {
+  if (running) return '对话正在进行时无法重启引擎，请等待当前回合结束。';
+  if (!hasSession) return '打开一个会话后才能重启引擎。';
+  return null;
+}
+
 /**
  * Copy report / export JSON / refresh, lifted from the old settings modal's
  * Diagnostics section in `BetaDesktop.tsx` (`bridge.copyDiagnostics` /
  * `exportDiagnostics` / `refreshDiagnostics`, and the same sanitized-log
  * rendering). The restart action is NOT part of that lifted section —
  * that Diagnostics block had no restart button — it is added
- * here per this task's brief, reusing `bridge.restartBridge` and the
- * already-tested `restartDisabledReason` the settings shell itself uses for
- * its own pending-settings restart action.
+ * here per this task's brief, reusing `bridge.restartBridge` while keeping the
+ * manual recovery action inside Diagnostics instead of the settings shell.
  */
 export function Diagnostics({ bridge }: PageContentProps) {
   const t = useT();

@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  filterModelGroups,
   groupModelReferences,
+  modelBillingGroups,
+  modelDisplayLabel,
   modelReference,
   modelSelectionConfirmed,
   resolveModelSelection,
@@ -77,6 +80,60 @@ test('keeps Kimi Code separate from the pay-as-you-go Kimi provider', () => {
 
   assert.deepEqual(groups.map((group) => group.providerLabel), ['Kimi', 'Kimi Code']);
   assert.deepEqual(groups.map((group) => group.models[0]?.label), ['Kimi K3', 'K3']);
+});
+
+test('filters models by friendly name, wire id, and provider without changing catalog order', () => {
+  const groups = groupModelReferences([
+    'anthropic/claude-sonnet-5',
+    'openrouter/~openai/gpt-latest',
+    'openrouter/inclusionai/ling-3.0-flash-fin:free',
+  ]);
+  const details = [
+    { reference: 'openrouter/inclusionai/ling-3.0-flash-fin:free', display_name: 'InclusionAI: Ling 3.0 Flash Fin (free)' },
+  ];
+
+  assert.deepEqual(
+    filterModelGroups(groups, 'flash fin', details).flatMap((group) => group.models.map((model) => model.reference)),
+    ['openrouter/inclusionai/ling-3.0-flash-fin:free'],
+  );
+  assert.deepEqual(
+    filterModelGroups(groups, '~OPENAI/GPT', details).flatMap((group) => group.models.map((model) => model.reference)),
+    ['openrouter/~openai/gpt-latest'],
+  );
+  assert.deepEqual(
+    filterModelGroups(groups, 'anthropic', details).flatMap((group) => group.models.map((model) => model.reference)),
+    ['anthropic/claude-sonnet-5'],
+  );
+  assert.deepEqual(filterModelGroups(groups, '   ', details), groups);
+});
+
+test('separates OpenRouter paid and free choices from authoritative billing metadata', () => {
+  const [openrouter] = groupModelReferences([
+    'openrouter/openrouter/auto',
+    'openrouter/~anthropic/claude-opus-latest',
+    'openrouter/openrouter/free',
+    'openrouter/cohere/north-mini-code:free',
+  ]);
+  const details = [
+    { reference: 'openrouter/openrouter/auto', display_name: 'OpenRouter Auto', pricing: { billing_mode: 'per_token' } },
+    { reference: 'openrouter/~anthropic/claude-opus-latest', display_name: 'Anthropic: Claude Opus Latest', pricing: { billing_mode: 'per_token' } },
+    { reference: 'openrouter/openrouter/free', display_name: 'OpenRouter Free', pricing: { billing_mode: 'free' } },
+    { reference: 'openrouter/cohere/north-mini-code:free', display_name: 'Cohere: North Mini Code (free)', pricing: { billing_mode: 'free' } },
+  ];
+
+  assert.deepEqual(
+    modelBillingGroups(openrouter!, details).map((section) => [section.label, section.models.map((model) => model.reference)]),
+    [
+      ['Paid', ['openrouter/openrouter/auto', 'openrouter/~anthropic/claude-opus-latest']],
+      ['Free', ['openrouter/openrouter/free', 'openrouter/cohere/north-mini-code:free']],
+    ],
+  );
+  assert.equal(modelDisplayLabel(openrouter!.models[1]!, details), 'Anthropic: Claude Opus Latest');
+});
+
+test('keeps non-OpenRouter providers in one unlabeled billing section', () => {
+  const [anthropic] = groupModelReferences(['anthropic/claude-sonnet-5']);
+  assert.deepEqual(modelBillingGroups(anthropic!, []), [{ label: null, models: anthropic!.models }]);
 });
 
 test('defaults Kimi Code to the model available on every membership tier', () => {

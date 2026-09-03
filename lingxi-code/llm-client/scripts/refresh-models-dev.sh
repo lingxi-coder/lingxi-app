@@ -178,6 +178,7 @@ openrouter	~moonshotai/kimi-latest
 openrouter	~z-ai/glm-latest
 openrouter	~z-ai/glm-flash-latest
 openrouter	~x-ai/grok-latest
+openrouter	openai/gpt-chat-latest
 openrouter	cohere/north-mini-code:free
 openrouter	z-ai/glm-5.2:free
 openrouter	thinkingmachines/inkling:free

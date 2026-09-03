@@ -1511,6 +1511,7 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         "openrouter" => {
             request_model == "openrouter/auto"
                 || request_model == "openrouter/free"
+                || request_model == "openai/gpt-chat-latest"
                 || request_model.starts_with('~')
                 || matches!(
                     request_model,

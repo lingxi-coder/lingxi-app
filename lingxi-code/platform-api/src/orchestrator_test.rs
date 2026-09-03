@@ -572,6 +572,7 @@ mod provider_boot_default_tests {
             "~openai/gpt-latest",
             "~google/gemini-pro-latest",
             "~deepseek/deepseek-v4-flash-latest",
+            "openai/gpt-chat-latest",
         ] {
             assert!(is_curated_model("openrouter", latest), "missing {latest}");
         }

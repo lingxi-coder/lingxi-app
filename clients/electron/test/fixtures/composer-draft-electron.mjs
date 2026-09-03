@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron';
+import { writeFile } from 'node:fs/promises';
 
 const url = process.argv.find((argument) => argument.startsWith('http://') || argument.startsWith('https://'));
 if (!url) throw new Error('fixture URL is required');
@@ -49,6 +50,45 @@ async function main() {
     await window.loadURL(url);
     const { webContents } = window;
     await waitFor(webContents, `Boolean(window.__composerDraftTest && document.querySelector('[aria-label="Prompt"]'))`);
+
+    await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
+    await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Model settings"] button').click()`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Search models"]') === document.activeElement`);
+    const initialPicker = await webContents.executeJavaScript(`(() => ({
+      sections: [...document.querySelectorAll('[aria-label="Available models"] div')]
+        .map((element) => element.textContent?.trim())
+        .filter((text) => text === 'Paid' || text === 'Free'),
+      models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
+        .map((element) => element.textContent?.trim()),
+    }))()`);
+
+    const screenshotPath = process.env.LINGXI_MODEL_PICKER_SCREENSHOT;
+    if (screenshotPath) {
+      const bounds = await webContents.executeJavaScript(`(() => {
+        const rect = document.querySelector('[aria-label="Available models"]').getBoundingClientRect();
+        return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+      })()`);
+      const image = await webContents.capturePage(bounds);
+      await writeFile(screenshotPath, image.toPNG());
+    }
+
+    await webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('[aria-label="Search models"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'flash fin');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 1`);
+    const filteredPicker = await webContents.executeJavaScript(`({
+      focused: document.activeElement?.getAttribute('aria-label'),
+      models: [...document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]')]
+        .map((element) => element.textContent?.trim()),
+      clearVisible: Boolean(document.querySelector('[aria-label="Clear model search"]')),
+    })`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Clear model search"]').click()`);
+    await waitFor(webContents, `document.querySelectorAll('[aria-label="Available models"] [role="menuitemradio"]').length === 4`);
+    await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
 
     const sessionA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const sessionB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -118,7 +158,7 @@ async function main() {
     await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === ''`);
 
-    process.stdout.write(`${JSON.stringify({ restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
+    process.stdout.write(`${JSON.stringify({ initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

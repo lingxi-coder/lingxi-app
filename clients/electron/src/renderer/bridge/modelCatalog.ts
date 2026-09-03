@@ -13,6 +13,17 @@ export interface ModelProviderGroup {
   readonly models: readonly ModelReference[];
 }
 
+export interface ModelCatalogDetail {
+  readonly reference: string;
+  readonly display_name?: string;
+  readonly pricing?: { readonly billing_mode?: string } | null;
+}
+
+export interface ModelBillingGroup {
+  readonly label: 'Paid' | 'Free' | null;
+  readonly models: readonly ModelReference[];
+}
+
 export type ModelSelectionDecision =
   | { kind: 'select'; reference: string }
   | { kind: 'connect'; providerId: string; reference: string }
@@ -119,6 +130,58 @@ export function modelReference(reference: string): ModelReference {
     requestModel,
     label: modelLabel(requestModel),
   };
+}
+
+export function modelDisplayLabel(
+  model: ModelReference,
+  details: readonly ModelCatalogDetail[],
+): string {
+  return details.find((detail) => detail.reference === model.reference)?.display_name?.trim()
+    || model.label;
+}
+
+export function filterModelGroups(
+  groups: readonly ModelProviderGroup[],
+  query: string,
+  details: readonly ModelCatalogDetail[] = [],
+): readonly ModelProviderGroup[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return groups;
+
+  return groups.flatMap((group) => {
+    const providerMatches = `${group.providerLabel} ${group.providerId ?? ''}`
+      .toLocaleLowerCase()
+      .includes(normalized);
+    const models = group.models.filter((model) => providerMatches || [
+      modelDisplayLabel(model, details),
+      model.label,
+      model.requestModel,
+      model.reference,
+    ].some((value) => value.toLocaleLowerCase().includes(normalized)));
+    return models.length > 0 ? [{ ...group, models }] : [];
+  });
+}
+
+export function modelBillingGroups(
+  group: ModelProviderGroup,
+  details: readonly ModelCatalogDetail[] = [],
+): readonly ModelBillingGroup[] {
+  if (group.providerId !== 'openrouter') return [{ label: null, models: group.models }];
+
+  const free: ModelReference[] = [];
+  const paid: ModelReference[] = [];
+  for (const model of group.models) {
+    const detail = details.find((candidate) => candidate.reference === model.reference);
+    const isFree = detail?.pricing?.billing_mode === 'free'
+      || model.requestModel === 'openrouter/free'
+      || model.requestModel.endsWith(':free');
+    (isFree ? free : paid).push(model);
+  }
+
+  return [
+    ...(paid.length > 0 ? [{ label: 'Paid' as const, models: paid }] : []),
+    ...(free.length > 0 ? [{ label: 'Free' as const, models: free }] : []),
+  ];
 }
 
 export function groupModelReferences(references: readonly string[]): readonly ModelProviderGroup[] {

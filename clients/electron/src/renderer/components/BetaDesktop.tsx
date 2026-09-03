@@ -27,7 +27,14 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
-import { groupModelReferences, modelReference, resolveModelSelection } from '../bridge/modelCatalog';
+import {
+  filterModelGroups,
+  groupModelReferences,
+  modelBillingGroups,
+  modelDisplayLabel,
+  modelReference,
+  resolveModelSelection,
+} from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { ALL_DESKTOP_COMMANDS, DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import {
@@ -904,6 +911,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [text, setText] = useState('');
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
+  const [modelQuery, setModelQuery] = useState('');
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -926,6 +934,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const permissionButton = useRef<HTMLButtonElement>(null);
   const modelControl = useRef<HTMLDivElement>(null);
   const modelTrigger = useRef<HTMLButtonElement>(null);
+  const modelSearchInput = useRef<HTMLInputElement>(null);
   const slashControl = useRef<HTMLDivElement>(null);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const voiceBase = useRef('');
@@ -948,6 +957,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const modelGroups = useMemo(
     () => groupModelReferences(bridge.desktop.models),
     [bridge.desktop.models],
+  );
+  const filteredModelGroups = useMemo(
+    () => filterModelGroups(modelGroups, modelQuery, bridge.desktop.modelDetails),
+    [bridge.desktop.modelDetails, modelGroups, modelQuery],
   );
   const modelDetailsByReference = useMemo(
     () => new Map(bridge.desktop.modelDetails.map((detail) => [detail.reference, detail])),
@@ -1026,6 +1039,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     document.addEventListener('pointerdown', closeOnOutsidePointer);
     return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
   }, [modelOpen]);
+
+  useEffect(() => {
+    if (modelOpen && modelSubmenu === 'model') {
+      modelSearchInput.current?.focus();
+      return;
+    }
+    setModelQuery('');
+  }, [modelOpen, modelSubmenu]);
 
   useEffect(() => {
     setSlashResultIndex((index) => reconcileSlashSelectionIndex(
@@ -2037,9 +2058,39 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
                 {modelSubmenu === 'model' && (
                   <div style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
-                    <div style={{ flexShrink: 0, padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
+                    <div style={{ flexShrink: 0, padding: '5px 10px 7px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
+                    <div style={{ position: 'relative', flexShrink: 0, margin: '0 3px 7px' }}>
+                      <span aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', display: 'grid', placeItems: 'center', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+                        <Icon name="search" size={14} color={t.text4} stroke={1.8} />
+                      </span>
+                      <input
+                        ref={modelSearchInput}
+                        type="text"
+                        value={modelQuery}
+                        aria-label="Search models"
+                        placeholder="Search models"
+                        autoComplete="off"
+                        spellCheck={false}
+                        onChange={(event) => setModelQuery(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Escape') return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (modelQuery) setModelQuery('');
+                          else setModelSubmenu(null);
+                        }}
+                        style={{ width: '100%', height: 34, padding: '0 32px 0 31px', border: `0.5px solid ${t.borderStrong}`, borderRadius: 8, outline: 'none', background: t.surfaceActive, color: t.text, font: 'inherit', fontSize: 12.5 }}
+                        onFocus={(event) => { event.currentTarget.style.borderColor = t.accent; }}
+                        onBlur={(event) => { event.currentTarget.style.borderColor = t.borderStrong; }}
+                      />
+                      {modelQuery && (
+                        <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+                          <Icon name="x" size={12} color={t.text3} stroke={1.9} />
+                        </button>
+                      )}
+                    </div>
                     <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
-                      {modelGroups.map((group, groupIndex) => {
+                      {filteredModelGroups.map((group, groupIndex) => {
                         const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
                         const metadata = statusProviderId
                           ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
@@ -2057,32 +2108,40 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
                               {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
                             </div>
-                            {group.models.map((entry) => {
-                              const active = entry.reference === bridge.desktop.currentModel;
-                              const entryDetail = modelDetailsByReference.get(entry.reference);
-                              const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
-                                && modelSupportsFastMode(entryDetail);
-                              const selection = resolveModelSelection(entry.reference, providerCredentials);
-                              const unavailable = selection.kind === 'loading';
-                              const requiresConnection = selection.kind === 'connect';
-                              return (
-                                <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : undefined} onClick={() => {
-                                  if (selection.kind === 'loading') return;
-                                  setModelOpen(false);
-                                  setModelSubmenu(null);
-                                  if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
-                                  else invoke(() => bridge.setModel(entry.reference));
-                                }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
-                                  {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
-                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{entry.label}</span>
-                                  {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
-                                  {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
-                                </button>
-                              );
-                            })}
+                            {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
+                              <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
+                                {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
+                                {billingGroup.models.map((entry) => {
+                                  const active = entry.reference === bridge.desktop.currentModel;
+                                  const entryDetail = modelDetailsByReference.get(entry.reference);
+                                  const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
+                                    && modelSupportsFastMode(entryDetail);
+                                  const selection = resolveModelSelection(entry.reference, providerCredentials);
+                                  const unavailable = selection.kind === 'loading';
+                                  const requiresConnection = selection.kind === 'connect';
+                                  return (
+                                    <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : entry.requestModel} onClick={() => {
+                                      if (selection.kind === 'loading') return;
+                                      setModelOpen(false);
+                                      setModelSubmenu(null);
+                                      if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
+                                      else invoke(() => bridge.setModel(entry.reference));
+                                    }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
+                                      {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
+                                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
+                                      {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
+                                      {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ))}
                           </section>
                         );
                       })}
+                      {filteredModelGroups.length === 0 && (
+                        <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>No models match “{modelQuery.trim()}”</div>
+                      )}
                     </div>
                   </div>
                 )}

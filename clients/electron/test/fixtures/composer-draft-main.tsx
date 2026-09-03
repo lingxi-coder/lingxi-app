@@ -26,16 +26,29 @@ function bridgeFixture(sessionId: string, running: boolean) {
       activeSession: { projectPath, sessionId },
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },
-      providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true }],
+      providerCredentials: [
+        { providerId: 'anthropic', configured: true, encryptionAvailable: true },
+        { providerId: 'openrouter', configured: true, encryptionAvailable: true },
+      ],
       connection: { status: 'connected' },
       diagnostics: [],
     },
     desktop: {
       sessions: [],
       activeSessionId: sessionId,
-      models: [],
-      modelDetails: [],
-      currentModel: null,
+      models: [
+        'openrouter/openrouter/auto',
+        'openrouter/~anthropic/claude-opus-latest',
+        'openrouter/openrouter/free',
+        'openrouter/inclusionai/ling-3.0-flash-fin:free',
+      ],
+      modelDetails: [
+        { reference: 'openrouter/openrouter/auto', display_name: 'OpenRouter Auto', pricing: { billing_mode: 'per_token' } },
+        { reference: 'openrouter/~anthropic/claude-opus-latest', display_name: 'Anthropic: Claude Opus Latest', pricing: { billing_mode: 'per_token' } },
+        { reference: 'openrouter/openrouter/free', display_name: 'OpenRouter Free', pricing: { billing_mode: 'free' } },
+        { reference: 'openrouter/inclusionai/ling-3.0-flash-fin:free', display_name: 'InclusionAI: Ling 3.0 Flash Fin (free)', pricing: { billing_mode: 'free' } },
+      ],
+      currentModel: 'openrouter/openrouter/auto',
       conversationControls: null,
       fastMode: false,
       permissionMode: 'default',
@@ -84,12 +97,14 @@ function Fixture() {
   }, []);
 
   return (
-    <Theme.Provider value={tokens('light')}>
+    <Theme.Provider value={tokens('dark')}>
       <BetaComposer
         bridge={bridgeFixture(sessionId, running) as never}
         ready
         onOpenSettings={() => undefined}
+        onOpenSettingsPage={() => undefined}
         onSetTheme={() => undefined}
+        onOpenProviderSettings={() => undefined}
       />
     </Theme.Provider>
   );

@@ -157,9 +157,9 @@
           "name": "libcrypto3",
           "repository": "main",
           "role": "transitive",
-          "sha256": "936ce77a0f5621c9ebc91395d01c62d1127b13e6981d5eb55cdcae7a389540d0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libcrypto3-3.5.7-r0.apk",
-          "version": "3.5.7-r0"
+          "sha256": "35b892813c23664a3592e4fc8c12a03538a22c579057655361c7043305272a9a",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libcrypto3-3.5.8-r0.apk",
+          "version": "3.5.8-r0"
         },
         {
           "arch": "aarch64",
@@ -187,9 +187,9 @@
           "name": "libexpat",
           "repository": "main",
           "role": "transitive",
-          "sha256": "3c112b8ce1dd8211a6446921654e5f85047db803ed6827147691b4789a523209",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libexpat-2.8.2-r0.apk",
-          "version": "2.8.2-r0"
+          "sha256": "ca1be5be36985a8370f4a8e9e33a25788ac95260295718e1b0b721a16bb2aa61",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libexpat-2.8.4-r0.apk",
+          "version": "2.8.4-r0"
         },
         {
           "arch": "aarch64",
@@ -257,9 +257,9 @@
           "name": "libssl3",
           "repository": "main",
           "role": "transitive",
-          "sha256": "7b8f7b8b83d799987ad892ff16efd838368e778b4406bd5f4b046547ab7e5551",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libssl3-3.5.7-r0.apk",
-          "version": "3.5.7-r0"
+          "sha256": "d6ec970cc10e01539e41626f720c4e0ac69016eaa2079a10ef776ffd3243db5b",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libssl3-3.5.8-r0.apk",
+          "version": "3.5.8-r0"
         },
         {
           "arch": "aarch64",
@@ -763,9 +763,9 @@
           "name": "libcrypto3",
           "repository": "main",
           "role": "transitive",
-          "sha256": "b709346666ff1343ebbc780950e61d9a0217e460c5e0836fe11b7cd3c5656b04",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libcrypto3-3.5.7-r0.apk",
-          "version": "3.5.7-r0"
+          "sha256": "161223a16f042b8e469e9441291e071464fd91d4f4bbe6f496ee8d0abd4e0701",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libcrypto3-3.5.8-r0.apk",
+          "version": "3.5.8-r0"
         },
         {
           "arch": "x86_64",
@@ -793,9 +793,9 @@
           "name": "libexpat",
           "repository": "main",
           "role": "transitive",
-          "sha256": "cbd8ae7af319512615ae546970112667136ac88e6c18dcb2059bd0dfceb877fb",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libexpat-2.8.2-r0.apk",
-          "version": "2.8.2-r0"
+          "sha256": "34fa41e3994d9a844f50a7c01cb40bb2e272fa7f506b96e92a2b4a20b23a81bc",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libexpat-2.8.4-r0.apk",
+          "version": "2.8.4-r0"
         },
         {
           "arch": "x86_64",
@@ -863,9 +863,9 @@
           "name": "libssl3",
           "repository": "main",
           "role": "transitive",
-          "sha256": "84b1da6cb64ab8018c3dcfb80647c03b14d609de3d49ff90dd8356f63836217e",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libssl3-3.5.7-r0.apk",
-          "version": "3.5.7-r0"
+          "sha256": "aca521e5ae4a321322a9d47ed64a1775f5ab1ffd215d1e9fc0433c58f7bfd037",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libssl3-3.5.8-r0.apk",
+          "version": "3.5.8-r0"
         },
         {
           "arch": "x86_64",

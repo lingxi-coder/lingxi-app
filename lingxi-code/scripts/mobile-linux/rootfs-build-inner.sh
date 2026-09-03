@@ -286,13 +286,34 @@ if [ "${actual_tsc_sha256}" != "${TYPESCRIPT_TSC_SHA256}" ]; then
   exit 1
 fi
 
-typescript_version_output="$(chroot "${TARGET}" "${TYPESCRIPT_INSTALL_ROOT}/tsc" --version)"
+# Probe the installed binary DIRECTLY, not through `chroot "${TARGET}"`.
+#
+# `tsc` here is typescript-go: a statically linked Go binary whose `osvfs`
+# package calls `os.Executable()` in its `init()`, which on Linux reads
+# `/proc/self/exe`. Nothing mounts `/proc` inside "${TARGET}" — the directory is
+# created at the `mkdir -p` above and left empty — so every chroot'd invocation
+# dies before `main` with:
+#
+#   panic: vfs: failed to get executable path: readlink /proc/self/exe:
+#          no such file or directory
+#
+# Mounting proc into the target is the other repair, but this build container
+# runs without CAP_SYS_ADMIN (`build-local-app-rootfs.sh` passes no
+# `--cap-add`/`--privileged`), so `mount -t proc` there fails with EPERM.
+#
+# Running it directly costs nothing: the binary is `statically linked` (verified
+# with `file`), so it needs no interpreter, no shared library and no other file
+# from "${TARGET}" — only the container's own `/proc`, which is mounted. It is
+# byte-for-byte the file just installed into the target and hash-checked above,
+# so the probe still proves that exact artifact runs.
+typescript_version_output="$("${TARGET}${TYPESCRIPT_INSTALL_ROOT}/tsc" --version)"
 if [ "${typescript_version_output}" != "Version ${TYPESCRIPT_VERSION}" ]; then
   echo "[rootfs:${ARCH}] native TypeScript version probe failed: ${typescript_version_output}" >&2
   exit 1
 fi
 
-python3 - <<'PY' | chroot "${TARGET}" "${TYPESCRIPT_INSTALL_ROOT}/tsc" --lsp --stdio > "${OUT}/typescript-lsp-initialize.out" 2> "${OUT}/typescript-lsp-initialize.err"
+# Same reason as the version probe above: direct exec, not chroot.
+python3 - <<'PY' | "${TARGET}${TYPESCRIPT_INSTALL_ROOT}/tsc" --lsp --stdio > "${OUT}/typescript-lsp-initialize.out" 2> "${OUT}/typescript-lsp-initialize.err"
 import json
 import sys
 

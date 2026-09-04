@@ -3,8 +3,8 @@
 *.xcworkspace
 
 ## Generated UniFFI integration artifacts (reproduce with scripts/build-xcframework.sh)
-Generated/
-Frameworks/
+Generated
+Frameworks
 *.xcframework
 
 ## Xcode

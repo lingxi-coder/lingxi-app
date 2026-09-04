@@ -103,6 +103,17 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     // Mutating.
     ("LocalAppBuild", "build", false),
     ("LocalAppInstallDeps", "install_dependencies", false),
+    // r2-never-wired-02: these two had a full provider catalog entry,
+    // description and handler (host's native dependency-review confirmation
+    // flow) but no row here, so `AppDependencyChangeConfirmationRequested`
+    // had no reachable producer and both clients' dependency-review sheet
+    // was dead code.
+    (
+        "LocalAppConfirmDependencyChange",
+        "confirm_dependency_change",
+        false,
+    ),
+    ("LocalAppUpdateDependencies", "update_dependencies", false),
     ("LocalAppRuntime", "manage_runtime", false),
     ("LocalAppCreate", "create", false),
     // Lands the scaffold into an app the "+" button created as an empty SHELL
@@ -738,6 +749,30 @@ mod tests {
                  known: {ops:?}"
             );
         }
+    }
+
+    /// r2-never-wired-02: `confirm_dependency_change`/`update_dependencies`
+    /// had a full provider catalog entry, description and handler but no row
+    /// in `LOCAL_APP_TOOLS`, so `AppDependencyChangeConfirmationRequested`
+    /// had no reachable producer and both clients' dependency-review sheet
+    /// was dead code.
+    #[test]
+    fn dependency_review_operations_are_wired_as_builtin_tools() {
+        let names: std::collections::BTreeSet<&str> =
+            LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
+        assert!(
+            names.contains("LocalAppConfirmDependencyChange"),
+            "confirm_dependency_change has a full provider catalog entry and \
+             handler but no builtin tool row, so \
+             AppDependencyChangeConfirmationRequested can never be emitted by \
+             a model-driven call"
+        );
+        assert!(
+            names.contains("LocalAppUpdateDependencies"),
+            "update_dependencies has a full provider catalog entry and \
+             handler but no builtin tool row, so a confirmed dependency \
+             change receipt can never be applied"
+        );
     }
 
     /// The builder must produce one tool per declared entry. `filter_map`

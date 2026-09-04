@@ -1800,6 +1800,7 @@
     <string name="local_apps_widget_pin_unavailable">このランチャーは Widget の自動追加に対応していません。後で手動で追加してください。</string>
     <string name="local_apps_draft_card_title">新しいアプリ</string>
     <string name="local_apps_draft_card_subtitle">作成中</string>
+    <string name="local_apps_draft_card_subtitle_stalled">セットアップ未完了</string>
     <string name="local_apps_creation_result_unknown">作成結果が不明です。アプリライブラリで確認してください。</string>
     <string name="local_apps_widget_add">ホーム画面に Widget を追加</string>
     <string name="local_apps_profile_proposal_title">アプリがアシスタントの指示の更新を求めています</string>
@@ -1817,6 +1818,10 @@
     <string name="local_apps_plugin_bundle_digest">Bundle ダイジェスト</string>
     <string name="local_apps_plugin_state_enabled">有効</string>
     <string name="local_apps_plugin_state_disabled">無効</string>
+    <string name="local_apps_plugin_enabled">有効</string>
+    <string name="local_apps_plugin_disabled">無効</string>
+    <string name="local_apps_plugin_status_unavailable">プラグインの状態は現在取得できません。</string>
+    <string name="local_apps_plugin_toggle_failed">プラグインの状態を切り替えられませんでした。もう一度お試しください。</string>
     <string name="local_apps_plugin_validation_error">検証エラー</string>
     <string name="local_apps_plugin_skills_count_fmt">スキル %1$d 件</string>
     <string name="local_apps_plugin_agents_count_fmt">Agent %1$d 件</string>
@@ -1830,6 +1835,7 @@
     <string name="local_apps_create_confirm_app_brief">アプリの内容</string>
     <string name="local_apps_create_confirm_selected_template">選択したテンプレート</string>
     <string name="local_apps_create_confirm_runtime_profile">ランタイムプロファイル</string>
+    <string name="local_apps_create_confirm_runtime_packages">パッケージ</string>
     <string name="local_apps_create_confirm_agent_reason">この構成を選んだ理由</string>
     <string name="local_apps_create_confirm_rejected_candidates">採用しなかった候補</string>
     <string name="local_apps_create_confirm_initial_tools">初期 MCP ツール</string>
@@ -1862,6 +1868,9 @@
     <string name="local_apps_verification_status_failed">失敗</string>
     <string name="local_apps_verification_status_unverified">未検証</string>
     <string name="local_apps_verification_status_unavailable">利用不可</string>
+    <string name="local_apps_verification_draft">下書き</string>
+    <string name="local_apps_verification_published_unverified">公開済み（未検証）</string>
+    <string name="local_apps_verification_published_verified">公開済み（検証済み）</string>
     <string name="local_apps_error_plugin_disabled">まず「LingXi ローカルアプリ」を有効にしてから、もう一度だけやり直してください。</string>
     <string name="local_apps_error_builtin_bundle_unavailable">組み込みのローカルアプリ Bundle を利用できません。ストレージを修復するか、アプリを再起動してください。</string>
     <string name="local_apps_error_template_unavailable">現在の要件に合う利用可能なテンプレートがありません。</string>

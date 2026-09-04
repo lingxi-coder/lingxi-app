@@ -11827,7 +11827,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
             let workspace = backfill_root.join(&record.workspace_rel);
             let lingxi_md = workspace.join("LINGXI.md");
             let needs_repair = match std::fs::read_to_string(&lingxi_md) {
-                Ok(contents) => !contents.contains("# Local App（新建，尚未定形态）"),
+                Ok(contents) => !contents.contains("# Local App (new, not yet shaped)"),
                 Err(_) => true,
             };
             if needs_repair {
@@ -19895,7 +19895,7 @@ mod tests {
                 "the contract must name the one useful tool: {contract}"
             );
             assert!(
-                contract.contains("会在脚手架落地时被删除"),
+                contract.contains("will be deleted the moment the scaffold lands"),
                 "the contract must warn that pre-confirmation source is wiped: {contract}"
             );
             assert!(

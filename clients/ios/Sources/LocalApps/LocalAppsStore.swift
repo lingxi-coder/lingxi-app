@@ -944,6 +944,21 @@ final class LocalAppsStore {
         return createdAppLanding
     }
 
+    /// Re-arm a landing `RootView` already consumed but could not deliver —
+    /// the scope switch it needed stayed refused past the bounded retry
+    /// window. Re-publishing into the same one-shot slot puts the hand-off
+    /// back in front of the sinks that watch it, instead of it being lost for
+    /// good the instant the retry gives up.
+    ///
+    /// The caller MUST bound how often it does this: republishing fires
+    /// `onChange(of: localAppsStore.createdAppLanding)` at once, and that
+    /// path's guard does not test whatever refused the switch, so an
+    /// unlatched re-arm is a fresh retry window every time — see
+    /// `RootView.openCreatedAppSession`'s per-app latch.
+    func restoreCreatedAppLanding(_ landing: CreatedAppLanding) {
+        createdAppLanding = landing
+    }
+
     func getDetails(appID: String) async {
         #if canImport(engine_mobileFFI)
             if let detailsTask = detailsTasks[appID] {

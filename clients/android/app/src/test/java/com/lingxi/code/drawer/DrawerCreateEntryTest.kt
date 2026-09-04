@@ -1,6 +1,7 @@
 package com.lingxi.code.drawer
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -203,6 +204,74 @@ class DrawerCreateEntryTest {
         assertTrue(
             "RootScreen must stop computing and passing the now-deleted appsCount argument",
             "appsCount" !in rootScreen,
+        )
+    }
+
+    /**
+     * Kotlin line comments stripped. Both slices below span the production
+     * comments that explain WHY no mode is set in those lambdas, and the most
+     * natural wording of such a comment names the very symbol the assertions
+     * require to be absent -- a maintainer writing "do not call
+     * setConversationMode here" would otherwise turn this gate red on correct
+     * code. (It already happened once while this test was being written.)
+     */
+    private fun String.codeOnly(): String = lines()
+        .filterNot { it.trimStart().startsWith("//") }
+        .joinToString("\n")
+
+    /**
+     * RootScreen's own wiring of the two rows: `onCreateApp` must not flip the
+     * active conversation mode (already fixed — the drawer's create row lands
+     * the user inside the new app's OWN conversation, so forcing a Code-mode
+     * switch first is redundant), and `onOpenApps` — the plain "browse the
+     * library" row — must not either, matching iOS's equivalent entry (which
+     * changes no mode) and the sibling `onOpenLocalAppDetails` handler
+     * elsewhere in this file, which opens the apps cover with no mode flip.
+     *
+     * Sliced from RootScreen.kt's own source rather than exercised via Compose:
+     * this module's plain-JVM `test` source set has no
+     * `androidx.compose.ui:ui-test-junit4` dependency (see the class doc
+     * above), so every gate in this file reads the composable's source text.
+     *
+     * Bounded on a call inside each lambda's own body rather than the next
+     * `},` (which drifts with reformatting/reindentation) — `closeDrawer()` for
+     * the create row, `Refresh` for the open-apps row.
+     */
+    @Test
+    fun `neither drawer quick-action row force-switches the active conversation mode`() {
+        val rootScreen = File("src/main/java/com/lingxi/code/RootScreen.kt").readText()
+
+        val createStart = rootScreen.indexOf("onCreateApp = {\n                            closeDrawer()")
+        assertTrue("expected to find the drawer's onCreateApp wiring in RootScreen.kt", createStart >= 0)
+        val createEnd = rootScreen.indexOf("createAppFromDrawer()", createStart)
+        assertTrue(createEnd > createStart)
+        val createBody = rootScreen.substring(createStart, createEnd)
+        assertFalse(
+            "the create row must not force a conversation-mode switch: it lands the user " +
+                "directly in the new app's OWN conversation, and iOS's equivalent entry changes " +
+                "no mode",
+            "setConversationMode" in createBody.codeOnly(),
+        )
+
+        val openStart = rootScreen.indexOf("onOpenApps = {", createEnd)
+        assertTrue("expected to find the drawer's onOpenApps wiring in RootScreen.kt", openStart >= 0)
+        val openEnd = rootScreen.indexOf(
+            "localAppsViewModel.onAction(LocalAppsAction.Refresh)",
+            openStart,
+        )
+        assertTrue(openEnd > openStart)
+        val openBody = rootScreen.substring(openStart, openEnd)
+        assertTrue(
+            "vacuity guard: the sliced region must still be the browse row's own body",
+            "showingApps = true" in openBody && "closeDrawer()" in openBody,
+        )
+        assertFalse(
+            "the browse row only opens the library to look at it — forcing " +
+                "setConversationMode(SessionMode.Code) here swaps the user's live Chat " +
+                "conversation to a Code session as a side effect of browsing, which iOS's " +
+                "equivalent entry does not do (and the sibling onOpenLocalAppDetails handler " +
+                "elsewhere in this file already opens the apps cover with no mode flip)",
+            "setConversationMode" in openBody.codeOnly(),
         )
     }
 }

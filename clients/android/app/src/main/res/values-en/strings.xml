@@ -1806,6 +1806,7 @@
     <string name="local_apps_widget_pin_unavailable">This launcher cannot add Widgets automatically. Add it manually later.</string>
     <string name="local_apps_draft_card_title">New App</string>
     <string name="local_apps_draft_card_subtitle">Creating…</string>
+    <string name="local_apps_draft_card_subtitle_stalled">Setup unfinished</string>
     <string name="local_apps_creation_result_unknown">The creation result is unknown. Check your app library.</string>
     <string name="local_apps_widget_add">Add Widget to Home Screen</string>
     <string name="local_apps_profile_proposal_title">This app wants to update its assistant instructions</string>
@@ -1823,6 +1824,10 @@
     <string name="local_apps_plugin_bundle_digest">Bundle digest</string>
     <string name="local_apps_plugin_state_enabled">Enabled</string>
     <string name="local_apps_plugin_state_disabled">Disabled</string>
+    <string name="local_apps_plugin_enabled">Enabled</string>
+    <string name="local_apps_plugin_disabled">Disabled</string>
+    <string name="local_apps_plugin_status_unavailable">The plugin status is unavailable right now.</string>
+    <string name="local_apps_plugin_toggle_failed">Couldn\'t change the plugin\'s state. Try again.</string>
     <string name="local_apps_plugin_validation_error">Validation error</string>
     <string name="local_apps_plugin_skills_count_fmt">%1$d skills</string>
     <string name="local_apps_plugin_agents_count_fmt">%1$d agents</string>
@@ -1836,6 +1841,7 @@
     <string name="local_apps_create_confirm_app_brief">What it should do</string>
     <string name="local_apps_create_confirm_selected_template">Selected template</string>
     <string name="local_apps_create_confirm_runtime_profile">Runtime profile</string>
+    <string name="local_apps_create_confirm_runtime_packages">Packages</string>
     <string name="local_apps_create_confirm_agent_reason">Why this shape fits</string>
     <string name="local_apps_create_confirm_rejected_candidates">Rejected candidates</string>
     <string name="local_apps_create_confirm_initial_tools">Initial MCP tools</string>
@@ -1868,6 +1874,9 @@
     <string name="local_apps_verification_status_failed">Failed</string>
     <string name="local_apps_verification_status_unverified">Unverified</string>
     <string name="local_apps_verification_status_unavailable">Unavailable</string>
+    <string name="local_apps_verification_draft">Draft</string>
+    <string name="local_apps_verification_published_unverified">Published (unverified)</string>
+    <string name="local_apps_verification_published_verified">Published (verified)</string>
     <string name="local_apps_error_plugin_disabled">Enable LingXi Local App, then retry once.</string>
     <string name="local_apps_error_builtin_bundle_unavailable">The built-in Local App bundle is unavailable. Repair storage or restart the app.</string>
     <string name="local_apps_error_template_unavailable">No available template matches the current requirements.</string>

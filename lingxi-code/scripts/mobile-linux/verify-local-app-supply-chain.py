@@ -1003,6 +1003,94 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     if "Template v2 bundles the JSX Vite/Tailwind foundation" in handoff:
         fail("local-app handoff still describes the retired Template v2 scaffold")
 
+
+def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
+    """Pin the P2-fix-round prompt contracts so a later edit can't quietly
+    reopen the reconciled findings (verifier's thin-tool-list enumeration,
+    the operator's ok/findings non-verdict semantics, builder.md's
+    isolated-staging contradiction, the verifier/acceptance-checks starve,
+    the fast-quality "confirmed design spec" reference, and the two
+    workflows that never advanced meta.phases)."""
+    agents_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "agents"
+    workflows_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "workflows"
+
+    verifier = (agents_dir / "verifier.md").read_text(encoding="utf-8")
+    marker = "tool list is deliberately thin:"
+    idx = verifier.find(marker)
+    if idx == -1:
+        fail("verifier.md is missing the 'deliberately thin' tool-list enumeration")
+    enumeration = verifier[idx : idx + 800].split("\n\n#")[0]
+    for tool in ("LocalAppResolveTemplateSelection", "LocalAppPromoteMcpCandidate"):
+        if tool not in enumeration:
+            fail(
+                f"verifier.md's thin-tool-list enumeration omits {tool} even though it is "
+                "granted in frontmatter"
+            )
+
+    operator = (agents_dir / "operator.md").read_text(encoding="utf-8")
+    if "`ok: true` means only" not in operator or "never a scenario" not in operator:
+        fail("operator.md no longer documents that ok/findings are not a pass/fail verdict")
+
+    builder = (agents_dir / "builder.md").read_text(encoding="utf-8")
+    if "isolated staging (Create) or its own workspace inside an update transaction" in builder:
+        fail("builder.md frontmatter description still claims create-stage writes land in isolated staging")
+    if "shipped Host/cwd wiring actually bounds you — and where it does not" not in builder:
+        fail(
+            "builder.md's quoted §7.3 design intent no longer carries its shipped-behavior caveat "
+            "(the caveat must point at \"Where your write access actually comes from\" without "
+            "re-asserting that the Host structurally enforces create-stage isolated staging)"
+        )
+
+    build_js = (workflows_dir / "local-app-build.js").read_text(encoding="utf-8")
+    verifier_prompt_match = re.search(
+        r"report = await run\(`(.*?)`, \{ agentType: 'verifier', label: `verifier-",
+        build_js,
+        re.DOTALL,
+    )
+    if not verifier_prompt_match:
+        fail("local-app-build.js's verifier prompt call (report = await run(...)) was not found")
+    if "Acceptance checks: ${JSON.stringify(acceptanceChecks)}" not in verifier_prompt_match.group(1):
+        fail("local-app-build.js's verifier prompt is never given acceptanceChecks")
+    if "designSpecReference" not in build_js or "no design spec was produced for this fast-quality run" not in build_js:
+        fail(
+            "local-app-build.js no longer declares designSpecReference with its fast-quality "
+            "fallback wording, so builder-build cannot be pointed away from a design spec that "
+            "was never produced"
+        )
+    scaffold_line = next(
+        (line for line in build_js.splitlines() if "Call LocalAppScaffold with app_id=" in line),
+        None,
+    )
+    if scaffold_line is None:
+        fail("local-app-build.js's builder-build LocalAppScaffold prompt line was not found")
+    if "${designSpecReference}" not in scaffold_line or "the confirmed design spec relies on" in scaffold_line:
+        fail(
+            "local-app-build.js's builder-build prompt no longer interpolates ${designSpecReference} "
+            "at its LocalAppManifest clause, so it still tells builder-build to work from \"the "
+            "confirmed design spec\" unconditionally on a fast-quality run that skipped the designer"
+        )
+    if "ok means only that you completed the scenarios" not in build_js:
+        fail(
+            "local-app-build.js's operator prompt no longer defines ok as 'the run completed', so "
+            "'do not judge pass/fail' contradicts the required ok field again"
+        )
+
+    for name, titles in (
+        ("local-app-use-test.js", ("Operate", "Test", "Verify")),
+        (
+            "local-app-mcp-authoring.js",
+            ("Evidence and proposal", "Validate and approve", "QA and promote"),
+        ),
+    ):
+        source = (workflows_dir / name).read_text(encoding="utf-8")
+        calls = re.findall(r"phase\('([^']*)'\)", source)
+        if calls != list(titles):
+            fail(
+                f"{name} must call phase(...) once per meta.phases title in order "
+                f"{list(titles)}; found {calls}"
+            )
+
+
 def validate_product_model_name_absence(repo: pathlib.Path) -> None:
     """Keep the task-only model name out of product routing and generation."""
     forbidden = "gpt-5.6" + "luna"
@@ -1317,6 +1405,7 @@ def main() -> None:
         validate_runtime_profiles(repo, pins, args.profile)
     validate_runtime_policy(repo)
     validate_create_skill(repo)
+    validate_agent_prompt_contracts(repo)
     validate_product_model_name_absence(repo)
     print("local-app runtime profile supply-chain pins verified")
 

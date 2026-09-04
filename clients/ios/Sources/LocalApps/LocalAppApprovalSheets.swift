@@ -44,8 +44,18 @@ struct LocalAppCreateConfirmationSheet: View {
               sub: runtimeProfileSummary,
               value: prompt.runtimeProfile.family.title,
               chevron: false,
-              isLast: true
+              isLast: prompt.runtimeProfile.corePackages.isEmpty
             )
+            if !prompt.runtimeProfile.corePackages.isEmpty {
+              SettingsRow(
+                label: String(localized: "local_apps_create_confirm_runtime_packages"),
+                sub: prompt.runtimeProfile.corePackages
+                  .map { "\($0.name) \($0.version)" }
+                  .joined(separator: ", "),
+                chevron: false,
+                isLast: true
+              )
+            }
           }
 
           SettingsSection(label: String(localized: "local_apps_create_confirm_agent_reason")) {
@@ -157,12 +167,29 @@ struct LocalAppCreateConfirmationSheet: View {
     .accessibilityIdentifier("local-apps.create-confirm.\(prompt.id)")
   }
 
+  /// The host derives BOTH status fields from one availability verdict
+  /// (`runtime_profile_dependency_availability`, or the literal `unavailable`
+  /// when the profile is not available at all), so rendering them
+  /// unconditionally printed the same word twice — three times with the
+  /// `unavailable` fallback appended. Render the second only when it actually
+  /// differs, and let a real `reason` be the only thing the unavailable case
+  /// adds, since the status part already carries that word.
   private var runtimeProfileSummary: String {
-    [
+    var parts = [
       "r\(prompt.runtimeProfile.revision)",
       approvalSurfaceTitle(prompt.runtimeProfile.surface),
       approvalDigestSummary(prompt.runtimeProfile.contractSHA256),
-    ].joined(separator: " · ")
+      localizedRuntimeProfileStatus(prompt.runtimeProfile.cacheStatus),
+    ]
+    if prompt.runtimeProfile.downloadStatus != prompt.runtimeProfile.cacheStatus {
+      parts.append(localizedRuntimeProfileStatus(prompt.runtimeProfile.downloadStatus))
+    }
+    if !prompt.runtimeProfile.available,
+      let reason = prompt.runtimeProfile.reason, !reason.isEmpty
+    {
+      parts.append(reason)
+    }
+    return parts.joined(separator: " · ")
   }
 
   private func resolve(_ approved: Bool) {

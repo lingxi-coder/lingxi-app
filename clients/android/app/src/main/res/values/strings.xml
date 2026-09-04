@@ -1806,6 +1806,7 @@
     <string name="local_apps_widget_pin_unavailable">当前启动器不支持自动添加 Widget，请稍后手动添加。</string>
     <string name="local_apps_draft_card_title">新应用</string>
     <string name="local_apps_draft_card_subtitle">创建中</string>
+    <string name="local_apps_draft_card_subtitle_stalled">创建未完成</string>
     <string name="local_apps_creation_result_unknown">创建结果未知，请在应用库确认。</string>
     <string name="local_apps_widget_add">添加到主屏幕 Widget</string>
     <string name="local_apps_profile_proposal_title">应用请求更新助手指令</string>
@@ -1823,6 +1824,10 @@
     <string name="local_apps_plugin_bundle_digest">Bundle 摘要</string>
     <string name="local_apps_plugin_state_enabled">已启用</string>
     <string name="local_apps_plugin_state_disabled">已禁用</string>
+    <string name="local_apps_plugin_enabled">已启用</string>
+    <string name="local_apps_plugin_disabled">已禁用</string>
+    <string name="local_apps_plugin_status_unavailable">插件状态暂不可用。</string>
+    <string name="local_apps_plugin_toggle_failed">切换插件状态失败，请重试。</string>
     <string name="local_apps_plugin_validation_error">校验错误</string>
     <string name="local_apps_plugin_skills_count_fmt">%1$d 个技能</string>
     <string name="local_apps_plugin_agents_count_fmt">%1$d 个 Agent</string>
@@ -1836,6 +1841,7 @@
     <string name="local_apps_create_confirm_app_brief">应用要做什么</string>
     <string name="local_apps_create_confirm_selected_template">所选模板</string>
     <string name="local_apps_create_confirm_runtime_profile">运行时配置</string>
+    <string name="local_apps_create_confirm_runtime_packages">依赖包</string>
     <string name="local_apps_create_confirm_agent_reason">为何这样选择</string>
     <string name="local_apps_create_confirm_rejected_candidates">未采用候选</string>
     <string name="local_apps_create_confirm_initial_tools">初始 MCP 工具</string>
@@ -1868,6 +1874,9 @@
     <string name="local_apps_verification_status_failed">失败</string>
     <string name="local_apps_verification_status_unverified">未校验</string>
     <string name="local_apps_verification_status_unavailable">不可用</string>
+    <string name="local_apps_verification_draft">草稿</string>
+    <string name="local_apps_verification_published_unverified">已发布（未校验）</string>
+    <string name="local_apps_verification_published_verified">已发布（已校验）</string>
     <string name="local_apps_error_plugin_disabled">请先启用“灵犀本地应用”，再重试一次。</string>
     <string name="local_apps_error_builtin_bundle_unavailable">内建本地应用 Bundle 不可用。请修复存储或重启应用。</string>
     <string name="local_apps_error_template_unavailable">当前需求没有可用模板可选。</string>

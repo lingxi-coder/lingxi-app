@@ -168,6 +168,10 @@ struct RootView: View {
     private static let maxDeferredAppActions = 8
     @State private var workspacePinnedAt: [String: Date]
     @State private var collapsedWorkspaceKeys: Set<String>
+    /// The app whose created-app landing the bounded retry has already
+    /// re-armed once. Without it the re-arm is a paced infinite loop — see
+    /// `openCreatedAppSession`'s give-up path.
+    @State private var reArmedCreatedAppLandingID: String?
     @State private var pendingSessionFork: PendingSessionFork?
     @State private var pendingConversationSelectionRestore: PendingConversationSelectionRestore?
 
@@ -519,6 +523,13 @@ struct RootView: View {
             .onChange(of: projectSwitching) { _, switching in
                 guard !switching else { return }
                 applyPendingConversationSelectionRestoreIfPossible()
+                // A landing `openCreatedAppSession` re-armed via
+                // `restoreCreatedAppLanding` is usually re-drained by the
+                // `createdAppLanding` sink right away; this edge is what
+                // picks it up in the case that sink refuses — a streaming
+                // turn or the widget-setup sheet — which is the same edge
+                // every other refusal in this file retries on.
+                landCreatedAppIfReady()
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                 Task { await localAppsStore.handleMemoryWarning() }
@@ -1091,6 +1102,28 @@ struct RootView: View {
                 // Bounding the retry introduces a give-up path the recursive
                 // version never had, so it must not drop the app silently: the
                 // record exists and the landing signal is spent.
+                //
+                // Re-arm rather than just report: whatever refused the switch
+                // for 10s straight (a busy `projectSwitching` or a held
+                // mutation policy) can still clear later, and the restored
+                // landing's `onChange` sink (see the property declaration)
+                // will retry the hand-off then. The error stays too, since
+                // that clearing is not guaranteed to happen at all.
+                //
+                // Re-arm AT MOST ONCE per app. `landCreatedAppIfReady`'s guard
+                // does not test `projectSwitching`, so the restore republishes
+                // into `createdAppLanding` and that sink drains it again on the
+                // spot — under a refusal that is still held this would start a
+                // fresh 10s window, dismiss whatever the user has open
+                // (`closePresentedRoute` above) and repeat for as long as the
+                // refusal lasts: the very unbounded retry the bound removed,
+                // merely paced. One re-arm gives the "it cleared in the
+                // meantime" case its retry and terminates either way.
+                if reArmedCreatedAppLandingID != appID {
+                    reArmedCreatedAppLandingID = appID
+                    localAppsStore.restoreCreatedAppLanding(
+                        LocalAppsStore.CreatedAppLanding(appID: appID, initSessionID: sessionID))
+                }
                 localAppsStore.reportCreatedAppLandingExhausted()
             }
             return
@@ -1665,8 +1698,18 @@ struct RootView: View {
         // leaving it armed) is still required: otherwise it survives as a
         // stale latch and can later fire into an unrelated session that
         // happens to match `kickoff.sessionID`.
+        //
+        // `pendingInitKickoff` only ever carries the local-app create-flow
+        // brief (see `switchScope`'s `initialPrompt`, its one producer), so
+        // reusing that flow's own "the result is unknown" copy here is the
+        // right message: the app record exists, but this client could not
+        // deliver the create brief into it, same as the bounded-retry
+        // give-up path in `openCreatedAppSession`. Said through the store's
+        // own mutator because `errorMessage` is `private(set)` — assigning it
+        // from this file does not compile.
         if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID {
             pendingInitKickoff = nil
+            localAppsStore.reportCreatedAppLandingExhausted()
         }
         if let pending = pendingSessionFork,
            pending.sourceSessionID == sessionID {

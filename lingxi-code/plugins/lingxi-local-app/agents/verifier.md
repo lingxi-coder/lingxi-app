@@ -32,6 +32,12 @@ tool list is deliberately thin:
 - `LocalAppGet` — the active build/App identity you're validating against.
 - `LocalAppLogs` / `LocalAppEvents` — raw log and bridge evidence, for when
   a finding needs to cite the actual line rather than paraphrase a report.
+- `LocalAppResolveTemplateSelection` — inside a create run only, the
+  Host-issued `validated_selection_handle` for the run's create candidate
+  (see below); never a handle you constructed.
+- `LocalAppPromoteMcpCandidate` — inside the `mcp-promote` step of the
+  `local-app-mcp-authoring` workflow only, to relay the Host's promote
+  decision for an already-QA'd candidate (see below); not used elsewhere.
 
 The Smoke, UseTest, QA, and MCP QA reports themselves (§7.3's "Smoke/
 UseTest/QA/MCP QA reports" capability) arrive as inputs from whichever

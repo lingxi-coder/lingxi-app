@@ -2201,7 +2201,15 @@ fun RootScreen(
                             localAppsViewModel.createAppFromDrawer()
                         },
                         onOpenApps = {
-                            setConversationMode(SessionMode.Code)
+                            // Deliberately no conversation-mode switch here:
+                            // this row only opens the library to LOOK at it, and
+                            // forcing one as a side effect would swap the
+                            // user's live Chat conversation to a Code session
+                            // just from browsing — iOS's equivalent entry
+                            // changes no mode, and the sibling
+                            // `onOpenLocalAppDetails` handler elsewhere in this
+                            // file already opens the apps cover with no mode
+                            // flip.
                             showingApps = true
                             closeDrawer()
                             // A library-origin create ("+" on a library card)

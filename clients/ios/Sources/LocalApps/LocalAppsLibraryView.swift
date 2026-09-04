@@ -386,7 +386,7 @@ private func localizedDependencyStatus(_ raw: String) -> String {
     }
 }
 
-private func localizedRuntimeProfileStatus(_ raw: String) -> String {
+func localizedRuntimeProfileStatus(_ raw: String) -> String {
     switch raw {
     case "bundled":
         String(localized: "local_apps_runtime_profile_status_bundled")

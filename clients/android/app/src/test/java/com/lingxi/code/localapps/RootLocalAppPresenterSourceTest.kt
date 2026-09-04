@@ -91,14 +91,28 @@ class RootLocalAppPresenterSourceTest {
             "setConversationMode(SessionMode.Code)" !in onCreateAppBody,
         )
 
-        // Sibling regression guard: onOpenApps starts no create, so its own mode
-        // flip is a different code path and must be left alone by this fix.
+        // Sibling guard: the browse row must not force a mode switch either. It
+        // starts no create, so it is a different code path from the one above,
+        // but the outcome it has to avoid is the same one — a row that only
+        // opens the library to LOOK at it silently swapping the user's live Chat
+        // conversation to a Code session. iOS's equivalent entry changes no
+        // mode, and the sibling `onOpenLocalAppDetails` handler in the same file
+        // already opens the apps cover with no mode flip.
         val onOpenAppsEnd = source.indexOf("},", createEnd)
         assertTrue("read the wrong file: onOpenApps callback body not found", onOpenAppsEnd > createEnd)
         val onOpenAppsBody = source.substring(createEnd, onOpenAppsEnd)
+        // Comment lines are stripped before the symbol test: the slice spans the
+        // production comment that explains WHY no mode is set there, and the
+        // most natural wording of such a comment names the very symbol this
+        // asserts is absent.
+        val onOpenAppsCode = onOpenAppsBody.lines()
+            .filterNot { it.trimStart().startsWith("//") }
+            .joinToString("\n")
         assertTrue(
-            "sibling onOpenApps callback should be left untouched by the onCreateApp fix",
-            "setConversationMode(SessionMode.Code)" in onOpenAppsBody,
+            "onOpenApps must not force a conversation-mode switch either: the browse row only " +
+                "opens the library to look at it, and forcing SessionMode.Code as a side effect " +
+                "swaps the user's live Chat conversation to a Code session just from browsing",
+            "setConversationMode" !in onOpenAppsCode,
         )
         assertTrue(
             "onOpenApps must reset the library destination via openLibrary(): a library-origin " +

@@ -107,14 +107,44 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
         isDraftShell ? String(localized: "local_apps_draft_card_title") : name
     }
 
+    /// How long a shell can sit unscaffolded before its card stops claiming
+    /// a create is still running.
+    ///
+    /// Sized against what `updatedAt` actually measures, which is NOT "last
+    /// sign of life": the engine writes it twice for a shell — once in
+    /// `set_init_session` (seconds after the record appears) and once in
+    /// `commit_scaffold`, which stops it being a shell at all. Everything in
+    /// between — the kickoff, the whole interview with the user, staging,
+    /// scaffolding, dependency install — moves it not at all. So this window
+    /// has to clear a realistic conversation, not just a machine step, or a
+    /// healthy create gets branded stalled while the user is still typing.
+    private static let draftStalledInterval: TimeInterval = 60 * 60
+
+    /// `true` once a still-unscaffolded shell has sat long enough that
+    /// "Creating…" would be a lie: the create failed, or this client never
+    /// heard back, and nothing else marks that state anywhere in the UI.
+    var isDraftStalled: Bool {
+        isDraftShell && Date().timeIntervalSince(updatedAt) > Self.draftStalledInterval
+    }
+
     /// The secondary line a shell replaces its normal status line with, or
     /// `nil` once the app is formed and its own status applies.
     ///
     /// Returned as an Optional rather than a plain String so each call site
     /// reads `app.draftStatusLine ?? <its own status>` and cannot forget the
     /// shell case by writing only its own branch.
+    ///
+    /// The stalled copy is deliberately NOT a terminal failure
+    /// (`local_apps_workflow_generation_failed`, "Generation Failed"):
+    /// nothing here observed a failure. All that is known is that the shell
+    /// never scaffolded within the window — the create may have died, or the
+    /// interview may simply have been abandoned half-way and be resumable.
+    /// "Setup unfinished" is what is actually true of both.
     var draftStatusLine: String? {
-        isDraftShell ? String(localized: "local_apps_draft_card_subtitle") : nil
+        guard isDraftShell else { return nil }
+        return isDraftStalled
+            ? String(localized: "local_apps_draft_card_subtitle_stalled")
+            : String(localized: "local_apps_draft_card_subtitle")
     }
 
     /// The brief, or `nil` while this app is a shell.

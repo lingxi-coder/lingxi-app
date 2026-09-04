@@ -60,12 +60,22 @@ final class LocalAppsStoreTests: XCTestCase {
     func testPublishedWorkflowBadgesStayTextualAndActionable() {
         let unverified = LocalAppWorkflow.publishedUnverified.statusBadge
         XCTAssertEqual(unverified.systemImageName, "exclamationmark.triangle.fill")
-        XCTAssertEqual(unverified.accessibilityLabel, "local_apps_verification_published_unverified")
+        XCTAssertEqual(
+            unverified.accessibilityLabel,
+            String(localized: "local_apps_verification_published_unverified"))
+        XCTAssertNotEqual(
+            unverified.accessibilityLabel, "local_apps_verification_published_unverified",
+            "the key fell through as itself — it is missing from the catalog")
         XCTAssertEqual(LocalAppWorkflow.publishedUnverified.isPublished, true)
 
         let verified = LocalAppWorkflow.publishedVerified.statusBadge
         XCTAssertEqual(verified.systemImageName, "checkmark.seal.fill")
-        XCTAssertEqual(verified.accessibilityLabel, "local_apps_verification_published_verified")
+        XCTAssertEqual(
+            verified.accessibilityLabel,
+            String(localized: "local_apps_verification_published_verified"))
+        XCTAssertNotEqual(
+            verified.accessibilityLabel, "local_apps_verification_published_verified",
+            "the key fell through as itself — it is missing from the catalog")
         XCTAssertEqual(LocalAppWorkflow.publishedVerified.isPublished, true)
 
         let draft = LocalAppWorkflow.draft.statusBadge
@@ -3081,7 +3091,9 @@ final class LocalAppsStoreTests: XCTestCase {
         /// rendering `local_apps_draft_card_title` to the user.
         func testAShellRendersTheDraftCopyAndHidesItsNameAndBrief() {
             let shell = LocalAppsProtocolAdapter.app(
-                shellRecord(id: "shell", name: "untitled"))
+                shellRecord(
+                    id: "shell", name: "untitled",
+                    updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)))
 
             XCTAssertFalse(shell.scaffolded, "the flag must come off the wire")
             XCTAssertTrue(shell.isDraftShell)
@@ -3103,6 +3115,59 @@ final class LocalAppsStoreTests: XCTestCase {
                 formed.draftStatusLine,
                 "a formed app keeps its own status line — the draft line is the exception")
             XCTAssertEqual(formed.displayBrief, "一个记事本")
+        }
+
+        /// Every terminal create failure used to leave a card that read
+        /// "Creating…" forever: `draftStatusLine` was a pure function of
+        /// `isDraftShell` alone, with no notion of how long it had been
+        /// stuck. A shell whose `updatedAt` is far in the past has not
+        /// scaffolded in any bounded window the create flow itself waits on,
+        /// so its card must say so instead of still claiming to be in
+        /// progress.
+        func testAStalledShellRendersAFailedCopyInsteadOfCreatingForever() {
+            let now = Date().timeIntervalSince1970
+            let freshShell = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "fresh", name: "untitled",
+                    updatedAtMs: UInt64(now * 1_000)))
+            XCTAssertFalse(freshShell.isDraftStalled, "just created — still within the create flow's own window")
+            XCTAssertEqual(
+                freshShell.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"))
+
+            // The healthy path this window must not misread. The engine writes
+            // `updated_at_ms` in `set_init_session` and then not again until
+            // `commit_scaffold` — the entire interview with the user happens
+            // between those two writes with the timestamp frozen — so a shell
+            // half an hour old is routinely a create that is still going.
+            let midInterview = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "interviewing", name: "untitled",
+                    updatedAtMs: UInt64((now - 30 * 60) * 1_000)))
+            XCTAssertFalse(
+                midInterview.isDraftStalled,
+                "a 30-minute-old shell is a normal in-progress interview, not a stall")
+            XCTAssertEqual(
+                midInterview.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"))
+
+            // `shellRecord`'s default `updatedAtMs` (2ms past epoch) is, by
+            // construction, always past the staleness window.
+            let stalledShell = LocalAppsProtocolAdapter.app(
+                shellRecord(id: "stuck", name: "untitled"))
+            XCTAssertTrue(stalledShell.isDraftStalled)
+            XCTAssertEqual(
+                stalledShell.draftStatusLine,
+                String(localized: "local_apps_draft_card_subtitle_stalled"))
+            XCTAssertNotEqual(
+                stalledShell.draftStatusLine, "local_apps_draft_card_subtitle_stalled",
+                "the key fell through as itself — it is missing from the catalog")
+            XCTAssertNotEqual(
+                stalledShell.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"),
+                "a stalled shell must stop claiming to still be in progress")
+            // Nothing here observed a failure, so it must not say one happened.
+            XCTAssertNotEqual(
+                stalledShell.draftStatusLine,
+                String(localized: "local_apps_workflow_generation_failed"),
+                "an unfinished setup is not an observed generation failure")
         }
 
         /// Search matches what the card SHOWS.
@@ -3246,7 +3311,13 @@ final class LocalAppsStoreTests: XCTestCase {
             name: String,
             brief: String,
             scaffolded: Bool,
-            initSessionId: String? = nil
+            initSessionId: String? = nil,
+            // `2`ms-past-epoch by default, same fixed placeholder every one of
+            // these fixtures used before `LocalAppSummary.isDraftStalled`
+            // existed. A caller exercising that staleness window passes an
+            // explicit value instead — everyone else keeps the old constant,
+            // so this default changes NOTHING for the tests that predate it.
+            updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             AppRecordDto(
                 id: id,
@@ -3254,7 +3325,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 brief: brief,
                 gitEnabled: true,
                 createdAtMs: 1,
-                updatedAtMs: 2,
+                updatedAtMs: updatedAtMs,
                 workflowState: .draft,
                 conversationId: nil,
                 initSessionId: initSessionId,
@@ -3268,11 +3339,12 @@ final class LocalAppsStoreTests: XCTestCase {
         private func shellRecord(
             id: String,
             name: String,
-            initSessionId: String? = nil
+            initSessionId: String? = nil,
+            updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             wireRecord(
                 id: id, name: name, brief: "", scaffolded: false,
-                initSessionId: initSessionId)
+                initSessionId: initSessionId, updatedAtMs: updatedAtMs)
         }
 
         /// An app whose scaffold has landed.
@@ -3905,6 +3977,117 @@ final class LocalAppsStoreTests: XCTestCase {
             """
             bounding the retry adds a give-up path the recursive version never had; it \
             must name the app rather than dropping a spent one-shot landing silently
+            """)
+        // The give-up path used to just report and drop the landing for good.
+        // It must now RESTORE it (before reporting, order does not matter for
+        // correctness but both calls must be present) so a later clearing of
+        // whatever refused the switch for 10s can pick the hand-off back up
+        // instead of losing it permanently.
+        XCTAssertTrue(
+            code.contains("localAppsStore.restoreCreatedAppLanding("),
+            """
+            the give-up path must re-arm the landing via restoreCreatedAppLanding, \
+            not just report an error, or a switch that clears after the retry window \
+            has nothing left to resume the hand-off with
+            """)
+        // `openCreatedAppSession` only has `appID`/`sessionID` in scope here, not
+        // a `CreatedAppLanding` value — the re-arm must rebuild one from them.
+        XCTAssertTrue(
+            code.contains("LocalAppsStore.CreatedAppLanding(appID: appID, initSessionID: sessionID)"),
+            "the restored landing must carry this attempt's own appID/sessionID, not a stale value")
+        // …and re-arm AT MOST ONCE. `landCreatedAppIfReady`'s guard does not
+        // test `projectSwitching`, so an unguarded restore is re-drained by
+        // the `createdAppLanding` sink immediately, starts another 10s window
+        // under the same unchanged refusal, dismisses the user's presented
+        // route again, and repeats forever — the unbounded retry this bound
+        // was added to remove, merely paced.
+        XCTAssertTrue(
+            code.contains("if reArmedCreatedAppLandingID != appID {"),
+            """
+            the re-arm must be latched per app, or restoring the landing turns the \
+            bounded retry back into an endless one
+            """)
+        XCTAssertTrue(
+            code.contains("reArmedCreatedAppLandingID = appID"),
+            "the latch must be set, or the guard above never becomes false")
+    }
+
+    /// The create confirmation sheet decoded `corePackages`, `cacheStatus`,
+    /// `downloadStatus`, `available` and profile `reason` and rendered none
+    /// of them — the sheet showed only family/revision/surface/digest.
+    func testCreateConfirmationSheetRendersRuntimeProfileDependencyFields() throws {
+        let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
+        guard let start = source.range(of: "struct LocalAppCreateConfirmationSheet"),
+              let end = source.range(
+                  of: "private func resolve(_ approved: Bool)",
+                  range: start.upperBound ..< source.endIndex)
+        else {
+            return XCTFail("read the wrong file: LocalAppCreateConfirmationSheet not found")
+        }
+        let body = String(source[start.lowerBound ..< end.lowerBound])
+        for symbol in ["corePackages", "cacheStatus", "downloadStatus", "prompt.runtimeProfile.available"] {
+            XCTAssertTrue(
+                body.contains(symbol),
+                "the create confirmation sheet must render runtime profile's \(symbol)")
+        }
+    }
+
+    /// `rollbackFailedSession` used to drop `pendingInitKickoff` on a failed
+    /// init-session transition with nothing shown for it: the app record
+    /// exists, but the interview brief that was supposed to fire into its
+    /// session is gone and the screen says nothing about it.
+    func testRollbackFailedSessionSurfacesTheDroppedKickoff() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+        guard let start = source.range(of: "private func rollbackFailedSession("),
+              let end = source.range(
+                  of: "private func toggleWorkspacePinned(",
+                  range: start.upperBound ..< source.endIndex)
+        else {
+            return XCTFail("read the wrong file: rollbackFailedSession not found")
+        }
+        let body = String(source[start.lowerBound ..< end.lowerBound])
+        XCTAssertTrue(
+            body.contains("pendingInitKickoff = nil"),
+            "the stale latch must still be dropped on a failed transition")
+        // Through the store's own mutator, NOT `localAppsStore.errorMessage = …`:
+        // the property is `private(set)` (LocalAppsStore.swift), so assigning it
+        // from RootView.swift does not compile at all.
+        XCTAssertTrue(
+            body.contains("localAppsStore.reportCreatedAppLandingExhausted()"),
+            """
+            dropping the create kickoff on a failed session transition must not be \
+            silent: the same copy the bounded-retry give-up path uses belongs here too
+            """)
+        XCTAssertFalse(
+            body.contains("localAppsStore.errorMessage ="),
+            "errorMessage is private(set); assigning it from this file does not compile")
+    }
+
+    /// A restored landing (see the assertion above) that is NOT drained on the
+    /// spot — `landCreatedAppIfReady`'s guard also refuses while the turn is
+    /// streaming or the widget-setup sheet is up — has to be re-checked by
+    /// something later, and a switch refusal clearing is exactly that moment.
+    ///
+    /// Note what this sink is not: it is not what stops the re-arm looping.
+    /// The guard does not test `projectSwitching` at all, so the
+    /// `createdAppLanding` sink normally re-drains the restore immediately;
+    /// the per-app latch asserted above is what makes that terminate.
+    func testProjectSwitchingClearingRetriesARestoredCreatedAppLanding() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+        guard let range = source.range(of: ".onChange(of: projectSwitching) { _, switching in") else {
+            return XCTFail("read the wrong file: the projectSwitching onChange sink was not found")
+        }
+        guard let closeBrace = source.range(of: "\n            }", range: range.upperBound ..< source.endIndex)
+        else {
+            return XCTFail("could not find the end of the projectSwitching onChange sink")
+        }
+        let body = String(source[range.upperBound ..< closeBrace.lowerBound])
+        XCTAssertTrue(
+            body.contains("landCreatedAppIfReady()"),
+            """
+            the projectSwitching sink must retry landCreatedAppIfReady() once switching \
+            clears, or a landing restored by openCreatedAppSession's give-up path is \
+            never picked back up
             """)
     }
 }

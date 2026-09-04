@@ -3110,11 +3110,17 @@ fn desktop_fusion_catalog_row(
 /// install (`TooFewModels{eligible:0}` on every `/fusion` call) even though
 /// the same models work for the ordinary turn loop. When the probe is not
 /// definitive, anthropic rows are kept regardless of the availability map;
-/// every other profile's absence/`false` still means genuinely unavailable.
+/// every other profile's absence/`false` still means genuinely unavailable —
+/// UNLESS the whole probe timed out (`availability_probe_completed ==
+/// false`), in which case an empty map cannot be told apart from "every
+/// non-anthropic provider is uncredentialed" and the availability half of
+/// this filter is skipped entirely rather than fail-closing the whole
+/// Fusion catalog on a transient stall (finding [7]).
 fn filter_fusion_catalog(
     catalog: Vec<fusion::CatalogModel>,
     provider_availability: &std::collections::BTreeMap<String, bool>,
     anthropic_probe_definitive: bool,
+    availability_probe_completed: bool,
     session_model_restriction: Option<&(
         llm_client::model::allowlist::ModelEnforcement,
         Vec<String>,
@@ -3123,6 +3129,16 @@ fn filter_fusion_catalog(
     catalog
         .into_iter()
         .filter(|row| {
+            // Finding [7]: an empty `provider_availability` map means either
+            // "the probe ran and found nothing" (genuinely uncredentialed —
+            // fail closed) or "the whole probe timed out" (unknown — fail
+            // open, same as the sibling `connected_provider_fallback` rule
+            // treats an absent map entry). Without this branch the timeout
+            // case is indistinguishable from the first and drops every
+            // non-anthropic profile's rows for the runtime's lifetime.
+            if !availability_probe_completed {
+                return true;
+            }
             if row.profile == "anthropic" && !anthropic_probe_definitive {
                 return true;
             }
@@ -3410,32 +3426,6 @@ fn desktop_fusion_runtime_config(
     }
 }
 
-struct RejectedFusionExecutor {
-    error: platform_api::FusionError,
-}
-
-#[async_trait::async_trait]
-impl platform_api::FusionExecutor for RejectedFusionExecutor {
-    async fn run(
-        &self,
-        _request: platform_api::FusionRequest,
-        _inherit: platform_api::FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
-    ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-        Err(self.error.clone())
-    }
-
-    // F008: surface the REAL boot-time rejection through Agent(fusion) and
-    // the workflow bridge too — both consult `preflight_error()` before
-    // their `enabled` gate. Without this override the default `None` let
-    // both fall back to the generic "not found"/`Disabled` message, and
-    // §3's "invalid config → InvalidConfiguration" promise held only for
-    // `/fusion` (which calls `run()` directly and hits the `Err` above).
-    fn preflight_error(&self) -> Option<platform_api::FusionError> {
-        Some(self.error.clone())
-    }
-}
-
 /// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves
 /// the effective settings on every call instead of a config frozen at
 /// construction, so a settings-file edit or the design's §11 kill switch
@@ -3452,6 +3442,54 @@ impl fusion::FusionConfigSource for DesktopFusionConfigSource {
     }
 }
 
+/// Finding [14]: wraps the constructed live `FusionOrchestrator` so a
+/// boot-time-invalid `fusion.*` value does NOT pin `RejectedFusionExecutor`
+/// for the rest of the process. `preflight_error()` re-validates FRESH on
+/// every call — mirroring how `FusionOrchestrator::run` /
+/// `agent_surface` / `workflow_fusion_call_cap` already reload the config
+/// per call (F007) — instead of freezing the first boot-time error, so a
+/// user who fixes and saves the settings file recovers within the session
+/// exactly as the F007 doc comment promises ("takes effect on the NEXT run,
+/// not the next process restart"), rather than only after a restart.
+struct DesktopFusionExecutor {
+    inner: fusion::FusionOrchestrator,
+    cfg: DesktopConfig,
+    managed_raw_tiers: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::FusionExecutor for DesktopFusionExecutor {
+    async fn run(
+        &self,
+        request: platform_api::FusionRequest,
+        inherit: platform_api::FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+        self.inner.run(request, inherit, progress).await
+    }
+
+    fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+        self.inner.agent_surface()
+    }
+
+    fn preflight_error(&self) -> Option<platform_api::FusionError> {
+        desktop_fusion_runtime_config(&self.cfg, &self.managed_raw_tiers).err()
+    }
+
+    fn resolve_parent_profile(
+        &self,
+        parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        self.inner
+            .resolve_parent_profile(parent_model, explicit_profile)
+    }
+
+    fn workflow_fusion_call_cap(&self) -> u32 {
+        self.inner.workflow_fusion_call_cap()
+    }
+}
+
 fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
@@ -3461,23 +3499,134 @@ fn desktop_fusion_executor(
     bus: Arc<telemetry::AnalyticsBus>,
     pricing: Arc<cost::PricingCatalog>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
-    // Boot-time validation: an invalid `fusion.*` value pins a
-    // `RejectedFusionExecutor` for this executor's lifetime, same as before
-    // F007 — the LIVE source below still re-validates on every subsequent
-    // call, so a fix-then-save recovers without a restart.
+    // Boot-time validation: surface the FIRST invalid `fusion.*` value
+    // through a log line, but always build the live orchestrator below —
+    // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
+    // re-validate on every subsequent call, so a still-broken file keeps
+    // failing with an up-to-date message while a fixed-then-saved one
+    // recovers without a restart (finding [14]).
     if let Err(error) = desktop_fusion_runtime_config(cfg, managed_raw_tiers) {
-        return Arc::new(RejectedFusionExecutor { error });
+        tracing::warn!(
+            error = %error,
+            "fusion.* settings failed boot-time validation; \
+             /fusion will report this until the settings file is fixed"
+        );
     }
     let config_source: Arc<dyn fusion::FusionConfigSource> =
         Arc::new(DesktopFusionConfigSource {
             cfg: cfg.clone(),
             managed_raw_tiers: managed_raw_tiers.to_vec(),
         });
-    Arc::new(
+    let inner =
         fusion::FusionOrchestrator::new(spawner, side_query, config_source, Arc::new(catalog))
             .with_bus(bus)
-            .with_price_book(Arc::new(DesktopFusionPriceBook { catalog: pricing })),
-    )
+            .with_price_book(Arc::new(DesktopFusionPriceBook { catalog: pricing }));
+    Arc::new(DesktopFusionExecutor {
+        inner,
+        cfg: cfg.clone(),
+        managed_raw_tiers: managed_raw_tiers.to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod desktop_fusion_executor_boot_test {
+    use super::*;
+
+    /// Never actually called: `preflight_error()` re-validates settings
+    /// directly and must not spawn a panel or issue a side query.
+    struct UnreachableSpawner;
+    #[async_trait::async_trait]
+    impl platform_api::subagent_spawn::SubagentSpawner for UnreachableSpawner {
+        async fn spawn(
+            &self,
+            _request: platform_api::subagent_spawn::SubagentSpawnRequest,
+            _inherit: platform_api::subagent_spawn::SubagentInheritance,
+        ) -> Result<
+            platform_api::subagent_spawn::SubagentResult,
+            platform_api::subagent_spawn::SubagentSpawnError,
+        > {
+            panic!("preflight_error() must not spawn a panel");
+        }
+    }
+
+    struct UnreachableSideQuery;
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for UnreachableSideQuery {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            panic!("preflight_error() must not issue a side query");
+        }
+    }
+
+    /// Finding [14]: a `fusion.*` value that is invalid only on the MERGED
+    /// view (passes per-file validation, fails `FusionRuntimeConfig::from_settings`)
+    /// pins the boot-time `InvalidConfiguration` — before this fix, in a
+    /// frozen `RejectedFusionExecutor` for the executor's whole lifetime.
+    /// This test proves the fix: after the SAME executor is constructed
+    /// once, correcting the settings file and calling `preflight_error()`
+    /// again (no restart, no re-construction) must recover to `None`,
+    /// exactly as `DesktopFusionExecutor`'s doc comment now promises.
+    #[test]
+    fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        // Passes FusionSettingsJson::validate() per-file (no stage field is
+        // present alongside totalTimeoutMs in this same file), but fails the
+        // MERGED-view stage-sum check in FusionRuntimeConfig::from_settings:
+        // the default stage sum is 600_000 + 120_000*2 + 180_000 = 1_020_000
+        // > 500_000.
+        std::fs::write(
+            lingxi_home.join("settings.json"),
+            r#"{"fusion":{"totalTimeoutMs":500000}}"#,
+        )
+        .unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            ..DesktopConfig::default()
+        };
+
+        let executor = desktop_fusion_executor(
+            Arc::new(UnreachableSpawner),
+            Arc::new(UnreachableSideQuery),
+            &cfg,
+            &[],
+            Vec::new(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+        );
+
+        let boot_error = executor
+            .preflight_error()
+            .expect("the invalid merged config must surface as a preflight error");
+        let platform_api::FusionError::InvalidConfiguration(msg) = boot_error else {
+            panic!("expected InvalidConfiguration, got {boot_error:?}");
+        };
+        assert!(
+            msg.contains("must not exceed fusion.totalTimeoutMs"),
+            "got: {msg}"
+        );
+
+        // Fix-then-save: raise totalTimeoutMs above the stage sum. Same
+        // `executor` instance — no restart, no re-construction.
+        std::fs::write(
+            cfg.lingxi_home.join("settings.json"),
+            r#"{"fusion":{"totalTimeoutMs":1500000}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.preflight_error(),
+            None,
+            "a fixed-then-saved settings file must recover within the same \
+             session, not only after a process restart"
+        );
+    }
 }
 
 /// Assemble the desktop builtin tool set.
@@ -8096,12 +8245,25 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         // no machine credentials", and env is the other half of that.
         cfg.isolated_credential_storage,
     );
-    let availability_rows =
+    // Finding [7]: distinguish "the probe ran and found nothing" from "the
+    // probe never completed" (a 5s timeout, e.g. a slow/contended macOS
+    // keychain). `provider_availability` is otherwise empty in BOTH cases,
+    // and `filter_fusion_catalog`'s `unwrap_or(false)` cannot tell them
+    // apart — on the timeout path every non-anthropic profile reads as
+    // "genuinely uncredentialed" and the whole Fusion catalog for that
+    // profile is dropped for the runtime's lifetime, even though the
+    // ordinary turn loop routes the same profile fine on the same
+    // credentials. `availability_probe_completed` lets the Fusion filter
+    // skip its availability half instead of fail-closing on a transient
+    // stall (mirrors the sibling `connected_provider_fallback` rule at
+    // line ~5898, which already treats an unknown provider as "don't
+    // reroute" rather than "disconnected").
+    let (availability_rows, availability_probe_completed) =
         match tokio::time::timeout(std::time::Duration::from_secs(5), availability_probe).await {
-            Ok(rows) => rows,
+            Ok(rows) => (rows, true),
             Err(_) => {
                 tracing::warn!("provider availability probe timed out; continuing engine startup");
-                Vec::new()
+                (Vec::new(), false)
             }
         };
     let mut provider_availability: std::collections::BTreeMap<String, bool> = availability_rows
@@ -8396,6 +8558,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         fusion_catalog,
         &provider_availability,
         anthropic_probe_definitive,
+        availability_probe_completed,
         session_model_restriction.as_ref(),
     );
 
@@ -15998,7 +16161,7 @@ mod tests {
         let mut availability = std::collections::BTreeMap::new();
         availability.insert("anthropic".to_string(), true);
         availability.insert("openai".to_string(), false);
-        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].profile, "anthropic");
     }
@@ -16012,7 +16175,7 @@ mod tests {
         let catalog = vec![fusion_catalog_row("anthropic", "claude-sonnet-4-6")];
         let mut availability = std::collections::BTreeMap::new();
         availability.insert("anthropic".to_string(), false);
-        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
         assert!(filtered.is_empty(), "got: {filtered:?}");
     }
 
@@ -16036,7 +16199,7 @@ mod tests {
         // is reachable via `LINGXI_API_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`.
         availability.insert("anthropic".to_string(), false);
         availability.insert("openai".to_string(), false);
-        let filtered = filter_fusion_catalog(catalog, &availability, false, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, false, true, None);
         assert_eq!(filtered.len(), 2, "got: {filtered:?}");
         assert!(filtered.iter().all(|row| row.profile == "anthropic"));
         // openai is still genuinely dropped — the blindness guard is
@@ -16050,8 +16213,38 @@ mod tests {
     fn filter_fusion_catalog_drops_rows_missing_from_availability_map() {
         let catalog = vec![fusion_catalog_row("groq", "llama-3.3-70b-versatile")];
         let availability = std::collections::BTreeMap::new();
-        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
         assert!(filtered.is_empty(), "got: {filtered:?}");
+    }
+
+    /// Finding [7]: an empty `provider_availability` map produced by a
+    /// TIMED-OUT probe (`availability_probe_completed: false`) must NOT be
+    /// treated the same as a completed probe finding nothing — that reading
+    /// dropped every non-anthropic profile's rows for the runtime's
+    /// lifetime even though the ordinary turn loop routes the same profile
+    /// fine on the same credentials (e.g. a locked/contended macOS keychain
+    /// blowing the 5s budget on an openai-parent session). When the probe
+    /// did not complete, every row must survive the availability half of
+    /// the filter (the managed-allowlist half still applies).
+    #[test]
+    fn filter_fusion_catalog_keeps_every_row_when_the_availability_probe_timed_out() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+            fusion_catalog_row("deepseek", "deepseek-v4-pro"),
+        ];
+        // The probe timed out: no rows were ever produced, so the map is
+        // empty exactly as it would be for "every provider is genuinely
+        // uncredentialed" -- `availability_probe_completed: false` is the
+        // only signal telling the two cases apart.
+        let availability = std::collections::BTreeMap::new();
+        let filtered = filter_fusion_catalog(catalog, &availability, true, false, None);
+        assert_eq!(
+            filtered.len(),
+            3,
+            "a timed-out probe must not empty the catalog for every \
+             non-anthropic profile: got {filtered:?}"
+        );
     }
 
     /// F011 item 1 (managed allowlist half, G009-adjacent): a managed
@@ -16073,7 +16266,7 @@ mod tests {
             overrides: std::collections::BTreeMap::new(),
         };
         let restriction = (enforcement, vec!["claude-sonnet-4-6".to_string()]);
-        let filtered = filter_fusion_catalog(catalog, &availability, true, Some(&restriction));
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, Some(&restriction));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model, "claude-sonnet-4-6");
     }
@@ -16087,7 +16280,7 @@ mod tests {
         ];
         let mut availability = std::collections::BTreeMap::new();
         availability.insert("anthropic".to_string(), true);
-        let filtered = filter_fusion_catalog(catalog, &availability, true, None);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
         assert_eq!(filtered.len(), 2);
     }
 

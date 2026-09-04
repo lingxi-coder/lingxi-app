@@ -910,8 +910,21 @@ impl FusionSettingsJson {
             ("fusion.analystTimeoutMs", self.analyst_timeout_ms),
             ("fusion.synthesizerTimeoutMs", self.synthesizer_timeout_ms),
         ] {
+            // Finding [15]: same per-file hazard the stage-SUM check below
+            // is deliberately gated against — a tier that sets a stage
+            // field but not `totalTimeoutMs` has no opinion on the total;
+            // it may be raised in a DIFFERENT tier. Defaulting `total` to
+            // the runtime's restrictive 1_200_000 here (unconditionally,
+            // before this gate) rejected a file whose merged view is fine
+            // (e.g. this tier setting `panelTotalTimeoutMs: 1500000` while
+            // a user tier sets `totalTimeoutMs: 2400000`), and
+            // `read_layer_or_skip` silently dropped that tier's unrelated
+            // `permissions`/`hooks`/`model` along with it.
+            // `FusionRuntimeConfig::from_settings` re-checks the identical
+            // per-stage-vs-total invariant on the MERGED view and fails
+            // only the fusion run, which is the right blast radius.
             if let Some(stage) = value {
-                if stage > total {
+                if self.total_timeout_ms.is_some() && stage > total {
                     return Err(SchemaViolation(format!(
                         "{name} must not exceed fusion.totalTimeoutMs"
                     )));
@@ -1200,6 +1213,28 @@ mod tests {
         // permissions/hooks/model, not just the fusion block.
         let settings: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no totalTimeoutMs present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_stage_field_alone_above_the_default_total_does_not_trip_the_per_stage_bound_check() {
+        // Finding [15]: the OLDER per-stage `stage > total` check (three
+        // lines above the stage-sum check the two tests above pin) still
+        // substitutes the runtime's default `total` (1_200_000) for a file
+        // that sets no `totalTimeoutMs` of its own, with no presence gate.
+        // A project-tier file that raises ONE stage timeout above 20
+        // minutes — e.g. `panelTotalTimeoutMs: 1500000`, valid under a user
+        // tier's `totalTimeoutMs: 2400000` — has no opinion on the total; it
+        // may be raised in a DIFFERENT tier, exactly like the stage-SUM
+        // check two tests above already protects against. Filling in the
+        // restrictive 1_200_000 default here rejects this file on its own
+        // even though the merged config is perfectly valid, and
+        // `read_layer_or_skip` then silently drops the whole tier's
+        // unrelated permissions/hooks/model along with it.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1500000}}"#).unwrap();
         settings
             .validate()
             .expect("no totalTimeoutMs present in this file — must not be rejected");
@@ -2088,9 +2123,37 @@ mod tests {
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":0}}"#).unwrap();
         assert!(zero_total.validate().is_err());
 
-        let exceeds_default_total: SettingsJson =
+        // Finding [15]: a stage field set ALONE, above the runtime's
+        // default `totalTimeoutMs` (1_200_000), must NOT be rejected by
+        // this per-FILE validator — this file has no opinion on the total;
+        // it may be raised in a different tier (see
+        // `fusion_stage_field_alone_above_the_default_total_does_not_trip_the_per_stage_bound_check`).
+        // Only `FusionRuntimeConfig::from_settings`, on the merged view,
+        // may reject this.
+        let stage_alone_exceeds_default_total: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1200001}}"#).unwrap();
-        assert!(exceeds_default_total.validate().is_err());
+        assert!(stage_alone_exceeds_default_total.validate().is_ok());
+        // The SAME idea, with `totalTimeoutMs` present in this same file (so
+        // this file DOES have an opinion on the total), is still rejected —
+        // by the per-stage branch specifically. `panelIdleTimeoutMs` is used
+        // here (not `panelTotalTimeoutMs`/`analystTimeoutMs`/
+        // `synthesizerTimeoutMs`) because those three also feed the
+        // stage-SUM check just below (F004): a fixture built from any of
+        // them would be rejected by either branch, so `is_err()` would stop
+        // isolating the per-stage branch this test exists to pin.
+        // `panelIdleTimeoutMs` is not part of that sum, so only the
+        // per-stage branch can produce this Err.
+        let exceeds_default_total: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"totalTimeoutMs":1200000,"panelIdleTimeoutMs":1200001}}"#,
+        )
+        .unwrap();
+        let err = exceeds_default_total
+            .validate()
+            .expect_err("panelIdleTimeoutMs 1200001 > totalTimeoutMs 1200000");
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("panelIdleTimeoutMs")),
+            "expected the per-stage branch to name panelIdleTimeoutMs, got {err:?}"
+        );
 
         let retries: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();

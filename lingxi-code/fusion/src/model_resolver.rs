@@ -371,19 +371,22 @@ fn resolve_analyst(
     // and the top-ranked judge, so a key that only breaks TIES at
     // `quality_rank` never fires for that shape and the analyst stays
     // `panels[0]` — the exact defect F011 names. This key therefore sits
-    // BEFORE `quality_rank` (right after the parent-profile key): among
-    // schema-capable judges, a non-panelist always wins over a panelist, even
-    // at a lower quality tier. Judge quality stays bounded by the
-    // `judge_eligible` (and `structured_output`) gate above, so this cannot
-    // drop the analyst onto an unqualified model; a panelist is picked only
-    // when every eligible schema-capable judge is a panelist (no alternative
-    // exists at all).
+    // BEFORE the parent-profile key: on the flagship cross-provider shape
+    // every parent-profile judge is typically already a panelist while a
+    // non-parent judge is not, so ranking the parent-profile key first would
+    // make it win outright and the is_panelist key would never get a chance
+    // to fire (round-2 finding [3]). The parent-profile key still applies as
+    // a tie-break AMONG equally (non-)panelist judges. Judge quality stays
+    // bounded by the `judge_eligible` (and `structured_output`) gate above,
+    // so this cannot drop the analyst onto an unqualified model; a panelist
+    // is picked only when every eligible schema-capable judge is a panelist
+    // (no alternative exists at all).
     with_schema.sort_by(|a, b| {
         let a_parent = u8::from(a.profile == request.parent_profile);
         let b_parent = u8::from(b.profile == request.parent_profile);
-        b_parent
-            .cmp(&a_parent)
-            .then(u8::from(is_panelist(a)).cmp(&u8::from(is_panelist(b))))
+        u8::from(is_panelist(a))
+            .cmp(&u8::from(is_panelist(b)))
+            .then(b_parent.cmp(&a_parent))
             .then(b.hints.quality_rank.cmp(&a.hints.quality_rank))
             .then(a.hints.cost_class.cmp(&b.hints.cost_class))
             .then(a.hints.latency_class.cmp(&b.hints.latency_class))
@@ -945,6 +948,50 @@ mod tests {
         let analyst =
             resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &panels, &catalog).unwrap();
         assert_eq!(analyst.model, "opus");
+    }
+
+    #[test]
+    fn resolve_analyst_prefers_non_parent_non_panelist_over_parent_panelist() {
+        // Round-2 finding [3]: the parent-profile key was sorted BEFORE the
+        // is_panelist key, so on the flagship cross-provider shape (every
+        // parent-profile judge already a panelist, a non-parent non-panelist
+        // judge available) the parent key wins outright and is_panelist
+        // never gets a chance to fire -- the analyst stays panels[0],
+        // grading its own panel answer. req()'s parent_profile is
+        // "anthropic" with cross_provider: true.
+        let catalog = vec![
+            hinted(
+                "anthropic",
+                "claude-opus-5",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "openai",
+                "gpt-5.6-terra",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+        ];
+        // The only anthropic judge is already on the panel; the openai judge
+        // is not.
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-opus-5".into(),
+        }];
+        let analyst =
+            resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &panels, &catalog).unwrap();
+        assert_eq!(
+            analyst.model, "gpt-5.6-terra",
+            "a non-parent, non-panelist judge must be preferred over a \
+             parent-profile judge that is already on the panel, even though \
+             the parent-profile judge outranks it -- otherwise the analyst \
+             grades its own panel answer"
+        );
     }
 
     #[test]

@@ -287,6 +287,19 @@ pub type InitSessionMinter = dyn Fn(
 ///   conversation is not the mistake this gate exists to catch; what it
 ///   catches is building, installing into, running or driving a workspace
 ///   that has no source tree yet.
+/// - `runtime_profiles` / `template_catalog` / `validate_template_selection`
+///   / `resolve_template_selection` / `stage_create` — the create-flow
+///   orientation and staging steps that run *before* a template is
+///   materialized; refusing them would gate the same way out as `scaffold`.
+/// - `validate_mcp_proposal` / `approve_mcp_proposal` — the `create`
+///   surface's own pre-scaffold branch: a brand-new app is proposed and
+///   confirmed as `create_without_mcp` through these two before any source
+///   tree exists (see `load_create_proposal_context`'s staged MCP flow
+///   context, written for exactly this branch). `qa_mcp_candidate` and
+///   `promote_mcp_candidate` are deliberately NOT here: both require an
+///   `Approved`-or-later candidate journal plus an active build id, and an
+///   unscaffolded app has no build — so their true operating window starts
+///   only after `scaffold`, unlike the two above.
 const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "scaffold",
     "list",
@@ -299,8 +312,6 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "stage_create",
     "validate_mcp_proposal",
     "approve_mcp_proposal",
-    "qa_mcp_candidate",
-    "promote_mcp_candidate",
 ];
 
 /// Stable machine-readable prefix on the shell gate's refusal.
@@ -1378,7 +1389,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "stage_create",
-                "Prepare isolated create staging from a Host-validated selection, persist the user-confirmed display name and brief plus optional structured design evidence, and return the install-before-build dependency_input_sha256. The name and brief staged here are authoritative for the rest of create: the native create confirmation sheet renders them and LocalAppScaffold commits them, never a caller-echoed value. This operation never publishes a receipt or commits a Manifest.",
+                "Prepare isolated create staging from a Host-validated selection, persist the user-confirmed display name and brief plus optional structured design evidence and MCP intent, and return the install-before-build dependency_input_sha256. The name, brief and mcp_intent staged here are authoritative for the rest of create: the native create confirmation sheet renders name/brief and LocalAppScaffold commits all three onto the record, never a caller-echoed value. This operation never publishes a receipt or commits a Manifest.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
@@ -1386,7 +1397,11 @@ impl LocalAppsMcpTransport {
                     "quality_level":{"enum":["fast","balanced","thorough"]},
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed for this app."},
                     "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
-                    "design_spec":{"type":"object","description":"Optional structured design evidence to bind into the staged create candidate and later native approval contract."}
+                    "design_spec":{"type":"object","description":"Optional structured design evidence to bind into the staged create candidate and later native approval contract."},
+                    "mcp_intent":{"type":"object","description":"Outcome of asking the user, during the interview, whether to set up MCP for this app. Omit when the interview did not run. {\"status\":\"declined\"} records that it was asked and refused; {\"status\":\"requested\",\"services\":[...]} records the concrete services the user asked for, drawn from LocalAppTemplateCatalog's mcpSuggestions.","properties":{
+                        "status":{"enum":["declined","requested"]},
+                        "services":{"type":"array","minItems":1,"maxItems":local_apps::service::MAX_MCP_INTENT_SERVICES,"items":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES}}
+                    },"required":["status"],"additionalProperties":false}
                 },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level","name","brief"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -1400,7 +1415,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "approve_mcp_proposal",
-                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP.",
+                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP. The create branch then BLOCKS for up to 5 minutes on a native user approval sheet before this call returns. It can fail with `user denied the Local App create proposal` (stop; the user said no), `approval_pending: this Local App already has a pending approval` (do not retry; a sheet is already outstanding), `native Local App approval was cancelled`, or `native Local App approval timed out` (safe to retry once, after re-confirming with the user).",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
@@ -1435,7 +1450,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name and one-line brief the Host commits are the ones staged through `LocalAppStageCreate`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name, one-line brief and MCP intent the Host commits are the ones staged through `LocalAppStageCreate`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name staged through `LocalAppStageCreate`; the Host commits the staged value."},
@@ -2282,12 +2297,13 @@ impl LocalAppsMcpTransport {
                     if !record.scaffolded {
                         return Ok(Self::tool_error(format!(
                             "{SHELL_GATE_CODE}: app `{app_id}` has no shape yet. \
-                             Confirm what the user wants first, then use the `Skill` tool to \
-                             start `lingxi-local-app:create-local-app` (that exact, \
-                             plugin-qualified name; the bare name does not resolve) — it runs \
-                             the unified create flow, raises one native confirmation, and only \
+                             Confirm what the user wants first, then get the guided create flow \
+                             `lingxi-local-app:create-local-app` (that exact, plugin-qualified \
+                             name; the bare name does not resolve) running — with the `Skill` \
+                             tool yourself if you hold it, otherwise by asking the calling agent \
+                             or the user to run it. It raises one native confirmation and only \
                              then lands `LocalAppScaffold` with the name, brief and shape. Do \
-                             not call `LocalAppScaffold` directly."
+                             not call `LocalAppScaffold` directly yourself."
                         )));
                     }
                 }
@@ -4057,7 +4073,9 @@ mod tests {
             .map(|(tools, _)| tools)
             .expect("builder.md must have a `tools:` list followed by `skills:`");
         assert!(
-            tools_block.lines().any(|line| line.trim() == "- LocalAppManifest"),
+            tools_block
+                .lines()
+                .any(|line| line.trim() == "- LocalAppManifest"),
             "builder.md's tools: list must grant LocalAppManifest, or the data-collection \
              declaration the formal contract and create-local-app/SKILL.md both require is \
              impossible for the one agent that writes App-managed source: {tools_block}"
@@ -4072,8 +4090,7 @@ mod tests {
     /// because no collection was ever declared.
     #[test]
     fn build_workflow_create_branch_requires_manifest_declaration_before_source() {
-        let source =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let build_call = source
             .lines()
             .find(|line| line.contains("Call LocalAppScaffold with app_id="))
@@ -4085,8 +4102,10 @@ mod tests {
              them: {build_call}"
         );
         assert!(
-            build_call.contains("Before writing any source that reads or writes a data \
-             collection"),
+            build_call.contains(
+                "Before writing any source that reads or writes a data \
+             collection"
+            ),
             "the manifest declaration must be ordered BEFORE writing source, not left as an \
              unordered mention the model can defer past the write it is meant to gate: \
              {build_call}"
@@ -4104,8 +4123,7 @@ mod tests {
     /// crate, not here.
     #[test]
     fn build_workflow_designer_prompt_carries_the_confirmed_spec() {
-        let source =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let designer_call = source
             .lines()
             .find(|line| line.contains("agentType: 'designer'"))
@@ -5324,8 +5342,7 @@ mod tests {
             .expect("create");
         let structured = result.structured_content.expect("structured");
         assert!(
-            structured.get("init_session_id").is_none()
-                || structured["init_session_id"].is_null(),
+            structured.get("init_session_id").is_none() || structured["init_session_id"].is_null(),
             "a failed mint must not fabricate an init_session_id: {structured}"
         );
         let next_step = structured["next_step"].as_str().expect("next_step string");
@@ -5735,7 +5752,7 @@ mod tests {
         .expect("write build receipt");
 
         service
-            .commit_scaffold(&shell.id, "Gate Fixture", "a gate fixture app", None)
+            .commit_scaffold(&shell.id, "Gate Fixture", "a gate fixture app", None, None)
             .await
             .expect("commit formed fixture")
     }

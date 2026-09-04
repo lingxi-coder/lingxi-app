@@ -405,8 +405,11 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
         (false, None, None) => Err(AppError::InvalidRequest(
             "this app has no runtime profile yet — it was created as an empty shell and nothing \
              has been scaffolded into its workspace. Confirm the app name and runtime profile \
-             with the user, then call LocalAppScaffold to bind the profile and lay the scaffold \
-             down. Building only becomes possible after that."
+             with the user, then get the guided create flow lingxi-local-app:create-local-app \
+             running — with the Skill tool yourself if you hold it, otherwise by asking the \
+             calling agent or the user to run it — which lands LocalAppScaffold with the name, \
+             brief and shape. Do not call LocalAppScaffold directly yourself. Building only \
+             becomes possible after that."
                 .into(),
         )),
         (false, _, Some(binding)) => Err(AppError::StorageCorrupt(format!(
@@ -842,9 +845,17 @@ pub(crate) fn scaffold_workspace_initialized(
 /// no surface, and touches nothing but `workspace/LINGXI.md`". So at landing
 /// time every top-level entry other than `.lingxi/` and `LINGXI.md` was
 /// necessarily written AFTER creation and BEFORE the user confirmed anything —
-/// which is precisely what must not reach the real app. (`node_modules` is the
-/// third: it is written by the host's own background install, not by the
-/// agent.)
+/// which is precisely what must not reach the real app.
+///
+/// `node_modules` is the third, but unlike the other two it is currently a
+/// no-op guard, not a live one: `install_dependencies` is absent from
+/// `SHELL_ALLOWED_OPERATIONS`, so nothing can install into an unscaffolded
+/// shell's workspace before this wipe runs, and every production first
+/// scaffold lands via `local_apps_host.rs`'s `land_scaffold` running BEFORE
+/// its own dependency install — there is nothing under `node_modules` here
+/// to preserve. The entry is kept defensively for the day a create path
+/// installs ahead of scaffold; re-installing a byte-identical locked tree
+/// would then cost real device minutes for nothing.
 ///
 /// ⛔ Do NOT restate this as "the preserved set is the host-owned set". The
 /// invariant runs in ONE direction only:
@@ -872,8 +883,11 @@ const FIRST_SCAFFOLD_PRESERVED: &[&str] = &[
     // The workspace contract. The caller rewrites it right after this returns;
     // keeping it means the workspace is never momentarily without one.
     "LINGXI.md",
-    // The installed dependency tree. Re-installing it costs minutes on device
-    // and it is byte-identical for every app built from the same locked set.
+    // The installed dependency tree, IF one is ever present here (see the
+    // doc comment above: no production path installs before a first
+    // scaffold today, so this is currently a defensive no-op). Re-installing
+    // it costs minutes on device and it is byte-identical for every app
+    // built from the same locked set.
     "node_modules",
 ];
 

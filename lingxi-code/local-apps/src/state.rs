@@ -98,6 +98,7 @@ impl AppState {
                 name,
                 brief,
                 workflow_model: None,
+                mcp_intent: None,
                 git_enabled,
                 init_session_id: None,
                 created_at_ms: now_ms,

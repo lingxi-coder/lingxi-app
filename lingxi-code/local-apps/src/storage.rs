@@ -958,38 +958,31 @@ impl ScaffoldRecoveryHandle {
                 AppError::StorageCorrupt("scaffold recovery journal disappeared".into())
             })?;
         restore_app_snapshot(&self.root, &journal)?;
+        let backup =
+            rooted_fs::checked_join(&self.root, &scaffold_recovery_backup_rel(&self.backup_name))
+                .map_err(|error| AppError::from_fs("resolve scaffold recovery backup", &error))?;
+        // Remove the JOURNAL first, matching this file's own recovery-path
+        // rollback (`recover_scaffold_transaction_locked`). `commit`'s
+        // opposite (backup-first) order is safe only because a repeat lands
+        // in the `scaffold_commit_is_durable == true` branch, which never
+        // restores; rollback has no such branch. Removing the backup first
+        // here means a `remove_dir_all` that fails PART WAY leaves a
+        // TRUNCATED backup still named by a live journal, and the next
+        // `load_all` would wipe the app we just restored correctly and copy
+        // that partial tree over it — `validate_snapshot_tree` only rejects
+        // symlinks, so nothing catches it. A backup left behind by a failed
+        // removal is merely unreachable disk, reclaimed by
+        // `sweep_orphaned_scaffold_backups` once the app is deleted; the
+        // error is propagated (not warned) so the caller still learns.
         remove_scaffold_recovery_journal(&self.root, &self.app_id).map_err(|error| {
             AppError::Io(format!(
                 "remove scaffold recovery journal {}: {error}",
                 journal_path.display()
             ))
         })?;
-        let backup =
-            rooted_fs::checked_join(&self.root, &scaffold_recovery_backup_rel(&self.backup_name))
-                .map_err(|error| AppError::from_fs("resolve scaffold recovery backup", &error))?;
-        if let Err(error) = remove_owned_path(&backup) {
-            tracing::warn!(
-                app_id = %self.app_id,
-                path = %backup.display(),
-                error = %error,
-                "scaffold backup cleanup deferred after rollback"
-            );
-        }
+        remove_owned_path(&backup)?;
         Ok(())
     }
-}
-
-/// Recover a pending first-scaffold transaction before a listed app is read.
-/// The caller is normally [`load_all`], which already holds the index lock;
-/// this function takes the app build lock itself for cross-process safety.
-pub fn recover_scaffold_transaction(root: &Path, index_record: &AppRecord) -> Result<(), AppError> {
-    ids::validate_app_id(&index_record.id)?;
-    let _recovery_lock = lock_scaffold_recovery(root)?;
-    if read_scaffold_recovery_journal(root, &index_record.id)?.is_none() {
-        return Ok(());
-    }
-    let _lock = lock_app_build(root, &index_record.id)?;
-    recover_scaffold_transaction_locked(root, &index_record.id, Some(index_record))
 }
 
 /// Serialize a document the way the repo persists native-feature JSON:
@@ -1122,6 +1115,7 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
     let _recovery_lock = lock_scaffold_recovery(root)?;
     let _lock = lock_index(root)?;
     sweep_trash(root);
+    sweep_orphaned_scaffold_backups(root);
     let index_rel = index_rel();
     let body = match rooted_fs::read_to_string_limited(root, &index_rel, MAX_DOC_BYTES) {
         Ok(body) => body,
@@ -1194,10 +1188,15 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         // A first-scaffold landing is a host transaction whose record commit
         // happens after the manifest/workspace writes. Resolve any durable
         // journal before reading runtime, metadata, or dependency state so a
-        // crash cannot route a half-landed app through the service. The helper
-        // takes the per-app build lock in addition to the index lock, which
-        // also serializes a second engine instance still finishing the same
-        // landing.
+        // crash cannot route a half-landed app through the service.
+        //
+        // r2-failure-paths-08: this call takes NO per-app build lock of its
+        // own — `load_all` already holds the broader index lock (`_lock`
+        // above) for the whole read-modify-write transaction, which already
+        // serializes a second engine instance against this recovery, so an
+        // additional per-app lock here would be redundant. (A per-app build
+        // lock IS required for a caller that recovers a single app WITHOUT
+        // first taking the index lock, such as [`begin_scaffold_recovery`].)
         recover_scaffold_transaction_locked(root, &record.id, Some(&record))?;
 
         let runtime_rel = runtime_rel(&record.id);
@@ -1530,11 +1529,40 @@ pub fn save_dependency_record(
 /// failure AFTER the rename still leaves the id fully out of the `apps/`
 /// namespace; the leftover trash entry is swept at the next load.
 pub fn delete_app_dir(root: &Path, app_id: &str) -> Result<(), AppError> {
-    match trash_app_dir(root, app_id)? {
+    let result = match trash_app_dir(root, app_id)? {
         None => Ok(()),
         Some(trash_path) => std::fs::remove_dir_all(&trash_path)
             .map_err(|error| AppError::Io(format!("remove {}: {error}", trash_path.display()))),
+    };
+    // r1-backlog-scaffold-build-03 / r1-failure-paths-008: create staging for
+    // this app (`.lingxi-build-state/template-candidates/<app_id>/…`) hangs
+    // off the apps DATA ROOT, a sibling of `apps/` — so trashing `apps/<id>`
+    // above never touches it, and nothing else ever reclaims it once the app
+    // is gone. Best-effort only: it is diagnostic litter at this point, never
+    // load-bearing, and must not turn a successful app deletion into an
+    // error.
+    let template_candidates = root
+        .join(".lingxi-build-state")
+        .join("template-candidates")
+        .join(app_id);
+    if let Err(error) = std::fs::symlink_metadata(&template_candidates) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                app_id,
+                path = %template_candidates.display(),
+                error = %error,
+                "stat create-staging leftovers during app deletion"
+            );
+        }
+    } else if let Err(error) = std::fs::remove_dir_all(&template_candidates) {
+        tracing::warn!(
+            app_id,
+            path = %template_candidates.display(),
+            error = %error,
+            "create-staging leftovers cleanup deferred"
+        );
     }
+    result
 }
 
 /// COMMIT POINT of app-directory deletion: atomically rename `apps/<id>` into
@@ -1658,6 +1686,89 @@ pub fn app_id_present_on_disk(root: &Path, app_id: &str) -> bool {
     }
 }
 
+/// Split a scaffold-recovery backup's directory name into the app id that
+/// owns it. `begin_scaffold_recovery` mints the name as
+/// `format!("{app_id}-{}", ids::generate_app_id())`, and `generate_app_id`
+/// always yields exactly 8 lowercase-hex characters — so the suffix is
+/// unambiguous even though `app_id` itself may contain hyphens. Returns
+/// `None` for anything that does not match that shape, so a stray or
+/// hand-placed entry is left untouched rather than guessed at.
+fn parse_scaffold_backup_owner(backup_name: &str) -> Option<String> {
+    if backup_name.len() < 10 {
+        return None;
+    }
+    // `backup_name` is an arbitrary on-disk entry name, not necessarily one
+    // this code minted: `str::split_at` PANICS when the index is not a UTF-8
+    // char boundary, and this runs inside `load_all` ahead of the index read,
+    // so a single stray CJK/emoji-named directory here would take the whole
+    // profile load down. Fail the match instead, as the doc above promises.
+    let cut = backup_name.len() - 8;
+    if !backup_name.is_char_boundary(cut) {
+        return None;
+    }
+    let (prefix, suffix) = backup_name.split_at(cut);
+    if !suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    prefix.strip_suffix('-').map(str::to_string)
+}
+
+/// Best-effort sweep of `apps/.scaffold-recovery` (r1-engine-core-005).
+///
+/// A first-scaffold backup's journal lives INSIDE the app directory it
+/// backs up (`apps/<id>/<journal file>`), while the backup itself lives
+/// outside it, in this sibling directory. Deleting the app therefore
+/// deletes the journal but never this backup, and — because
+/// `recover_scaffold_transaction_locked` above only ever runs for an app id
+/// still present in the index — nothing else ever revisits it again. Reclaim
+/// any backup whose owning app directory no longer exists. Failures are
+/// logged and NEVER fail the load.
+fn sweep_orphaned_scaffold_backups(root: &Path) {
+    let Ok(recovery_dir) = rooted_fs::checked_join(root, &scaffold_recovery_dir_rel()) else {
+        return;
+    };
+    let entries = match std::fs::read_dir(&recovery_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "apps/.scaffold-recovery is unreadable; sweep skipped"
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let backup_name = entry.file_name().to_string_lossy().to_string();
+        let Some(app_id) = parse_scaffold_backup_owner(&backup_name) else {
+            continue;
+        };
+        if !ids::is_valid_app_id(&app_id) {
+            continue;
+        }
+        let Ok(app_dir) = rooted_fs::checked_join(root, &app_dir_rel(&app_id)) else {
+            continue;
+        };
+        if std::fs::symlink_metadata(&app_dir).is_ok() {
+            // The app is still live; its own journal governs this backup,
+            // not this sweep.
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = remove_owned_path(&path) {
+            tracing::warn!(
+                app_id = %app_id,
+                path = %path.display(),
+                error = %error,
+                "orphaned scaffold recovery backup could not be swept; leaving it for the next load"
+            );
+        }
+    }
+}
+
 /// Best-effort sweep of `apps/.trash` (leftovers from removals that failed
 /// or were interrupted after their commit-point rename). Failures are logged
 /// and NEVER fail the load.
@@ -1771,6 +1882,107 @@ mod tests {
             .path()
             .join(scaffold_recovery_journal_rel("scaffold1"))
             .exists());
+    }
+
+    #[test]
+    fn load_all_sweeps_a_scaffold_backup_whose_app_directory_was_deleted() {
+        // r1-engine-core-005: a first-scaffold backup's journal lives INSIDE
+        // the app directory it backs up, while the backup lives outside it
+        // under `apps/.scaffold-recovery/`. Deleting the app takes the
+        // journal with it but leaves the backup behind, and nothing besides
+        // this sweep ever revisits a backup for an app id no longer present.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps/orphan1")).unwrap();
+        std::fs::write(dir.path().join("apps/orphan1/marker.txt"), b"x").unwrap();
+        let lock = lock_app_build(dir.path(), "orphan1").unwrap();
+        let recovery = begin_scaffold_recovery(dir.path(), "orphan1", "formed", "brief").unwrap();
+        // A crash drops the handle without commit/rollback, exactly like the
+        // partial-scaffold recovery test above.
+        std::mem::forget(recovery);
+        drop(lock);
+
+        let recovery_dir = dir.path().join(scaffold_recovery_dir_rel());
+        let backups_before = std::fs::read_dir(&recovery_dir).unwrap().count();
+        assert_eq!(
+            backups_before, 1,
+            "begin_scaffold_recovery must have written exactly one backup"
+        );
+
+        // The app is deleted out from under the backup — its journal (which
+        // lives inside `apps/orphan1/`) goes with it, exactly like a real
+        // `delete_app_dir`.
+        std::fs::remove_dir_all(dir.path().join("apps/orphan1")).unwrap();
+
+        load_all(dir.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_dir(&recovery_dir).unwrap().count(),
+            0,
+            "load_all must sweep a scaffold-recovery backup whose owning app directory is gone"
+        );
+    }
+
+    #[test]
+    fn load_all_survives_a_non_ascii_entry_in_the_scaffold_recovery_dir() {
+        // `sweep_orphaned_scaffold_backups` runs inside `load_all` BEFORE the
+        // index is read, and feeds every directory entry name straight to
+        // `parse_scaffold_backup_owner`. `str::split_at` panics when the cut
+        // is not a UTF-8 char boundary, so a single stray CJK-named entry
+        // used to take the whole profile load down instead of being skipped
+        // (the two sweep tests above only ever use ASCII ids).
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_dir = dir.path().join(scaffold_recovery_dir_rel());
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+        // 18 bytes; byte index 10 (len - 8) lands inside the third character.
+        let stray = "测试目录名字";
+        assert!(
+            !stray.is_char_boundary(stray.len() - 8),
+            "this fixture only exercises the bug if len - 8 is mid-character"
+        );
+        std::fs::create_dir_all(recovery_dir.join(stray)).unwrap();
+
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 0, "empty profile still loads");
+        assert!(
+            recovery_dir.join(stray).exists(),
+            "an entry that does not match the backup name shape must be left untouched"
+        );
+    }
+
+    #[test]
+    fn load_all_keeps_a_scaffold_backup_whose_app_is_still_live() {
+        // The mirror image of the sweep test above: a backup for an app that
+        // still exists (mid in-flight scaffold, journal present) must survive
+        // the sweep untouched — only the per-record recovery path may act on
+        // it, and here that recovers (rolls back) the pending scaffold, so
+        // only the RECORD is what changes; the sweep itself must not have
+        // deleted the backup out from under that recovery.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = AppState::create(
+            "live1".into(),
+            "untitled".into(),
+            "original brief".into(),
+            None,
+            1_700_000_000_000,
+        );
+        app.record.scaffolded = false;
+        save_full(dir.path(), std::slice::from_ref(&app));
+        let layout = crate::manifest::AppLayout::new(dir.path(), app.record.id.clone()).unwrap();
+        layout.initialize().unwrap();
+        let manifest = crate::manifest::AppManifest::for_new_app("live1", "untitled");
+        crate::manifest::save_manifest(&layout, &manifest).unwrap();
+
+        let lock = lock_app_build(dir.path(), "live1").unwrap();
+        let recovery = begin_scaffold_recovery(dir.path(), "live1", "formed", "brief").unwrap();
+        std::mem::forget(recovery);
+        drop(lock);
+
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1, "the live app must still load");
+        assert!(
+            !dir.path().join(scaffold_recovery_journal_rel("live1")).exists(),
+            "the per-record recovery path (not the sweep) must have resolved this journal"
+        );
     }
 
     #[test]

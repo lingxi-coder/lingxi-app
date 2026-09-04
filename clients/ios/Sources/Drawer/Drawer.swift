@@ -339,7 +339,12 @@ struct Drawer: View {
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
     let onNewChat: (String?) -> Void
-    let onSelectAppSession: (String, String) -> Void
+    /// The mode of the SECTION the tapped row lives in — `nil` only when that
+    /// section has no fixed mode. Carried atomically with the tap rather than
+    /// fired separately through `onModeChanged` beforehand: two independent
+    /// scope switches raced the in-flight `projectSwitching` guard, so a tap
+    /// that both entered an app scope AND changed mode was silently refused.
+    let onSelectAppSession: (String, String, WorkspaceSessionMode?) -> Void
     let onNewAppChat: (String) -> Void
     let onModeChanged: ((WorkspaceSessionMode) -> Void)?
     let onToggleWorkspacePinned: (String) -> Void
@@ -375,7 +380,7 @@ struct Drawer: View {
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
         onNewChat: @escaping (String?) -> Void,
-        onSelectAppSession: @escaping (String, String) -> Void = { _, _ in },
+        onSelectAppSession: @escaping (String, String, WorkspaceSessionMode?) -> Void = { _, _, _ in },
         onNewAppChat: @escaping (String) -> Void = { _ in },
         onModeChanged: ((WorkspaceSessionMode) -> Void)? = nil,
         onToggleWorkspacePinned: @escaping (String) -> Void = { _ in },
@@ -904,16 +909,21 @@ struct Drawer: View {
     }
 
     private func selectSession(_ sessionID: String, in scope: ConversationScope) {
-        if let mode = section.sessionMode {
-            onModeChanged?(mode)
-        }
         switch scope {
         case .global:
+            if let mode = section.sessionMode { onModeChanged?(mode) }
             onSelectSession(nil, sessionID)
         case let .project(id):
+            if let mode = section.sessionMode { onModeChanged?(mode) }
             onSelectSession(id, sessionID)
         case let .localApp(id):
-            onSelectAppSession(id, sessionID)
+            // NOT `onModeChanged?` + `onSelectAppSession` as two separate
+            // calls: the mode change is itself a `switchScope` that sets
+            // `projectSwitching = true` synchronously, so the session-select
+            // call right after it was refused whenever this tap also changed
+            // mode. Carried as ONE parameter so the caller can fold both into
+            // a single `switchScope`.
+            onSelectAppSession(id, sessionID, section.sessionMode)
         }
     }
 

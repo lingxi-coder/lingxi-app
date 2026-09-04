@@ -86,4 +86,10 @@
 /// required Chat/Code mode, and the Android/iOS launch configs gained a
 /// session-mode field. Those binding layouts are positional on mobile, so this
 /// is a real major bump.
-pub const CLIENT_PROTOCOL_VERSION: &str = "11.0.0";
+///
+/// Bumped to 12.0.0 for the shared provider model catalog. The protocol adds a
+/// new `ProviderModelCatalog` event and a new `ProviderModelCatalogEntryDto`
+/// record consumed by Android/iOS/Desktop settings and picker filtering. The
+/// JSON addition is wire-additive, but the UniFFI-generated native enums and
+/// records change shape, so mobile bindings version-lock with the host.
+pub const CLIENT_PROTOCOL_VERSION: &str = "12.0.0";

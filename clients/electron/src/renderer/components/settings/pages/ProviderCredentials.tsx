@@ -7,7 +7,12 @@ import { PROVIDERS, providerById } from '../../../../shared/providers';
 import type { ProviderCredentialMetadata } from '../../../bridge/lingxi';
 import type { ProviderConnectionTestResult } from '../../../bridge/lingxi';
 import { isCurrentCredentialTransaction, persistProviderCredentialAndApplyModel } from '../../../bridge/providerCredentials';
-import { modelReference, waitForModelSelection } from '../../../bridge/modelCatalog';
+import {
+  modelCapabilitySummary,
+  modelReference,
+  selectedModelIdsForPickerSettings,
+  waitForModelSelection,
+} from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
 
 /**
@@ -99,6 +104,13 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const selectedProvider = providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
   const statusKind = credentialStatusKind(selectedMetadata);
+  const providerModelCatalog = bridge.desktop.providerModelCatalog ?? [];
+  const providerCatalogEntry = providerModelCatalog.find((entry) => entry.provider_id === selectedProvider.id);
+  const visibility = snapshot?.settings.modelPickerVisibility?.[selectedProvider.id];
+  const selectedModelIds = selectedModelIdsForPickerSettings(
+    providerCatalogEntry?.models.map((model) => model.model_id) ?? [],
+    visibility,
+  );
 
   const mountedRef = useRef(true);
   const transactionGenerationRef = useRef(0);
@@ -282,6 +294,14 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     }
   };
 
+  const writeVisibility = (next: { showInModelPicker?: boolean; visibleModelIds?: string[] }) => {
+    const current = snapshot?.settings.modelPickerVisibility ?? {};
+    void bridge.setModelPickerVisibility({
+      ...current,
+      [selectedProvider.id]: next,
+    });
+  };
+
   const statusMessage = saveError ?? applyError;
   const busy = connecting || modelApplying;
   const transactionLocked = busy || testingConnection;
@@ -299,7 +319,6 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       : connectionTestResult?.reachable
         ? t.warn
         : t.danger;
-
   return (
     <>
       {selectedProviderId === null ? (
@@ -456,6 +475,61 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
               <Icon name="activity" size={13} color="currentColor" stroke={1.8} />
               {testingConnection ? '测试中…' : '测试连接'}
             </button>
+          </Row>
+        )}
+        {selectedProvider.available && (
+          <Row
+            title="对话模型列表"
+            desc={providerCatalogEntry
+              ? `${selectedModelIds.length} / ${providerCatalogEntry.models.length} 个模型可见`
+              : '正在等待共享 Provider 模型目录。'}
+            align="center"
+          >
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: t.text2, fontSize: 12.5 }}>
+              <input
+                type="checkbox"
+                checked={visibility?.showInModelPicker !== false}
+                onChange={(event) => writeVisibility({
+                  showInModelPicker: event.currentTarget.checked,
+                  visibleModelIds: visibility?.visibleModelIds,
+                })}
+              />
+              显示此 Provider
+            </label>
+          </Row>
+        )}
+        {selectedProvider.available && providerCatalogEntry?.models.map((entry) => {
+          const selected = selectedModelIds.includes(entry.model_id);
+          return (
+            <Row
+              key={entry.reference}
+              title={entry.display_name || entry.model_id}
+              desc={[entry.model_id, modelCapabilitySummary(entry)].filter(Boolean).join(' · ')}
+              align="center"
+            >
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: t.text2, fontSize: 12.5 }}>
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={() => {
+                    const base = visibility?.visibleModelIds ?? providerCatalogEntry.models.map((model) => model.model_id);
+                    const next = selected
+                      ? base.filter((modelId) => modelId !== entry.model_id)
+                      : [...base, entry.model_id];
+                    writeVisibility({
+                      showInModelPicker: visibility?.showInModelPicker,
+                      visibleModelIds: [...new Set(next)],
+                    });
+                  }}
+                />
+                在模型列表中显示
+              </label>
+            </Row>
+          );
+        })}
+        {selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0 && (
+          <Row title="提示" desc="当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。" align="center">
+            <Icon name="warning" size={15} color={t.warn} />
           </Row>
         )}
         {selectedProvider.available && (

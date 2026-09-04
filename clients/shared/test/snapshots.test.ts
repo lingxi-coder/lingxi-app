@@ -188,6 +188,15 @@ function validateSettingsDestination(v: unknown): void {
   assert.ok(['user', 'project', 'local'].includes(v as string), `unknown SettingsDestinationDto "${String(v)}"`);
 }
 
+function validateConfigurationAdminCommand(v: unknown): void {
+  const command = rec(v);
+  assert.ok(isString(command['action']));
+  if ('operation_id' in command) assert.ok(isNumber(command['operation_id']));
+  for (const key of ['target', 'scope', 'revision', 'payload_json']) {
+    if (key in command) assert.ok(isString(command[key]));
+  }
+}
+
 function validatePermissionBehavior(v: unknown): void {
   assert.ok(['allow', 'deny', 'ask'].includes(v as string), `unknown PermissionBehaviorDto "${String(v)}"`);
 }
@@ -1753,6 +1762,12 @@ function validateCommand(name: string, v: unknown): void {
       validateMcpScope(o['scope']);
       assert.ok(isString(o['name']));
       break;
+    case 'skill_admin':
+    case 'mcp_admin':
+    case 'plugin_admin':
+    case 'hook_admin':
+      validateConfigurationAdminCommand(o['command']);
+      break;
     case 'audio_response':
       assert.ok(isNumber(o['request_id']));
       validateAudioResult(o['result']);
@@ -1865,7 +1880,8 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(
         isNumber(o['messages_before']) &&
           isNumber(o['messages_after']) &&
-          isNumber(o['bytes_saved']),
+          isNumber(o['bytes_saved']) &&
+          isString(o['summary']),
       );
       break;
     case 'session_started':
@@ -1930,6 +1946,17 @@ function validateEvent(name: string, v: unknown): void {
     case 'model_list':
       assert.ok(Array.isArray(o['models']) && isString(o['current']));
       if (o['details'] !== undefined) assert.ok(Array.isArray(o['details']));
+      break;
+    case 'provider_model_catalog':
+      assert.ok(Array.isArray(o['providers']));
+      for (const provider of o['providers'] as unknown[]) {
+        const entry = rec(provider);
+        assert.ok(
+          isString(entry['provider_id']) &&
+            isString(entry['provider_label']) &&
+            Array.isArray(entry['models']),
+        );
+      }
       break;
     case 'model_changed':
       assert.ok(isString(o['model']));
@@ -2180,6 +2207,26 @@ function validateEvent(name: string, v: unknown): void {
     case 'audio_request':
       assert.ok(isNumber(o['request_id']));
       validateAudioOp(o['op']);
+      break;
+    case 'configuration_operation':
+      assert.ok(['skill', 'mcp', 'plugin', 'hook'].includes(o['domain'] as string));
+      assert.ok(isNumber(o['operation_id']));
+      assert.ok(['started', 'progress', 'succeeded', 'failed'].includes(o['status'] as string));
+      assert.ok(['applied', 'restart_required', 'not_applicable'].includes(o['effect'] as string));
+      if ('message' in o) assert.ok(isString(o['message']));
+      if ('details_json' in o) assert.ok(isString(o['details_json']));
+      break;
+    case 'skill_catalog':
+      assert.ok(isString(o['catalog_json']));
+      break;
+    case 'skill_document':
+      assert.ok(isString(o['document_json']));
+      break;
+    case 'mcp_configuration_snapshot':
+      assert.ok(isString(o['snapshot_json']));
+      break;
+    case 'plugin_catalog':
+      assert.ok(isString(o['catalog_json']));
       break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);

@@ -115,6 +115,17 @@ final class LocalAppsStore {
     /// longer possible either: a shell create sends `brief: ""`, so every
     /// concurrent shell would match every other one.
     @ObservationIgnored private var pendingCreateRequestID: String?
+    /// Mirrors `pendingCreateRequestID != nil`, but OBSERVED — the latch
+    /// itself is `@ObservationIgnored` (see its own doc comment) so a view
+    /// reading it directly never invalidates. Without a tracked twin, every
+    /// "+" button had to fake its own local in-flight flag that only covered
+    /// the round-trip to the engine, not the ~30s until `AppCreated` /
+    /// `AppOperationFailed` / the stop-loss actually resolves it — so the
+    /// button re-enabled and gave no feedback for most of a create. Written
+    /// at the same two call sites that touch `pendingCreateRequestID`
+    /// (`createShellApp` arms it, `clearPendingCreate` is the one place that
+    /// disarms it), so it can never drift from the latch it mirrors.
+    private(set) var isCreateInFlight = false
     /// Whether the create in flight should arm [`createdAppID`] — the library's
     /// FALLBACK landing — when it resolves.
     ///
@@ -144,6 +155,14 @@ final class LocalAppsStore {
     /// Stop-loss timer for [`pendingCreateRequestID`]. Cancelled the moment
     /// the create resolves either way.
     @ObservationIgnored private var createResultTimeoutTask: Task<Void, Never>?
+    /// Stop-loss timer for [`landingAwaitingPin`]. Armed on `AppCreated`
+    /// alongside the pin latch itself; cancelled the moment a matching
+    /// `AppRecordChanged` arrives (or a rebind drops the latch outright).
+    /// Without this, an `AppRecordChanged` that never arrives — the engine's
+    /// best-effort init-session mint can fail silently — leaves the hand-off
+    /// waiting forever with no way to ever land the user in the app it just
+    /// created.
+    @ObservationIgnored private var pinWaitTimeoutTask: Task<Void, Never>?
 
     /// Offset each in-flight `ListAppSessions` was issued at, so the reply can
     /// be reduced as a replace (offset 0) or an append (later pages) — the
@@ -201,12 +220,21 @@ final class LocalAppsStore {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return apps }
         return apps.filter { app in
-            // `displayName`, so a query only ever matches text the user can
-            // actually see on the card. A shell's stored `name` is an engine
-            // placeholder that is never rendered; matching it would surface a
-            // card whose visible title has nothing to do with the query.
-            app.displayName.localizedStandardContains(query)
-                || app.workflow.label.localizedStandardContains(query)
+            // A draft shell is excluded outright, matching Android
+            // (`LocalAppsContract.kt`'s `app.scaffolded` term): its
+            // `displayName` is the localized placeholder card title
+            // (`local_apps_draft_card_title`), not a name the user chose, so
+            // typing that placeholder — or any workflow label, shared by
+            // every shell in whatever state — surfaced shells no query
+            // actually distinguishes from one another.
+            !app.isDraftShell
+                // `displayName`, so a query only ever matches text the user
+                // can actually see on the card. A shell's stored `name` is an
+                // engine placeholder that is never rendered; matching it
+                // would surface a card whose visible title has nothing to do
+                // with the query.
+                && (app.displayName.localizedStandardContains(query)
+                    || app.workflow.label.localizedStandardContains(query))
         }
     }
 
@@ -336,6 +364,12 @@ final class LocalAppsStore {
         func resolvePendingCreateConfirmation(_ approved: Bool) async {
             guard let prompt = pendingCreateConfirmation else { return }
             pendingCreateConfirmation = nil
+            // Drained IMMEDIATELY, not after the `await send` below: the next
+            // queued confirmation is very likely a DIFFERENT app's create,
+            // and withholding it for the whole duration of THIS resolve's
+            // engine round-trip left it stuck behind an unrelated prompt for
+            // no reason.
+            presentNextCreateConfirmation()
             let sent = await send(
                 .pluginCommand(
                     command: .resolveCreateConfirmation(
@@ -344,14 +378,18 @@ final class LocalAppsStore {
                     )
                 )
             )
-            if sent {
-                presentNextCreateConfirmation()
-            } else {
+            if !sent {
                 // The result was discarded here before: a failed send left
                 // the engine holding the approval token with no answer, and
                 // the sheet already gone with nothing to re-answer it.
                 // Restore the SAME prompt (not the queue's next one) so the
                 // user can retry, mirroring `setBuiltinPluginEnabled` above.
+                // Whatever `presentNextCreateConfirmation()` already pulled
+                // up in the meantime goes back to the FRONT of the queue
+                // rather than being dropped.
+                if let displaced = pendingCreateConfirmation {
+                    createConfirmationQueue.insert(displaced, at: 0)
+                }
                 pendingCreateConfirmation = prompt
             }
         }
@@ -359,7 +397,9 @@ final class LocalAppsStore {
         func resolvePendingMcpProposalApproval(_ approved: Bool) async {
             guard let prompt = pendingMcpProposalApproval else { return }
             pendingMcpProposalApproval = nil
-            defer { presentNextMcpProposalApproval() }
+            // Drained immediately for the same reason as the create
+            // confirmation above — see its comment.
+            presentNextMcpProposalApproval()
             _ = await send(
                 .pluginCommand(
                     command: .resolveMcpProposalApproval(
@@ -533,9 +573,10 @@ final class LocalAppsStore {
                 values.append(item)
                 checkpoints[appId] = values.sorted { $0.createdAt > $1.createdAt }
 
-            case let .appOperationFailed(_, _, message, requestId):
+            case let .appOperationFailed(_, code, message, requestId):
                 isRefreshing = false
-                errorMessage = message
+                errorMessage = LocalAppsStore.localizedOperationFailureMessage(
+                    code: code, message: message)
                 // Disarm ONLY on the failure of the create this client
                 // started. `app_id == nil` used to stand in for that, but it
                 // is not a correlation key: an agent-tool create that fails
@@ -548,6 +589,45 @@ final class LocalAppsStore {
 
             default:
                 break
+            }
+        }
+
+        /// `AppOperationFailed.message` is a raw engine diagnostic — never
+        /// localized for the client's locale — so every prior release showed
+        /// it to the user verbatim. Map the stable `code` to a client-owned,
+        /// localized message; an unrecognized future code (the wire type is
+        /// `#[non_exhaustive]`) falls back to the raw `message` rather than
+        /// showing nothing.
+        static func localizedOperationFailureMessage(
+            code: AppErrorCodeDto, message: String
+        ) -> String {
+            switch code {
+            case .notFound:
+                String(localized: "local_apps_error_operation_not_found")
+            case .revisionConflict:
+                String(localized: "local_apps_error_operation_revision_conflict")
+            case .interactionInvalid:
+                String(localized: "local_apps_error_operation_interaction_invalid")
+            case .workflowStateInvalid:
+                String(localized: "local_apps_error_operation_workflow_state_invalid")
+            case .runtimeBusy:
+                String(localized: "local_apps_error_operation_runtime_busy")
+            case .notYetAvailable:
+                String(localized: "local_apps_error_operation_not_yet_available")
+            case .storageCorrupt:
+                String(localized: "local_apps_error_operation_storage_corrupt")
+            case .invalidRequest:
+                String(localized: "local_apps_error_operation_invalid_request")
+            case .lspDiagnosticsFailed:
+                String(localized: "local_apps_error_operation_lsp_diagnostics_failed")
+            case .io:
+                String(localized: "local_apps_error_operation_io")
+            case .llmUnavailable:
+                String(localized: "local_apps_error_operation_llm_unavailable")
+            case .llmOutputRejected:
+                String(localized: "local_apps_error_operation_llm_output_rejected")
+            default:
+                message
             }
         }
     #endif
@@ -652,8 +732,11 @@ final class LocalAppsStore {
         /// seeding unconditionally would leave nothing to assert against.
         static let uiTestSeedEnvironmentKey = "LINGXI_UI_TEST_LOCAL_APPS"
 
-        /// The id of the app [`seedForUITesting`] plants. The drawer renders it
-        /// as `drawer.apps.row.<id>`.
+        /// The id of the app [`seedForUITesting`] plants. The local-apps
+        /// library cover (`LocalAppsLibraryView`) renders it as
+        /// `local-apps.row.<id>`; the drawer has no row of its own — it only
+        /// ever shows the two fixed actions `drawer.apps.create` and
+        /// `drawer.apps.library`, which do not vary with the catalog.
         static let uiTestSeedAppID = "ui-test-seeded-app"
 
         /// Plant one app in the catalog so the surfaces gated on a non-empty
@@ -731,6 +814,14 @@ final class LocalAppsStore {
     ///   `false`: an ACTUAL rebind, where any create still armed is provably
     ///   stale.
     func refreshAfterEngineRebind(isInitialBootstrap: Bool = false) async {
+        // Captured rather than written to `errorMessage` immediately: `await
+        // refresh()` below can itself fail, and `performRefresh` assigns
+        // `errorMessage` UNCONDITIONALLY on both its failure paths (no
+        // connection, or the `.listApps` round-trip erroring), which used to
+        // silently overwrite this notice in exactly the situation — a rebind
+        // that just failed — where it is most likely to fire. Set once,
+        // AFTER the refresh, so it always wins.
+        var reportCreationResultUnknown = false
         if !isInitialBootstrap {
             // The create claim does NOT survive a rebind. `AppCreated` is a
             // one-shot event on the source that was just torn down, so a
@@ -747,7 +838,7 @@ final class LocalAppsStore {
             // store is still waiting on, so nothing can be claimed.
             if let pending = pendingCreateRequestID {
                 clearPendingCreate(requestID: pending)
-                errorMessage = String(localized: "local_apps_creation_result_unknown")
+                reportCreationResultUnknown = true
             }
             // The pin half of the hand-off is a SEPARATE latch, armed by
             // `AppCreated` and cleared only by a matching `AppRecordChanged`
@@ -756,9 +847,43 @@ final class LocalAppsStore {
             // arbitrarily later, for any unrelated reason — would still
             // publish a landing and pull the user into a session they never
             // asked to enter. Mirrors `LocalAppsViewModel.kt:308` on Android.
-            landingAwaitingPin = nil
+            //
+            // This drop is reported even when no `pendingCreateRequestID` was
+            // armed above: `AppCreated` already cleared that latch by the time
+            // the pin is the only thing still outstanding, so without this the
+            // rebind above sets no error at all and the drop is silent.
+            if landingAwaitingPin != nil {
+                landingAwaitingPin = nil
+                clearPinWaitTimeout()
+                reportCreationResultUnknown = true
+            }
+            #if canImport(engine_mobileFFI)
+                // A pending (or queued) approval sheet is a promise to resolve
+                // ITS request against the source that is about to be torn
+                // down. Dropped outright rather than routed through
+                // `discardPendingApproval`/`resolve`, which would submit into
+                // the NEW source using a request id the old one issued — the
+                // same class of bug this avoids. Mirrors the `abandonedSheet`
+                // capture in `LocalAppsViewModel.kt`'s rebind handling.
+                let abandonedApprovalSheet = pendingCreateConfirmation != nil
+                    || pendingMcpProposalApproval != nil
+                    || pendingProfileProposal != nil
+                    || !createConfirmationQueue.isEmpty
+                    || !mcpProposalApprovalQueue.isEmpty
+                pendingCreateConfirmation = nil
+                pendingMcpProposalApproval = nil
+                pendingProfileProposal = nil
+                createConfirmationQueue.removeAll()
+                mcpProposalApprovalQueue.removeAll()
+                if abandonedApprovalSheet {
+                    reportCreationResultUnknown = true
+                }
+            #endif
         }
         await refresh()
+        if reportCreationResultUnknown {
+            errorMessage = String(localized: "local_apps_creation_result_unknown")
+        }
         let appIDs = apps.map(\.id)
         // Rebind used to issue one bridge round-trip after another. Keep a
         // small batch so large libraries do not flood the FFI queue while the
@@ -792,6 +917,18 @@ final class LocalAppsStore {
     /// that a constant equals thirty. `createResultTimeoutIsThirtySeconds`
     /// pins the production value so shortening it here cannot go unnoticed.
     @ObservationIgnored var createResultTimeout: Duration = LocalAppsStore.defaultCreateResultTimeout
+
+    /// The default stop-loss for [`landingAwaitingPin`] — the wait for the
+    /// engine's best-effort init-session mint to report back on
+    /// `AppRecordChanged` after `AppCreated`. Much shorter than the create
+    /// timeout above: this is a single local round-trip on an app record that
+    /// already exists, not a network create.
+    static let defaultPinWaitTimeout: Duration = .seconds(10)
+
+    /// The stop-loss this instance actually uses. Overridable for the same
+    /// reason as `createResultTimeout` — a test shortens it to exercise the
+    /// real timer in milliseconds.
+    @ObservationIgnored var pinWaitTimeout: Duration = LocalAppsStore.defaultPinWaitTimeout
 
     /// Create the empty SHELL app that the conversational create flow
     /// interviews the user inside.
@@ -841,6 +978,7 @@ final class LocalAppsStore {
             // the engine can emit `AppCreated` from inside that call. Arming
             // afterwards drops the event this whole mechanism exists to catch.
             pendingCreateRequestID = requestID
+            isCreateInFlight = true
             // Recorded with the correlation key, not read at event time from a
             // view: by the time `AppCreated` lands the cover may have been
             // opened or closed for unrelated reasons, and what decides this is
@@ -908,6 +1046,40 @@ final class LocalAppsStore {
         errorMessage = String(localized: "local_apps_creation_result_unknown")
     }
 
+    /// Arm the stop-loss for one pin still awaited on `landingAwaitingPin`.
+    private func armPinWaitTimeout(appID: String) {
+        pinWaitTimeoutTask?.cancel()
+        let timeout = pinWaitTimeout
+        pinWaitTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.reportPinWaitTimedOut(appID: appID)
+        }
+    }
+
+    /// Disarm the pin-wait stop-loss without touching the latch itself —
+    /// callers that already know how they are resolving `landingAwaitingPin`
+    /// (a matching `AppRecordChanged`, a rebind) still need this so the timer
+    /// does not fire later against whatever the latch holds next.
+    private func clearPinWaitTimeout() {
+        pinWaitTimeoutTask?.cancel()
+        pinWaitTimeoutTask = nil
+    }
+
+    /// The engine's best-effort init-session mint never reported back within
+    /// the stop-loss. The app record itself is not in question — `AppCreated`
+    /// already committed it — only the pin is missing, so this still
+    /// publishes the hand-off rather than leaving the user stranded: the
+    /// landing opens a FRESH conversation in the app's scope instead of the
+    /// pinned one, same fallback as a pin that fails outright.
+    private func reportPinWaitTimedOut(appID: String) {
+        guard let armed = landingAwaitingPin, armed.appID == appID else { return }
+        landingAwaitingPin = nil
+        var landing = armed
+        landing.initSessionID = nil
+        createdAppLanding = landing
+    }
+
     /// Disarm the pending create — but ONLY if `requestID` is the one still in
     /// flight. Every caller passes a key that came off the wire, so this guard
     /// is what makes "ignore any event whose request id does not match" true
@@ -915,6 +1087,7 @@ final class LocalAppsStore {
     private func clearPendingCreate(requestID: String) {
         guard pendingCreateRequestID == requestID else { return }
         pendingCreateRequestID = nil
+        isCreateInFlight = false
         pendingCreateArmsLibraryFallback = false
         createResultTimeoutTask?.cancel()
         createResultTimeoutTask = nil
@@ -942,6 +1115,21 @@ final class LocalAppsStore {
     func consumeCreatedAppLanding() -> CreatedAppLanding? {
         defer { createdAppLanding = nil }
         return createdAppLanding
+    }
+
+    /// Re-arm a landing `RootView` already consumed but could not deliver —
+    /// the scope switch it needed stayed refused past the bounded retry
+    /// window. Re-publishing into the same one-shot slot puts the hand-off
+    /// back in front of the sinks that watch it, instead of it being lost for
+    /// good the instant the retry gives up.
+    ///
+    /// The caller MUST bound how often it does this: republishing fires
+    /// `onChange(of: localAppsStore.createdAppLanding)` at once, and that
+    /// path's guard does not test whatever refused the switch, so an
+    /// unlatched re-arm is a fresh retry window every time — see
+    /// `RootView.openCreatedAppSession`'s per-app latch.
+    func restoreCreatedAppLanding(_ landing: CreatedAppLanding) {
+        createdAppLanding = landing
     }
 
     func getDetails(appID: String) async {
@@ -1331,6 +1519,7 @@ final class LocalAppsStore {
                     appID: summary.id,
                     initSessionID: record.initSessionId
                 )
+                armPinWaitTimeout(appID: summary.id)
 
             case let .appDetailsChanged(details):
                 let status = details.runtimeProfileStatus.map(LocalAppsProtocolAdapter.runtimeProfileStatus)
@@ -1359,6 +1548,7 @@ final class LocalAppsStore {
                 // `RootView` from resuming a session id that does not exist yet.
                 if let armed = landingAwaitingPin, armed.appID == summary.id {
                     landingAwaitingPin = nil
+                    clearPinWaitTimeout()
                     var landing = armed
                     landing.initSessionID = summary.initSessionId
                     createdAppLanding = landing

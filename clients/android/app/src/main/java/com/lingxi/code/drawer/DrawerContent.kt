@@ -566,7 +566,7 @@ private fun DrawerAppQuickActions(onCreateApp: () -> Unit, onOpenApps: () -> Uni
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         ) {
             LXIcon(name = LXIconName.Book, size = 13.dp, color = t.text3, stroke = 1.8f)
-            Text(stringResource(R.string.drawer_open_apps_library), color = t.text3, fontSize = 12.sp)
+            Text(stringResource(R.string.drawer_apps_library), color = t.text3, fontSize = 12.sp)
         }
     }
 }

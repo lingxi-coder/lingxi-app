@@ -3,6 +3,12 @@ import { Card, isEditableLayer, MergedBadge, MergedNotice, OverriddenNotice, Row
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { rowState, type SettingsSnapshot } from '../useEngineSettings';
+import type { ModelPickerVisibilitySettings, ProviderModelPickerVisibility } from '../../../../shared/settings';
+import {
+  modelCapabilitySummary,
+  providerVisibilityConfig,
+  selectedModelIdsForPickerSettings,
+} from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
 
 /**
@@ -92,6 +98,23 @@ export interface RoutingDraft {
 export function routingFromLayer(snapshot: SettingsSnapshot | null, layer: string): RoutingDraft {
   const value = snapshot?.layers?.[layer]?.['routing'];
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as RoutingDraft) : {};
+}
+
+export function withoutProviderModelPickerVisibility(
+  settings: ModelPickerVisibilitySettings | undefined,
+  providerId: string,
+): ModelPickerVisibilitySettings {
+  if (!settings?.[providerId]) return settings ?? {};
+  const next = { ...settings };
+  delete next[providerId];
+  return next;
+}
+
+export function visibleCustomProviderModelIds(
+  candidates: readonly string[],
+  visibility: ProviderModelPickerVisibility | undefined,
+): string[] {
+  return selectedModelIdsForPickerSettings(candidates, visibility);
 }
 
 /** `"gpt-x, gpt-y"` / one-per-line → `[{id:'gpt-x'},{id:'gpt-y'}]`, blank entries dropped. Pure so the parsing itself is testable independent of any form state. */
@@ -215,7 +238,17 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
   const handleRemoveProvider = (name: string) => {
     const next = { ...providers };
     delete next[name];
-    writeProviders(next);
+    setSaving(true);
+    setSaveError(null);
+    void Promise.all([
+      bridge.updateEngineSettings(editingLayer, { providers: next }),
+      bridge.setModelPickerVisibility(withoutProviderModelPickerVisibility(modelPickerVisibility, name)),
+    ])
+      .then(() => {
+        if (profileName.trim() === name) resetForm();
+      })
+      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存 Provider 设置。'))
+      .finally(() => setSaving(false));
   };
 
   const writeRouting = (next: RoutingDraft) => {
@@ -265,6 +298,19 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
 
   const providerNames = Object.keys(providers).sort();
   const aliasNames = Object.keys(routing.aliases ?? {}).sort();
+  const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
+  const providerModelCatalog = bridge.desktop.providerModelCatalog ?? [];
+  const catalogByProviderId = new Map(
+    providerModelCatalog.map((provider) => [provider.provider_id, provider] as const),
+  );
+  const draftProviderId = profileName.trim();
+  const draftModelIds = parseModelsInput(modelsText).map((model) => model.id);
+  const updateVisibility = (providerId: string, next: ProviderModelPickerVisibility) => {
+    void bridge.setModelPickerVisibility({
+      ...(modelPickerVisibility ?? {}),
+      [providerId]: next,
+    });
+  };
 
   return (
     <>
@@ -320,6 +366,78 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
             {saveError && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{saveError}</span>}
           </div>
         </Row>
+        {draftProviderId && (
+          <Row
+            title="对话模型列表"
+            desc="仅影响 Desktop 对话模型选择器的显示，不修改引擎 provider 配置。"
+            align="start"
+          >
+            <div style={{ display: 'grid', gap: 7, minWidth: 260 }}>
+              {(() => {
+                const catalog = catalogByProviderId.get(draftProviderId);
+                const candidates = [...new Set([
+                  ...(catalog?.models.map((model) => model.model_id) ?? []),
+                  ...draftModelIds,
+                ])];
+                const visibility = providerVisibilityConfig(modelPickerVisibility, draftProviderId);
+                const visible = visibleCustomProviderModelIds(candidates, visibility);
+                const detailsByModelId = new Map(
+                  (catalog?.models ?? []).map((model) => [model.model_id, model] as const),
+                );
+                return (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => updateVisibility(draftProviderId, {
+                        showInModelPicker: visibility?.showInModelPicker === false,
+                        visibleModelIds: visibility?.visibleModelIds,
+                      })}
+                      style={ghostButtonStyle(t)}
+                    >
+                      {visibility?.showInModelPicker === false ? '当前已隐藏 Provider' : '当前显示 Provider'}
+                    </button>
+                    {candidates.length === 0
+                      ? <span style={{ color: t.text4, fontSize: 12.5 }}>先填写至少一个模型 id，目录到达后这里会显示可见性选择。</span>
+                      : candidates.map((modelId) => {
+                        const selected = visible.includes(modelId);
+                        const detail = detailsByModelId.get(modelId);
+                        return (
+                          <button
+                            key={modelId}
+                            type="button"
+                            onClick={() => {
+                              const base = visibility?.visibleModelIds ?? candidates;
+                              const next = base.includes(modelId)
+                                ? base.filter((entry) => entry !== modelId)
+                                : [...base, modelId];
+                              updateVisibility(draftProviderId, {
+                                showInModelPicker: visibility?.showInModelPicker,
+                                visibleModelIds: [...new Set(next)],
+                              });
+                            }}
+                            style={{ ...ghostButtonStyle(t), justifyContent: 'space-between' }}
+                          >
+                            <span style={{ display: 'grid', gap: 2, textAlign: 'left' }}>
+                              <span>{detail?.display_name || modelId}</span>
+                              <span className="mono" style={{ color: t.text4, fontSize: 11 }}>
+                                {[modelId, detail ? modelCapabilitySummary(detail) : ''].filter(Boolean).join(' · ')}
+                              </span>
+                            </span>
+                            <span>{selected ? '显示' : '隐藏'}</span>
+                          </button>
+                        );
+                      })}
+                    {visibility?.showInModelPicker !== false && visible.length === 0 && (
+                      <span style={{ color: t.warn, fontSize: 12.5 }}>
+                        当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </Row>
+        )}
       </Card>
 
       <Card title="路由 (routing)">

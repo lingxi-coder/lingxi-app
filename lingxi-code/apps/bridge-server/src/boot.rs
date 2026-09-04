@@ -317,6 +317,96 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
+fn desktop_provider_catalog_listings(cfg: &DesktopConfig) -> Vec<platform_api::ModelListing> {
+    let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: desktop_provider_catalog_anthropic_models(
+            &cfg.default_model,
+            cfg.fallback_model.as_deref(),
+        ),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    });
+    for warning in &assembled.warnings {
+        tracing::warn!(warning = %warning, "bridge-server provider catalog assembly");
+    }
+    llm_client::ModelRegistry::from_config(assembled.client_config)
+        .map(|registry| {
+            registry
+                .available_models()
+                .into_iter()
+                .map(orchestrator::provider_adapter::lower_model_listing)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn desktop_provider_catalog_anthropic_models(
+    default_model: &str,
+    fallback_model: Option<&str>,
+) -> Vec<llm_client::ModelProfile> {
+    let caps = llm_client::Capabilities {
+        streaming: true,
+        tools: true,
+        vision: true,
+        documents: true,
+        reasoning: true,
+        structured_output: true,
+    };
+    let mut ids: Vec<String> = vec![
+        "claude-opus-5".to_string(),
+        "claude-opus-4-8".to_string(),
+        "claude-opus-4-6".to_string(),
+        "claude-opus-4-5-20251101".to_string(),
+        "claude-opus-4-1-20250805".to_string(),
+        "claude-opus-4-20250514".to_string(),
+        "claude-sonnet-5".to_string(),
+        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-haiku-4-5".to_string(),
+        "claude-fable-5-1".to_string(),
+    ];
+    let admit = |value: &str| -> Option<String> {
+        let (profile, bare) = llm_client::split_profile_model(value);
+        (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
+    };
+    let fallback_models = fallback_model
+        .into_iter()
+        .flat_map(|csv| csv.split(','))
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    for model in std::iter::once(default_model).chain(fallback_models) {
+        if let Some(bare) = admit(model) {
+            ids.push(bare);
+        }
+    }
+    for var in [
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ] {
+        if let Ok(model) = std::env::var(var) {
+            if let Some(bare) = admit(model.trim()) {
+                ids.push(bare);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| llm_client::ModelProfile {
+            display_model: id.clone(),
+            request_model: id.clone(),
+            billing_model: id,
+            aliases: Vec::new(),
+            description: None,
+            metadata: Default::default(),
+            capabilities: caps,
+        })
+        .collect()
+}
+
 /// Load the merged settings `providers` / `routing` / `apiKeyHelper` blocks from the layered
 /// settings (project + user + env), rooted at the *current* working directory
 /// (the process has already `chdir`'d into any `--cwd`). Returns `(None, None)`
@@ -989,6 +1079,7 @@ pub async fn assemble_with_provider_keys(
     let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
         connection.event_sink(),
     ));
+    let provider_model_catalog_listings = desktop_provider_catalog_listings(&cfg);
 
     let runtime = build(cfg, output, permission_sink)
         .await
@@ -1092,6 +1183,7 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
+        .with_provider_model_catalog_listings(provider_model_catalog_listings)
         .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
         .with_session_store(session_store)

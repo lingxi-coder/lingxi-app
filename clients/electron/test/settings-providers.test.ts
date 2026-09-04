@@ -8,6 +8,8 @@ import {
   parseModelsInput,
   providersFromLayer,
   routingFromLayer,
+  withoutProviderModelPickerVisibility,
+  visibleCustomProviderModelIds,
   validateCustomProvider,
 } from '../src/renderer/components/settings/pages/CustomProviders';
 import {
@@ -88,6 +90,33 @@ test('models input parses comma- and newline-separated ids, dropping blanks', ()
   assert.deepEqual(parseModelsInput('gpt-x, gpt-y,\n , gpt-z'), [{ id: 'gpt-x' }, { id: 'gpt-y' }, { id: 'gpt-z' }]);
   assert.deepEqual(parseModelsInput(''), []);
   assert.deepEqual(parseModelsInput('   '), []);
+});
+
+test('removing a custom provider also removes its local model-picker visibility record', () => {
+  assert.deepEqual(
+    withoutProviderModelPickerVisibility({
+      openai: { visibleModelIds: ['gpt-5.6-sol'] },
+      customlab: { showInModelPicker: false, visibleModelIds: [] },
+    }, 'customlab'),
+    { openai: { visibleModelIds: ['gpt-5.6-sol'] } },
+  );
+  assert.deepEqual(withoutProviderModelPickerVisibility(undefined, 'customlab'), {});
+});
+
+test('custom provider visibility uses the draft+catalog union and defaults draft-only ids to selected', () => {
+  const candidates = ['catalog-a', 'draft-only', 'catalog-a', ''];
+  assert.deepEqual(
+    visibleCustomProviderModelIds(candidates, undefined),
+    ['catalog-a', 'draft-only'],
+  );
+  assert.deepEqual(
+    visibleCustomProviderModelIds(candidates, { showInModelPicker: false, visibleModelIds: ['catalog-a'] }),
+    ['catalog-a'],
+  );
+  assert.deepEqual(
+    visibleCustomProviderModelIds(candidates, { visibleModelIds: ['draft-only', 'missing'] }),
+    ['draft-only'],
+  );
 });
 
 test('providersFromLayer reads the SELECTED LAYER\'s own map, and is never a throw', () => {
@@ -416,6 +445,129 @@ test('configured provider detail keeps its storage row while the engine is disco
   ));
 
   assert.match(markup, /已安全保存在 macOS Data Protection Keychain 中/);
+});
+
+test('provider detail shows an honest zero-visible state when every catalog model is hidden', () => {
+  const bridge = {
+    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    bootstrap: {
+      settings: {
+        version: 1,
+        projects: [],
+        pinnedSessions: [],
+        modelPickerVisibility: { openai: { visibleModelIds: [] } },
+      },
+      workspace: { path: '/test/project', trusted: true },
+      providerCredentials: [{
+        providerId: 'openai',
+        configured: true,
+        encryptionAvailable: true,
+      }],
+    },
+    desktop: {
+      currentModel: 'openai/gpt-5.7-preview',
+      providerModelCatalog: [{
+        provider_id: 'openai',
+        provider_label: 'OpenAI',
+        models: [
+          { reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol', display_name: 'GPT 5.6 Sol' },
+          { reference: 'openai/gpt-5.7-preview', model_id: 'gpt-5.7-preview', display_name: 'GPT 5.7 Preview' },
+        ],
+      }],
+    },
+    connected: true,
+    running: false,
+    openSession: async () => undefined,
+    restartBridge: async () => undefined,
+    setProviderCredential: async () => undefined,
+    clearProviderCredential: async () => undefined,
+    refreshProviderCredential: async () => undefined,
+    setApiBaseUrl: async () => undefined,
+    setModel: async () => undefined,
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: bridge as any,
+      initialProviderId: 'openai',
+      snapshot: null,
+      editingLayer: 'user',
+      theme: 'light',
+      onTheme: () => undefined,
+      onNavigate: () => undefined,
+      onClose: () => undefined,
+      onJumpToLayer: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /0 \/ 2 个模型可见/);
+  assert.match(markup, /当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。/);
+  assert.match(markup, /GPT 5\.7 Preview/);
+});
+
+test('provider detail keeps stored checks and suppresses the zero-visible warning when the provider is hidden', () => {
+  const bridge = {
+    activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
+    bootstrap: {
+      settings: {
+        version: 1,
+        projects: [],
+        pinnedSessions: [],
+        modelPickerVisibility: {
+          openai: {
+            showInModelPicker: false,
+            visibleModelIds: ['gpt-5.7-preview'],
+          },
+        },
+      },
+      workspace: { path: '/test/project', trusted: true },
+      providerCredentials: [{
+        providerId: 'openai',
+        configured: true,
+        encryptionAvailable: true,
+      }],
+    },
+    desktop: {
+      currentModel: 'openai/gpt-5.7-preview',
+      providerModelCatalog: [{
+        provider_id: 'openai',
+        provider_label: 'OpenAI',
+        models: [
+          { reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol', display_name: 'GPT 5.6 Sol' },
+          { reference: 'openai/gpt-5.7-preview', model_id: 'gpt-5.7-preview', display_name: 'GPT 5.7 Preview' },
+        ],
+      }],
+    },
+    connected: true,
+    running: false,
+    openSession: async () => undefined,
+    restartBridge: async () => undefined,
+    setProviderCredential: async () => undefined,
+    clearProviderCredential: async () => undefined,
+    refreshProviderCredential: async () => undefined,
+    setApiBaseUrl: async () => undefined,
+    setModel: async () => undefined,
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: bridge as any,
+      initialProviderId: 'openai',
+      snapshot: null,
+      editingLayer: 'user',
+      theme: 'light',
+      onTheme: () => undefined,
+      onNavigate: () => undefined,
+      onClose: () => undefined,
+      onJumpToLayer: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /1 \/ 2 个模型可见/);
+  assert.match(markup, /GPT 5\.7 Preview/);
+  assert.doesNotMatch(markup, /当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。/);
 });
 
 test('configured credentials request a disconnected preview only when the broker is available', () => {

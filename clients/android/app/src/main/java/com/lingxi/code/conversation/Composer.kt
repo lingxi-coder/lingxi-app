@@ -457,7 +457,10 @@ private fun ModelChip(
     var query by remember { mutableStateOf("") }
     var selectedDetails by remember { mutableStateOf<CatalogModelDetails?>(null) }
     val chipShape = RoundedCornerShape(8.dp)
-    val filteredModels = remember(models, query) { EngineModelCatalog.filter(models, query) }
+    val visibleModels = remember(models, providerStatuses) {
+        EngineModelCatalog.visibleModels(models, providerStatuses)
+    }
+    val filteredModels = remember(visibleModels, query) { EngineModelCatalog.filter(visibleModels, query) }
     val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
     val recentsStore = remember(context) { ModelRecentsStore(context) }
     // Re-read on every open rather than once: a pick made in this composition
@@ -608,7 +611,11 @@ private fun ModelChip(
             }
             if (groups.isEmpty() && recents.isEmpty()) {
                 Text(
-                    text = stringResource(R.string.composer_no_matching_models),
+                    text = if (query.isBlank() && visibleModels.isEmpty()) {
+                        stringResource(R.string.composer_no_visible_models)
+                    } else {
+                        stringResource(R.string.composer_no_matching_models)
+                    },
                     color = t.text3,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),

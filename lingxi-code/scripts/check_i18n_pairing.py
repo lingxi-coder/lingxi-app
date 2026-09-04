@@ -97,6 +97,24 @@ ANDROID_COMPANION_STRINGS_FILES = (
     "clients/android/app/src/main/res/values/strings_local_apps_v3.xml",
 )
 
+# strings_local_apps_v3.xml 是手工维护的姊妹文件，不经 generate.py 生成，所以
+# 不会像 values*/strings.xml 那样自动铺到每个 locale 目录——加一个 key 只加进
+# values/ 很容易忘记其它 locale。ANDROID_LOCALE_DIR 把每个 LOCALES 条目映射到
+# 它在 Android res 下应该有的 qualifier，这样才能查出「哪个 locale 的副本缺了
+# 哪些 key」，而不只是「values/ 存在」。
+# ⚠️ 与 generate.py 的 `ANDROID_VALUES_DIRS` 逐字一致。那边改了这边必须跟着改，
+# 否则这个门会对着一个已经不存在的目录布局报告「没有回归」。迭代源是 LOCALES
+# 而不是这个字典本身——字典缺条目要 fail-closed，不能静默少查一个 locale。
+ANDROID_LOCALE_DIR = {
+    "zh-Hans": "values",
+    "zh-Hant": "values-zh-rTW",
+    "en": "values-en",
+    "ja": "values-ja",
+    "ko": "values-ko",
+}
+ANDROID_COMPANION_STRINGS_BASENAME = "strings_local_apps_v3.xml"
+ANDROID_RES_ROOT = "clients/android/app/src/main/res"
+
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
 # （`"foo %lld"` 等），那一半已经由上面的 `_fmt` 配对逻辑覆盖，这里再匹配
 # 只会重新引入本文件开头已经排除过的插值假阳性。
@@ -155,6 +173,40 @@ def _android_companion_names(repo_root):
     return names
 
 
+def _android_companion_locale_gaps(repo_root):
+    """locale -> sorted missing key list: keys `values/strings_local_apps_v3.xml`
+    defines that this locale's own ANDROID_LOCALE_DIR copy does not have (a
+    missing file counts every base key as missing). Base locale excluded —
+    it can't be missing from itself."""
+    root = Path(repo_root) / ANDROID_RES_ROOT
+    missing_dir_map = [loc for loc in LOCALES if loc not in ANDROID_LOCALE_DIR]
+    if missing_dir_map:
+        fail("ANDROID_LOCALE_DIR has no entry for locale(s) %s — mirror generate.py's "
+             "ANDROID_VALUES_DIRS, otherwise those locales are never checked for a "
+             "%s copy and this gate reports OK while they silently fall back to %s"
+             % (", ".join(repr(loc) for loc in missing_dir_map),
+                ANDROID_COMPANION_STRINGS_BASENAME, BASE_LOCALE))
+    base_path = root / ANDROID_LOCALE_DIR[BASE_LOCALE] / ANDROID_COMPANION_STRINGS_BASENAME
+    base_keys = (
+        set(ANDROID_STRING_NAME.findall(base_path.read_text(encoding="utf-8", errors="replace")))
+        if base_path.is_file() else set()
+    )
+    gaps = {}
+    for loc in LOCALES:
+        if loc == BASE_LOCALE:
+            continue
+        dirname = ANDROID_LOCALE_DIR[loc]
+        p = root / dirname / ANDROID_COMPANION_STRINGS_BASENAME
+        have = (
+            set(ANDROID_STRING_NAME.findall(p.read_text(encoding="utf-8", errors="replace")))
+            if p.is_file() else set()
+        )
+        missing = sorted(base_keys - have)
+        if missing:
+            gaps[loc] = missing
+    return gaps
+
+
 def load(directory):
     directory = Path(directory)
     out = {}
@@ -197,6 +249,7 @@ def measure(locales, repo_root):
     android_known = legal | _android_companion_names(repo_root)
     ios_orphans = sorted(k for k in ios_refs if k not in key_set)
     android_orphans = sorted(k for k in android_refs if k not in android_known)
+    companion_gaps = _android_companion_locale_gaps(repo_root)
 
     m = {
         "totalKeys": len(keys),
@@ -204,6 +257,7 @@ def measure(locales, repo_root):
         "androidIllegalUnpaired": len(unpaired),
         "iosSourceOrphans": len(ios_orphans),
         "androidSourceOrphans": len(android_orphans),
+        "androidCompanionLocaleGapsTotal": sum(len(v) for v in companion_gaps.values()),
         "empty": {},
         "identicalToBase": {},
     }
@@ -220,6 +274,7 @@ def measure(locales, repo_root):
     m["unpairedKeys"] = sorted(unpaired)
     m["iosSourceOrphanKeys"] = ios_orphans
     m["androidSourceOrphanKeys"] = android_orphans
+    m["androidCompanionLocaleGaps"] = companion_gaps
     return m
 
 
@@ -269,6 +324,22 @@ def compare(base, now):
                ", ".join(repr(k) for k in sorted(
                    set(now["androidSourceOrphanKeys"]) - set(base.get("androidSourceOrphanKeys", []))
                )))
+        )
+    if now["androidCompanionLocaleGapsTotal"] > base.get("androidCompanionLocaleGapsTotal", 0):
+        detail = "; ".join(
+            "%s missing %d key(s) (%s)" % (
+                loc, len(keys),
+                ", ".join(repr(k) for k in keys[:5]) + (", …" if len(keys) > 5 else "")
+            )
+            for loc, keys in sorted(now.get("androidCompanionLocaleGaps", {}).items())
+        )
+        problems.append(
+            "%d strings_local_apps_v3.xml key(s) missing from a non-base Android locale copy "
+            "under %s, baseline was %d — that locale's resource resolution silently falls back to "
+            "values/ (%s) for these keys, e.g. the AskUserQuestion card copy shows %s instead of the "
+            "device language. %s"
+            % (now["androidCompanionLocaleGapsTotal"], ANDROID_RES_ROOT,
+               base.get("androidCompanionLocaleGapsTotal", 0), BASE_LOCALE, BASE_LOCALE, detail)
         )
     return problems
 

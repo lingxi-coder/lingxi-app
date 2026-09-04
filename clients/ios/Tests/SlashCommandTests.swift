@@ -275,7 +275,8 @@ import XCTest
             source.applyForTesting(.compactionCompleted(
                 messagesBefore: 20,
                 messagesAfter: 7,
-                bytesSaved: 4096
+                bytesSaved: 4096,
+                summary: "kept context"
             ))
             XCTAssertEqual(source.model.compactionStatus, .completed(
                 messagesBefore: 20,

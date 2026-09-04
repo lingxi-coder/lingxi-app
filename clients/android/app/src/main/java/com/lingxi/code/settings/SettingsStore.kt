@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.graphics.Color
 import com.lingxi.code.R
+import com.lingxi.code.bindings.ProviderModelCatalogEntryDto
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
 import com.lingxi.code.model.GenericProvider
@@ -40,6 +42,7 @@ import kotlinx.coroutines.launch
 data class SettingsUiState(
     val llmProviders: List<GenericProvider> = emptyList(),
     val llmCatalogEntries: List<LlmProviderCatalogEntry> = emptyList(),
+    val llmCatalogLoaded: Boolean = false,
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
@@ -112,7 +115,6 @@ class SettingsStore(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
             SettingsUiState(
                 llmProviders = llm,
-                llmCatalogEntries = providerRepo.builtinProviderCatalog(),
                 searchProviders = search,
                 fetchProviders = fetch,
                 visionDelegationEnabled = providerRepo.visionDelegationEnabled(),
@@ -246,6 +248,31 @@ class SettingsStore(
 
     fun setVoiceCapability(snapshot: VoiceCapabilitySnapshot) =
         _state.update { it.copy(voiceCapability = snapshot) }
+
+    fun setLlmCatalogEntries(entries: List<ProviderModelCatalogEntryDto>) {
+        _state.update { state ->
+            val existing = state.llmCatalogEntries.associateBy(LlmProviderCatalogEntry::profileId)
+            state.copy(
+                llmCatalogLoaded = true,
+                llmCatalogEntries = entries.map { entry ->
+                    val prior = existing[entry.providerId]
+                    val presetId = if (entry.providerId == "gemini") "google" else entry.providerId
+                    val preset = ProviderKind.Llm.presets.firstOrNull { it.id == presetId }
+                    LlmProviderCatalogEntry(
+                        profileId = entry.providerId,
+                        displayName = entry.providerLabel,
+                        baseUrl = prior?.baseUrl ?: preset?.defaultUrl.orEmpty(),
+                        protocol = prior?.protocol ?: preset?.sub.orEmpty(),
+                        auth = prior?.auth.orEmpty(),
+                        credentialEnv = prior?.credentialEnv,
+                        modelIds = entry.models.map { it.modelId },
+                        modelDetails = entry.models.map(CatalogModelDetails::fromDto),
+                    )
+                },
+            )
+        }
+    }
+
     @Synchronized
     fun setLinuxRuntimeMode(mode: LinuxRuntimeMode) {
         val current = _state.value

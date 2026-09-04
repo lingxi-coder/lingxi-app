@@ -139,8 +139,9 @@ fn phase4_and_phase6_workflows_use_real_orchestration() {
         // appear somewhere (a comment mentioning the namespace used to be
         // enough to satisfy this).
         assert!(
-            code.lines()
-                .any(|line| line.trim_start().starts_with("const WORKFLOW_ID = 'lingxi-local-app:")),
+            code.lines().any(|line| line
+                .trim_start()
+                .starts_with("const WORKFLOW_ID = 'lingxi-local-app:")),
             "{name} must declare `const WORKFLOW_ID = 'lingxi-local-app:...'`, not merely \
              mention the namespace"
         );
@@ -175,6 +176,14 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
         "app_id": "aaaa1111",
         "spec": "A small form app",
         "quality_level": "balanced",
+        // r3-workflow-runtime-02: the Host launch boundary always injects
+        // `workflow_run_id` at the TOP level of args (workflow_support.rs
+        // :1775-1779), not only inside `host_context`. A hermetic fixture
+        // that omits it can never exercise the script's `unknown` check
+        // against that key, so a regression that dropped `workflow_run_id`
+        // from `INTERNAL_KEYS` would pass this test while breaking every
+        // real create launch.
+        "workflow_run_id": "wf_hermetic1",
         "host_context": {
             "source": "verified_host",
             "operation": "create",
@@ -279,7 +288,8 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     let prompts = seen_prompts.lock().expect("prompt log");
     let agent_calls = prompts.len();
     assert_eq!(
-        agent_calls, 8,
+        agent_calls,
+        8,
         "a hermetic create run with quality_level 'balanced' and every stub reporting success \
          must make exactly template-selector, designer, builder-stage, native-create-approval, \
          builder-build, operator, tester, verifier — 8 agent calls (saw: {:?})",
@@ -330,6 +340,20 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
         "operation": "verify",
         "app_id": "aaaa1111",
         "quality_level": "balanced",
+        // r3-workflow-runtime-02: mirror the Host's real top-level injection
+        // (workflow_support.rs :1488-1493, :1775-1779) alongside host_context,
+        // not only inside it.
+        "workflow_run_id": "wf_verify1",
+        // The build path's top-level `runtime_profile` carries exactly three
+        // fields (workflow_support.rs:1478-1482); `surface` is added only by
+        // `enrich_persisted_plugin_workflow_context` on the use-test /
+        // mcp-authoring path, so it must NOT appear here.
+        "runtime_profile": {
+            "family": "react_dom",
+            "revision": 1,
+            "contract_sha256": "a".repeat(64)
+        },
+        "expected_writable_collections": [],
         "host_context": {
             "source": "verified_host",
             "operation": "verify",
@@ -454,6 +478,18 @@ fn unified_build_update_keeps_mcp_authoring_explicit() {
         "app_id": "aaaa1111",
         "revision_prompt": "Add a bounded search filter",
         "quality_level": "balanced",
+        // r3-workflow-runtime-02: mirror the Host's real top-level injection
+        // (workflow_support.rs :1488-1493, :1775-1779) alongside host_context,
+        // not only inside it.
+        "workflow_run_id": "wf_update2",
+        // Three fields only -- see the verify fixture's note; the build path
+        // never populates `surface` at the top level.
+        "runtime_profile": {
+            "family": "react_dom",
+            "revision": 1,
+            "contract_sha256": "a".repeat(64)
+        },
+        "expected_writable_collections": ["items"],
         "host_context": {
             "source": "verified_host",
             "operation": "update",

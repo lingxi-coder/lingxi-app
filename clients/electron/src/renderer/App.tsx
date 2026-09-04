@@ -88,8 +88,6 @@ export function App() {
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
             theme={theme}
             onTheme={changeTheme}
-            onOpenSettingsPage={(pageId) => openSettings(pageId ? { pageId } : undefined)}
-            onOpenCommandPalette={() => setCommandPaletteOpen(true)}
           />
           {!bridge.sessionLoading && <RuntimeCenterOverview bridge={bridge} />}
           <ErrorBanner bridge={bridge} />

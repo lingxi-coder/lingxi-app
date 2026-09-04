@@ -74,7 +74,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
-    lower_skill_info, lower_status_snapshot, lower_task_output_chunk, lower_task_record,
+    lower_provider_model_catalog_entry, lower_skill_info, lower_status_snapshot,
+    lower_task_output_chunk, lower_task_record,
 };
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{
@@ -189,6 +190,15 @@ fn lower_auth_state(info: Option<LoginInfo>) -> AuthStateDto {
     }
 }
 
+fn provider_model_catalog_from_listings(
+    listings: &[platform_api::ModelListing],
+) -> Vec<client_protocol::listings::ProviderModelCatalogEntryDto> {
+    platform_api::provider_model_catalog(listings)
+        .iter()
+        .map(lower_provider_model_catalog_entry)
+        .collect()
+}
+
 /// The production [`CommandRouter`]: wraps the real engine handles and lowers
 /// each reply with the pure `client_adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
@@ -209,6 +219,9 @@ pub struct EngineCommandRouter {
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
+    /// Settings-visible provider model directory assembled from the full
+    /// provider config, including providers not currently routable.
+    provider_model_catalog_listings: Vec<platform_api::ModelListing>,
     /// Packaged Desktop owns persistence in its signed credential broker; in
     /// that mode bridge credential mutations update only this process cache.
     provider_credentials_ephemeral: bool,
@@ -484,6 +497,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             credentials: None,
+            provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
             http: None,
             settings: None,
@@ -502,6 +516,15 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    #[must_use]
+    pub fn with_provider_model_catalog_listings(
+        mut self,
+        listings: Vec<platform_api::ModelListing>,
+    ) -> Self {
+        self.provider_model_catalog_listings = listings;
         self
     }
 
@@ -2772,6 +2795,15 @@ impl EngineCommandRouter {
                 let available = self.handle.list_available_models().await;
                 let listings = self.handle.list_model_listings().await;
                 let snapshot = self.handle.get_status_snapshot().await;
+                let provider_catalog = if self.provider_model_catalog_listings.is_empty() {
+                    provider_model_catalog_from_listings(&listings)
+                } else {
+                    provider_model_catalog_from_listings(&self.provider_model_catalog_listings)
+                };
+                sink.emit(ClientEvent::ProviderModelCatalog {
+                    providers: provider_catalog,
+                })
+                .await;
                 let curated = platform_api::curated_model_listings(
                     &listings,
                     &snapshot.model,
@@ -3386,6 +3418,7 @@ impl CommandRouter for EngineCommandRouter {
                         messages_before: summary.messages_before,
                         messages_after: summary.messages_after,
                         bytes_saved: summary.bytes_saved,
+                        summary: summary.summary,
                     })
                     .await;
                 }

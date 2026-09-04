@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ProviderCatalogEntryDto
 import com.lingxi.code.bindings.ProviderCredentialSecretDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
@@ -106,6 +105,7 @@ class EngineProviderCredentialClient(
                 ClientCommand.ListProviderCredentials(
                     operationId = operationId,
                     providerIds = providerIds,
+                    previewProviderIds = emptyList(),
                 ),
             )
         }
@@ -289,9 +289,7 @@ class ProviderSettingsRepository(
 
     fun persistProviders(kind: ProviderKind, providers: List<GenericProvider>) {
         val key = prefKeyFor(kind)
-        val encoded = JSONArray().apply {
-            providers.forEach { put(providerToJson(it)) }
-        }.toString()
+        val encoded = encodeProvidersJson(providers)
         prefs.edit().putString(key, encoded).apply()
     }
 
@@ -350,24 +348,6 @@ class ProviderSettingsRepository(
             credentialOverride = credentialOverride?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
-
-    fun builtinProviderCatalog(): List<LlmProviderCatalogEntry> =
-        runCatching {
-            buildVoiceEngine(
-                context = appContext,
-                apiBase = "",
-                apiKey = "",
-                model = "",
-                onEvent = {},
-                onPermission = {},
-            )?.let { handle ->
-                try {
-                    handle.builtinProviderCatalog().map(::lowerCatalogEntry)
-                } finally {
-                    runCatching { handle.destroy() }
-                }
-            }.orEmpty()
-        }.getOrDefault(emptyList())
 
     /**
      * Non-secret provider settings consumed by the mobile Rust engine.
@@ -538,7 +518,7 @@ class ProviderSettingsRepository(
                     ?.modelDetails
                     ?.firstOrNull()
                     ?.modelId
-                    ?: preset.models.firstOrNull().orEmpty()
+                    .orEmpty()
             } else {
                 preset.models.firstOrNull().orEmpty()
             }
@@ -553,18 +533,6 @@ class ProviderSettingsRepository(
                 enabled = true,
             )
         }
-
-        private fun lowerCatalogEntry(dto: ProviderCatalogEntryDto): LlmProviderCatalogEntry =
-            LlmProviderCatalogEntry(
-                profileId = dto.profileId,
-                displayName = dto.displayName,
-                baseUrl = dto.baseUrl,
-                protocol = dto.protocol,
-                auth = dto.auth,
-                credentialEnv = dto.credentialEnv,
-                modelIds = dto.models,
-                modelDetails = dto.modelDetails.map(CatalogModelDetails::fromDto),
-            )
 
         private fun usesBuiltInProfile(provider: GenericProvider): Boolean {
             val preset = ProviderKind.Llm.presets.firstOrNull { it.id == provider.preset }
@@ -615,6 +583,69 @@ class ProviderSettingsRepository(
                 )
             }
         }
+
+        internal fun decodeProvidersJson(raw: String): List<GenericProvider> {
+            if (raw.isBlank()) return emptyList()
+            return runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (i in 0 until array.length()) {
+                        add(migrateLegacyDeepSeek(providerFromJson(array.getJSONObject(i))))
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        internal fun encodeProvidersJson(providers: List<GenericProvider>): String =
+            JSONArray().apply {
+                providers.forEach { put(providerToJson(it)) }
+            }.toString()
+
+        private fun providerFromJson(obj: JSONObject): GenericProvider =
+            GenericProvider(
+                id = obj.getString("id"),
+                preset = obj.getString("preset"),
+                name = obj.getString("name"),
+                url = obj.getString("url"),
+                key = "",
+                model = obj.optString("model"),
+                cx = obj.optString("cx"),
+                status = ConnStatus.Idle,
+                isDefault = obj.optBoolean("isDefault"),
+                enabled = obj.optBoolean("enabled", true),
+                credentialConfigured = obj.optBoolean("credentialConfigured", false),
+                showInModelPicker = obj.optBoolean("showInModelPicker", true),
+                visibleModelIds = obj.optJSONArray("visibleModelIds")?.let { ids ->
+                    buildList {
+                        for (index in 0 until ids.length()) {
+                            val modelId = ids.optString(index).trim()
+                            if (modelId.isNotEmpty() && !contains(modelId)) add(modelId)
+                        }
+                    }
+                },
+            )
+
+        private fun providerToJson(provider: GenericProvider): JSONObject =
+            JSONObject().apply {
+                put("id", provider.id)
+                put("preset", provider.preset)
+                put("name", provider.name)
+                put("url", provider.url)
+                put("model", provider.model)
+                put("cx", provider.cx)
+                put("isDefault", provider.isDefault)
+                put("enabled", provider.enabled)
+                put("credentialConfigured", provider.credentialConfigured)
+                put("showInModelPicker", provider.showInModelPicker)
+                if (provider.visibleModelIds != null) {
+                    put(
+                        "visibleModelIds",
+                        JSONArray().apply {
+                            provider.visibleModelIds.forEach(::put)
+                        },
+                    )
+                }
+            }
     }
 
     private fun prefKeyFor(kind: ProviderKind): String = when (kind) {
@@ -653,44 +684,6 @@ class ProviderSettingsRepository(
 
     private fun decodeProviders(key: String): List<GenericProvider> {
         val raw = prefs.getString(key, null).orEmpty()
-        if (raw.isBlank()) return emptyList()
-        return runCatching {
-            val array = JSONArray(raw)
-            buildList {
-                for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    add(
-                        migrateLegacyDeepSeek(
-                            GenericProvider(
-                                id = obj.getString("id"),
-                                preset = obj.getString("preset"),
-                                name = obj.getString("name"),
-                                url = obj.getString("url"),
-                                key = "",
-                                model = obj.optString("model"),
-                                cx = obj.optString("cx"),
-                                status = ConnStatus.Idle,
-                                isDefault = obj.optBoolean("isDefault"),
-                                enabled = obj.optBoolean("enabled", true),
-                                credentialConfigured = obj.optBoolean("credentialConfigured", false),
-                            ),
-                        ),
-                    )
-                }
-            }
-        }.getOrDefault(emptyList())
+        return decodeProvidersJson(raw)
     }
-
-    private fun providerToJson(provider: GenericProvider): JSONObject =
-        JSONObject().apply {
-            put("id", provider.id)
-            put("preset", provider.preset)
-            put("name", provider.name)
-            put("url", provider.url)
-            put("model", provider.model)
-            put("cx", provider.cx)
-            put("isDefault", provider.isDefault)
-            put("enabled", provider.enabled)
-            put("credentialConfigured", provider.credentialConfigured)
-        }
 }

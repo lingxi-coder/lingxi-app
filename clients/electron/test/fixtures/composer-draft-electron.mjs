@@ -65,9 +65,9 @@ async function main() {
 
     await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
     await webContents.executeJavaScript(`document.querySelector('[aria-label="Start ordinary recording"]').click()`);
-    await waitFor(webContents, `document.querySelector('[aria-label="Stop ordinary recording"]')?.disabled === false`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Stop dictation"]')?.disabled === false`);
     const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
-    await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop ordinary recording"]').click()`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]').click()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
     const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
 

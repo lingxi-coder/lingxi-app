@@ -444,21 +444,40 @@ struct ProviderEditorSheet: View {
     }
 
     private var modelSection: some View {
-        let preset = repository.preset(for: draft.profile.presetID)
-        let catalogEntry = repository.catalogEntries.first(where: { $0.id == draft.profile.presetID })
-        let detailByModelID = Dictionary(
-            uniqueKeysWithValues: (catalogEntry.map { Array($0.modelDetails.values) } ?? []).map { ($0.modelId, $0) }
+        let modelCatalog = repository.editorModelCatalog(
+            for: draft.profile,
+            runtimeModelReferences: repository.runtimeSnapshot.models
         )
-        let runtimeModels = repository.runtimeSnapshot.models.compactMap { ref -> String? in
-            guard let slash = ref.firstIndex(of: "/") else { return nil }
-            guard String(ref[..<slash]) == draft.profile.id || String(ref[..<slash]) == draft.profile.presetID else { return nil }
-            return String(ref[ref.index(after: slash)...])
+        let models: [String]
+        let detailByModelID: [String: ModelRuntimeDetails]
+        let modelPlaceholder: String
+        let visibilitySummary: String
+        switch modelCatalog {
+        case .ready(let readyModels, let readyDetails):
+            models = readyModels
+            detailByModelID = readyDetails
+            modelPlaceholder = readyModels.first ?? String(localized: "settings_provider_model_placeholder")
+            visibilitySummary = "\(repository.visibleModelCount(for: draft.profile, from: readyModels)) / \(readyModels.count)"
+        case .loading, .unavailable:
+            models = []
+            detailByModelID = [:]
+            modelPlaceholder = draft.profile.modelID.isEmpty
+                ? String(localized: "settings_provider_model_placeholder")
+                : draft.profile.modelID
+            switch modelCatalog {
+            case .loading:
+                visibilitySummary = String(localized: "settings_provider_model_catalog_loading")
+            case .unavailable:
+                visibilitySummary = String(localized: "settings_provider_model_catalog_unavailable")
+            case .ready:
+                visibilitySummary = ""
+            }
         }
-        var models = Array(NSOrderedSet(array: runtimeModels + preset.models + [draft.profile.modelID]).compactMap { $0 as? String })
-        models.removeAll { $0.isEmpty }
+        let selectedModels = repository.visibleModelIDs(for: draft.profile, from: models)
         return VStack(alignment: .leading, spacing: 8) {
             FieldLabel(text: String(localized: "settings_provider_model_id"))
-            if !models.isEmpty {
+            switch modelCatalog {
+            case .ready:
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 7) {
                         ForEach(models, id: \.self) { model in
@@ -508,9 +527,67 @@ struct ProviderEditorSheet: View {
                         }
                     }
                 }
+            case .loading:
+                FieldHint(String(localized: "settings_provider_model_catalog_loading"))
+            case .unavailable:
+                FieldHint(String(localized: "settings_provider_model_catalog_unavailable"))
             }
-            SettingsField(text: textBinding(\.modelID), placeholder: preset.models.first ?? String(localized: "settings_provider_model_placeholder"))
+            SettingsField(text: textBinding(\.modelID), placeholder: modelPlaceholder)
             FieldHint(String(localized: "settings_provider_custom_model_hint"))
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle(isOn: Binding(
+                    get: { draft.profile.showInModelPicker },
+                    set: { draft.profile.showInModelPicker = $0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(String(localized: "settings_provider_show_in_picker"))
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(t.text2)
+                        Text(visibilitySummary)
+                            .font(.system(size: 11.5))
+                            .foregroundColor(t.text4)
+                    }
+                }
+                .toggleStyle(.switch)
+                if case .ready = modelCatalog, !models.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(models, id: \.self) { model in
+                            let selected = selectedModels.contains(model)
+                            Button {
+                                toggleVisibleModel(model, from: models)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: selected ? "checkmark.square.fill" : "square")
+                                        .foregroundStyle(selected ? t.accent : t.text4)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(detailByModelID[model]?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
+                                            .font(.system(size: 12.5, weight: .medium))
+                                            .foregroundColor(t.text2)
+                                        Text(model)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundColor(t.text4)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(t.windowBg)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                if case .ready = modelCatalog,
+                   draft.profile.showInModelPicker && selectedModels.isEmpty {
+                    Text(String(localized: "settings_provider_picker_hidden_empty"))
+                        .font(.system(size: 11.5))
+                        .foregroundColor(t.statusTesting)
+                }
+            }
+            .padding(.top, 6)
         }
     }
 
@@ -540,6 +617,16 @@ struct ProviderEditorSheet: View {
 
     private func boolBinding(_ keyPath: WritableKeyPath<ProviderStoredProfile, Bool>) -> Binding<Bool> {
         Binding(get: { draft.profile[keyPath: keyPath] }, set: { draft.profile[keyPath: keyPath] = $0 })
+    }
+
+    private func toggleVisibleModel(_ modelID: String, from candidates: [String]) {
+        var allowlist = draft.profile.visibleModelIDs ?? candidates
+        if allowlist.contains(modelID) {
+            allowlist.removeAll { $0 == modelID }
+        } else {
+            allowlist.append(modelID)
+        }
+        draft.profile.visibleModelIDs = Array(NSOrderedSet(array: allowlist)).compactMap { $0 as? String }
     }
 
     private func testConnection() {

@@ -132,6 +132,7 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
     bundleId: identifiers.desktopBundleId,
     allowJit: true,
     disableLibraryValidation: true,
+    audioInput: true,
   });
   const brokerEntitlementsPath = join(appContainer, 'LingXiCredentialBroker.entitlements.plist');
   writeEntitlements(brokerEntitlementsPath, {
@@ -142,6 +143,7 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   writeEntitlements(audioEntitlementsPath, {
     teamId,
     bundleId: audioIdentifiers.bundleId,
+    audioInput: true,
   });
   const helperEntitlementsPath = join(appContainer, 'Electron-Helper.entitlements.plist');
   const pluginEntitlementsPath = join(appContainer, 'Electron-Plugin-Helper.entitlements.plist');
@@ -166,9 +168,13 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   verifyIdentifier(audioHelperAppPath, audioIdentifiers.bundleId, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
   verifyIdentifier(appPath, identifiers.desktopBundleId, teamId);
-  verifySignedEntitlements(audioHelperAppPath, teamId, audioIdentifiers.bundleId);
+  verifySignedEntitlements(audioHelperAppPath, teamId, audioIdentifiers.bundleId, {
+    'com.apple.security.device.audio-input': true,
+  });
   verifySignedEntitlements(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
-  verifySignedEntitlements(appPath, teamId, identifiers.desktopBundleId);
+  verifySignedEntitlements(appPath, teamId, identifiers.desktopBundleId, {
+    'com.apple.security.device.audio-input': true,
+  });
   verifyTeamIdentifier(join(audioHelperAppPath, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
   for (const path of nestedFrameworkBinaries) verifyTeamIdentifier(path, teamId);
   log(`signed app, audio helper, and credential broker with ${identity} (${version})`);

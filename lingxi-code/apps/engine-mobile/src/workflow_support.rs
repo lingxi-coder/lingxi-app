@@ -1058,6 +1058,14 @@ fn is_verified_plugin_workflow(
 /// which is what the native create confirmation sheet renders and what
 /// `LocalAppScaffold` commits. Without them the create flow falls back to the
 /// `untitled` placeholder.
+///
+/// WP-MCP-intent: `mcp_intent` is the create-time MCP interview outcome the
+/// user already gave conversationally (absent = never asked,
+/// `{"status":"declined"}`, `{"status":"requested","services":[...]}`). It
+/// belongs here for the same reason `name`/`brief` do: the launch boundary
+/// forwards ONLY the declared contract, so a key the script declares but this
+/// list omits is rejected before the script runs — which does not lose the
+/// answer, it fails the whole create launch.
 pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
     "operation",
     "app_id",
@@ -1066,6 +1074,7 @@ pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
     "quality_level",
     "name",
     "brief",
+    "mcp_intent",
 ];
 
 /// External argument keys accepted for the plugin use-test workflow.
@@ -1341,24 +1350,29 @@ fn apply_materialized_local_app_collections_with_identity(
                 )
             })?
             .to_string();
-        // AUD-WF-02, known-unfixed: injecting `workflow_run_id` on a trusted
-        // scriptPath resume (r1-backlog-workflow-runtime-04) lets a CREATE
-        // resume reach this call, but it does not yet make that resume
-        // succeed. `mint_run_id` reuses the run id on a resume, so this is the
-        // same capability path the interrupted run already holds, and
-        // `issue_selector_capability` fails closed with
-        // `selector_capability_exists` whenever the live (never-consumed)
-        // token is still on disk -- i.e. exactly the interrupted run one would
-        // want to resume. It only rotates the `.used` marker. Making a create
-        // resume actually resumable needs that function to rotate a LIVE
-        // capability on a Host-verified resume too; that lives in
-        // `local_app_template_catalog.rs`, outside this work package. Only the
-        // update/verify resume is proven end to end today.
-        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
-            app_data_root,
-            &app_id,
-            &workflow_run_id,
-        )
+        // AUD-WF-02, r1-backlog-workflow-runtime-04 / r1-workflow-runtime-06:
+        // injecting `workflow_run_id` on a trusted scriptPath resume lets a
+        // CREATE resume reach this call with the SAME capability path the
+        // interrupted run already held (`mint_run_id` reuses the run id on a
+        // resume). The plain `issue_selector_capability` fails closed
+        // against that -- correctly, for an UNverified caller -- so a
+        // Host-verified resume goes through the rotation-aware sibling
+        // instead, which is the only thing this branch has proven
+        // (`trusted_local_app_resume`) that a duplicate concurrent launch
+        // has not.
+        let selector_capability = if trusted_local_app_resume {
+            crate::local_app_template_catalog::issue_selector_capability_for_verified_resume(
+                app_data_root,
+                &app_id,
+                &workflow_run_id,
+            )
+        } else {
+            crate::local_app_template_catalog::issue_selector_capability(
+                app_data_root,
+                &app_id,
+                &workflow_run_id,
+            )
+        }
         .map_err(tool_workflow::WorkflowLaunchError)?;
         // r3-never-wired-11: `selector_capability` is also copied into
         // `host_context` below, which is the ONLY copy the build workflow
@@ -1479,6 +1493,7 @@ fn apply_materialized_local_app_collections_with_identity(
         "family": binding_family.as_str(),
         "revision": binding_revision,
         "contract_sha256": binding_contract_sha256,
+        "surface": binding_family.surface().as_str(),
     });
     let collection_ids = manifest
         .collections
@@ -1766,11 +1781,10 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // `{scriptPath, resumeFromRunId}` with no `name` -- proves it instead
         // through `expected_workflow_id`, the host-owned checkpoint
         // provenance resolved above. Either must inject the same key.
-        let is_build_workflow_launch = spec
-            .name
-            .as_deref()
-            .is_some_and(|name| name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)
-            || expected_workflow_id
+        let is_build_workflow_launch =
+            spec.name.as_deref().is_some_and(|name| {
+                name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+            }) || expected_workflow_id
                 == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
         if is_build_workflow_launch {
             if let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) {
@@ -2209,18 +2223,25 @@ fn enrich_persisted_plugin_workflow_context(
 }
 
 /// Remove all authority-bearing fields from caller args before a namespaced
-/// Local App workflow is enriched. The workflow receives these values only
-/// from this launch boundary; allowing a caller-provided `runtime_profile`,
-/// template handle, collection list or context to survive would turn the
-/// Plugin script into its own authority source.
+/// Local App workflow is enriched, on every launch shape this sanitizer can
+/// currently recognize as such a workflow. The workflow receives these
+/// values only from this launch boundary; allowing a caller-provided
+/// `runtime_profile`, template handle, collection list or context to
+/// survive on a recognized shape would turn the Plugin script into its own
+/// authority source.
 ///
 /// `spec.name` proves this on a fresh launch, but a `scriptPath` resume --
 /// the shape the Workflow tool's own resume hint produces -- carries no
 /// `name` at all. `expected_workflow_id` is the launcher's host-owned
-/// checkpoint-provenance answer for that case (only ever
-/// `PLUGIN_BUILD_WORKFLOW_ID` today; see `local_app_resume_resolution_for_record`),
-/// so a caller cannot forge it by omitting `name` and supplying a
-/// `scriptPath` instead.
+/// checkpoint-provenance answer for that case, but
+/// `local_app_resume_resolution_for_record` only ever resolves it to
+/// `PLUGIN_BUILD_WORKFLOW_ID`; a `scriptPath` resume of the use-test or
+/// mcp-authoring workflows produces neither signal, so this sanitizer is
+/// currently a NO-OP on those two resume shapes (`validate_namespaced_local_app_external_args`
+/// also early-returns there, since it too keys off `spec.name`). Narrowing
+/// this gap requires extending `local_app_resume_resolution_for_record` to
+/// resolve those workflow ids from checkpoint provenance the same way it
+/// does for the build workflow.
 fn sanitize_namespaced_local_app_args(
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     expected_workflow_id: Option<&str>,
@@ -2371,8 +2392,7 @@ mod plugin_args_tests {
     /// script's declared contract against the real validator, key by key.
     #[test]
     fn build_workflow_script_external_contract_is_accepted_by_the_host() {
-        let script =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let script = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let declaration = script
             .lines()
             .find(|line| line.starts_with("const ALLOWED_EXTERNAL ="))
@@ -2450,7 +2470,9 @@ mod plugin_args_tests {
             let declaration = script
                 .lines()
                 .find(|line| line.starts_with(declaration_prefix))
-                .unwrap_or_else(|| panic!("script must declare a line starting {declaration_prefix:?}"));
+                .unwrap_or_else(|| {
+                    panic!("script must declare a line starting {declaration_prefix:?}")
+                });
             declaration
                 .split_once('[')
                 .and_then(|(_, rest)| rest.split_once(']'))
@@ -4389,11 +4411,13 @@ mod run_id_tests {
             let args_json = state.args.as_deref().unwrap_or_else(|| {
                 panic!("operation {operation:?}: the launcher must persist args onto the task row")
             });
-            let after: serde_json::Value = serde_json::from_str(args_json)
-                .unwrap_or_else(|error| panic!("operation {operation:?}: persisted args are not valid json: {error}"));
-            let after_object = after
-                .as_object()
-                .unwrap_or_else(|| panic!("operation {operation:?}: persisted args are not an object"));
+            let after: serde_json::Value =
+                serde_json::from_str(args_json).unwrap_or_else(|error| {
+                    panic!("operation {operation:?}: persisted args are not valid json: {error}")
+                });
+            let after_object = after.as_object().unwrap_or_else(|| {
+                panic!("operation {operation:?}: persisted args are not an object")
+            });
 
             assert_eq!(
                 after_object
@@ -4448,7 +4472,10 @@ mod run_id_tests {
             let expected_by_layer: std::collections::BTreeMap<String, &'static str> =
                 if operation == "create" {
                     vec![
-                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "workflow_run_id",
+                            "`launch` itself, workflow_support.rs:1711",
+                        ),
                         (
                             "host_context",
                             "the seam, workflow_support.rs:1331 (create-only), including its \
@@ -4458,7 +4485,10 @@ mod run_id_tests {
                     ]
                 } else {
                     vec![
-                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "workflow_run_id",
+                            "`launch` itself, workflow_support.rs:1711",
+                        ),
                         (
                             "runtime_profile",
                             "the seam `apply_materialized_local_app_collections_with_identity`, \

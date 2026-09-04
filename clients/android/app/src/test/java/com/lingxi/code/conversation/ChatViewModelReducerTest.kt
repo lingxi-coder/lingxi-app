@@ -296,7 +296,7 @@ class ChatViewModelReducerTest {
         vm.send("must not overlap compaction")
         assertEquals(1, vm.state.value.messages.size)
 
-        vm.reduceClientEvent(ClientEvent.CompactionCompleted(20u, 7u, 4096u))
+        vm.reduceClientEvent(ClientEvent.CompactionCompleted(20u, 7u, 4096u, "kept context"))
         val completed = vm.state.value.compaction
         assertEquals(CompactionProgressStatus.Completed, completed?.status)
         assertEquals(20, completed?.messagesBefore)

@@ -337,6 +337,9 @@ data class ModelProviderStatus(
     val status: ConnStatus,
     val enabled: Boolean,
     val credentialConfigured: Boolean,
+    val catalogModelIds: List<String>? = null,
+    val showInModelPicker: Boolean = true,
+    val visibleModelIds: List<String>? = null,
 ) {
     val canSelect: Boolean
         get() = enabled && (status == ConnStatus.Configured || status == ConnStatus.Connected)
@@ -374,6 +377,63 @@ data class ModelProviderGroup(
     val name: String,
     val models: List<ModelOption>,
 )
+
+data class ProviderModelVisibility(
+    val catalogModelIds: List<String>? = null,
+    val showInModelPicker: Boolean = true,
+    val visibleModelIds: List<String>? = null,
+)
+
+object ProviderModelVisibilityRules {
+    fun visibleCatalogModels(
+        models: List<CatalogModelDetails>,
+        visibility: ProviderModelVisibility?,
+    ): List<CatalogModelDetails> {
+        if (visibility?.showInModelPicker == false) return emptyList()
+        val allowed = visibility?.visibleModelIds ?: return models
+        if (allowed.isEmpty()) return emptyList()
+        val allowedIds = allowed.toHashSet()
+        return models.filter { allowedIds.contains(it.modelId) }
+    }
+
+    fun selectedCatalogModelIds(
+        candidateModelIds: List<String>,
+        visibility: ProviderModelVisibility?,
+    ): List<String> {
+        val allowed = visibility?.visibleModelIds ?: return candidateModelIds.distinct()
+        if (allowed.isEmpty()) return emptyList()
+        val candidates = candidateModelIds.toHashSet()
+        return allowed.filter { it in candidates }.distinct()
+    }
+
+    fun visibleConversationModels(
+        models: List<ModelOption>,
+        visibilityByProviderId: Map<String, ProviderModelVisibility>,
+    ): List<ModelOption> =
+        models.filter { model ->
+            val visibility = visibilityByProviderId[model.providerId] ?: return@filter true
+            val catalogModelIds = visibility.catalogModelIds
+            if (catalogModelIds != null) {
+                val catalog = catalogModelIds.toHashSet()
+                val requestModelId = model.requestModelId()
+                val detailModelId = model.details?.modelId
+                if (
+                    model.id !in catalog &&
+                    requestModelId !in catalog &&
+                    (detailModelId == null || detailModelId !in catalog)
+                ) {
+                    return@filter false
+                }
+            }
+            if (!visibility.showInModelPicker) return@filter false
+            val allowed = visibility.visibleModelIds ?: return@filter true
+            if (allowed.isEmpty()) return@filter false
+            allowed.contains(model.details?.modelId ?: model.requestModelId())
+        }
+
+    private fun ModelOption.requestModelId(): String =
+        id.substringAfter('/', id)
+}
 
 enum class Role { User, Ai }
 
@@ -718,4 +778,18 @@ object EngineModelCatalog {
             )
         }
     }
+
+    fun visibleModels(
+        models: List<ModelOption>,
+        statuses: List<ModelProviderStatus>,
+    ): List<ModelOption> = ProviderModelVisibilityRules.visibleConversationModels(
+        models,
+        statuses.associate { status ->
+            status.profileId to ProviderModelVisibility(
+                catalogModelIds = status.catalogModelIds,
+                showInModelPicker = status.showInModelPicker,
+                visibleModelIds = status.visibleModelIds,
+            )
+        },
+    )
 }

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 
 import {
   defaultSettings,
+  parseModelPickerVisibility,
   parseSettings,
   parseVoicePreferences,
   publicSettings,
@@ -123,6 +124,7 @@ export class SettingsStore {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    modelPickerVisibility?: unknown;
   }): PublicSettings {
     if ('theme' in patch) {
       if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
@@ -144,6 +146,11 @@ export class SettingsStore {
       // Android's `save()` each write the full snapshot at once, never a
       // partial merge of individual fields).
       this.settings.voice = parseVoicePreferences(patch.voice);
+    }
+    if ('modelPickerVisibility' in patch) {
+      const parsed = parseModelPickerVisibility(patch.modelPickerVisibility);
+      if (Object.keys(parsed).length > 0) this.settings.modelPickerVisibility = parsed;
+      else delete this.settings.modelPickerVisibility;
     }
     this.persist();
     return this.getPublic();

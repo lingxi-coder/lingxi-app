@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Japanese for values/strings_local_apps_v3.xml (see that file's header). -->
+<resources>
+    <string name="local_apps_webview_upgrade_required">現在の Android System WebView は安全なローカルアプリ Bridge に対応していません。先に System WebView を更新してください。</string>
+    <string name="local_apps_webview_untrusted_origin">ローカルアプリは信頼できるループバックアドレスからのみ開けます。</string>
+    <string name="local_apps_webview_storage_cleanup_waiting">このアプリアドレスの古いブラウザデータを安全に削除しています…</string>
+    <string name="local_apps_webview_storage_cleanup_failed">アプリのブラウザデータを安全に準備できなかったため、アプリは読み込まれませんでした。</string>
+    <string name="local_apps_error_web_storage_cleanup_queue">アプリのブラウザデータ削除タスクを安全に記録できなかったため、アプリはまだ削除されていません。</string>
+    <string name="local_apps_workflow_draft">下書き</string>
+    <string name="local_apps_session_load_more">さらに読み込む</string>
+    <string name="local_apps_sessions_loading">会話を読み込んでいます…</string>
+    <string name="local_apps_session_meta">%1$s・%2$d 件のメッセージ</string>
+    <string name="chat_question_card_title">アシスタントがいくつか確認したいことがあります</string>
+    <string name="chat_question_progress">第 %1$d/%2$d 問</string>
+    <string name="chat_question_previous">前へ</string>
+    <string name="chat_question_next">次へ</string>
+    <string name="chat_question_other_placeholder">その他</string>
+    <string name="chat_question_submit">送信</string>
+    <string name="chat_task_status_pending">バックグラウンドタスク %1$s をキューに追加しました</string>
+    <string name="chat_task_status_running">バックグラウンドタスク %1$s を実行中です</string>
+    <string name="chat_task_status_paused">バックグラウンドタスク %1$s を一時停止しました</string>
+    <string name="chat_task_status_completed">バックグラウンドタスク %1$s が完了しました</string>
+    <string name="chat_task_status_failed">バックグラウンドタスク %1$s が失敗しました</string>
+    <string name="chat_task_status_cancelled">バックグラウンドタスク %1$s をキャンセルしました</string>
+    <string name="drawer_app_scope_label">アプリ・%1$s</string>
+    <string name="drawer_app_sessions_empty">このアプリにはまだ会話がありません。</string>
+</resources>

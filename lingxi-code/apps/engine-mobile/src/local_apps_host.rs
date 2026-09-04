@@ -17,7 +17,8 @@ use client_protocol::local_apps::{
     AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
-    LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
+    LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+    LocalAppVerificationStatusDto,
     LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
     McpAppWidgetDto,
 };
@@ -194,6 +195,21 @@ struct CreateProposalContext {
     /// placeholder until `commit_scaffold` runs.
     name: String,
     brief: String,
+    /// Outcome of the create-time MCP interview, staged through
+    /// `LocalAppStageCreate` alongside `name`/`brief`. `None` means the
+    /// interview was skipped or the app predates it — NOT that the user
+    /// declined. See [`local_apps::AppMcpIntent`].
+    ///
+    /// ⚠️ Unlike `name`/`brief` this is DELIBERATELY outside the native create
+    /// confirmation sheet's rendered set: it grants nothing (create still runs
+    /// no MCP authoring — `create_without_mcp` stays the only create-time MCP
+    /// path), so there is no authorization for the user to answer for here. It
+    /// is a note-to-self carried onto the record for the Settings MCP flow to
+    /// read later. The receipt's "the user already answered for these bytes"
+    /// claim (see `stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_bytes`) covers the
+    /// bytes the sheet renders; the moment this intent starts GRANTING
+    /// anything, it must be rendered on that sheet before it is committed.
+    mcp_intent: Option<local_apps::AppMcpIntent>,
 }
 
 #[derive(Clone, Debug)]
@@ -205,6 +221,8 @@ struct CreateScaffoldSeed {
     /// the model echoes back into `LocalAppScaffold`. See `CreateProposalContext`.
     name: String,
     brief: String,
+    /// See `CreateProposalContext::mcp_intent`.
+    mcp_intent: Option<local_apps::AppMcpIntent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -719,6 +737,86 @@ impl Drop for ReceiptClaim {
     }
 }
 
+/// r4-failure-paths-06: guards a create-only MCP candidate's durable state
+/// (candidate journal + candidate file) across the native-approval await in
+/// the create branch of `approve_mcp_proposal`.
+///
+/// Constructed once that state is durable, and defused with [`Self::keep`]
+/// on the ONE outcome that must survive it (approval granted). Every other
+/// exit — an explicit deny, an error, or the request's future being dropped
+/// (a Stop, a 529 non-streaming fallback, connection teardown) — must not
+/// leave a `Prepared` candidate on disk. Before this guard existed, both
+/// `delete_mcp_candidate_state` calls lived only in the `Ok(false)`/`Err`
+/// match arms on `request_mcp_candidate_approval`'s result, which a dropped
+/// future never reaches, so a Stop during the (up to five-minute) native
+/// confirmation wait leaked the journal and candidate file for the life of
+/// the process. `delete_mcp_candidate_state` is documented idempotent
+/// ("crash-recovery cleanup"), so this guard running again after either
+/// manual cleanup arm is harmless.
+struct McpCreateCandidateGuard<'a> {
+    broker: &'a LocalAppsHostBroker,
+    layout: AppLayout,
+    app_id: String,
+    workflow_run_id: String,
+    keep: bool,
+}
+
+impl McpCreateCandidateGuard<'_> {
+    /// The candidate was approved: its durable state must survive this guard.
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for McpCreateCandidateGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            // Best-effort: Drop cannot propagate an error to a caller that no
+            // longer exists, and the ordinary paths already surface (or
+            // idempotently repeat) this same cleanup with a real error.
+            let _ = self.broker.delete_mcp_candidate_state(
+                &self.layout,
+                &self.app_id,
+                &self.workflow_run_id,
+            );
+        }
+    }
+}
+
+/// One entry in `pending_dependency_change_confirmations`, held across the
+/// native dependency-review await in `confirm_dependency_change`.
+///
+/// `confirm_dependency_change` only became MODEL-callable when its
+/// `LOCAL_APP_TOOLS` row landed (r2-never-wired-02), and
+/// `local_apps_tools.rs` gives every operation except `create`/`scaffold`
+/// `InterruptBehavior::Cancel` — so an ESC during the (up to five-minute)
+/// review sheet DROPS this future. The explicit `remove` calls live only in
+/// the cancelled/timed-out match arms on the `timeout(..)` result, which a
+/// dropped future never reaches, so before this guard a Stop orphaned the
+/// entry for the life of the broker and the user's later tap resolved into a
+/// receiver nobody was holding.
+///
+/// The approved path needs no defusing: `resolve_dependency_change_confirmation`
+/// takes the entry out of the map itself before sending, and `HashMap::remove`
+/// on an absent key is a no-op — so this guard is idempotent with every arm.
+struct PendingDependencyConfirmationGuard<'a> {
+    pending: &'a Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    request_id: String,
+}
+
+impl Drop for PendingDependencyConfirmationGuard<'_> {
+    fn drop(&mut self) {
+        // `try_lock` first for the same reason as `RuntimeReservation::drop`:
+        // `Drop` cannot await. Unlike the runtime map there is no owned handle
+        // to hand a spawned task here, but this mutex is only ever held for a
+        // single `insert` or `remove` with no await in between, so a failed
+        // `try_lock` needs a collision inside a few instructions.
+        if let Ok(mut pending) = self.pending.try_lock() {
+            pending.remove(&self.request_id);
+        }
+    }
+}
+
 // The `device.*` operations of the bridge — capture / pick / record / locate
 // / notify. A CHILD module (not a sibling) so it reaches the broker's private
 // fields and `authorize_declared_capability` without widening their
@@ -784,13 +882,41 @@ impl From<&str> for BridgeFailure {
 /// ONE canonical spelling for a session-catalog cwd key. `canonicalize`
 /// collapses the platform's symlink split (`/var` vs `/private/var` on
 /// iOS/macOS), so mint, listing, resume and the cwd gates all derive the SAME
-/// sanitized `projects/` directory. Falls back to the raw string when the path
-/// does not exist.
+/// sanitized `projects/` directory.
+///
+/// r1-engine-core-010: a bare `canonicalize(path).unwrap_or(raw)` disagrees
+/// with itself across a path's lifetime — mint runs while the workspace
+/// directory still exists (canonicalizes to e.g. `/private/var/...`), but a
+/// later cleanup can run after that directory is gone, where `canonicalize`
+/// fails outright and the raw fallback (`/var/...`) spells a DIFFERENT
+/// catalog directory than the one mint wrote into, so the cleanup's
+/// `remove_file` silently misses. Walk up to the nearest surviving ancestor,
+/// canonicalize THAT, and reappend the removed suffix — this reproduces the
+/// same spelling `canonicalize` would have produced while the leaf still
+/// existed, so mint and a post-deletion cleanup always agree.
 pub(crate) fn canonical_cwd_string(path: &std::path::Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
+    let mut removed_suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(mut canonical) => {
+                for name in removed_suffix.into_iter().rev() {
+                    canonical.push(name);
+                }
+                return canonical.to_string_lossy().to_string();
+            }
+            Err(_) => match ancestor.file_name().map(std::ffi::OsString::from) {
+                Some(name) => {
+                    removed_suffix.push(name);
+                    if !ancestor.pop() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    path.to_string_lossy().to_string()
 }
 
 /// Delete a session file this host minted into an app's workspace catalog.
@@ -1944,6 +2070,24 @@ impl LocalAppsHostBroker {
             });
         }
         servers.sort_by(|left, right| left.app_id.cmp(&right.app_id));
+        // r2-never-wired-01: `VerificationSummaryChanged` had zero producers
+        // anywhere in the engine, so both clients' per-app verification
+        // fields could never become non-nil. The publication/verification
+        // triple is already computed per server above; derive the summary
+        // event from the SAME values rather than recomputing them, so the
+        // two events can never disagree.
+        for server in &servers {
+            self.event_sink
+                .emit(ClientEvent::AppEvent {
+                    event: AppEventDto::VerificationSummaryChanged {
+                        app_id: server.app_id.clone(),
+                        publication_state: server.publication_state,
+                        mcp_verification: server.mcp_verification.clone(),
+                        ui_verification: server.ui_verification.clone(),
+                    },
+                })
+                .await;
+        }
         self.event_sink
             .emit(ClientEvent::AppEvent {
                 event: AppEventDto::ManagedMcpInventoryChanged { servers },
@@ -2142,13 +2286,46 @@ impl LocalAppsHostBroker {
         let relative =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
         match platform_api::rooted_fs::remove_file(&self.root, &relative) {
-            Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
-            Err(error) => Err(local_apps::AppError::from_fs(
-                "delete create-only MCP candidate",
-                &error,
-            )
-            .to_string()),
+            Ok(()) | Err(platform_api::FsError::NotFound(_)) => {}
+            Err(error) => {
+                return Err(local_apps::AppError::from_fs(
+                    "delete create-only MCP candidate",
+                    &error,
+                )
+                .to_string());
+            }
         }
+        // r1-backlog-scaffold-build-03 / r1-failure-paths-008: this run's
+        // create staging (`.lingxi-build-state/template-candidates/<app>/
+        // <run>/staging/`, holding a full template copy plus the confirmed
+        // name/brief in evidence.json) is never read again once the
+        // candidate state it gates is torn down. Reclaim exactly that
+        // subtree — NOT the whole `<run>/` directory, which is also home to
+        // `validated-selection.json` and the selector capability
+        // (`local_app_template_catalog::journal_path`). Two of this
+        // function's callers are NOT terminal for the workflow run: the
+        // `Err(error)` arm after a five-minute native-approval timeout, and
+        // the `McpCreateCandidateGuard` Drop on a Stop / teardown mid-sheet.
+        // Deleting the validated selection there would turn a retry of
+        // `LocalAppStageCreate` with the same handle into
+        // `validated_selection_missing`, i.e. a dead create run.
+        Self::remove_create_staging(&self.root, app_id, workflow_run_id)
+    }
+
+    /// Reclaim `<root>/.lingxi-build-state/template-candidates/<app>/<run>/
+    /// staging/` — the run's template copy, `evidence.json`, `design-spec
+    /// .json` and staged MCP flow contexts (see `create_staging_root`).
+    fn remove_create_staging(
+        root: &Path,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<(), String> {
+        let staging = root
+            .join(".lingxi-build-state/template-candidates")
+            .join(app_id)
+            .join(workflow_run_id)
+            .join("staging");
+        Self::remove_owned_path(&staging)
     }
 
     fn load_active_mcp_flow_contexts(
@@ -2215,9 +2392,41 @@ impl LocalAppsHostBroker {
         app_id: &str,
         event: AppEventDto,
     ) -> Result<bool, String> {
+        self.wait_for_native_approval_with_timeout(
+            pending,
+            request_id,
+            app_id,
+            event,
+            APPROVAL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Same as [`Self::wait_for_native_approval`] with an injectable deadline.
+    /// Production always goes through the wrapper above, which fixes it at
+    /// `APPROVAL_TIMEOUT`; tests call this directly with a short duration so
+    /// the `Err(_)` timeout arm (r4-tests-honesty-05) does not cost the suite
+    /// five real minutes.
+    async fn wait_for_native_approval_with_timeout(
+        &self,
+        pending: &Mutex<HashMap<String, PendingNativeApproval>>,
+        request_id: String,
+        app_id: &str,
+        event: AppEventDto,
+        deadline: Duration,
+    ) -> Result<bool, String> {
         let (sender, receiver) = oneshot::channel();
         {
             let mut requests = pending.lock().await;
+            // r1-backlog-native-confirmation-04: a caller that drops this
+            // future mid-await (task cancellation, request abandonment) skips
+            // every arm below, so the entry it inserted here would otherwise
+            // never be removed — its `sender` is dead (the paired `receiver`
+            // dropped with the future) but the map still holds it forever,
+            // and the duplicate guard below would then refuse every later
+            // approval for this app. Prune dead entries first so a stale one
+            // never blocks a fresh request.
+            requests.retain(|_, request| !request.sender.is_closed());
             if requests.values().any(|request| request.app_id == app_id) {
                 return Err(
                     "approval_pending: this Local App already has a pending approval".into(),
@@ -2232,15 +2441,67 @@ impl LocalAppsHostBroker {
             );
         }
         self.event_sink.emit(ClientEvent::AppEvent { event }).await;
-        match timeout(APPROVAL_TIMEOUT, receiver).await {
+        match timeout(deadline, receiver).await {
             Ok(Ok(approved)) => Ok(approved),
             Ok(Err(_)) => {
                 pending.lock().await.remove(&request_id);
-                Err("native Local App approval was cancelled".into())
+                let message = "native Local App approval was cancelled".to_string();
+                // r1-failure-paths-002: proactively retract the native sheet on
+                // every client. Clients discard their pending approval keyed on
+                // `request_id` (e.g. iOS's `discardPendingApproval`), so a bare
+                // `Err` here left a stale sheet on screen indefinitely — the
+                // caller only learns the workflow failed, never the client.
+                //
+                // ⚠️ KNOWN-WRONG `code`, deliberately left as-is:
+                // `LocalAppPluginErrorCodeDto` (client-protocol/src/local_apps.rs)
+                // has NO cancelled/aborted/timed-out member, and `code` is not
+                // optional. Android DOES render it —
+                // `LocalAppsViewModel.localizedPluginError` maps
+                // `PROPOSAL_INVALID` to `local_apps_error_proposal_invalid`
+                // ("MCP 提案未通过校验，需要继续修改。"), which is wrong copy for a
+                // cancelled/timed-out sheet and doubly wrong on the CREATE
+                // confirmation path below (`wait_for_native_approval` also serves
+                // `CreateConfirmationRequested`, which has no MCP proposal at
+                // all). iOS ignores `code` and shows `message`, so iOS is correct
+                // already; the dismissal itself keys on `request_id` on BOTH
+                // platforms and works regardless of `code`.
+                // Fixing the copy is a four-file, cross-platform change this
+                // module cannot land alone: append (never insert — UniFFI encodes
+                // by declaration ordinal) an `ApprovalAborted` member at the END
+                // of `LocalAppPluginErrorCodeDto`; add its string to the five
+                // `clients/translations/*.json` sources and regenerate the iOS
+                // `.xcstrings` / Android `strings.xml` catalogs; add the arm to
+                // `LocalAppsViewModel.localizedPluginError`; then emit it here and
+                // in the timeout arm below.
+                self.event_sink
+                    .emit(ClientEvent::AppEvent {
+                        event: AppEventDto::LocalAppOperationFailed {
+                            app_id: Some(app_id.to_string()),
+                            code: LocalAppPluginErrorCodeDto::ProposalInvalid,
+                            message: message.clone(),
+                            request_id: Some(request_id.clone()),
+                        },
+                    })
+                    .await;
+                Err(message)
             }
             Err(_) => {
                 pending.lock().await.remove(&request_id);
-                Err("native Local App approval timed out".into())
+                let message = "native Local App approval timed out".to_string();
+                // r1-failure-paths-002: same retraction as the cancelled arm
+                // above, for the timeout arm — including its KNOWN-WRONG `code`
+                // and the four-file fix that would correct it.
+                self.event_sink
+                    .emit(ClientEvent::AppEvent {
+                        event: AppEventDto::LocalAppOperationFailed {
+                            app_id: Some(app_id.to_string()),
+                            code: LocalAppPluginErrorCodeDto::ProposalInvalid,
+                            message: message.clone(),
+                            request_id: Some(request_id.clone()),
+                        },
+                    })
+                    .await;
+                Err(message)
             }
         }
     }
@@ -2339,6 +2600,30 @@ impl LocalAppsHostBroker {
                 "create_staging_evidence_invalid: staged evidence is missing brief".to_string()
             })?
             .to_string();
+        // WP-MCP-intent: `stage_create` always writes this key, `null` when
+        // no interview ran this call — so a MISSING key (not merely a `null`
+        // value) means staging predates this field or is corrupt, while a
+        // present-but-malformed value is a genuine parse error. Either way
+        // this is the only place a staged intent is read back for the
+        // create-in-progress path, so a silent fallback to `None` here would
+        // let a corrupt or unparsable staged answer quietly turn into
+        // "never asked" on the committed record.
+        let mcp_intent = match staging_evidence.get("mcpIntent") {
+            None => {
+                return Err(
+                    "create_staging_evidence_invalid: staged evidence is missing mcpIntent"
+                        .to_string(),
+                )
+            }
+            Some(Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value::<local_apps::AppMcpIntent>(value.clone()).map_err(
+                    |error| {
+                        format!("create_staging_evidence_invalid: staged mcpIntent is malformed: {error}")
+                    },
+                )?,
+            ),
+        };
         let design_path = staging_root.join("design-spec.json");
         let (design_spec, design_spec_sha256) = match std::fs::read(&design_path) {
             Ok(bytes) => {
@@ -2369,6 +2654,7 @@ impl LocalAppsHostBroker {
                         contexts,
                         name,
                         brief,
+                        mcp_intent,
                     });
                 }
                 Err(error) => {
@@ -2399,12 +2685,61 @@ impl LocalAppsHostBroker {
                 "create_staging_template_invalid: template root is not a real directory".into(),
             );
         }
+        // r1-backlog-scaffold-build-07: `stage_create` digests every staged
+        // template file into `evidence.json`'s `stagedFiles` at write time
+        // (see the `staged_files.push` loop above it), but until now nothing
+        // ever read those digests back. The multi-minute native confirmation
+        // wait sits BETWEEN that write and this seed being landed into the
+        // real workspace, so tampering with the staged template in that
+        // window went undetected — the staging-time `materialized != bytes`
+        // check runs before the wait even starts and cannot cover it.
+        let staged_files = create_context
+            .staging_evidence
+            .get("stagedFiles")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                "create_staging_template_invalid: staged evidence is missing stagedFiles"
+                    .to_string()
+            })?;
+        for entry in staged_files {
+            let path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+                "create_staging_template_invalid: a stagedFiles entry is missing path".to_string()
+            })?;
+            let expected_sha256 = entry.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+                format!(
+                    "create_staging_template_invalid: stagedFiles entry {path:?} is missing sha256"
+                )
+            })?;
+            let relative_path = std::path::Path::new(path);
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(format!(
+                    "create_staging_template_invalid: unsafe stagedFiles path {path:?}"
+                ));
+            }
+            let bytes = std::fs::read(template_root.join(relative_path)).map_err(|error| {
+                format!(
+                    "create_staging_template_invalid: staged file changed since staging \
+                     (unreadable) {path:?}: {error}"
+                )
+            })?;
+            let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+            if actual_sha256 != expected_sha256 {
+                return Err(format!(
+                    "create_staging_template_invalid: staged file changed since staging {path:?}"
+                ));
+            }
+        }
         Ok(CreateScaffoldSeed {
             selection: create_context.selection,
             template_root,
             contexts: create_context.contexts,
             name: create_context.name,
             brief: create_context.brief,
+            mcp_intent: create_context.mcp_intent,
         })
     }
 
@@ -2420,12 +2755,16 @@ impl LocalAppsHostBroker {
                     && entry.contract_sha256 == binding.contract_sha256
             })
             .ok_or_else(|| "selected runtime profile is no longer available".to_string())?;
-        let dependency_status = if entry.available {
+        // r1-never-wired-09: cache/download describe different provenance
+        // (a shared snapshot is `cached`, a matching seed is `bundled`,
+        // download is only `download_required`) — mirror the sibling JSON
+        // emission in `runtime_profiles_value` below, which already gives the
+        // unavailable case two DIFFERENT tokens (`unavailable` / `gated`)
+        // rather than repeating one value into both DTO fields.
+        let dependency_status = entry.available.then(|| {
             self.runtime_profile_dependency_availability(entry.family, entry.revision)
                 .as_str()
-        } else {
-            "unavailable"
-        };
+        });
         Ok(AppRuntimeProfileOptionDto {
             family: lower_runtime_profile_family(entry.family),
             revision: entry.revision,
@@ -2439,8 +2778,8 @@ impl LocalAppsHostBroker {
                     version: version.into(),
                 })
                 .collect(),
-            cache_status: dependency_status.into(),
-            download_status: dependency_status.into(),
+            cache_status: dependency_status.unwrap_or("unavailable").into(),
+            download_status: dependency_status.unwrap_or("gated").into(),
             available: entry.available,
             reason: entry.availability_reason.map(str::to_string),
         })
@@ -3582,10 +3921,30 @@ impl LocalAppsHostBroker {
             }
             return Err(format!("promote staged dependencies: {error}"));
         }
+        // r4-engine-core-05: the rename above already committed the new
+        // `node_modules` tree — the install SUCCEEDED. Everything from here
+        // is post-commit litter cleanup; propagating either failure via `?`
+        // would turn that success into `Err` (and, on the create path, roll
+        // back the whole scaffold) while a full, working dependency tree
+        // sits in the workspace. Best-effort only: warn and leave the
+        // leftovers for a later sweep instead of disowning the promotion.
         if had_current {
-            Self::remove_owned_path(&backup)?;
+            if let Err(error) = Self::remove_owned_path(&backup) {
+                tracing::warn!(
+                    path = %backup.display(),
+                    error = %error,
+                    "node_modules backup cleanup deferred after a successful dependency promotion"
+                );
+            }
         }
-        Self::remove_owned_path(staging)
+        if let Err(error) = Self::remove_owned_path(staging) {
+            tracing::warn!(
+                path = %staging.display(),
+                error = %error,
+                "dependency staging cleanup deferred after a successful dependency promotion"
+            );
+        }
+        Ok(())
     }
 
     async fn install_dependencies_value(&self, input: Value) -> Result<Value, String> {
@@ -6574,6 +6933,12 @@ impl LocalAppsHostBroker {
             let mut proposed = record.clone();
             proposed.name = name.clone();
             proposed.brief = brief.clone();
+            // WP-MCP-intent: rendered into the formal contract below via
+            // `formal_workspace_contract(proposed, ...)` — same reasoning as
+            // name/brief above: the shell record has no intent yet, so the
+            // contract must read it from the staged candidate, not from
+            // `record`.
+            proposed.mcp_intent = create_seed.mcp_intent.clone();
             if let Some(model) = &workflow_model {
                 proposed.workflow_model = Some(model.clone());
             }
@@ -6590,7 +6955,13 @@ impl LocalAppsHostBroker {
                 self.install_scaffold_dependencies(&service, &app_id, &layout)
                     .await?;
                 service
-                    .commit_scaffold(&app_id, &name, &brief, workflow_model.as_deref())
+                    .commit_scaffold(
+                        &app_id,
+                        &name,
+                        &brief,
+                        workflow_model.as_deref(),
+                        create_seed.mcp_intent.as_ref(),
+                    )
                     .await
                     .map_err(|error| error.to_string())
             }
@@ -6681,6 +7052,24 @@ impl LocalAppsHostBroker {
                         );
                     }
                 } else {
+                    // The candidate journal survives an MCP-carrying create
+                    // (it still gates the tool grant), but the run's create
+                    // staging is spent the moment the scaffold commits —
+                    // and this arm is the only reclaim point that scaffold
+                    // success ever reaches (`delete_mcp_candidate_state`,
+                    // which sweeps it for a create-only app, is never called
+                    // here). Best-effort so a reclaim failure cannot fail a
+                    // committed scaffold.
+                    if let Err(error) =
+                        Self::remove_create_staging(&self.root, &app_id, &workflow_run_id)
+                    {
+                        tracing::warn!(
+                            app_id = %app_id,
+                            workflow_run_id = %workflow_run_id,
+                            %error,
+                            "scaffold committed but create staging reclaim failed"
+                        );
+                    }
                     match local_apps::load_candidate_journal(&layout)
                         .map_err(|error| error.to_string())
                         .and_then(|mut journal| {
@@ -7375,6 +7764,23 @@ fn scaffold_next_step_guidance() -> String {
         .into()
 }
 
+/// Render the create-time MCP interview outcome for [`formal_workspace_contract`].
+/// Empty string when the interview never ran — there is nothing to tell the
+/// model about a question that was not asked, and the surrounding contract
+/// reads correctly either way since this is spliced in as its own line.
+fn mcp_intent_contract_line(intent: Option<&local_apps::AppMcpIntent>) -> String {
+    match intent {
+        None => String::new(),
+        Some(local_apps::AppMcpIntent::Declined) => {
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n".into()
+        }
+        Some(local_apps::AppMcpIntent::Requested { services }) => format!(
+            "MCP intent: asked during creation; the user asked for MCP access to {}.\n\n",
+            services.join(", ")
+        ),
+    }
+}
+
 /// Render the FORMAL workspace contract — the `workspace/LINGXI.md` a
 /// formed app carries, and the twin of [`guided_workspace_contract`].
 ///
@@ -7475,9 +7881,11 @@ fn formal_workspace_contract(
          `build/store/dist/`.\n",
         id = record.id,
     );
+    let mcp_intent_line = mcp_intent_contract_line(record.mcp_intent.as_ref());
     format!(
         "# Local App: {name} ({id})\n\n\
          Brief: {brief}\n\n\
+         {mcp_intent_line}\
          ## Workspace contract\n\
          - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
          - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
@@ -7524,6 +7932,7 @@ fn formal_workspace_contract(
         name = record.name,
         id = record.id,
         brief = record.brief,
+        mcp_intent_line = mcp_intent_line,
         setup_path = setup_path,
         build_preview = build_preview,
     )
@@ -7561,7 +7970,23 @@ fn formal_workspace_contract(
 ///   wrong for the one turn that has none — which is why step 1 states the
 ///   exception in the same breath as the tool, rather than leaving a reader to
 ///   reconcile the two.
-/// - step 4 names the create SKILL below, not the build workflow it launches
+/// - step 4 (the MCP interview) grounds its recommendations in
+///   `LocalAppTemplateCatalog`'s `mcpSuggestions` rather than free invention,
+///   and asks with concrete named options rather than a bare "do you want
+///   MCP?" — a yes/no with nothing to say yes TO gives the user nothing to
+///   decide between. It does NOT call `LocalAppStageCreate` itself: staging
+///   is the workflow's own sub-agent call (see below), so this step only
+///   determines the answer and lets it ride the conversation into step 5.
+///   That is why the step asks the model to restate the answer in plain text
+///   instead of promising it a slot to put it in: the ONLY thing that makes
+///   this answer durable is the create skill/workflow passing it to
+///   `LocalAppStageCreate`'s `mcp_intent` argument, and until that wiring
+///   exists the step must not describe a carry-forward mechanism the model
+///   would then have to invent. The create workflow's launch-argument
+///   allowlist rejects unknown keys outright (`unknown external field(s)`),
+///   so a model improvising an `mcp_intent` launch argument would not
+///   silently lose the answer — it would fail the whole create.
+/// - step 5 names the create SKILL below, not the build workflow it launches
 ///   internally. There is no host-initiated launch site for the build
 ///   workflow (the host only auto-starts MCP authoring and resume), so an
 ///   agent that reaches this file can only get to `LocalAppScaffold` through
@@ -7584,31 +8009,73 @@ fn formal_workspace_contract(
 ///   sub-agent calls, not something the top-level interview agent invokes
 ///   itself.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
+    // r3-e2e-trace-05: an MCP-created (chat-origin) app's init session is a
+    // FORK of the very conversation that already described it — asking the
+    // open-ended "what do you want to build" question again throws that
+    // description away and makes the user repeat themselves. `LocalAppCreate`
+    // (the only writer that stamps `conversation_id`) always carries a real,
+    // non-empty `brief` from the same turn; a `+`-button shell never does.
+    let step_one = if record.conversation_id.is_some() {
+        format!(
+            "1. This app was created from a request already described **in this same \
+             conversation** — do not ask the opening question again. Its recorded brief \
+             is: \"{brief}\". Treat that as the answer to \"what do you want to build\" and \
+             move straight to step 2 unless it leaves something essential unresolved; if it \
+             does, ask for just that missing piece in **ordinary conversational text**, not \
+             `AskUserQuestion`.\n"
+        , brief = record.brief)
+    } else {
+        "1. In **ordinary conversational text**, ask the user what they want to build — one \
+         open-ended question — then wait for their answer. **Do not use `AskUserQuestion`** for \
+         this round: it renders a picker, and at this point you know nothing about the app, so \
+         the only thing you could put in the options is your own guess at what the user means — \
+         turning that guess into a menu crowds out the very description you need from them.\n"
+            .to_string()
+    };
     format!(
-        "# Local App（新建，尚未定形态）\n\n\
-         这个应用刚刚创建，**还没有形态**，工作区是空的。\n\n\
-         这个工作区已经绑定到本地应用 `{id}`。把 `{id}` 当作权威：不要调 `LocalAppList` 或 \
-         `LocalAppGet` 去重新发现或确认它，也不要再调一次 `LocalAppCreate`。\n\n\
-         你现在的任务是引导用户，不是写代码。**你现在写下的任何源文件都会在脚手架落地时被删除**，\
-         写了也是白写。\n\n\
-         此刻先不要构建、安装依赖或操作运行时；在应用定形态并落脚手架之前，这些步骤都没有意义。\n\n\
-         步骤：\n\
-         1. **用普通对话文本**问用户想做什么，一句开放式的话，然后等他回答。\
-         这一轮**不要用 `AskUserQuestion`**：它弹的是选择器，而此刻你对这个应用一无所知，\
-         能填进选项里的只有你对用户想法的猜测——把猜测做成菜单，恰好挤掉了你真正需要的那段描述。\n\
-         2. 读他的描述，能自己定的就自己定，别把他已经说过的再问一遍。\
-         只有当某一点仍然悬着、**会改变最终做出来的东西**、而且是可以列出选项的选择时，\
-         才用 `AskUserQuestion` 问一轮，提出 1-3 个聚焦问题；没有未决事项就省略这一轮。\n\
-         描述已经说清楚的，直接进第 3 步。\n\
-         3. 用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
-         \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
-         \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
-         4. 名称与形态确认后，用 `Skill` 工具启动 `lingxi-local-app:create-local-app`（技能只以这个\
-         带插件前缀的名字注册，裸名解析不到）继续：它会读 `LocalAppRuntimeProfiles` \
-         定运行时子档位，走统一创建流程暂存候选、弹出一次原生确认，确认后才落地 `LocalAppScaffold`。\
-         不要自己直接调 `LocalAppScaffold`——它需要那条流程发出的 receipt，没有任何捷径能绕过。\n\
-         5. 重读本文件，按新合约继续。\n\n\
-         形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
+        "# Local App (new, not yet shaped)\n\n\
+         This app was just created and **has no shape yet** — its workspace is empty.\n\n\
+         This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative: \
+         do not call `LocalAppList` or `LocalAppGet` to rediscover or reconfirm it, and do not \
+         call `LocalAppCreate` again.\n\n\
+         Your job right now is to interview the user, not to write code. **Any source file you \
+         write now will be deleted the moment the scaffold lands** — writing it is wasted work.\n\n\
+         Do not build, install dependencies, or operate the runtime yet; none of that means \
+         anything before the app has a shape and a scaffold on disk.\n\n\
+         Steps:\n\
+         {step_one}\
+         2. Read what they wrote. Settle anything you can settle yourself; do not re-ask \
+         something they already said. Only when a point still hangs open, **would change what \
+         gets built**, and is a choice you can lay out as options, ask ONE round of \
+         `AskUserQuestion` with 1-3 focused questions; skip this round if nothing is left \
+         undecided. If their description already settled everything, go straight to step 3.\n\
+         3. Use `AskUserQuestion` to have the user confirm or change the proposed **name** and \
+         **shape**:\n\
+         \u{20}  - `dom` — a multi-screen interface (forms, lists, page navigation)\n\
+         \u{20}  - `canvas` — a single drawing surface (games, 3D, visualizations)\n\
+         4. In **ordinary conversational text**, tell the user in one or two sentences what MCP \
+         is and what it would let this specific app do — reach a live external service or data \
+         source it could not reach on its own. Call `LocalAppTemplateCatalog` and read the \
+         `mcpSuggestions` for the template family matching their confirmed shape and what they \
+         described, then turn those into 2-3 concrete named recommendations for THIS app. Use \
+         `AskUserQuestion` to let them pick which of those to set up, or none. Then write their \
+         answer back in one short line of ordinary text — the exact service names they picked, or \
+         that they declined — so the choice is stated plainly in this conversation for step 5 to \
+         read. Nothing is set up now: creating the app never configures MCP.\n\
+         5. Once the name, shape, and MCP choice are confirmed, use the `Skill` tool to start \
+         `lingxi-local-app:create-local-app` (the skill is registered only under this \
+         plugin-prefixed name; the bare name will not resolve) to continue: it reads \
+         `LocalAppRuntimeProfiles` to decide the runtime sub-profile, stages a candidate through \
+         the unified create flow, raises one native confirmation, and only then lands \
+         `LocalAppScaffold`. Do not call `LocalAppScaffold` yourself — it needs the receipt that \
+         flow issues; there is no shortcut around it. Steps 1-4 above already settled that \
+         skill's own opening question, its one clarification round, the display **name** and \
+         **shape**, and the MCP choice — carry those confirmed answers into it verbatim and do \
+         not ask the user any of them a second time. Inside the skill only the one-line brief \
+         and the runtime sub-profile within the already-confirmed shape are still open.\n\
+         6. Re-read this file and continue under the new contract.\n\n\
+         The shape cannot change once it lands, so it must be the user's confirmed choice, never \
+         something you decide on their behalf.\n",
         id = record.id,
     )
 }
@@ -8297,6 +8764,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 local_apps::service::MAX_BRIEF_BYTES
             ));
         }
+        let mcp_intent = parse_staged_mcp_intent(&input)?;
         let design_spec = input.get("design_spec").cloned();
         let record = self
             .service()?
@@ -8488,6 +8956,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "validatedSelectionHandle": handle,
             "name": name,
             "brief": brief,
+            "mcpIntent": mcp_intent,
             "templateId": selection.template_id,
             "dependencyInputSha256": dependency_input_sha256,
             "designSpecSha256": design_spec_sha256,
@@ -8756,14 +9225,40 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
             local_apps::save_candidate_journal(&layout, &journal)
                 .map_err(|error| error.to_string())?;
+            // r4-failure-paths-06: armed before the (up to five-minute) native
+            // approval await, so a Stop/interrupt that drops this future
+            // mid-wait still cleans up the candidate journal/file instead of
+            // leaking a durable `Prepared` candidate for the life of the
+            // process.
+            let candidate_guard = McpCreateCandidateGuard {
+                broker: self,
+                layout: layout.clone(),
+                app_id: app_id.clone(),
+                workflow_run_id: workflow_run_id.clone(),
+                keep: false,
+            };
             let approval = self
                 .request_mcp_candidate_approval(&record, &workflow_run_id, &manifest, &candidate)
                 .await;
             match approval {
-                Ok(true) => {}
+                Ok(true) => {
+                    candidate_guard.keep();
+                }
                 Ok(false) => {
-                    self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)?;
-                    return Err("user denied the Local App create proposal".into());
+                    // r2-failure-paths-07 / r2-engine-core-09: `?` here would
+                    // let a cleanup I/O failure REPLACE "user denied" with a
+                    // bare storage error, losing the one signal that says the
+                    // user made a choice at all — compose both, matching the
+                    // `Err(error)` arm just below.
+                    let denied = "user denied the Local App create proposal";
+                    if let Err(cleanup_error) =
+                        self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
+                    {
+                        return Err(format!(
+                            "{denied}; create-only candidate cleanup failed: {cleanup_error}"
+                        ));
+                    }
+                    return Err(denied.into());
                 }
                 Err(error) => {
                     if let Err(cleanup_error) =
@@ -8776,6 +9271,18 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     return Err(error);
                 }
             }
+            // r3-engine-core-2: `DeleteApp` may have landed while the native
+            // confirmation sheet above was awaited. `save_candidate_journal`
+            // below unconditionally calls `layout.initialize()`, which would
+            // RESURRECT this app's on-disk skeleton (workspace dir, state
+            // dir, …) if it no longer exists. Re-resolve the record here —
+            // still holding the (kept) candidate guard, so nothing is torn
+            // down twice — and fail closed instead of writing a journal back
+            // into a directory tree that a delete already committed.
+            self.service()?
+                .record(&app_id)
+                .await
+                .map_err(|error| format!("app_deleted_during_approval: {error}"))?;
             let receipt = local_apps::McpConfirmationReceipt::new(
                 &app_id,
                 &workflow_run_id,
@@ -9401,6 +9908,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .lock()
                 .await
                 .insert(request_id.clone(), sender);
+            let _confirmation_guard = PendingDependencyConfirmationGuard {
+                pending: &self.pending_dependency_change_confirmations,
+                request_id: request_id.clone(),
+            };
             self.event_sink
                 .emit(ClientEvent::AppEvent {
                     event: AppEventDto::AppDependencyChangeConfirmationRequested {
@@ -10290,6 +10801,53 @@ fn confirmed_field<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
     required_string(input, key)
         .map(str::trim)
         .map_err(|_| format!("invalid_argument: {key} must be a non-empty string"))
+}
+
+/// Parse the optional `mcp_intent` staged alongside `name`/`brief` in
+/// `LocalAppStageCreate`. Absent or `null` means the interview was not run
+/// this call (staged evidence then records `None`, distinct from a staged
+/// `Declined`); present-but-malformed is a caller error, not silently
+/// dropped — `local_apps::AppMcpIntent`'s own `commit_scaffold`-side bounds
+/// still apply later, but a caller that got the SHAPE wrong should hear
+/// about it at staging time, not at scaffold time several steps later.
+fn parse_staged_mcp_intent(input: &Value) -> Result<Option<local_apps::AppMcpIntent>, String> {
+    match input.get("mcp_intent") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let intent: local_apps::AppMcpIntent = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid_argument: mcp_intent is malformed: {error}"))?;
+            if let local_apps::AppMcpIntent::Requested { services } = &intent {
+                if services.is_empty() {
+                    return Err(
+                        "invalid_argument: mcp_intent Requested must name at least one service"
+                            .into(),
+                    );
+                }
+                if services.len() > local_apps::service::MAX_MCP_INTENT_SERVICES {
+                    return Err(format!(
+                        "invalid_argument: mcp_intent names {} services (limit {})",
+                        services.len(),
+                        local_apps::service::MAX_MCP_INTENT_SERVICES
+                    ));
+                }
+                for service in services {
+                    if service.trim().is_empty() {
+                        return Err(
+                            "invalid_argument: mcp_intent service name must not be blank".into(),
+                        );
+                    }
+                    if service.len() > local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES {
+                        return Err(format!(
+                            "invalid_argument: mcp_intent service name is {} bytes (limit {})",
+                            service.len(),
+                            local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES
+                        ));
+                    }
+                }
+            }
+            Ok(Some(intent))
+        }
+    }
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -12118,6 +12676,27 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tempfile::TempDir;
 
+    #[test]
+    fn canonical_cwd_string_keeps_the_same_spelling_after_the_leaf_directory_is_deleted() {
+        // r1-engine-core-010: mint runs while the workspace directory still
+        // exists; a later cleanup (e.g. `remove_app_session_file`) can run
+        // after it is gone. A bare `canonicalize(..).unwrap_or(raw)` gives
+        // those two calls DIFFERENT spellings on a symlink-split platform
+        // (`/var` vs `/private/var`), so the cleanup misses the catalog
+        // directory the mint actually wrote to.
+        let tmp = TempDir::new().unwrap();
+        let leaf = tmp.path().join("workspace");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let while_present = canonical_cwd_string(&leaf);
+        std::fs::remove_dir_all(&leaf).unwrap();
+        let after_deleted = canonical_cwd_string(&leaf);
+        assert_eq!(
+            while_present, after_deleted,
+            "mint (leaf exists) and a later cleanup (leaf deleted) must agree \
+             on the same catalog directory spelling"
+        );
+    }
+
     #[derive(Default)]
     struct NoopClientEventSink;
 
@@ -12848,7 +13427,7 @@ mod tests {
             .expect("create app");
         seed_launchable_runtime_fixture(root.path(), &record, name);
         service
-            .commit_scaffold(&record.id, name, "a test app", None)
+            .commit_scaffold(&record.id, name, "a test app", None, None)
             .await
             .expect("commit fixture scaffold");
         record.id
@@ -13497,6 +14076,48 @@ mod tests {
         record
     }
 
+    /// r3-e2e-trace-05: a chat-origin app (`LocalAppCreate`, which always
+    /// stamps `conversation_id`) must not receive step 1's open-ended
+    /// question — the user already answered it in the conversation that
+    /// created the app.
+    #[tokio::test]
+    async fn a_chat_origin_shells_guided_contract_does_not_re_ask_the_opening_question() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let record = service
+            .create_app_with_mode(
+                None,
+                "a todo list app with reminders",
+                Some("conv-123".to_string()),
+                local_apps::CreateMode::Shell,
+                None,
+            )
+            .await
+            .expect("create chat-origin shell app");
+        assert!(
+            record.conversation_id.is_some(),
+            "the fixture must actually carry the origin conversation these tests name"
+        );
+        broker
+            .write_guided_contract_value(&record)
+            .await
+            .expect("write the guided contract");
+        let guided = fs::read_to_string(workspace_of(&root, &record.id).join("LINGXI.md"))
+            .expect("read the guided contract");
+        assert!(
+            !guided.contains("ask the user what they want to build"),
+            "a chat-origin app must not be told to re-ask the opening question the user \
+             already answered: {guided}"
+        );
+        assert!(
+            guided.contains("a todo list app with reminders"),
+            "step 1 must carry the recorded brief forward instead of discarding it: {guided}"
+        );
+        assert!(
+            guided.contains("already described **in this same conversation**"),
+            "step 1 must say why it is skipping the open-ended question: {guided}"
+        );
+    }
+
     fn scaffold_input(app_id: &str, name: &str, brief: &str, _surface: &str) -> Value {
         json!({
             "app_id": app_id,
@@ -13563,18 +14184,36 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
-        broker
-            .stage_create(json!({
-                "app_id": app_id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
-                "name": name,
-                "brief": brief,
-                "design_spec": design_spec,
-            }))
+        // r2-tests-honesty-001: a real design-less create OMITS the
+        // `design_spec` key entirely — `json!({"design_spec": design_spec})`
+        // with `design_spec: None` instead serializes a literal JSON `null`,
+        // which `stage_create`'s `input.get("design_spec")` sees as
+        // `Some(Value::Null)`, not `None`, so it writes `design-spec.json`
+        // containing 4 bytes of `null` and digests those bytes into
+        // `design_spec_sha256` — a value no real design-less create can
+        // produce. Insert the key only when a design spec is actually
+        // supplied so this fixture exercises the branch it claims to.
+        let has_design_spec = design_spec.is_some();
+        let mut stage_request = json!({
+            "app_id": app_id,
+            "workflow_run_id": workflow_run_id,
+            "validated_selection_handle": handle,
+            "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
+            "name": name,
+            "brief": brief,
+        });
+        if let Some(design_spec) = design_spec {
+            stage_request["design_spec"] = design_spec;
+        }
+        let stage = broker
+            .stage_create(stage_request)
             .await
             .expect("stage create");
+        assert_eq!(
+            stage.get("design_spec_sha256").map_or(false, |v| !v.is_null()),
+            has_design_spec,
+            "design_spec_sha256 presence must track whether a design spec was staged: {stage}"
+        );
         write_initial_staging_flow_contexts(broker, app_id, &workflow_run_id, handle);
         let approval_contract_sha256 =
             persist_initial_mcp_candidate_fixture(broker, app_id, &workflow_run_id);
@@ -13646,12 +14285,12 @@ mod tests {
         // case; the (possibly invalid) `name`/`brief` args still reach the
         // returned scaffold input unchanged, so the validation under test
         // still sees exactly what the caller asked for.
-        let stage_name = if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES
-        {
-            name
-        } else {
-            TEST_DEFAULT_APP_NAME
-        };
+        let stage_name =
+            if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES {
+                name
+            } else {
+                TEST_DEFAULT_APP_NAME
+            };
         let stage_brief =
             if !brief.trim().is_empty() && brief.len() <= local_apps::service::MAX_BRIEF_BYTES {
                 brief
@@ -13946,11 +14585,12 @@ mod tests {
     /// by making them choose.
     ///
     /// Nothing else in this file would catch a regression. Step 1 reverting to
-    /// "用 `AskUserQuestion` 问用户想做什么" compiles, keeps `尚未定形态`, and
-    /// leaves every other contract test green, because they assert on the
-    /// header and on the formal contract that REPLACES this text. So this test
-    /// pins the two halves that carry the behaviour: that step 1 names ordinary
-    /// text, and that it names the tool only to forbid it there.
+    /// a bare "ask the user what they want with `AskUserQuestion`" compiles,
+    /// keeps `has no shape yet`, and leaves every other contract test green,
+    /// because they assert on the header and on the formal contract that
+    /// REPLACES this text. So this test pins the two halves that carry the
+    /// behaviour: that step 1 names ordinary text, and that it names the tool
+    /// only to forbid it there.
     #[tokio::test]
     async fn the_interview_opens_with_a_description_prompt_not_a_picker() {
         let (root, service, broker) = create_broker(false, None).await;
@@ -13959,34 +14599,37 @@ mod tests {
             .expect("read the guided contract");
 
         assert!(
-            guided.contains("**用普通对话文本**问用户想做什么"),
+            guided
+                .contains("**ordinary conversational text**, ask the user what they want to build"),
             "step 1 must ask for a description in ordinary text: {guided}"
         );
         assert!(
-            guided.contains("这一轮**不要用 `AskUserQuestion`**"),
+            guided.contains("**Do not use `AskUserQuestion`** for this round"),
             "step 1 must forbid the picker on the opening turn: {guided}"
         );
-        // The generic "问需求用 `AskUserQuestion`" line used to sit above the
-        // step list and contradicted step 1 outright. A model reading both
-        // resolves the contradiction back to the picker, so the unqualified
-        // form must not reappear.
+        // A generic, unqualified "ask the user's needs with `AskUserQuestion`"
+        // line would contradict step 1 outright: a model reading both resolves
+        // the contradiction back to the picker, so that unqualified form must
+        // never appear.
         assert!(
-            !guided.contains("问需求用 `AskUserQuestion`"),
-            "the unqualified rule contradicts step 1 and must stay removed: {guided}"
+            !guided.contains("ask the user's needs with `AskUserQuestion`"),
+            "an unqualified rule would contradict step 1: {guided}"
         );
         // The tool is still the right instrument once there are options to pick
         // between — the name/surface confirmation. Forbidding it everywhere
         // would be the opposite mistake.
         assert!(
-            guided.contains("用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改"),
+            guided.contains(
+                "Use `AskUserQuestion` to have the user confirm or change the proposed **name** and **shape**"
+            ),
             "the name/surface confirmation still belongs in a picker: {guided}"
         );
         assert!(
-            guided.contains("1-3 个聚焦问题"),
+            guided.contains("1-3 focused questions"),
             "a clarification round must contain one to three questions: {guided}"
         );
         assert!(
-            guided.contains("没有未决事项就省略这一轮"),
+            guided.contains("skip this round if nothing is left undecided"),
             "no unresolved decisions must omit the clarification round: {guided}"
         );
     }
@@ -14005,7 +14648,7 @@ mod tests {
         assert!(
             fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
                 .expect("guided contract")
-                .contains("尚未定形态")
+                .contains("has no shape yet")
         );
     }
 
@@ -14252,6 +14895,95 @@ mod tests {
         );
     }
 
+    /// r2-tests-honesty-013: `stage_create` is the only production writer of
+    /// `evidence.json` and always writes `name`/`brief`, so the ONLY way
+    /// either key is missing is on-disk corruption or a pre-fix staging tree
+    /// left over from before this shape existed. `load_create_proposal_context`
+    /// hard-fails on that with `create_staging_evidence_invalid`, but nothing
+    /// pinned the label — a future edit could silently fall back to the shell
+    /// record's `untitled` placeholder instead and every other test would
+    /// stay green, because they all go through `stage_create` itself.
+    #[tokio::test]
+    async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
+        async fn stage_with_evidence_missing(broker: &Arc<LocalAppsHostBroker>, app_id: &str, drop_key: &str) -> String {
+            let workflow_run_id =
+                format!("wf_evidence_gap_{drop_key}_{}", uuid::Uuid::new_v4().simple());
+            let catalog =
+                crate::local_app_template_catalog::catalog_view().expect("template catalog");
+            let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+                &broker.root,
+                app_id,
+                &workflow_run_id,
+            )
+            .expect("selector capability");
+            let selection = broker
+                .validate_template_selection(json!({
+                    "app_id": app_id,
+                    "workflow_run_id": workflow_run_id,
+                    "catalog_digest": catalog.catalog_digest,
+                    "template_id": "react-dom-r2",
+                    "reason": "evidence gap test",
+                    "rejected": [],
+                    "selector_capability": selector_capability,
+                }))
+                .await
+                .expect("validated selection");
+            let handle = selection["validated_selection_handle"]
+                .as_str()
+                .expect("selection handle")
+                .to_string();
+            broker
+                .stage_create(json!({
+                    "app_id": app_id,
+                    "workflow_run_id": workflow_run_id,
+                    "validated_selection_handle": handle,
+                    "quality_level": "fast",
+                    "name": TEST_DEFAULT_APP_NAME,
+                    "brief": TEST_DEFAULT_APP_BRIEF,
+                }))
+                .await
+                .expect("stage create");
+            let evidence_path = broker
+                .create_staging_root(app_id, &workflow_run_id, &handle)
+                .join("evidence.json");
+            let mut evidence: Value =
+                serde_json::from_str(&fs::read_to_string(&evidence_path).expect("staged evidence"))
+                    .expect("parse staged evidence");
+            evidence
+                .as_object_mut()
+                .expect("evidence object")
+                .remove(drop_key);
+            fs::write(
+                &evidence_path,
+                serde_json::to_vec_pretty(&evidence).expect("serialize corrupted evidence"),
+            )
+            .expect("rewrite staged evidence without the key under test");
+            workflow_run_id
+        }
+
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let missing_name_run = stage_with_evidence_missing(&broker, &shell.id, "name").await;
+        let error = broker
+            .load_create_proposal_context(&shell.id, &missing_name_run)
+            .expect_err("staged evidence missing `name` must be a named hard fail");
+        assert!(
+            error.contains("create_staging_evidence_invalid") && error.contains("missing name"),
+            "expected the missing-name hard fail to be named, got: {error}"
+        );
+
+        let missing_brief_run = stage_with_evidence_missing(&broker, &shell.id, "brief").await;
+        let error = broker
+            .load_create_proposal_context(&shell.id, &missing_brief_run)
+            .expect_err("staged evidence missing `brief` must be a named hard fail");
+        assert!(
+            error.contains("create_staging_evidence_invalid") && error.contains("missing brief"),
+            "expected the missing-brief hard fail to be named, got: {error}"
+        );
+    }
+
     /// WP-C gate (`r4-engine-core-01`): a SECOND `create_without_mcp` call for
     /// a `workflow_run_id` whose candidate journal is already sealed at
     /// `Approved` must reuse that approval — no second native
@@ -14361,7 +15093,10 @@ mod tests {
         let sealed_journal =
             local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
                 .expect("sealed journal after first approval");
-        assert_eq!(sealed_journal.stage, local_apps::McpAuthoringStage::Approved);
+        assert_eq!(
+            sealed_journal.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
 
         // A SECOND identical call must reuse the sealed approval promptly —
         // it must NOT raise a second native confirmation sheet and hang
@@ -14452,7 +15187,9 @@ mod tests {
                 &journal_after.proposal_sha256,
                 now_ms(),
             )
-            .expect("the receipt handed back by the reuse arm must be claimable by LocalAppScaffold");
+            .expect(
+                "the receipt handed back by the reuse arm must be claimable by LocalAppScaffold",
+            );
 
         // With that claim now live (an in-flight scaffold), a THIRD call must
         // still refuse to raise a native sheet: it fails fast with a named
@@ -14736,7 +15473,17 @@ mod tests {
     #[tokio::test]
     async fn create_without_mcp_reaches_confirmation_from_staged_context_alone() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
         let shell = shell_app_fixture(&broker, &service).await;
         let workflow_run_id = format!("wf_stage_only_{}", uuid::Uuid::new_v4().simple());
         let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
@@ -14791,25 +15538,31 @@ mod tests {
             }
         });
         tokio::pin!(approval);
-        let request_id = tokio::select! {
-            id = timeout(Duration::from_secs(2), async {
+        // r4-tests-honesty-06: read the actual emitted `AppEventDto` from the
+        // sink, not just the internal `pending_create_confirmations` map's
+        // key — the map proves a confirmation was raised, but says nothing
+        // about what the DTO the native side actually received contained.
+        let request = tokio::select! {
+            found = timeout(Duration::from_secs(2), async {
                 loop {
-                    if let Some(request_id) = broker
-                        .pending_create_confirmations
-                        .lock()
-                        .await
-                        .keys()
-                        .next()
-                        .cloned()
-                    {
-                        break request_id;
+                    if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                        if let ClientEvent::AppEvent {
+                            event: AppEventDto::CreateConfirmationRequested { request },
+                        } = event
+                        {
+                            Some(request)
+                        } else {
+                            None
+                        }
+                    }) {
+                        break request;
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-            }) => id.expect(
+            }) => found.expect(
                 "approve_mcp_proposal(create_without_mcp) must raise a native \
                  CreateConfirmationRequested within 2s using only what production \
-                 stage_create wrote, but none was pending",
+                 stage_create wrote, but none was observed on the sink",
             ),
             result = &mut approval => {
                 panic!(
@@ -14820,7 +15573,15 @@ mod tests {
                 );
             }
         };
-        assert!(broker.resolve_create_confirmation(&request_id, true).await);
+        // The whole point of `create_without_mcp`: no MCP candidate was ever
+        // proposed for this run, so the sheet must not claim any initial
+        // tools — a value the shipped create branch cannot otherwise produce.
+        assert!(
+            request.initial_tools.is_empty(),
+            "create_without_mcp must not surface any initial_tools: {:?}",
+            request.initial_tools
+        );
+        assert!(broker.resolve_create_confirmation(&request.request_id, true).await);
         let approved = approval
             .await
             .expect("approval task")
@@ -14861,6 +15622,267 @@ mod tests {
             "landing an empty staged context set must persist an empty active \
              context map, got: {landed_contexts:?}"
         );
+    }
+
+    /// r3-engine-core-2: `DeleteApp` landing while the native create
+    /// confirmation sheet is still open must not let the eventual approval
+    /// resurrect the app's on-disk skeleton. `save_candidate_journal`
+    /// unconditionally calls `layout.initialize()`, so before the fix this
+    /// scenario silently recreated `apps/<id>/workspace/…` for an app the
+    /// user had just deleted.
+    #[tokio::test]
+    async fn approving_a_create_confirmation_after_delete_app_fails_closed_instead_of_resurrecting_it(
+    ) {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_resurrect_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "r3-engine-core-2 regression",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Resurrection regression",
+                "brief": "app is deleted mid-approval and must not come back",
+            }))
+            .await
+            .expect("stage create");
+
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(approval);
+        let request_id = tokio::select! {
+            id = timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request_id) = broker
+                        .pending_create_confirmations
+                        .lock()
+                        .await
+                        .keys()
+                        .next()
+                        .cloned()
+                    {
+                        break request_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }) => id.expect(
+                "approve_mcp_proposal(create_without_mcp) must raise a native \
+                 confirmation within 2s",
+            ),
+            result = &mut approval => {
+                panic!(
+                    "returned before any confirmation was requested: {:?}",
+                    result.expect("approval task did not panic")
+                );
+            }
+        };
+
+        // The app is deleted OUT FROM UNDER the still-open native sheet.
+        service
+            .delete_app(&shell.id)
+            .await
+            .expect("delete the app while its create approval is pending");
+        let workspace_dir = workspace_of(&root, &shell.id);
+        assert!(
+            !workspace_dir.exists(),
+            "the app must actually be gone before the sheet resolves"
+        );
+
+        assert!(broker.resolve_create_confirmation(&request_id, true).await);
+        let outcome = approval.await.expect("approval task did not panic");
+        let error = outcome.expect_err(
+            "approving a create for a since-deleted app must fail, not resurrect it",
+        );
+        assert!(
+            error.contains("app_deleted_during_approval"),
+            "expected the fail-closed app_deleted_during_approval error, got: {error}"
+        );
+        assert!(
+            !workspace_dir.exists(),
+            "save_candidate_journal's layout.initialize() must not have resurrected \
+             the deleted app's workspace directory: {}",
+            workspace_dir.display()
+        );
+    }
+
+    /// r4-tests-honesty-03: every existing test resolves a create confirmation
+    /// with `approved=true`; the deny arm (cleanup + "user denied the Local
+    /// App create proposal") had zero test references anywhere. Deny it here
+    /// and assert both the error copy AND that the candidate journal/file are
+    /// actually gone -- not just that the call returned an error.
+    #[tokio::test]
+    async fn resolving_a_create_confirmation_with_denial_cleans_up_and_reports_the_denial() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_deny_create_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "deny the create confirmation",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Denied create",
+                "brief": "r4-tests-honesty-03 regression",
+            }))
+            .await
+            .expect("stage create");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(approval);
+        let request_id = tokio::select! {
+            id = timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request_id) = broker
+                        .pending_create_confirmations
+                        .lock()
+                        .await
+                        .keys()
+                        .next()
+                        .cloned()
+                    {
+                        break request_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }) => id.expect("a native CreateConfirmationRequested must be pending"),
+            result = &mut approval => {
+                panic!(
+                    "approve_mcp_proposal must raise a native confirmation before \
+                     returning, got: {:?}",
+                    result.expect("approval task did not panic")
+                );
+            }
+        };
+
+        assert!(broker.resolve_create_confirmation(&request_id, false).await);
+        let error = approval
+            .await
+            .expect("approval task did not panic")
+            .expect_err("a denied create confirmation must surface an error, not a value");
+        assert_eq!(error, "user denied the Local App create proposal");
+
+        assert!(
+            local_apps::load_candidate_journal(&layout).is_err(),
+            "r4-tests-honesty-03: a denied create confirmation must not leave a \
+             durable Prepared candidate journal on disk"
+        );
+        assert!(
+            broker
+                .load_mcp_candidate(&shell.id, &workflow_run_id)
+                .is_err(),
+            "r4-tests-honesty-03: a denied create confirmation must not leave a \
+             durable candidate file on disk"
+        );
+        assert!(
+            !service.record(&shell.id).await.expect("record").scaffolded,
+            "a denied create confirmation must not scaffold the app"
+        );
+
+        // The reclaim must be scoped to `<run>/staging/`. `<run>/` itself is
+        // also home to `validated-selection.json` and the selector
+        // capability, and this arm is NOT terminal for the workflow run: the
+        // user can simply confirm again. Wiping the whole run directory here
+        // turned that retry into `validated_selection_missing`.
+        let run_dir = broker
+            .root
+            .join(".lingxi-build-state/template-candidates")
+            .join(&shell.id)
+            .join(&workflow_run_id);
+        assert!(
+            !run_dir.join("staging").exists(),
+            "the denied run's create staging must be reclaimed: {}",
+            run_dir.join("staging").display()
+        );
+        assert!(
+            run_dir.join("validated-selection.json").exists(),
+            "the run's validated selection must SURVIVE a denial so the user can              retry the same create run: {}",
+            run_dir.join("validated-selection.json").display()
+        );
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Denied create",
+                "brief": "retry after the user denied the first confirmation",
+            }))
+            .await
+            .expect("re-staging the same run after a denial must still resolve the handle");
     }
 
     #[tokio::test]
@@ -15119,8 +16141,14 @@ mod tests {
             .expect("scaffold from unified create receipt");
         let record = service.record(&shell.id).await.expect("record");
         assert!(record.scaffolded);
-        assert_eq!(record.name, STAGED_NAME, "scaffold must commit the staged name, not the model's echoed value");
-        assert_eq!(record.brief, STAGED_BRIEF, "scaffold must commit the staged brief, not the model's echoed value");
+        assert_eq!(
+            record.name, STAGED_NAME,
+            "scaffold must commit the staged name, not the model's echoed value"
+        );
+        assert_eq!(
+            record.brief, STAGED_BRIEF,
+            "scaffold must commit the staged brief, not the model's echoed value"
+        );
         let manifest = load_manifest(&layout).expect("scaffolded manifest");
         assert_eq!(
             manifest
@@ -15176,6 +16204,31 @@ mod tests {
             .await
             .expect("promote candidate");
         assert_eq!(promoted["publication_state"], "published_unverified");
+        // r2-never-wired-01: `AppEventDto::VerificationSummaryChanged` had
+        // zero producers, so a client's per-app verification fields could
+        // never become non-nil. Promoting an MCP candidate is the point at
+        // which the app first leaves Draft, so it must emit the summary.
+        let verification_publication_state = sink
+            .events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::VerificationSummaryChanged {
+                            app_id,
+                            publication_state,
+                            ..
+                        },
+                } if app_id == shell.id => Some(publication_state),
+                _ => None,
+            })
+            .expect("promoting an MCP candidate must emit VerificationSummaryChanged for the app");
+        assert_eq!(
+            verification_publication_state,
+            AppWorkflowStateDto::PublishedUnverified
+        );
         let promoted_manifest = load_manifest(&layout).expect("promoted manifest");
         assert!(promoted_manifest.active_mcp_catalog.is_some());
         let promoted_settings = load_mcp_settings(&layout).expect("promoted MCP settings");
@@ -15200,6 +16253,357 @@ mod tests {
             .await
             .expect("promoted tool executes through active contexts");
         assert!(flow_result.get("state").is_some(), "{flow_result}");
+    }
+
+    /// WP-MCP-intent gate: an mcp_intent staged through `LocalAppStageCreate`
+    /// must survive the whole stage → approve → scaffold chain onto the
+    /// COMMITTED record, and the formal contract `LocalAppScaffold` writes
+    /// must carry it — the same shape as
+    /// `unscaffolded_create_uses_single_confirmation_then_scaffolds_builds_and_promotes`'s
+    /// WP5 gate for name/brief, but for the new field.
+    #[tokio::test]
+    async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_mcp_intent_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "mcp intent staging e2e",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        const STAGED_NAME: &str = "记账本";
+        const STAGED_BRIEF: &str = "记录日常收支的小工具";
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
+                "mcp_intent": {"status": "requested", "services": ["github", "google-drive"]},
+            }))
+            .await
+            .expect("stage create");
+        assert_eq!(stage["ok"], true);
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+        let layout = broker.layout(&shell.id).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        let validated = broker
+            .validate_mcp_proposal(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "proposal": initial_mcp_proposal_fixture(&shell.id, manifest.revision),
+            }))
+            .await
+            .expect("validate mcp proposal");
+        let approval_contract_sha256 = validated["approval_contract_sha256"]
+            .as_str()
+            .expect("approval digest")
+            .to_string();
+
+        let approval_task = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "approval_contract_sha256": approval_contract_sha256,
+                    }))
+                    .await
+            }
+        });
+        let request = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::CreateConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("create confirmation event");
+        assert!(
+            broker
+                .resolve_create_confirmation(&request.request_id, true)
+                .await
+        );
+        let approval = approval_task
+            .await
+            .expect("approval task")
+            .expect("approved");
+        let receipt_id = approval["receipt_id"].as_str().expect("receipt id");
+
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold from unified create receipt");
+
+        let record = service.record(&shell.id).await.expect("record");
+        assert!(record.scaffolded);
+        assert_eq!(
+            record.mcp_intent,
+            Some(local_apps::AppMcpIntent::Requested {
+                services: vec!["github".to_string(), "google-drive".to_string()]
+            }),
+            "the staged mcp_intent must land on the committed record, not be dropped or genericized"
+        );
+
+        let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the formal contract");
+        assert!(
+            contract.contains("MCP intent: asked during creation; the user asked for MCP access to github, google-drive."),
+            "the formal contract must carry the recorded MCP intent: {contract}"
+        );
+
+        // Scaffold success is a reclaim point too: the run's create staging
+        // (a full template copy plus evidence.json) is spent once the
+        // scaffold commits.
+        let staging = broker
+            .root
+            .join(".lingxi-build-state/template-candidates")
+            .join(&shell.id)
+            .join(&workflow_run_id)
+            .join("staging");
+        assert!(
+            !staging.exists(),
+            "a committed scaffold must reclaim its create staging: {}",
+            staging.display()
+        );
+    }
+
+    /// Cheap unit-level complement to the e2e gate above: exercises every
+    /// `mcp_intent` shape `formal_workspace_contract` renders — including
+    /// `Declined`, which the full pipeline test above does not cover — without
+    /// paying for a broker/service fixture.
+    #[test]
+    fn mcp_intent_contract_line_covers_every_shape() {
+        assert_eq!(mcp_intent_contract_line(None), "");
+        assert_eq!(
+            mcp_intent_contract_line(Some(&local_apps::AppMcpIntent::Declined)),
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n"
+        );
+        assert_eq!(
+            mcp_intent_contract_line(Some(&local_apps::AppMcpIntent::Requested {
+                services: vec!["github".to_string(), "google-drive".to_string()]
+            })),
+            "MCP intent: asked during creation; the user asked for MCP access to github, google-drive.\n\n"
+        );
+    }
+
+    /// WP-MCP-intent gate, second state: `Declined` must cross the STAGING
+    /// seam, not just render.
+    ///
+    /// `staged_mcp_intent_survives_create_and_reaches_the_formal_contract`
+    /// stages only `requested`; `commit_scaffold_distinguishes_never_asked_from_declined`
+    /// starts BELOW staging; `mcp_intent_contract_line_covers_every_shape` does
+    /// no serde at all. So nothing proved `{"status":"declined"}` survives
+    /// `parse_staged_mcp_intent` → `evidence.json` → `load_create_proposal_context`.
+    /// Declined is the whole reason this field is not a bool: if it were the one
+    /// shape that failed to round-trip, every declining user would silently
+    /// become "never asked" and be re-prompted forever, and the rest of the
+    /// suite would stay green. This stops at the scaffold seed rather than
+    /// running the full confirmation e2e — the seed is the value
+    /// `scaffold_shell_app_value` commits, and the e2e above already pins the
+    /// seed → record → contract half.
+    #[tokio::test]
+    async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_mcp_declined_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "declined mcp intent staging",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "无 MCP 的记账本",
+                "brief": "用户问过 MCP 但拒绝了",
+                "mcp_intent": {"status": "declined"},
+            }))
+            .await
+            .expect("stage create with a declined intent");
+        assert_eq!(stage["ok"], true);
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let seed = broker
+            .load_create_scaffold_seed(&shell.id, &workflow_run_id)
+            .expect("scaffold seed reads the staged evidence back");
+        assert_eq!(
+            seed.mcp_intent,
+            Some(local_apps::AppMcpIntent::Declined),
+            "a staged `declined` must read back as Declined, never collapse into None \
+             (\"never asked\") — that collapse is what would re-prompt the user forever"
+        );
+        assert_ne!(
+            seed.mcp_intent, None,
+            "asked-and-declined must stay distinguishable from never-asked at the staging seam"
+        );
+        assert_eq!(
+            mcp_intent_contract_line(seed.mcp_intent.as_ref()),
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n"
+        );
+    }
+
+    /// r1-backlog-scaffold-build-07: the multi-minute native create
+    /// confirmation sits BETWEEN `stage_create` digesting the template into
+    /// `evidence.json`'s `stagedFiles` and `load_create_scaffold_seed`
+    /// copying that template into the real workspace. Before this fix,
+    /// nothing re-checked the digests at landing time, so a file tampered
+    /// with during that window would be copied in unverified.
+    #[tokio::test]
+    async fn create_scaffold_seed_rejects_a_staged_template_file_tampered_after_staging() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_tamper_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "staged template tamper test",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Tamper target",
+                "brief": "template file changes after staging",
+            }))
+            .await
+            .expect("stage create");
+        assert_eq!(stage["ok"], true);
+
+        // Before tampering, the seed must load cleanly — proves the gate is
+        // not merely refusing everything.
+        assert!(
+            broker
+                .load_create_scaffold_seed(&shell.id, &workflow_run_id)
+                .is_ok(),
+            "an untouched staged template must load"
+        );
+
+        // Simulate the tamper window: rewrite one staged template file after
+        // `stage_create` already digested it into `evidence.json`.
+        let tampered_path = broker
+            .create_staging_root(&shell.id, &workflow_run_id, &handle)
+            .join("template")
+            .join(".lingxi/dependencies/requested.json");
+        std::fs::write(&tampered_path, b"{\"tampered\": true}")
+            .expect("overwrite staged template file");
+
+        let error = broker
+            .load_create_scaffold_seed(&shell.id, &workflow_run_id)
+            .expect_err("a staged template file changed after staging must be rejected");
+        assert!(
+            error.contains("create_staging_template_invalid")
+                && error.contains(".lingxi/dependencies/requested.json"),
+            "expected the mismatch to name the tampered path, got: {error}"
+        );
+
+        // And landing must actually go through this gate: the app is never
+        // scaffolded from tampered bytes.
+        assert!(!service.record(&shell.id).await.expect("record").scaffolded);
     }
 
     #[tokio::test]
@@ -15731,13 +17135,8 @@ mod tests {
             let _guard = ReceiptClaim::held(Arc::clone(&book), receipt_id.clone());
         }
 
-        let reissued = local_apps::McpConfirmationReceipt::new(
-            "app",
-            "run-2",
-            digest.clone(),
-            digest,
-            0,
-        );
+        let reissued =
+            local_apps::McpConfirmationReceipt::new("app", "run-2", digest.clone(), digest, 0);
         book.lock().unwrap().issue(reissued).expect(
             "the dropped ReceiptClaim guard must have released the claim so a fresh \
              receipt can be issued for this app -- otherwise the app can never be \
@@ -15817,32 +17216,374 @@ mod tests {
         drop(contender);
     }
 
+    /// r4-failure-paths-06: a Stop/interrupt during the (up to five-minute)
+    /// native create confirmation must not leave a durable `Prepared`
+    /// candidate journal or candidate file on disk. Before
+    /// `McpCreateCandidateGuard` existed, both cleanup calls lived only in
+    /// the `Ok(false)`/`Err` match arms on the approval result, which a
+    /// dropped future never reaches: the create branch's real future is
+    /// dropped here, mid-await on the native confirmation, and nothing
+    /// further in its body -- `Err` arm included -- ever runs.
+    #[tokio::test]
+    async fn dropping_the_create_approval_future_cleans_up_the_candidate_state() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_drop_create_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "drop mid create-approval",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Dropped create approval",
+                "brief": "r4-failure-paths-06 regression",
+            }))
+            .await
+            .expect("stage create");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+
+        {
+            let mut approving = Box::pin(broker.approve_mcp_proposal(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "create_without_mcp": true,
+            })));
+            assert!(
+                timeout(Duration::from_millis(400), &mut approving)
+                    .await
+                    .is_err(),
+                "the transaction must still be IN FLIGHT -- parked on the native \
+                 create-confirmation await, past `save_candidate_journal` -- for its \
+                 drop to be the thing under test"
+            );
+            // ...and here it is dropped, never polled again: nothing further in
+            // its body ever runs, `Err` arm included.
+        }
+
+        assert!(
+            local_apps::load_candidate_journal(&layout).is_err(),
+            "r4-failure-paths-06: a Stop/interrupt during the native create \
+             confirmation must not leave a durable Prepared candidate journal on disk"
+        );
+        assert!(
+            broker
+                .load_mcp_candidate(&shell.id, &workflow_run_id)
+                .is_err(),
+            "r4-failure-paths-06: a Stop/interrupt during the native create \
+             confirmation must not leave a durable candidate file on disk"
+        );
+    }
+
+    fn dummy_native_approval_event() -> AppEventDto {
+        AppEventDto::LocalAppOperationFailed {
+            app_id: None,
+            code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+            message: "r4-tests-honesty-05 fixture event; content is not under test".into(),
+            request_id: None,
+        }
+    }
+
+    /// r4-tests-honesty-05: the one-pending-per-app `approval_pending` guard
+    /// had zero test references anywhere. A second concurrent wait for the
+    /// SAME app on the SAME pending map must be refused rather than silently
+    /// replacing or racing the first.
+    #[tokio::test]
+    async fn wait_for_native_approval_refuses_a_second_concurrent_wait_for_the_same_app() {
+        let root = TempDir::new().expect("tempdir");
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        let pending: Mutex<HashMap<String, PendingNativeApproval>> = Mutex::new(HashMap::new());
+
+        let first = {
+            let broker = &broker;
+            let pending = &pending;
+            Box::pin(broker.wait_for_native_approval_with_timeout(
+                pending,
+                "req-1".into(),
+                "app-shared",
+                dummy_native_approval_event(),
+                Duration::from_secs(30),
+            ))
+        };
+        tokio::pin!(first);
+        // Park the first wait past its pending-map insert, short of its
+        // (30s) deadline, so the second call below races a REAL pending
+        // entry rather than an empty map.
+        assert!(
+            timeout(Duration::from_millis(50), &mut first)
+                .await
+                .is_err(),
+            "the first wait must still be in flight for the guard to be exercised"
+        );
+
+        let second = broker
+            .wait_for_native_approval_with_timeout(
+                &pending,
+                "req-2".into(),
+                "app-shared",
+                dummy_native_approval_event(),
+                Duration::from_secs(30),
+            )
+            .await;
+        assert_eq!(
+            second,
+            Err("approval_pending: this Local App already has a pending approval".into()),
+            "a second wait for the same app must be refused while the first is pending, got {second:?}"
+        );
+    }
+
+    /// r4-tests-honesty-05: the native-approval `Err(_)` timeout arm had zero
+    /// test references anywhere. It must both name the timeout AND clear the
+    /// pending-map entry it inserted -- otherwise a timed-out approval wedges
+    /// the app under the `approval_pending` guard above for the life of the
+    /// process.
+    #[tokio::test]
+    async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_pending_entry() {
+        let root = TempDir::new().expect("tempdir");
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        let pending: Mutex<HashMap<String, PendingNativeApproval>> = Mutex::new(HashMap::new());
+
+        let result = broker
+            .wait_for_native_approval_with_timeout(
+                &pending,
+                "req-timeout".into(),
+                "app-timeout",
+                dummy_native_approval_event(),
+                Duration::from_millis(20),
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err("native Local App approval timed out".into()),
+            "got {result:?}"
+        );
+        assert!(
+            pending.lock().await.is_empty(),
+            "a timed-out approval must clear its own pending-map entry, or the \
+             approval_pending guard wedges this app forever"
+        );
+    }
+
+    /// r1-failure-paths-002: an aborted approval sheet (cancelled OR timed
+    /// out) was never proactively retracted on any client -- only the
+    /// in-flight workflow call learned about it via its `Err`. Clients
+    /// discard their pending sheet keyed on `request_id` (iOS's
+    /// `discardPendingApproval`), so this must emit a real
+    /// `AppEventDto::LocalAppOperationFailed` naming that exact
+    /// `request_id`/`app_id`, not merely "some event happened". The dummy
+    /// fixture event handed to `wait_for_native_approval_with_timeout` is
+    /// itself (coincidentally) a `LocalAppOperationFailed` with
+    /// `request_id: None`, so every assertion below keys off `request_id ==
+    /// Some(...)` to distinguish the NEW retraction emit from that unrelated
+    /// initial-request emit.
+    #[tokio::test]
+    async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed(
+    ) {
+        let root = TempDir::new().expect("tempdir");
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            None,
+            false,
+            None,
+        );
+        let pending: Mutex<HashMap<String, PendingNativeApproval>> = Mutex::new(HashMap::new());
+
+        // --- cancelled arm: drop the sender out from under the wait without
+        // resolving it, exactly as a forced cleanup (e.g. app deletion) would.
+        let wait = Box::pin(broker.wait_for_native_approval_with_timeout(
+            &pending,
+            "req-cancel".into(),
+            "app-cancel",
+            dummy_native_approval_event(),
+            Duration::from_secs(30),
+        ));
+        tokio::pin!(wait);
+        assert!(
+            timeout(Duration::from_millis(50), &mut wait).await.is_err(),
+            "the wait must still be in flight for the cancel to be exercised"
+        );
+        let dropped = pending.lock().await.remove("req-cancel");
+        assert!(dropped.is_some(), "pending entry must exist to drop");
+        drop(dropped);
+        let result = wait.await;
+        assert_eq!(
+            result,
+            Err("native Local App approval was cancelled".into()),
+            "got {result:?}"
+        );
+
+        let events = sink.events().await;
+        let cancel_failures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::LocalAppOperationFailed {
+                            app_id,
+                            message,
+                            request_id: Some(request_id),
+                            ..
+                        },
+                } if request_id == "req-cancel" => Some((app_id.clone(), message.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cancel_failures.len(),
+            1,
+            "expected exactly one LocalAppOperationFailed naming req-cancel, got {events:?}"
+        );
+        assert_eq!(cancel_failures[0].0, Some("app-cancel".to_string()));
+        assert!(
+            cancel_failures[0].1.contains("cancelled"),
+            "message must name the cancellation, got {:?}",
+            cancel_failures[0].1
+        );
+
+        // --- timeout arm ---
+        let result = broker
+            .wait_for_native_approval_with_timeout(
+                &pending,
+                "req-timeout-emit".into(),
+                "app-timeout-emit",
+                dummy_native_approval_event(),
+                Duration::from_millis(20),
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err("native Local App approval timed out".into()),
+            "got {result:?}"
+        );
+
+        let events = sink.events().await;
+        let timeout_failures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::LocalAppOperationFailed {
+                            app_id,
+                            message,
+                            request_id: Some(request_id),
+                            ..
+                        },
+                } if request_id == "req-timeout-emit" => Some((app_id.clone(), message.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            timeout_failures.len(),
+            1,
+            "expected exactly one LocalAppOperationFailed naming req-timeout-emit, got {events:?}"
+        );
+        assert_eq!(timeout_failures[0].0, Some("app-timeout-emit".to_string()));
+        assert!(
+            timeout_failures[0].1.contains("timed out"),
+            "message must name the timeout, got {:?}",
+            timeout_failures[0].1
+        );
+    }
+
     /// WP8 (corrector): the behavioural test above pins ONE of the three host
-    /// copies that used to send an agent to the two dead tool names. The copy
-    /// that mattered most was a different one — `local_apps_build.rs`'s
+    /// copies that used to send an agent to a tool name it cannot call. The
+    /// copy that mattered most was a different one — `local_apps_build.rs`'s
     /// `validate_dependency_snapshot_files`, reachable from the MODEL-callable
     /// `LocalAppBuild` (`build_app` -> `build_workspace` ->
     /// `build_workspace_locked`) — and a gate that covers only the copy that
     /// was fixed makes the FAMILY look handled when it is not.
     ///
-    /// So scan the production text of both files for an imperative that names
-    /// either operation. Neither is in `LOCAL_APP_TOOLS`; the MCP transport
-    /// refuses their static spelling outright (see `local_apps_mcp.rs`'s
-    /// `the_mcp_surface_no_longer_serves_the_static_host_operations`), so any
-    /// "use/run/call/retry/invoke <name>" in model-facing copy is an
-    /// instruction to retry a call that fails closed forever.
+    /// So scan the production text of both files for an imperative naming an
+    /// operation the model has no way to invoke.
+    ///
+    /// The dead set is DERIVED, not listed: it is every operation in the host
+    /// provider catalog that has no row in `LOCAL_APP_TOOLS`. An earlier
+    /// revision of this test hardcoded `ConfirmDependencyChange` /
+    /// `UpdateDependencies` and asserted in its own prose that they were
+    /// unreachable; wiring those two rows (r2-never-wired-02) turned the
+    /// assertion into a green test pinning a world that no longer existed,
+    /// and forbade the copy that had become CORRECT ("call
+    /// `LocalAppConfirmDependencyChange`"). Deriving the set is what keeps
+    /// this gate from rotting the same way again. Note the transport refusing
+    /// a static spelling is NOT the discriminator — the MCP surface refuses
+    /// `build` too (`the_mcp_surface_no_longer_serves_the_static_host_operations`)
+    /// and `LocalAppBuild` is very much live. Membership in `LOCAL_APP_TOOLS`
+    /// is the whole test.
     ///
     /// The needles are ASSEMBLED at runtime rather than written out, because
     /// this test's own source is inside one of the two files it scans — a
     /// literal needle here would match itself and the gate could never go red.
-    /// Mentioning the names in prose (as the comments above and this one do) is
+    /// Mentioning a name in prose (as the comments above and this one do) is
     /// deliberately still allowed: the defect is the imperative, not the name.
+    ///
+    /// An empty dead set makes this vacuous, and correctly so: if every
+    /// catalog operation has a tool row, no copy can point at one that does
+    /// not.
     #[test]
-    fn no_host_error_copy_tells_the_model_to_call_a_dead_dependency_operation() {
-        let dead = [
-            format!("LocalApp{}", "ConfirmDependencyChange"),
-            format!("LocalApp{}", "UpdateDependencies"),
-        ];
+    fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
+        let wired: std::collections::HashSet<&str> = crate::local_apps_tools::LOCAL_APP_TOOLS
+            .iter()
+            .map(|&(_, operation, _)| operation)
+            .collect();
+        // Both spellings a model-facing sentence could plausibly use for an
+        // operation that has no tool row: the provider-side operation name and
+        // the `LocalApp*` name it WOULD have had.
+        let mut dead: Vec<String> = Vec::new();
+        for tool in crate::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog() {
+            let operation = tool.tool_name().to_string();
+            if wired.contains(operation.as_str()) {
+                continue;
+            }
+            let camel: String = operation
+                .split('_')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect();
+            dead.push(format!("LocalApp{camel}"));
+            dead.push(operation);
+        }
         let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
         let sources = [
             ("local_apps_host.rs", include_str!("local_apps_host.rs")),
@@ -15870,9 +17611,10 @@ mod tests {
         }
         assert!(
             hits.is_empty(),
-            "host copy must not tell a caller to invoke a dependency operation that is \
-             absent from LOCAL_APP_TOOLS and refused by name on the MCP transport; it must \
-             tell the agent to report the drift instead. Offending line(s):\n{}",
+            "host copy must not tell a caller to invoke an operation that has no row in \
+             LOCAL_APP_TOOLS and therefore no model-callable name; it must tell the agent \
+             to report the drift instead. Dead operations today: {dead:?}. Offending \
+             line(s):\n{}",
             hits.join("\n")
         );
     }
@@ -15955,6 +17697,57 @@ mod tests {
                 .iter()
                 .all(|request| request.network == NetworkPolicy::Disabled),
             "remove-only updates must not perform a networked dependency resolution: {dependency_requests:?}"
+        );
+    }
+
+    /// A Stop during the native dependency-review sheet must not orphan the
+    /// pending entry.
+    ///
+    /// `local_apps_tools.rs` gives `confirm_dependency_change`
+    /// `InterruptBehavior::Cancel`, so ESC drops this future while it is
+    /// parked on `timeout(APPROVAL_TIMEOUT, receiver)` — a path neither
+    /// straight-line `remove` arm can ever run on.
+    #[tokio::test]
+    async fn dropping_the_dependency_confirmation_future_clears_the_pending_entry() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖中断", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let mut confirmation = Box::pin(broker.confirm_dependency_change(json!({
+            "app_id": shell.id,
+            "changes": [{"kind": "add", "package": "dayjs", "version": "1.11.13"}],
+        })));
+        let parked = timeout(Duration::from_millis(400), confirmation.as_mut()).await;
+        assert!(
+            parked.is_err(),
+            "an add-kind change must park on the native review await, got {parked:?}"
+        );
+        assert_eq!(
+            broker
+                .pending_dependency_change_confirmations
+                .lock()
+                .await
+                .len(),
+            1,
+            "the parked confirmation must be registered before the sheet is shown"
+        );
+
+        drop(confirmation);
+        assert!(
+            broker
+                .pending_dependency_change_confirmations
+                .lock()
+                .await
+                .is_empty(),
+            "a Stop during the native dependency review must not orphan its pending \
+             confirmation entry — the user's later tap would resolve into a receiver \
+             nobody holds"
         );
     }
 
@@ -16992,7 +18785,7 @@ mod tests {
         let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("read the guided contract");
         assert!(
-            guided.contains("尚未定形态"),
+            guided.contains("has no shape yet"),
             "the fixture must start on the guided contract: {guided}"
         );
 
@@ -17039,7 +18832,7 @@ mod tests {
             "must render the CONFIRMED brief: {contract}"
         );
         assert!(
-            !contract.contains("尚未定形态"),
+            !contract.contains("has no shape yet"),
             "the guided contract must be overwritten, not appended to"
         );
         assert!(
@@ -17129,6 +18922,34 @@ mod tests {
             let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
             let (root, service, broker) = create_broker(false, Some(runtime)).await;
             let shell = shell_app_fixture(&broker, &service).await;
+
+            // r3-tests-honesty-07: the GUIDED contract is the text the create
+            // interview actually reads — it is written to `LINGXI.md` the
+            // moment the shell exists, before any surface or workflow is
+            // chosen, and stays in place until the formal contract below
+            // overwrites it. The absence gate above only ever scanned the
+            // POST-scaffold file; a workflow id planted in
+            // `guided_workspace_contract` would leave that gate green for
+            // the entire lifetime of every unscaffolded shell.
+            //
+            // Both scans ACCUMULATE into `violations` and assert once at the
+            // end of the surface, rather than asserting inline: this arm runs
+            // BEFORE the post-scaffold arm below, so an inline `assert!` here
+            // would take the formal-contract half of the same test down with
+            // it — a new gate hollowing out the older one behind it.
+            let mut violations: Vec<String> = Vec::new();
+            let guided_contract =
+                fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                    .expect("read the guided contract");
+            for workflow in &workflows {
+                if guided_contract.contains(workflow) {
+                    violations.push(format!(
+                        "surface {surface}: the GUIDED (pre-scaffold) contract must name no \
+                         build workflow — found `{workflow}` in {guided_contract}"
+                    ));
+                }
+            }
+
             let input =
                 confirmed_scaffold_input(&broker, &shell.id, "测试", "一个测试应用", surface).await;
             broker
@@ -17138,13 +18959,19 @@ mod tests {
             let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
                 .expect("read the formal contract");
             for workflow in &workflows {
-                assert!(
-                    !contract.contains(workflow),
-                    "surface {surface}: the contract must name no build workflow — the host \
-                     authorizes one and refuses any other, the model does not choose it — \
-                     found `{workflow}` in {contract}"
-                );
+                if contract.contains(workflow) {
+                    violations.push(format!(
+                        "surface {surface}: the FORMAL contract must name no build workflow — \
+                         the host authorizes one and refuses any other, the model does not \
+                         choose it — found `{workflow}` in {contract}"
+                    ));
+                }
             }
+            assert!(
+                violations.is_empty(),
+                "{}",
+                violations.join("\n--- next violation ---\n")
+            );
         }
 
         // The contract file is not the only Host-authored prose the model
@@ -17266,7 +19093,24 @@ mod tests {
     #[tokio::test]
     async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
         fn assert_only_real_tool_names(contract: &str, label: &str) {
+            // r2-tests-honesty-008: the scan below pairs backticks
+            // POSITIONALLY (1st-2nd, 3rd-4th, …) with no balance check, so a
+            // single stray backtick anywhere in `contract` silently shifts
+            // every later span and can hide a planted bad name behind an
+            // innocuous one. Fail loudly and specifically instead of
+            // scanning a text this gate cannot actually parse.
+            assert!(
+                contract.matches('`').count() % 2 == 0,
+                "{label} has an ODD number of backticks, so this scanner cannot pair them \
+                 into spans without silently shifting every one after the stray mark: {contract}"
+            );
             let mut offset = 0;
+            // r4-tests-honesty-08: this scanner only asserts INSIDE a span it
+            // finds, so if the contract stops using backticks altogether the
+            // `while` body never runs and the whole scan silently no-ops —
+            // indistinguishable from every span having checked out clean.
+            // Count the spans it actually walked and require at least one.
+            let mut spans = 0usize;
             while let Some(found) = contract[offset..].find('`') {
                 let start = offset + found + 1;
                 let Some(found_end) = contract[start..].find('`') else {
@@ -17274,7 +19118,11 @@ mod tests {
                 };
                 let end = start + found_end;
                 let span = &contract[start..end];
-                let name: String = span.chars().take_while(char::is_ascii_alphanumeric).collect();
+                spans += 1;
+                let name: String = span
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect();
                 if let Some(rest) = name.strip_prefix("LocalApp") {
                     if !rest.is_empty() {
                         assert!(
@@ -17288,19 +19136,50 @@ mod tests {
                 }
                 offset = end + 1;
             }
+            assert!(
+                spans > 0,
+                "{label} has no backtick-delimited spans at all, so this scanner never ran: {contract}"
+            );
         }
 
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("read the guided contract");
+        // Vacuity guard FIRST. The negative assertion below is only meaningful if
+        // this text is the contract at all: when the contract was translated to
+        // English its needle was still the Chinese "运行时确认工具", which the
+        // English text can never contain, so the gate passed for a reason that had
+        // nothing to do with what it guards. A negative assertion whose needle is
+        // in the wrong language is indistinguishable from a green one.
         assert!(
-            !guided.contains("运行时确认工具"),
+            guided.contains("Local App (new, not yet shaped)"),
+            "read the wrong file, or the contract's own header moved — every \
+             assertion below is vacuous until this one holds: {guided}"
+        );
+        assert!(
+            !guided.to_lowercase().contains("runtime confirmation tool"),
             "the guided contract must not send the model to a \"runtime confirmation \
              tool\" that does not exist — protocol 10.0.0 removed that path; the real \
              path is the create-local-app skill's unified create flow, which stages a \
              candidate, raises one native confirmation, and only then calls \
              LocalAppScaffold: {guided}"
+        );
+        // r1-tests-honesty-17: the negative assertion above and the tool-name
+        // scanner below both stay green if the handoff step is deleted
+        // outright — neither one requires the guided contract to actually
+        // SAY how to get out of the shell. Pin that positively: the contract
+        // must instruct the `Skill` tool with the plugin-qualified name.
+        assert!(
+            guided.contains("the `Skill` tool"),
+            "the guided contract must positively instruct the model to use the \
+             `Skill` tool to escape the shell, not just avoid naming the retired \
+             runtime confirmation tool: {guided}"
+        );
+        assert!(
+            guided.contains("lingxi-local-app:create-local-app"),
+            "the guided contract must name the create skill by its exact, \
+             plugin-qualified id — the bare name does not resolve: {guided}"
         );
         assert_only_real_tool_names(&guided, "the guided contract");
 
@@ -17308,9 +19187,14 @@ mod tests {
             let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
             let (root, service, broker) = create_broker(false, Some(runtime)).await;
             let shell = shell_app_fixture(&broker, &service).await;
-            let input =
-                confirmed_scaffold_input(&broker, &shell.id, "契约扫描", "扫描正文的工具名", surface)
-                    .await;
+            let input = confirmed_scaffold_input(
+                &broker,
+                &shell.id,
+                "契约扫描",
+                "扫描正文的工具名",
+                surface,
+            )
+            .await;
             broker
                 .scaffold_shell_app_value(input)
                 .await
@@ -17745,8 +19629,94 @@ mod tests {
         let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("read the contract");
         assert!(
-            contract.contains("尚未定形态"),
+            contract.contains("has no shape yet"),
             "a rejected argument must not have touched the workspace: {contract}"
+        );
+    }
+
+    /// r3-tests-honesty-06: `stage_create`'s own name/brief bound is the one
+    /// that governs the value actually committed at scaffold time — every
+    /// other test drives `scaffold_shell_app_value` through
+    /// `confirmed_scaffold_input`, whose helper deliberately substitutes a
+    /// safe placeholder whenever the caller's name/brief would fail this
+    /// exact check, so `stage_create`'s bound itself was never directly
+    /// exercised. Send an over-long value straight to `stage_create`.
+    #[tokio::test]
+    async fn stage_create_rejects_an_over_long_name_or_brief() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        async fn stage_input(
+            broker: &Arc<LocalAppsHostBroker>,
+            app_id: &str,
+            name: &str,
+            brief: &str,
+        ) -> Value {
+            let workflow_run_id = format!("wf_bound_{}", uuid::Uuid::new_v4().simple());
+            let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+            let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+                &broker.root,
+                app_id,
+                &workflow_run_id,
+            )
+            .expect("selector capability");
+            let selection = broker
+                .validate_template_selection(json!({
+                    "app_id": app_id,
+                    "workflow_run_id": workflow_run_id,
+                    "catalog_digest": catalog.catalog_digest,
+                    "template_id": "react-dom-r2",
+                    "reason": "stage_create bound test",
+                    "rejected": [],
+                    "selector_capability": selector_capability,
+                }))
+                .await
+                .expect("validated selection");
+            let handle = selection["validated_selection_handle"]
+                .as_str()
+                .expect("selection handle");
+            json!({
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": name,
+                "brief": brief,
+            })
+        }
+
+        let over_long_name = "x".repeat(local_apps::service::MAX_NAME_BYTES + 1);
+        let error = broker
+            .stage_create(stage_input(&broker, &shell.id, &over_long_name, "b").await)
+            .await
+            .expect_err("an over-long name must be rejected by stage_create itself");
+        assert!(
+            error.contains("invalid_argument: name is") && error.contains("limit"),
+            "expected stage_create's own name-bound message, got: {error}"
+        );
+
+        let over_long_brief = "y".repeat(local_apps::service::MAX_BRIEF_BYTES + 1);
+        let error = broker
+            .stage_create(stage_input(&broker, &shell.id, "A", &over_long_brief).await)
+            .await
+            .expect_err("an over-long brief must be rejected by stage_create itself");
+        assert!(
+            error.contains("invalid_argument: brief is") && error.contains("limit"),
+            "expected stage_create's own brief-bound message, got: {error}"
+        );
+
+        let error = broker
+            .stage_create(stage_input(&broker, &shell.id, "   ", "b").await)
+            .await
+            .expect_err("an empty/whitespace name must be rejected by stage_create itself");
+        assert!(
+            error.contains("name must be a non-empty string"),
+            "expected stage_create's own empty-name message, got: {error}"
+        );
+
+        assert!(
+            !service.record(&shell.id).await.expect("record").scaffolded,
+            "a rejected stage_create must not have scaffolded the app"
         );
     }
 
@@ -20378,14 +22348,17 @@ mod tests {
         // state this test needs. Removing it too makes that starting point
         // explicit regardless of what the fixture happens to do.
         let _ = fs::remove_file(&lingxi_md);
-        assert!(!lingxi_md.exists(), "the guided contract must be absent before the sweep runs");
+        assert!(
+            !lingxi_md.exists(),
+            "the guided contract must be absent before the sweep runs"
+        );
 
         shell.run_boot_backfill_sweep().await;
 
         let repaired = fs::read_to_string(&lingxi_md)
             .expect("the boot sweep must rewrite a missing guided workspace contract");
         assert!(
-            repaired.contains("尚未定形态"),
+            repaired.contains("has no shape yet"),
             "the repaired file must be the real guided contract, not a stub: {repaired}"
         );
     }
@@ -20396,14 +22369,15 @@ mod tests {
     async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
         let shell = pinned_shell().await;
         let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-        fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
+        fs::write(&lingxi_md, "")
+            .expect("truncate the guided contract to simulate a partial write");
 
         shell.run_boot_backfill_sweep().await;
 
-        let repaired = fs::read_to_string(&lingxi_md)
-            .expect("guided contract still present after repair");
+        let repaired =
+            fs::read_to_string(&lingxi_md).expect("guided contract still present after repair");
         assert!(
-            repaired.contains("尚未定形态"),
+            repaired.contains("has no shape yet"),
             "a truncated guided contract must be rewritten, not left empty: {repaired}"
         );
     }
@@ -20419,7 +22393,7 @@ mod tests {
         let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
         let formal_before = fs::read_to_string(&lingxi_md).expect("formal contract");
         assert!(
-            !formal_before.contains("尚未定形态"),
+            !formal_before.contains("has no shape yet"),
             "a formed app's contract must already be the FORMAL one: {formal_before}"
         );
 

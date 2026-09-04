@@ -113,7 +113,13 @@ export interface LingxiApi {
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
-  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown }): Promise<PublicSettings>;
+  updateSettings(patch: {
+    theme?: 'dark' | 'light' | 'system';
+    model?: string | null;
+    apiBaseUrl?: string | null;
+    voice?: unknown;
+    modelPickerVisibility?: unknown;
+  }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;

@@ -387,7 +387,7 @@ import SwiftUI
             source.applyForTesting(.apiRetry(message: "429", attempt: 2, maxRetries: 5, delayMs: 1200))
             source.applyForTesting(.costUpdate(
                 totalUsd: 0.12, inputTokens: 11, outputTokens: 22, apiCalls: 1, sessionDurationSecs: 9, formatted: "$0.12"))
-            source.applyForTesting(.compactionCompleted(messagesBefore: 20, messagesAfter: 7, bytesSaved: 4096))
+            source.applyForTesting(.compactionCompleted(messagesBefore: 20, messagesAfter: 7, bytesSaved: 4096, summary: "kept context"))
             source.applyForTesting(.coordinatorStatus(activeWorkers: 2, team: "triage"))
             source.applyForTesting(
                 .coordinatorWorker(

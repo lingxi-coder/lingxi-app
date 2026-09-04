@@ -20,6 +20,29 @@ private func approvalSurfaceTitle(_ surface: LocalAppRuntimeProfileSurface) -> S
   }
 }
 
+/// The host (`pending_verification_gates` in `local_apps_host.rs`) always
+/// sends `label`/`detail` as fixed English strings — it has no notion of the
+/// client's locale. Map the two `gate_id`s it currently defines to the
+/// client's own catalog; an unrecognized future `gate_id` falls back to the
+/// engine's raw string rather than showing nothing.
+private func localizedGateLabel(_ gate: LocalAppGateStatus) -> String {
+  switch gate.gateID {
+  case "mcp_qa":
+    String(localized: "local_apps_create_confirm_gate_mcp_qa_label")
+  case "ui_runner":
+    String(localized: "local_apps_create_confirm_gate_ui_runner_label")
+  default:
+    gate.label
+  }
+}
+
+private func localizedGateDetail(_ gate: LocalAppGateStatus) -> String? {
+  if gate.gateID == "ui_runner", !gate.available {
+    return String(localized: "local_apps_create_confirm_gate_ui_runner_unavailable_detail")
+  }
+  return gate.detail
+}
+
 struct LocalAppCreateConfirmationSheet: View {
   @Bindable var store: LocalAppsStore
   let prompt: LocalAppCreateConfirmationPrompt
@@ -44,8 +67,18 @@ struct LocalAppCreateConfirmationSheet: View {
               sub: runtimeProfileSummary,
               value: prompt.runtimeProfile.family.title,
               chevron: false,
-              isLast: true
+              isLast: prompt.runtimeProfile.corePackages.isEmpty
             )
+            if !prompt.runtimeProfile.corePackages.isEmpty {
+              SettingsRow(
+                label: String(localized: "local_apps_create_confirm_runtime_packages"),
+                sub: prompt.runtimeProfile.corePackages
+                  .map { "\($0.name) \($0.version)" }
+                  .joined(separator: ", "),
+                chevron: false,
+                isLast: true
+              )
+            }
           }
 
           SettingsSection(label: String(localized: "local_apps_create_confirm_agent_reason")) {
@@ -97,21 +130,21 @@ struct LocalAppCreateConfirmationSheet: View {
             } else {
               ForEach(Array(prompt.requiredGates.enumerated()), id: \.element.id) { index, gate in
                 SettingsRow(
-                  label: gate.label,
+                  label: localizedGateLabel(gate),
                   labelView: AnyView(
                     VStack(alignment: .leading, spacing: 6) {
-                      Text(gate.label).font(.system(size: 14, weight: .medium))
+                      Text(localizedGateLabel(gate)).font(.system(size: 14, weight: .medium))
                       HStack(spacing: 8) {
                         LocalAppPublicationBadgeView(badge: gate.badge)
                         if !gate.available {
-                          Text("runner unavailable")
+                          Text("local_apps_create_confirm_gate_runner_unavailable")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         }
                       }
                     }
                   ),
-                  sub: gate.detail ?? gate.status.badge.label,
+                  sub: localizedGateDetail(gate) ?? gate.status.badge.label,
                   chevron: false,
                   isLast: index == prompt.requiredGates.count - 1
                 )
@@ -120,12 +153,14 @@ struct LocalAppCreateConfirmationSheet: View {
           }
 
           if let receipt = prompt.receipt {
-            SettingsSection(label: "Receipt") {
+            SettingsSection(label: String(localized: "local_apps_create_confirm_receipt")) {
               SettingsRow(
-                label: "Approval", value: approvalDigestSummary(receipt.approvalContractSHA256),
+                label: String(localized: "local_apps_create_confirm_approval"),
+                value: approvalDigestSummary(receipt.approvalContractSHA256),
                 chevron: false)
               SettingsRow(
-                label: "Candidate", value: approvalDigestSummary(receipt.candidateDigest),
+                label: String(localized: "local_apps_create_confirm_candidate"),
+                value: approvalDigestSummary(receipt.candidateDigest),
                 chevron: false)
               SettingsRow(
                 label: approvalReceiptExpiryText(
@@ -157,12 +192,29 @@ struct LocalAppCreateConfirmationSheet: View {
     .accessibilityIdentifier("local-apps.create-confirm.\(prompt.id)")
   }
 
+  /// The host derives BOTH status fields from one availability verdict
+  /// (`runtime_profile_dependency_availability`, or the literal `unavailable`
+  /// when the profile is not available at all), so rendering them
+  /// unconditionally printed the same word twice — three times with the
+  /// `unavailable` fallback appended. Render the second only when it actually
+  /// differs, and let a real `reason` be the only thing the unavailable case
+  /// adds, since the status part already carries that word.
   private var runtimeProfileSummary: String {
-    [
+    var parts = [
       "r\(prompt.runtimeProfile.revision)",
       approvalSurfaceTitle(prompt.runtimeProfile.surface),
       approvalDigestSummary(prompt.runtimeProfile.contractSHA256),
-    ].joined(separator: " · ")
+      localizedRuntimeProfileStatus(prompt.runtimeProfile.cacheStatus),
+    ]
+    if prompt.runtimeProfile.downloadStatus != prompt.runtimeProfile.cacheStatus {
+      parts.append(localizedRuntimeProfileStatus(prompt.runtimeProfile.downloadStatus))
+    }
+    if !prompt.runtimeProfile.available,
+      let reason = prompt.runtimeProfile.reason, !reason.isEmpty
+    {
+      parts.append(reason)
+    }
+    return parts.joined(separator: " · ")
   }
 
   private func resolve(_ approved: Bool) {
@@ -179,15 +231,20 @@ struct LocalAppMcpProposalApprovalSheet: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 0) {
           SettingsSection(label: String(localized: "local_apps_mcp_proposal_title")) {
-            SettingsRow(label: "App", value: prompt.appID, chevron: false)
             SettingsRow(
-              label: "Proposal", value: approvalDigestSummary(prompt.proposalSHA256), chevron: false
-            )
-            SettingsRow(
-              label: "Surface", value: approvalDigestSummary(prompt.toolSurfaceSHA256),
+              label: String(localized: "local_apps_mcp_proposal_field_app"), value: prompt.appID,
               chevron: false)
             SettingsRow(
-              label: "Approval", value: approvalDigestSummary(prompt.approvalContractSHA256),
+              label: String(localized: "local_apps_mcp_proposal_field_proposal"),
+              value: approvalDigestSummary(prompt.proposalSHA256), chevron: false
+            )
+            SettingsRow(
+              label: String(localized: "local_apps_mcp_proposal_field_surface"),
+              value: approvalDigestSummary(prompt.toolSurfaceSHA256),
+              chevron: false)
+            SettingsRow(
+              label: String(localized: "local_apps_create_confirm_approval"),
+              value: approvalDigestSummary(prompt.approvalContractSHA256),
               chevron: false, isLast: true)
           }
 
@@ -248,21 +305,21 @@ struct LocalAppMcpProposalApprovalSheet: View {
             SettingsSection(label: String(localized: "local_apps_create_confirm_required_gates")) {
               ForEach(Array(prompt.pendingGates.enumerated()), id: \.element.id) { index, gate in
                 SettingsRow(
-                  label: gate.label,
+                  label: localizedGateLabel(gate),
                   labelView: AnyView(
                     VStack(alignment: .leading, spacing: 6) {
-                      Text(gate.label).font(.system(size: 14, weight: .medium))
+                      Text(localizedGateLabel(gate)).font(.system(size: 14, weight: .medium))
                       HStack(spacing: 8) {
                         LocalAppPublicationBadgeView(badge: gate.badge)
                         if !gate.available {
-                          Text("runner unavailable")
+                          Text("local_apps_create_confirm_gate_runner_unavailable")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         }
                       }
                     }
                   ),
-                  sub: gate.detail ?? gate.status.badge.label,
+                  sub: localizedGateDetail(gate) ?? gate.status.badge.label,
                   chevron: false,
                   isLast: index == prompt.pendingGates.count - 1
                 )
@@ -271,10 +328,13 @@ struct LocalAppMcpProposalApprovalSheet: View {
           }
 
           if let receipt = prompt.receipt {
-            SettingsSection(label: "Receipt") {
-              SettingsRow(label: "Workflow", value: receipt.workflowRunID, chevron: false)
+            SettingsSection(label: String(localized: "local_apps_create_confirm_receipt")) {
               SettingsRow(
-                label: "Candidate", value: approvalDigestSummary(receipt.candidateDigest),
+                label: String(localized: "local_apps_mcp_proposal_field_workflow"),
+                value: receipt.workflowRunID, chevron: false)
+              SettingsRow(
+                label: String(localized: "local_apps_create_confirm_candidate"),
+                value: approvalDigestSummary(receipt.candidateDigest),
                 chevron: false)
               SettingsRow(
                 label: approvalReceiptExpiryText(
@@ -315,9 +375,12 @@ struct LocalAppMcpProposalApprovalSheet: View {
         .padding(.horizontal, 14)
         .padding(.top, 12)
       toolValue(label: String(localized: "settings_display_name"), value: surface.name)
-      toolValue(label: "Title", value: surface.title ?? String(localized: "common_none"))
       toolValue(
-        label: "Description", value: surface.description ?? String(localized: "common_none"))
+        label: String(localized: "local_apps_mcp_proposal_field_title"),
+        value: surface.title ?? String(localized: "common_none"))
+      toolValue(
+        label: String(localized: "local_apps_mcp_proposal_field_description"),
+        value: surface.description ?? String(localized: "common_none"))
       toolValue(
         label: String(localized: "local_apps_mcp_proposal_field_input_schema"),
         value: surface.inputSchemaSummary)

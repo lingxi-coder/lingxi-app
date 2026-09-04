@@ -1421,20 +1421,31 @@ final class MockConversationSource: ConversationSource {
             source.model.availableModels = uiTestModelCatalog
             source.model.activeModelId = uiTestModelCatalog[0]
             #if canImport(engine_mobileFFI)
-                source.mockProviderCatalog = Presets.llm
-                    .filter { $0.id != "custom" }
-                    .map { preset in
+                var uiCatalog: [(providerID: String, modelIDs: [String])] = []
+                for reference in uiTestModelCatalog {
+                    let parts = reference.split(separator: "/", maxSplits: 1).map(String.init)
+                    guard parts.count == 2 else { continue }
+                    let providerID = parts[0] == "gemini" ? "google" : parts[0]
+                    if let index = uiCatalog.firstIndex(where: { $0.providerID == providerID }) {
+                        uiCatalog[index].modelIDs.append(parts[1])
+                    } else {
+                        uiCatalog.append((providerID, [parts[1]]))
+                    }
+                }
+                source.mockProviderCatalog = uiCatalog.map { catalog in
+                    let preset = Presets.llm.first { $0.id == catalog.providerID }
+                    return
                         ProviderCatalogEntry(
-                            id: preset.id,
-                            displayName: preset.name,
-                            baseURL: preset.defaultUrl,
+                            id: catalog.providerID,
+                            displayName: preset?.name ?? catalog.providerID,
+                            baseURL: preset?.defaultUrl ?? "",
                             protocolName: "OpenAiChat",
-                            authName: preset.id == "openai-chatgpt" ? "ChatGptOAuth" : "ApiKey",
+                            authName: catalog.providerID == "openai-chatgpt" ? "ChatGptOAuth" : "ApiKey",
                             credentialEnv: nil,
-                            models: preset.models,
+                            models: catalog.modelIDs,
                             modelDetails: [:]
                         )
-                    }
+                }
             #endif
             source.model.slashCommands = [
                 ConversationSlashCommand(
@@ -1849,6 +1860,9 @@ final class MockConversationSource: ConversationSource {
         /// approval.
         private var permissionSink: EnginePermissionSink?
         private var externalEventHandler: ((ClientEvent) -> Void)?
+        private var providerCatalogEntries: [ProviderCatalogEntry] = []
+        private var providerCatalogLoaded = false
+        private var providerCatalogWaiters: [CheckedContinuation<[ProviderCatalogEntry], Error>] = []
         private var oauthSession: ASWebAuthenticationSession?
         private var oauthPresentationProvider: OAuthPresentationContextProvider?
         private var oauthFlowID: String?
@@ -3066,22 +3080,23 @@ final class MockConversationSource: ConversationSource {
         }
 
         func providerCatalog() async throws -> [ProviderCatalogEntry] {
-            let handle = try await ensureHandle()
-            return handle.builtinProviderCatalog().map {
-                ProviderCatalogEntry(
-                    id: $0.profileId,
-                    displayName: $0.displayName,
-                    baseURL: $0.baseUrl,
-                    protocolName: $0.protocol,
-                    authName: $0.auth,
-                    credentialEnv: $0.credentialEnv,
-                    models: $0.models,
-                    modelDetails: Dictionary(
-                        uniqueKeysWithValues: $0.modelDetails.map {
-                            ($0.reference, Self.lowerModelRuntimeDetails($0))
+            if providerCatalogLoaded {
+                return providerCatalogEntries
+            }
+            _ = try await ensureHandle()
+            return try await withCheckedThrowingContinuation { continuation in
+                providerCatalogWaiters.append(continuation)
+                Task { @MainActor in
+                    do {
+                        try await self.submitCommand(.listModels)
+                    } catch {
+                        let waiters = self.providerCatalogWaiters
+                        self.providerCatalogWaiters.removeAll()
+                        for waiter in waiters {
+                            waiter.resume(throwing: error)
                         }
-                    )
-                )
+                    }
+                }
             }
         }
 
@@ -4306,6 +4321,24 @@ final class MockConversationSource: ConversationSource {
             ModelRuntimeDetails.from(dto)
         }
 
+        private static func lowerProviderCatalogEntry(
+            _ dto: ProviderModelCatalogEntryDto
+        ) -> ProviderCatalogEntry {
+            let presetID = dto.providerId == "gemini" ? "google" : dto.providerId
+            let preset = Presets.llm.first(where: { $0.id == presetID })
+            let loweredModels = dto.models.map(Self.lowerModelRuntimeDetails)
+            return ProviderCatalogEntry(
+                id: presetID,
+                displayName: dto.providerLabel,
+                baseURL: preset?.defaultUrl ?? "",
+                protocolName: preset?.sub ?? "",
+                authName: "",
+                credentialEnv: nil,
+                models: loweredModels.map(\.modelId),
+                modelDetails: Dictionary(uniqueKeysWithValues: loweredModels.map { ($0.reference, $0) })
+            )
+        }
+
         private static func controlsState(from dto: ConversationControlsDto) -> ConversationControlsState {
             let reasoningOptions = dto.reasoning.spec.options.map { option in
                 let id = reasoningID(option.selection)
@@ -4743,7 +4776,7 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 updateActiveRun { $0.costFormatted = formatted }
 
-            case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved):
+            case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved, _):
                 guard acceptTurnEvent(event) else { return }
                 model.compactionStatus = .completed(
                     messagesBefore: messagesBefore,
@@ -5146,6 +5179,15 @@ final class MockConversationSource: ConversationSource {
                     uniqueKeysWithValues: details.map { ($0.reference, Self.lowerModelRuntimeDetails($0)) }
                 )
                 applyActiveModel(current)
+
+            case let .providerModelCatalog(providers):
+                providerCatalogEntries = providers.map(Self.lowerProviderCatalogEntry)
+                providerCatalogLoaded = true
+                let waiters = providerCatalogWaiters
+                providerCatalogWaiters.removeAll()
+                for waiter in waiters {
+                    waiter.resume(returning: providerCatalogEntries)
+                }
 
             case let .modelChanged(model: newModel):
                 // The engine confirmed a switch (1:1 with a successful `SetModel`).

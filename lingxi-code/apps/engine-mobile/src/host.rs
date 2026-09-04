@@ -54,7 +54,8 @@ use client_protocol::controls::{
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
 use client_protocol::listings::{
-    ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SlashCommandDto,
+    ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto, SessionModeDto,
+    SlashCommandDto,
 };
 use client_protocol::local_apps::{
     AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
@@ -587,6 +588,9 @@ pub struct MobileRuntime {
     /// Desktop needs no equivalent: its picker gates the same static catalog on
     /// per-provider availability maps that mobile does not have.
     pub routable_listings: Vec<platform_api::ModelListing>,
+    /// Settings-visible provider model directory generated before the mobile
+    /// routing allowlist is applied.
+    pub provider_model_catalog: Vec<ProviderModelCatalogEntryDto>,
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -1068,6 +1072,15 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
             .map(to_entry),
     );
     entries
+}
+
+fn provider_model_catalog_from_listings(
+    listings: &[platform_api::ModelListing],
+) -> Vec<ProviderModelCatalogEntryDto> {
+    platform_api::provider_model_catalog(listings)
+        .iter()
+        .map(client_adapter::lowering::lower_provider_model_catalog_entry)
+        .collect()
 }
 
 /// Tag an OAuth failure with the STAGE it happened in, and log it.
@@ -3178,6 +3191,8 @@ async fn build_mobile_inner_with_ask(
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     });
+    let full_provider_model_catalog =
+        provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
     apply_mobile_profile_allowlist(&mut assembled, cfg.routing.as_ref());
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
@@ -5185,6 +5200,7 @@ async fn build_mobile_inner_with_ask(
         mcp_reload_generations,
         mcp_oauth_authorization_url: mcp_auth_url,
         routable_listings: default_listings.clone(),
+        provider_model_catalog: full_provider_model_catalog,
         local_apps_mcp,
         local_apps_llm,
         task_registry,
@@ -8792,6 +8808,7 @@ impl MobileEngineHandle {
                                 messages_before: summary.messages_before,
                                 messages_after: summary.messages_after,
                                 bytes_saved: summary.bytes_saved,
+                                summary: summary.summary,
                             })
                             .await;
                         Ok(())
@@ -10313,6 +10330,11 @@ impl MobileEngineHandle {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         match kind {
             ProtocolListingKind::Models => {
+                self.event_sink
+                    .emit(ClientEvent::ProviderModelCatalog {
+                        providers: self.inner.provider_model_catalog.clone(),
+                    })
+                    .await;
                 // Curate to the "latest few" per provider instead of flooding the
                 // client with the full assembled catalog (~hundreds of ids — every
                 // preset is injected into the live config by `provider_config::assemble`).
@@ -11737,17 +11759,25 @@ pub(crate) async fn mint_app_init_session(
             .await
             {
                 Ok(result) => {
+                    let session_id = result.new_session_id.to_string();
                     let path = orchestrator::transcript_paths::main_transcript_path(
                         lingxi_home,
                         &workspace_cwd,
-                        &result.new_session_id.to_string(),
+                        &session_id,
                     );
                     let writer = session::jsonl::writer::JsonlWriter::new(path, fs.clone());
-                    writer
+                    if let Err(error) = writer
                         .append_session_mode(session::jsonl::SessionMode::Code.as_str())
                         .await
-                        .map_err(|error| format!("persist app init session mode: {error}"))?;
-                    return Ok(result.new_session_id.to_string());
+                    {
+                        // r1-engine-core-002: `create_branch_to_cwd` already
+                        // wrote the forked transcript to disk; a half-minted
+                        // session must not strand it as an orphan the caller
+                        // never learns the id of.
+                        remove_app_session_file(lingxi_home, data_root, record, &session_id);
+                        return Err(format!("persist app init session mode: {error}"));
+                    }
+                    return Ok(session_id);
                 }
                 Err(error) => {
                     // Degrade to an empty anchor — a brand-new conversation
@@ -11769,14 +11799,23 @@ pub(crate) async fn mint_app_init_session(
             .map_err(|error| format!("create app session catalog dir: {error}"))?;
     }
     let writer = session::jsonl::writer::JsonlWriter::new(path, fs);
-    writer
+    if let Err(error) = writer
         .append_mobile_empty_session(&init_id, &record.name)
         .await
-        .map_err(|error| format!("anchor app init session: {error}"))?;
-    writer
+    {
+        // r1-engine-core-002: best-effort — the file may not exist yet if
+        // this failed before any bytes landed — but if the writer got far
+        // enough to create it, a half-completed anchor must not strand it.
+        remove_app_session_file(lingxi_home, data_root, record, &init_id);
+        return Err(format!("anchor app init session: {error}"));
+    }
+    if let Err(error) = writer
         .append_session_mode(session::jsonl::SessionMode::Code.as_str())
         .await
-        .map_err(|error| format!("persist app init session mode: {error}"))?;
+    {
+        remove_app_session_file(lingxi_home, data_root, record, &init_id);
+        return Err(format!("persist app init session mode: {error}"));
+    }
     Ok(init_id)
 }
 
@@ -11827,7 +11866,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
             let workspace = backfill_root.join(&record.workspace_rel);
             let lingxi_md = workspace.join("LINGXI.md");
             let needs_repair = match std::fs::read_to_string(&lingxi_md) {
-                Ok(contents) => !contents.contains("# Local App（新建，尚未定形态）"),
+                Ok(contents) => !contents.contains("# Local App (new, not yet shaped)"),
                 Err(_) => true,
             };
             if needs_repair {
@@ -12048,6 +12087,57 @@ pub(crate) async fn run_app_boot_backfill_sweep(
             Ok(fresh) if fresh.init_session_id.is_none() => fresh,
             _ => continue,
         };
+        // r1-failure-paths-012: a pin-less record is not necessarily an
+        // empty shell — a create that minted a REAL conversation (the
+        // chat-origin fork, or a session the user already had in this
+        // workspace) and then failed before `set_init_session` leaves
+        // exactly this state. Listing the workspace's own session catalog
+        // and adopting the most recent non-empty row there (instead of
+        // always minting a fresh empty anchor over it) is what keeps that
+        // conversation from being silently orphaned.
+        let backfill_workspace_cwd =
+            canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
+        let existing_conversation: Option<session::jsonl::SessionMetadata> =
+            match session::jsonl::list_recent_sessions(
+            &backfill_home,
+            &backfill_workspace_cwd,
+            50,
+            backfill_fs.clone(),
+        )
+        .await
+        {
+            Ok(rows) => rows.into_iter().find(|row| row.message_count > 0),
+            Err(session::jsonl::LoaderError::EmptyDirectory) => None,
+            Err(error) => {
+                tracing::warn!(
+                    app_id = %record.id,
+                    %error,
+                    "init-session backfill catalog listing failed"
+                );
+                None
+            }
+        };
+        if let Some(existing) = existing_conversation {
+            let session_id = existing.uuid.to_string();
+            if let Err(error) = backfill_service
+                .set_init_session(&record.id, &session_id)
+                .await
+            {
+                tracing::warn!(
+                    app_id = %record.id,
+                    %error,
+                    session_id = %session_id,
+                    "init-session backfill adoption pin failed"
+                );
+            } else {
+                tracing::info!(
+                    app_id = %record.id,
+                    session_id = %session_id,
+                    "boot sweep adopted an existing unpinned conversation instead of minting"
+                );
+            }
+            continue;
+        }
         match mint_app_init_session(
             &backfill_home,
             &backfill_cwd,
@@ -12413,7 +12503,7 @@ mod tests {
 
     use crate::local_apps_mcp::LocalAppsMcpTransport;
     use async_trait::async_trait;
-    use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
+    use client_adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
     use client_protocol::listings::SessionModeDto;
     use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
@@ -16632,6 +16722,13 @@ mod tests {
                     _ => None,
                 })
                 .expect("ModelList must be emitted");
+            let providers = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ProviderModelCatalog { providers } => Some(providers.clone()),
+                    _ => None,
+                })
+                .expect("ProviderModelCatalog must be emitted");
 
             assert!(
                 models.iter().all(|m| m.starts_with("deepseek/")),
@@ -16640,6 +16737,14 @@ mod tests {
             assert!(
                 models.iter().any(|m| m == "deepseek/deepseek-v4-flash"),
                 "the allowlisted provider's curated models must still be offered: {models:?}"
+            );
+            assert!(
+                providers.iter().any(|provider| provider.provider_id == "anthropic"),
+                "settings catalog must retain built-in providers before the mobile allowlist: {providers:?}"
+            );
+            assert!(
+                providers.iter().any(|provider| provider.provider_id == "deepseek"),
+                "settings catalog must retain the configured provider: {providers:?}"
             );
         });
     }
@@ -19285,10 +19390,16 @@ mod tests {
                 .await
                 .expect("mint forks");
 
-        let workspace_cwd = data_root
-            .join(&record.workspace_rel)
-            .to_string_lossy()
-            .to_string();
+        // Spell the catalog directory the way `mint_app_init_session` does.
+        // A raw `to_string_lossy()` used to match only because the old
+        // `canonical_cwd_string` fell back to the raw path when the workspace
+        // leaf did not exist yet — which is exactly the bug r1-engine-core-010
+        // fixed, since mint (leaf present) and a later cleanup (leaf gone) then
+        // disagreed on where the catalog lived. Now it always canonicalises the
+        // nearest existing ancestor, so on a symlink-split platform this is
+        // `/private/var/...` where the raw join says `/var/...`.
+        let workspace_cwd =
+            crate::local_apps_host::canonical_cwd_string(&data_root.join(&record.workspace_rel));
         let fork_path = orchestrator::transcript_paths::main_transcript_path(
             &lingxi_home,
             &workspace_cwd,
@@ -19304,6 +19415,356 @@ mod tests {
             std::fs::read_to_string(&src_path).unwrap(),
             source_before,
             "the source session must be untouched"
+        );
+    }
+
+    /// r1-engine-core-002: a filesystem double that fails the Nth
+    /// `append_file_with_mode` call whose path ends with `target_suffix`,
+    /// delegating every other call (and every other trait method) to a real
+    /// `PosixFileSystem`. Used to force `mint_app_init_session`'s SECOND
+    /// write (the `session-mode` metadata append that runs after the
+    /// anchor/fork content has already landed) to fail, so the gate below
+    /// can prove the first write's bytes get cleaned up rather than
+    /// stranded.
+    struct FlakyAppendFs {
+        inner: Arc<dyn platform_api::FileSystem>,
+        target_suffix: String,
+        calls: std::sync::atomic::AtomicUsize,
+        fail_on_call: usize,
+    }
+
+    #[async_trait]
+    impl platform_api::FileSystem for FlakyAppendFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            offset: Option<u64>,
+            limit: Option<u64>,
+        ) -> Result<platform_api::FileContent, platform_api::FsError> {
+            self.inner.read_file(path, offset, limit).await
+        }
+
+        async fn write_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+            self.inner.write_file(path, content).await
+        }
+
+        fn is_within_workspace(&self, path: &str) -> bool {
+            self.inner.is_within_workspace(path)
+        }
+
+        async fn watch(
+            &self,
+            dir: &str,
+        ) -> Result<
+            std::pin::Pin<
+                Box<dyn futures_util::stream::Stream<Item = platform_api::FileEvent> + Send>,
+            >,
+            platform_api::FsError,
+        > {
+            self.inner.watch(dir).await
+        }
+
+        async fn append_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+            self.inner.append_file(path, content).await
+        }
+
+        async fn append_file_with_mode(
+            &self,
+            path: &str,
+            content: &str,
+            mode: u32,
+        ) -> Result<(), platform_api::FsError> {
+            if path.ends_with(&self.target_suffix) {
+                let n = self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                if n == self.fail_on_call {
+                    return Err(platform_api::FsError::Io(
+                        "r1-engine-core-002 planted failure".into(),
+                    ));
+                }
+            }
+            self.inner.append_file_with_mode(path, content, mode).await
+        }
+
+        async fn truncate(&self, path: &str, len: u64) -> Result<(), platform_api::FsError> {
+            self.inner.truncate(path, len).await
+        }
+
+        async fn file_mtime(
+            &self,
+            path: &str,
+        ) -> Result<std::time::SystemTime, platform_api::FsError> {
+            self.inner.file_mtime(path).await
+        }
+
+        async fn file_size(&self, path: &str) -> Result<u64, platform_api::FsError> {
+            self.inner.file_size(path).await
+        }
+
+        async fn delete_file(&self, path: &str) -> Result<(), platform_api::FsError> {
+            self.inner.delete_file(path).await
+        }
+
+        async fn symlink(&self, target: &str, link: &str) -> Result<(), platform_api::FsError> {
+            self.inner.symlink(target, link).await
+        }
+
+        async fn flock_exclusive(
+            &self,
+            path: &str,
+        ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
+            self.inner.flock_exclusive(path).await
+        }
+
+        async fn fsync(&self, path: &str) -> Result<(), platform_api::FsError> {
+            self.inner.fsync(path).await
+        }
+    }
+
+    /// r1-engine-core-002: `mint_app_init_session`'s empty-anchor branch
+    /// makes TWO writes to the same freshly-created transcript file —
+    /// `append_mobile_empty_session` then `append_session_mode`. Neither
+    /// `map_err` arm removed the file on failure, so a mint that got past
+    /// the first write and failed on the second stranded a real transcript
+    /// file on disk forever (the caller only ever sees the `Err` string).
+    /// This forces exactly that: the SECOND write fails, and the assertion
+    /// is that the file is actually gone afterward, not that an `Err` came
+    /// back.
+    #[tokio::test]
+    async fn mint_app_init_session_cleans_up_orphan_transcript_on_partial_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lingxi_home = tmp.path().join(".claude");
+        let source_cwd = tmp.path().to_string_lossy().to_string();
+        let data_root = tmp.path().to_path_buf();
+        let record = local_apps::AppState::create(
+            "orphan-app".into(),
+            "孤儿".into(),
+            "no source conversation, takes the empty-anchor branch".into(),
+            None,
+            1,
+        )
+        .record;
+
+        let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+            inner,
+            target_suffix: ".jsonl".to_string(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_on_call: 2,
+        });
+
+        let result =
+            super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
+                .await;
+        let error = result.expect_err("the planted 2nd append failure must surface");
+        assert!(
+            error.contains("persist app init session mode"),
+            "got {error:?}"
+        );
+
+        let workspace_cwd = super::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+        let catalog_dir = lingxi_home
+            .join("projects")
+            .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+        let stray_files: Vec<_> = std::fs::read_dir(&catalog_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            stray_files.is_empty(),
+            "a half-completed mint must not strand its transcript file, found {stray_files:?}"
+        );
+    }
+
+    /// r1-engine-core-002, FORK arm. The gate above only reaches
+    /// `mint_app_init_session`'s empty-anchor branch (its fixture record has
+    /// no `conversation_id`). The chat-origin branch strands the more
+    /// expensive artifact -- a full transcript COPY that
+    /// `create_branch_to_cwd` already wrote -- and derives its cleanup path
+    /// through a second spelling (`remove_app_session_file`) that could drift
+    /// from `main_transcript_path`. This forces that exact arm: the fork body
+    /// lands (`create_branch_to_cwd` writes it with `tokio::fs::write`, which
+    /// this double does not intercept), so the FIRST `append_file_with_mode`
+    /// on the forked file is the `session-mode` append -- planted to fail.
+    #[tokio::test]
+    async fn mint_app_init_session_cleans_up_a_forked_transcript_on_partial_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lingxi_home = tmp.path().join(".claude");
+        let source_cwd = tmp.path().to_string_lossy().to_string();
+        let data_root = tmp.path().to_path_buf();
+
+        let source_session_id = uuid::Uuid::new_v4();
+        let source_path = orchestrator::transcript_paths::main_transcript_path(
+            &lingxi_home,
+            &source_cwd,
+            &source_session_id.to_string(),
+        );
+        std::fs::create_dir_all(source_path.parent().expect("parent")).expect("source catalog");
+        std::fs::write(
+            &source_path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "22222222-2222-2222-2222-222222222222",
+                    "parentUuid": null,
+                    "sessionId": source_session_id.to_string(),
+                    "timestamp": "2026-08-09T12:00:00.000Z",
+                    "cwd": source_cwd,
+                    "version": "0.0.0",
+                    "message": { "role": "user", "content": "the chat this app forks from" },
+                })
+            ),
+        )
+        .expect("seed the source conversation");
+
+        let record = local_apps::AppState::create(
+            "fork-app".into(),
+            "分叉".into(),
+            "has a source conversation, takes the chat-origin fork branch".into(),
+            Some(source_session_id.to_string()),
+            1,
+        )
+        .record;
+
+        let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+            inner,
+            target_suffix: ".jsonl".to_string(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_on_call: 1,
+        });
+
+        let result =
+            super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await;
+        let error = result.expect_err("the planted session-mode append failure must surface");
+        assert!(
+            error.contains("persist app init session mode"),
+            "the FORK arm must be the arm that failed -- a degraded empty anchor would have \
+             failed its first write with \"anchor app init session\" instead, got {error:?}"
+        );
+
+        let workspace_cwd = super::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+        let catalog_dir = lingxi_home
+            .join("projects")
+            .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+        let stray_files: Vec<_> = std::fs::read_dir(&catalog_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            stray_files.is_empty(),
+            "a half-completed FORK must not strand the transcript copy it already wrote, \
+             found {stray_files:?}"
+        );
+    }
+
+    /// r1-failure-paths-012: a pin-less record is not necessarily an empty
+    /// shell -- a create that minted a REAL conversation and then failed
+    /// before `set_init_session` leaves exactly this state. Seeds a
+    /// non-empty session file directly under the app's workspace catalog
+    /// with no pin ever set, runs the real boot sweep, and asserts the
+    /// record gets pinned to THAT conversation -- not a freshly minted
+    /// empty anchor stacked next to it.
+    #[tokio::test]
+    async fn boot_backfill_adopts_an_existing_unpinned_conversation_instead_of_minting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backfill_home = tmp.path().join(".claude");
+        let backfill_root = tmp.path().to_path_buf();
+        let backfill_cwd = tmp.path().to_string_lossy().to_string();
+        let backfill_fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        let backfill_service = Arc::new(
+            local_apps::AppService::load(
+                tmp.path(),
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load app service"),
+        );
+        let record = backfill_service
+            .create_app(Some("领养"), "adopt an orphaned conversation", None)
+            .await
+            .expect("seed record");
+        assert!(
+            record.init_session_id.is_none(),
+            "fixture must start unpinned"
+        );
+
+        let workspace_cwd = super::canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
+        let orphan_session_id = uuid::Uuid::new_v4();
+        let session_path = orchestrator::transcript_paths::main_transcript_path(
+            &backfill_home,
+            &workspace_cwd,
+            &orphan_session_id.to_string(),
+        );
+        std::fs::create_dir_all(session_path.parent().expect("parent")).expect("catalog dir");
+        std::fs::write(
+            &session_path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "11111111-1111-1111-1111-111111111111",
+                    "parentUuid": null,
+                    "sessionId": orphan_session_id.to_string(),
+                    "timestamp": "2026-08-09T12:00:00.000Z",
+                    "cwd": workspace_cwd,
+                    "version": "0.0.0",
+                    "message": { "role": "user", "content": "orphaned by a half-completed create" },
+                })
+            ),
+        )
+        .expect("seed orphan conversation");
+
+        let broker = super::LocalAppsHostBroker::new(
+            backfill_root.clone(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+
+        super::run_app_boot_backfill_sweep(
+            backfill_home.clone(),
+            backfill_cwd,
+            backfill_root,
+            backfill_fs.clone(),
+            backfill_service.clone(),
+            broker,
+        )
+        .await;
+
+        let after = backfill_service
+            .record(&record.id)
+            .await
+            .expect("record after sweep");
+        assert_eq!(
+            after.init_session_id.as_deref(),
+            Some(orphan_session_id.to_string().as_str()),
+            "boot backfill must adopt the existing non-empty conversation, not mint a fresh \
+             empty anchor over it, got {after:?}"
+        );
+
+        let rows = session::jsonl::list_recent_sessions(&backfill_home, &workspace_cwd, 50, backfill_fs)
+            .await
+            .expect("list sessions after sweep");
+        assert_eq!(
+            rows.len(),
+            1,
+            "adoption must not ALSO mint a second, empty anchor next to it: {rows:?}"
         );
     }
 
@@ -19895,7 +20356,7 @@ mod tests {
                 "the contract must name the one useful tool: {contract}"
             );
             assert!(
-                contract.contains("会在脚手架落地时被删除"),
+                contract.contains("will be deleted the moment the scaffold lands"),
                 "the contract must warn that pre-confirmation source is wiped: {contract}"
             );
             assert!(
@@ -19989,6 +20450,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            mcp_intent: None,
             workflow_model: None,
             git_enabled: true,
             scaffolded: false,

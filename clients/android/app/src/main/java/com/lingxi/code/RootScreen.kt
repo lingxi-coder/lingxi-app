@@ -74,7 +74,9 @@ import com.lingxi.code.drawer.DrawerSection
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineSessionState
+import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.SessionCatalogPhase
@@ -741,6 +743,8 @@ fun RootScreen(
             .collect { event ->
                 if (event is ClientEvent.PermissionModeChanged) {
                     resolvedSettingsStore.setEffectivePermissionMode(event.mode)
+                } else if (event is ClientEvent.ProviderModelCatalog) {
+                    resolvedSettingsStore.setLlmCatalogEntries(event.providers)
                 } else if (event is ClientEvent.TypescriptLspModeChanged) {
                     resolvedSettingsStore.setTypescriptLspState(
                         requested = event.requested,
@@ -773,15 +777,34 @@ fun RootScreen(
                 }
             }
     }
-    val modelProviderStatuses = remember(settingsState.llmProviders) {
+    val llmCatalogByProfileId = remember(settingsState.llmCatalogEntries) {
+        settingsState.llmCatalogEntries.associateBy(LlmProviderCatalogEntry::profileId)
+    }
+    val modelProviderStatuses = remember(
+        settingsState.llmProviders,
+        settingsState.llmCatalogLoaded,
+        llmCatalogByProfileId,
+    ) {
         settingsState.llmProviders.map { provider ->
+            val profileId = ProviderSettingsRepository.profileNameFor(provider)
+            val catalogEntry = llmCatalogByProfileId[profileId]
             ModelProviderStatus(
-                profileId = ProviderSettingsRepository.profileNameFor(provider),
+                profileId = profileId,
                 settingsId = provider.id,
                 name = provider.name,
                 status = provider.status,
                 enabled = provider.enabled,
                 credentialConfigured = provider.credentialConfigured,
+                catalogModelIds = when {
+                    !settingsState.llmCatalogLoaded -> null
+                    catalogEntry == null -> emptyList()
+                    else -> (
+                        catalogEntry.modelIds +
+                            catalogEntry.modelDetails.map(CatalogModelDetails::reference)
+                        ).distinct()
+                },
+                showInModelPicker = provider.showInModelPicker,
+                visibleModelIds = provider.visibleModelIds,
             )
         }
     }
@@ -2201,7 +2224,15 @@ fun RootScreen(
                             localAppsViewModel.createAppFromDrawer()
                         },
                         onOpenApps = {
-                            setConversationMode(SessionMode.Code)
+                            // Deliberately no conversation-mode switch here:
+                            // this row only opens the library to LOOK at it, and
+                            // forcing one as a side effect would swap the
+                            // user's live Chat conversation to a Code session
+                            // just from browsing — iOS's equivalent entry
+                            // changes no mode, and the sibling
+                            // `onOpenLocalAppDetails` handler elsewhere in this
+                            // file already opens the apps cover with no mode
+                            // flip.
                             showingApps = true
                             closeDrawer()
                             // A library-origin create ("+" on a library card)

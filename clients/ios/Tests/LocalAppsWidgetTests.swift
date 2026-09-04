@@ -89,6 +89,28 @@ final class LocalAppsWidgetTests: XCTestCase {
                 + "gate must turn this test red")
     }
 
+    /// The drawer/library `armLibraryFallback` split
+    /// (`LocalAppsStoreTests.swift` pins the STORE's behavior for each
+    /// literal bool) is otherwise asserted only against literals the test
+    /// itself supplies — nothing pins which literal each real call site
+    /// actually passes, so swapping the drawer's `false` for `true` at
+    /// `RootView.swift` would leave every one of those tests green. Assert
+    /// the two real call sites directly.
+    func testArmLibraryFallbackCallSitesMatchTheirDocumentedSplit() throws {
+        let rootView = try clientSource("Sources/App/RootView.swift")
+        XCTAssertTrue(
+            rootView.contains("createShellApp(armLibraryFallback: false)"),
+            "the DRAWER's create must not arm the library fallback — it hands "
+                + "the conversation over directly")
+
+        let libraryView = try clientSource("Sources/LocalApps/LocalAppsLibraryView.swift")
+        XCTAssertTrue(
+            libraryView.contains("createShellApp(armLibraryFallback: true)"),
+            "the LIBRARY's create must arm the fallback so a failure leaves "
+                + "the user looking at the library rather than a chat that "
+                + "never got its app")
+    }
+
     func testApprovalSheetsStayScrollableAndDetentedForLargeTextAndKeyboard() throws {
         let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
 
@@ -223,6 +245,39 @@ final class LocalAppsWidgetTests: XCTestCase {
         XCTAssertTrue(source.contains("store.setManagedMcpToolEnabled("))
         XCTAssertTrue(source.contains("store.startManagedMcpAuthoring(appID: appID, userGoal: goal)"))
         XCTAssertFalse(source.contains("MCPConfigurationRepository"))
+    }
+
+    /// `.preview` is only ever pushed from `LocalAppDetailView` for the SAME
+    /// app it is already showing (`LocalAppsLibraryView.swift`'s
+    /// `onOpenPreview: { path.append(.preview(appID)) }`), so every route on
+    /// a `LocalAppsRootView`'s stack at once shares one id — which is what
+    /// the collapse-on-disappear `.onChange` below relies on.
+    func testLocalAppsRouteAppIDMatchesEitherCase() {
+        XCTAssertEqual(LocalAppsRoute.details("tracker").appID, "tracker")
+        XCTAssertEqual(LocalAppsRoute.preview("tracker").appID, "tracker")
+    }
+
+    /// Mirrors Android's collapse in `LocalAppsViewModel.kt`
+    /// (`appIdOnScreen()` against `liveIds`): without it, deleting the app
+    /// currently open in `.details`/`.preview` — the delete confirmation is
+    /// anchored on the LIST screen, not on those two routes, so a delete
+    /// never pops the stack on its own — left the stack pushed on a route
+    /// for an app that no longer exists.
+    func testLocalAppsRootViewCollapsesItsPathWhenTheOnScreenAppDisappears() throws {
+        let source = try clientSource("Sources/LocalApps/LocalAppsLibraryView.swift")
+
+        guard let start = source.range(of: "struct LocalAppsRootView"),
+              let end = source.range(of: "private func destination(", range: start.upperBound..<source.endIndex)
+        else {
+            return XCTFail("read the wrong file: LocalAppsRootView not found")
+        }
+        let body = source[start.lowerBound..<end.lowerBound]
+
+        XCTAssertTrue(
+            body.contains(".onChange(of: store.apps.map(\\.id))"),
+            "the stack must watch the live catalog, not just react to a delete "
+                + "action that happens to be anchored elsewhere")
+        XCTAssertTrue(body.contains("path.removeAll()"))
     }
 
     // ── Source-level helpers ──────────────────────────────────────────────

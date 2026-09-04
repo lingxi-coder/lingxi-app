@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+@preconcurrency import AppKit
 import AudioToolbox
 import CryptoKit
 import Foundation
@@ -50,6 +51,46 @@ enum HelperError: Error {
             return message
         }
     }
+}
+
+func permissionRequestFromArguments(_ arguments: [String]) throws -> Set<String>? {
+    guard let flagIndex = arguments.firstIndex(of: "--request-permissions") else { return nil }
+    guard arguments.indices.contains(flagIndex + 1) else {
+        throw HelperError.invalidRequest("missing audio permission list")
+    }
+    let requested = Set(arguments[flagIndex + 1]
+        .split(separator: ",")
+        .map(String.init)
+        .filter { !$0.isEmpty })
+    guard !requested.isEmpty, requested.isSubset(of: ["microphone", "speech"]) else {
+        throw HelperError.invalidRequest("unsupported audio permission")
+    }
+    return requested
+}
+
+@MainActor
+func requestSystemPermissions(_ requested: Set<String>) async throws {
+    guard requested.isSubset(of: ["microphone", "speech"]) else {
+        throw HelperError.invalidRequest("unsupported audio permission")
+    }
+    if requested.contains("speech"), SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+        _ = await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+        }
+    }
+    if requested.contains("microphone"), AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+        _ = await withCheckedContinuation { continuation in
+            AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+        }
+    }
+}
+
+@MainActor
+func requestForegroundSystemPermissions(_ requested: Set<String>) async throws {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    app.activate(ignoringOtherApps: true)
+    try await requestSystemPermissions(requested)
 }
 
 struct HelperOwner: Codable, Equatable, Sendable {
@@ -185,13 +226,36 @@ struct HelperRecognitionProgress: Encodable, Sendable {
 
 struct HelperEvent: Encodable, Sendable {
     let type: String
-    let snapshot: HelperSnapshot
+    let snapshot: HelperSnapshot?
     let owner: HelperOwner?
     let progress: HelperRecognitionProgress?
     let model: HelperModelSnapshot?
     let state: String?
     let error: HelperErrorPayload?
     let message: String?
+    let level: Double?
+
+    init(
+        type: String,
+        snapshot: HelperSnapshot?,
+        owner: HelperOwner?,
+        progress: HelperRecognitionProgress?,
+        model: HelperModelSnapshot?,
+        state: String?,
+        error: HelperErrorPayload?,
+        message: String?,
+        level: Double? = nil
+    ) {
+        self.type = type
+        self.snapshot = snapshot
+        self.owner = owner
+        self.progress = progress
+        self.model = model
+        self.state = state
+        self.error = error
+        self.message = message
+        self.level = level
+    }
 }
 
 enum HelperEngineResult: Sendable {
@@ -710,6 +774,7 @@ final class ListeningSession {
     private let outputSampleRate: Int
     private let wantsRecording: Bool
     private let onPartial: @Sendable (HelperTranscript) async -> Void
+    private let onLevel: @Sendable (Double) async -> Void
     private let onSilence: @Sendable () async -> Void
 
     private let engine = AVAudioEngine()
@@ -721,6 +786,7 @@ final class ListeningSession {
     private var samples: [Float] = []
     private var lastSpeechAt = Date()
     private var hasHeardSpeech = false
+    private var lastLevelPublishedAt = Date.distantPast
     private var monitorTask: Task<Void, Never>?
 
     init(
@@ -730,6 +796,7 @@ final class ListeningSession {
         outputSampleRate: Int,
         wantsRecording: Bool,
         onPartial: @escaping @Sendable (HelperTranscript) async -> Void,
+        onLevel: @escaping @Sendable (Double) async -> Void,
         onSilence: @escaping @Sendable () async -> Void
     ) {
         self.owner = owner
@@ -738,6 +805,7 @@ final class ListeningSession {
         self.outputSampleRate = outputSampleRate
         self.wantsRecording = wantsRecording
         self.onPartial = onPartial
+        self.onLevel = onLevel
         self.onSilence = onSilence
     }
 
@@ -818,6 +886,12 @@ final class ListeningSession {
             : resample(Array(source), from: sourceRate, to: outputSampleRate)
         samples.append(contentsOf: converted)
         let rms = sqrt(converted.reduce(0) { $0 + ($1 * $1) } / Float(max(1, converted.count)))
+        let now = Date()
+        if rms.isFinite, now.timeIntervalSince(lastLevelPublishedAt) >= 0.05 {
+            lastLevelPublishedAt = now
+            let level = Double(min(1, max(0, rms)))
+            Task { await onLevel(level) }
+        }
         if rms >= silenceThreshold {
             lastSpeechAt = Date()
             hasHeardSpeech = true
@@ -1345,6 +1419,26 @@ actor HelperStateStore {
         ))
     }
 
+    private func publishInputLevel(owner: HelperOwner, level: Double) async {
+        await writer.writeEnvelope(OutputEnvelope(
+            id: nil,
+            type: "event",
+            result: nil,
+            event: HelperEvent(
+                type: "input_level",
+                snapshot: nil,
+                owner: owner,
+                progress: nil,
+                model: nil,
+                state: nil,
+                error: nil,
+                message: nil,
+                level: level
+            ),
+            error: nil
+        ))
+    }
+
     private func publishSpeechState(owner: HelperOwner, state: String) async {
         await writer.writeEnvelope(OutputEnvelope(
             id: nil,
@@ -1554,19 +1648,7 @@ actor HelperStateStore {
 
     private func requestPermissions(_ permissions: [String]) async throws {
         let requested = Set(permissions)
-        guard requested.isSubset(of: ["microphone", "speech"]) else {
-            throw HelperError.invalidRequest("unsupported audio permission")
-        }
-        if requested.contains("speech"), SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-            _ = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-            }
-        }
-        if requested.contains("microphone"), AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            _ = await withCheckedContinuation { continuation in
-                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
-            }
-        }
+        try await requestSystemPermissions(requested)
         await publishSnapshotChanged()
     }
 
@@ -1583,16 +1665,17 @@ actor HelperStateStore {
         guard (8_000...48_000).contains(sampleRate) else {
             throw HelperError.invalidRequest("sample rate must be between 8000 and 48000 Hz")
         }
-        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-            try await requestPermissions(["microphone"])
-            if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-                throw HelperError.permission("microphone access is required")
-            }
+        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if microphoneStatus == .notDetermined {
+            throw HelperError.permission("microphone permission must be decided in the foreground authorization flow")
+        }
+        if microphoneStatus != .authorized {
+            throw HelperError.permission("microphone access is required")
         }
         if recognitionMode == "automatic",
            nextOwner.kind != "engine",
            SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-            try await requestPermissions(["speech"])
+            throw HelperError.permission("speech recognition permission must be decided in the foreground authorization flow")
         }
         activeLanguage = language
         let systemAvailable = recognitionMode == "automatic"
@@ -1647,6 +1730,9 @@ actor HelperStateStore {
                 wantsRecording: wantsRecording,
                 onPartial: { [weak self] transcript in
                     await self?.publishRecognitionProgress(owner: nextOwner, text: transcript.text, isFinal: false)
+                },
+                onLevel: { [weak self] level in
+                    await self?.publishInputLevel(owner: nextOwner, level: level)
                 },
                 onSilence: { [weak self] in
                     guard nextOwner.kind == "flow" else { return }
@@ -1923,6 +2009,18 @@ func readInputLoop(state: HelperStateStore) async {
 @main
 struct LingXiAudioHelperApp {
     static func main() async {
+        do {
+            if let permissions = try permissionRequestFromArguments(CommandLine.arguments) {
+                try await requestForegroundSystemPermissions(permissions)
+                return
+            }
+        } catch {
+            let message = (error as? HelperError)?.message ?? error.localizedDescription
+            if let data = "audio permission helper failed: \(message)\n".data(using: .utf8) {
+                try? FileHandle.standardError.write(contentsOf: data)
+            }
+            return
+        }
         let rootPath = ProcessInfo.processInfo.environment["LINGXI_AUDIO_MODELS_ROOT"]
             ?? NSHomeDirectory().appending("/Library/Application Support/LingXi/voice-models")
         let storageRoot = URL(fileURLWithPath: rootPath, isDirectory: true)

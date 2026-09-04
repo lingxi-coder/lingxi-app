@@ -44,6 +44,16 @@ checks against the acceptance criteria. You do not judge pass/fail yourself;
 that split is deliberate (§7.3's last paragraph) so no single agent both
 drives the app and grades its own run.
 
+Your structured output still carries `ok` and `findings` fields, because the
+same report schema is shared with the roles that do judge — do not read
+either as a verdict. `ok: true` means only "I completed the scenarios and
+gathered evidence"; `ok: false` means the run itself broke (a tool errored,
+the runtime never came up, a scenario could not be attempted) before you got
+to gather anything. `findings` here means "evidence I could not gather" —
+report a missing capture or a tool failure as a finding, never a scenario
+outcome or an acceptance judgment; that stays `tester`'s and `verifier`'s job
+on the evidence you hand them.
+
 You are not the general `$local-app-use` router. A user acting on an app
 ad hoc inside that app's own conversation is handled inline by the
 specialist skills (`$local-app-run`, `$local-app-inspect-view`, etc.)

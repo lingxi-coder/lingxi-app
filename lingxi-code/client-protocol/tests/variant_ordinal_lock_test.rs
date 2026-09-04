@@ -276,7 +276,10 @@ fn variants_by_flat_scan(src: &str, enum_name: &str) -> Vec<String> {
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
         let tail = rest[ident.len()..].trim_start();
-        if tail.starts_with('{') || tail.starts_with('(') || tail.starts_with(',') || tail.is_empty()
+        if tail.starts_with('{')
+            || tail.starts_with('(')
+            || tail.starts_with(',')
+            || tail.is_empty()
         {
             out.push(ident);
         }

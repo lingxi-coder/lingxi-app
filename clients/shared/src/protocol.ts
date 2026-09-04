@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '11.0.0';
+export const CLIENT_PROTOCOL_VERSION = '12.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -705,6 +705,12 @@ export interface ModelDetailsDto {
   capabilities: ModelCapabilitiesDto;
   reasoning: ReasoningControlSpecDto;
   supports_fast_mode?: boolean;
+}
+
+export interface ProviderModelCatalogEntryDto {
+  provider_id: string;
+  provider_label: string;
+  models: ModelDetailsDto[];
 }
 
 /** Authoritative state for the active conversation's reasoning controls. */
@@ -1978,6 +1984,8 @@ export type ClientEvent =
       messages_before: number;
       messages_after: number;
       bytes_saved: number;
+      /** Empty or absent when connected to an older engine. */
+      summary?: string;
     }
   // ── Session lifecycle ───────────────────────────────────────────────────────
   | { type: 'session_started'; session_id: string; mode: SessionModeDto }
@@ -2004,6 +2012,7 @@ export type ClientEvent =
     }
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
+  | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | {

@@ -123,6 +123,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   session_agent_updated: 'exposed',
   session_agent_message: 'exposed',
   model_list: 'exposed',
+  provider_model_catalog: 'exposed',
   model_changed: 'exposed',
   permission_mode_changed: 'exposed',
   typescript_lsp_mode_changed: 'not_applicable',

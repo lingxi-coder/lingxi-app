@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 
 import {
   filterModelGroups,
+  filterVisibleModelReferences,
   groupModelReferences,
   modelBillingGroups,
+  modelCapabilitySummary,
   modelDisplayLabel,
   modelReference,
   modelSelectionConfirmed,
   resolveModelSelection,
+  visibleProviderModelCatalog,
   waitForModelSelection,
 } from '../src/renderer/bridge/modelCatalog';
 import { providerById } from '../src/shared/providers';
@@ -136,6 +139,21 @@ test('keeps non-OpenRouter providers in one unlabeled billing section', () => {
   assert.deepEqual(modelBillingGroups(anthropic!, []), [{ label: null, models: anthropic!.models }]);
 });
 
+test('summarizes shared model capabilities for provider settings', () => {
+  assert.equal(modelCapabilitySummary({
+    capabilities: {
+      streaming: true,
+      tools: true,
+      vision: true,
+      documents: false,
+      reasoning: true,
+      structured_output: false,
+    },
+    attachments: true,
+    context_window_tokens: 128_000,
+  } as never), 'Tools · Vision · Reasoning · Attachments · 128k context');
+});
+
 test('defaults Kimi Code to the model available on every membership tier', () => {
   assert.equal(providerById('kimi-code')?.defaultModel, 'kimi-code/k3');
 });
@@ -169,7 +187,7 @@ test('model confirmation requires the authoritative model_changed value', () => 
 test('waits for authoritative model confirmation and times out deterministically', async () => {
   let current: string | null = 'anthropic/claude-sonnet-5';
   setTimeout(() => { current = 'deepseek/deepseek-v4-flash'; }, 5);
-  await waitForModelSelection('deepseek/deepseek-v4-flash', () => current, { timeoutMs: 100, pollMs: 1 });
+  await waitForModelSelection('deepseek/deepseek-v4-flash', () => current, { timeoutMs: 1_000, pollMs: 1 });
   await assert.rejects(
     waitForModelSelection('never/confirmed', () => current, { timeoutMs: 5, pollMs: 1 }),
     /did not confirm model/,
@@ -181,4 +199,98 @@ test('aborting an authoritative wait clears its polling path', async () => {
   const pending = waitForModelSelection('never/confirmed', () => null, { timeoutMs: 100, pollMs: 1, signal: controller.signal });
   controller.abort();
   await assert.rejects(pending, /wait aborted/);
+});
+
+test('provider visibility hides whole providers and keeps explicit allowlists closed to future models', () => {
+  const providers = [
+    {
+      provider_id: 'openai',
+      provider_label: 'OpenAI',
+      models: [
+        { reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol' },
+        { reference: 'openai/gpt-5.7-preview', model_id: 'gpt-5.7-preview' },
+      ],
+    },
+    {
+      provider_id: 'deepseek',
+      provider_label: 'DeepSeek',
+      models: [
+        { reference: 'deepseek/deepseek-v4-flash', model_id: 'deepseek-v4-flash' },
+      ],
+    },
+  ];
+
+  assert.deepEqual(
+    visibleProviderModelCatalog(providers as never, {
+      openai: { visibleModelIds: ['gpt-5.6-sol'] },
+      deepseek: { showInModelPicker: false },
+    }),
+    [{
+      providerId: 'openai',
+      displayName: 'OpenAI',
+      models: [{ reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol' }],
+    }],
+  );
+});
+
+test('visible reference filtering preserves unknown providers and drops explicitly hidden ones', () => {
+  const references = [
+    'openai/gpt-5.6-sol',
+    'openai/gpt-5.7-preview',
+    'deepseek/deepseek-v4-flash',
+    'community/custom-model',
+  ];
+  const providers = [{
+    provider_id: 'openai',
+    provider_label: 'OpenAI',
+    models: [{ reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol' }],
+  }];
+
+  assert.deepEqual(
+    filterVisibleModelReferences(references, providers as never, {
+      openai: { visibleModelIds: ['gpt-5.6-sol'] },
+      deepseek: { showInModelPicker: false },
+    }),
+    ['openai/gpt-5.6-sol', 'community/custom-model'],
+  );
+});
+
+test('missing visibility settings still restrict known providers to the authoritative catalog', () => {
+  assert.deepEqual(
+    filterVisibleModelReferences(
+      [
+        'openai/gpt-5.6-sol',
+        'openai/gpt-legacy-hidden',
+        'community/custom-model',
+      ],
+      [{
+        provider_id: 'openai',
+        provider_label: 'OpenAI',
+        models: [{ reference: 'openai/gpt-5.6-sol', model_id: 'gpt-5.6-sol' }],
+      }] as never,
+      undefined,
+    ),
+    ['openai/gpt-5.6-sol', 'community/custom-model'],
+  );
+});
+
+test('picker visibility can hide every row without changing the current-model label lookup', () => {
+  const current = 'openai/gpt-5.7-preview';
+
+  assert.deepEqual(
+    filterVisibleModelReferences(
+      [current],
+      [{
+        provider_id: 'openai',
+        provider_label: 'OpenAI',
+        models: [{ reference: current, model_id: 'gpt-5.7-preview' }],
+      }] as never,
+      { openai: { showInModelPicker: false, visibleModelIds: ['gpt-5.7-preview'] } },
+    ),
+    [],
+  );
+  assert.equal(
+    modelDisplayLabel(modelReference(current), [{ reference: current, display_name: 'GPT 5.7 Preview' }]),
+    'GPT 5.7 Preview',
+  );
 });

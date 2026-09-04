@@ -17,7 +17,7 @@
     "user_goal_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "$comment": "§12.4 struct field `user_goal_sha256: String`; hex-64 pattern inferred from every other *_sha256 field this design doc defines the same way (e.g. runtime_profile.contract_sha256, validated in lingxi-code/tools/workflow/src/local_app_workflow_core.js:111)."
+      "$comment": "§12.4 struct field `user_goal_sha256: String`; hex-64 pattern inferred from every other *_sha256 field this design doc defines the same way (e.g. runtime_profile.contract_sha256, validated by `contract_sha256` in lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs:558 — `local_app_workflow_core.js` does not exist in this repo)."
     },
     "summary": {
       "type": "string",

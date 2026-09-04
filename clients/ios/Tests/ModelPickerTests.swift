@@ -49,6 +49,17 @@ final class ModelPickerTests: XCTestCase {
         )
     }
 
+    func testComposerKeepsCurrentModelLabelWhenVisiblePickerRowsAreEmpty() {
+        XCTAssertEqual(
+            Composer.modelChipLabel(
+                providerConfigured: true,
+                availableModels: ["openai/gpt-5.6-terra"],
+                activeModelId: "openai/gpt-5.6-sol"
+            ),
+            ModelDisplay.shortName(for: "openai/gpt-5.6-sol")
+        )
+    }
+
     // MARK: filter
 
     func testBlankQueryKeepsEveryReferenceInEngineOrder() {
@@ -80,6 +91,20 @@ final class ModelPickerTests: XCTestCase {
 
     func testFilterReturnsEmptyWhenNothingMatches() {
         XCTAssertEqual(ModelDisplay.filter(catalog, matching: "llama"), [])
+    }
+
+    func testModelPickerEmptyStateDistinguishesNoVisibleFromNoMatches() {
+        XCTAssertEqual(
+            ModelPickerSheet.emptyStateKey(query: "", visibleModels: [], matches: []),
+            "composer_no_visible_models"
+        )
+        XCTAssertEqual(
+            ModelPickerSheet.emptyStateKey(query: "terra", visibleModels: ["openai/gpt-5.6-sol"], matches: []),
+            "composer_no_matching_models"
+        )
+        XCTAssertNil(
+            ModelPickerSheet.emptyStateKey(query: "", visibleModels: ["openai/gpt-5.6-sol"], matches: ["openai/gpt-5.6-sol"])
+        )
     }
 
     /// An OpenRouter wire id contains a slash of its own, so the qualified

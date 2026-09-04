@@ -1,9 +1,10 @@
 {
-  "totalKeys": 2027,
+  "totalKeys": 2062,
   "androidIllegal": 113,
   "androidIllegalUnpaired": 106,
-  "iosSourceOrphans": 48,
+  "iosSourceOrphans": 41,
   "androidSourceOrphans": 3,
+  "androidCompanionLocaleGapsTotal": 0,
   "empty": {
     "zh-Hans": 0,
     "zh-Hant": 26,
@@ -13,9 +14,9 @@
   },
   "identicalToBase": {
     "zh-Hans": 0,
-    "zh-Hant": 233,
+    "zh-Hant": 236,
     "en": 24,
-    "ja": 45,
+    "ja": 46,
     "ko": 19
   },
   "unpairedKeys": [
@@ -149,13 +150,6 @@
     "local_apps_mcp_tool_visible_meta",
     "local_apps_mcp_ui_verification",
     "local_apps_mcp_verification_title",
-    "local_apps_plugin_disabled",
-    "local_apps_plugin_enabled",
-    "local_apps_plugin_status_unavailable",
-    "local_apps_plugin_toggle_failed",
-    "local_apps_verification_draft",
-    "local_apps_verification_published_unverified",
-    "local_apps_verification_published_verified",
     "settings_provider_api_key",
     "settings_provider_api_key_placeholder",
     "settings_provider_credential_api_key_oauth",
@@ -180,5 +174,6 @@
     "chat_compacting_context",
     "chat_compaction_failed",
     "chat_compaction_progress"
-  ]
+  ],
+  "androidCompanionLocaleGaps": {}
 }

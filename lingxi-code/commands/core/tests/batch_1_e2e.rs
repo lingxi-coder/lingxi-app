@@ -41,6 +41,7 @@ async fn compact_dispatch() {
         messages_before: 100,
         messages_after: 5,
         bytes_saved: 4_096,
+        summary: "kept context".to_string(),
     });
     let r = d.dispatch("/compact").await;
     match r {

@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lingxi.local/local-app/design-spec.schema.json",
   "title": "Local App design spec",
-  "$comment": "PHASE 2 CONTENT, transcription not invention. This schema is a byte-for-byte transcription of the TWO design-result schemas that already exist in the two SEPARATE builtin workflows this plugin's local-app-build.js is meant to eventually replace (design §18 Phase 4, §8.3 'only one build workflow'): DESIGN_RESULT_SCHEMA in lingxi-code/tools/workflow/src/local_app_build_workflow.js:59-143 (react_dom / routed branch) and DESIGN_RESULT_SCHEMA in lingxi-code/tools/workflow/src/local_app_canvas_workflow.js:63-149 (canvas_2d|three_3d|phaser_2d|babylon_3d / drawn-surface branch). Those two schemas diverge STRUCTURALLY, not just optionally (compare 'information_architecture' vs 'drawn_surface'/'runtime_family'), and the design doc does not specify how design §18 Phase 4 merges them into one unified schema for the unified build workflow. Rather than invent that merge, this file expresses the CURRENT, real contract as a discriminated union of the two existing shapes. Whoever implements Phase 4's unification should treat this file as a starting point to edit, not a settled answer. additionalProperties:false is added on each branch (not present in the source schemas, which are permissive by omission) so oneOf can actually discriminate between the two branches; this is a Phase 2 authoring choice, not something already enforced by the two source workflows.",
+  "$comment": "PHASE 2 CONTENT, transcription not invention. This schema was drafted as a byte-for-byte transcription of design-result schemas once planned for two SEPARATE builtin workflows (design §18 Phase 4, §8.3 'only one build workflow'), tagged below as DESIGN_RESULT_SCHEMA from `local_app_build_workflow.js` (react_dom / routed branch) and from `local_app_canvas_workflow.js` (canvas_2d|three_3d|phaser_2d|babylon_3d / drawn-surface branch). Neither file exists anywhere in this repo (grepped; zero hits) — the plugin ships ONE unified build workflow instead, `lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js`, whose actual, much slimmer `designSchema` is `{runtime_family, acceptance_checks, summary}` (required). Those two drafted schemas diverge STRUCTURALLY, not just optionally (compare 'information_architecture' vs 'drawn_surface'/'runtime_family'), and the design doc does not specify how design §18 Phase 4 merges them into one unified schema for the unified build workflow. Rather than invent that merge, this file expresses a discriminated union of the two draft shapes as a design-only reference — not a schema any production code enforces. Whoever implements Phase 4's unification should treat this file as a starting point to edit, not a settled answer. additionalProperties:false is added on each branch (not present in the draft schemas, which are permissive by omission) so oneOf can actually discriminate between the two branches; this is a Phase 2 authoring choice, not something enforced anywhere today.",
   "oneOf": [
     {
       "title": "Routed (react_dom) design spec",
-      "$comment": "BUILT — lingxi-code/tools/workflow/src/local_app_build_workflow.js:59-143, DESIGN_RESULT_SCHEMA.",
+      "$comment": "DRAFT, not built — `local_app_build_workflow.js` does not exist in this repo; the shipped workflow's designSchema is the much slimmer {runtime_family, acceptance_checks, summary} in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -94,7 +94,7 @@
     },
     {
       "title": "Drawn-surface (canvas_2d | three_3d | phaser_2d | babylon_3d) design spec",
-      "$comment": "BUILT — lingxi-code/tools/workflow/src/local_app_canvas_workflow.js:63-149, DESIGN_RESULT_SCHEMA.",
+      "$comment": "DRAFT, not built — `local_app_canvas_workflow.js` does not exist in this repo; the shipped workflow's designSchema is the much slimmer {runtime_family, acceptance_checks, summary} in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js.",
       "type": "object",
       "additionalProperties": false,
       "properties": {

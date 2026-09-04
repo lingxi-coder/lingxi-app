@@ -353,6 +353,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 messages_before: 50,
                 messages_after: 12,
                 bytes_saved: 4096,
+                summary: "Summary:\nkept context".to_string(),
             },
         ),
         (
@@ -453,6 +454,78 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     message_count: 17,
                     mode: SessionModeDto::Code,
                     path: "/home/dev/.lingxi/sessions/33333333.jsonl".to_string(),
+                }],
+            },
+        ),
+        (
+            "event/provider_model_catalog.json",
+            ClientEvent::ProviderModelCatalog {
+                providers: vec![client_protocol::listings::ProviderModelCatalogEntryDto {
+                    provider_id: "anthropic".to_string(),
+                    provider_label: "Anthropic".to_string(),
+                    models: vec![client_protocol::listings::ModelDetailsDto {
+                        reference: "anthropic/claude-opus-4-8".to_string(),
+                        provider_id: "anthropic".to_string(),
+                        provider_label: "Anthropic".to_string(),
+                        display_name: "Claude Opus 4.8".to_string(),
+                        model_id: "claude-opus-4-8".to_string(),
+                        description: Some("Large reasoning model".to_string()),
+                        family: Some("claude".to_string()),
+                        status: None,
+                        release_date: None,
+                        last_updated: None,
+                        knowledge_cutoff: None,
+                        input_modalities: vec!["text".to_string()],
+                        output_modalities: vec!["text".to_string()],
+                        context_window_tokens: None,
+                        max_input_tokens: None,
+                        max_output_tokens: None,
+                        open_weights: None,
+                        attachments: None,
+                        temperature_control: None,
+                        pricing: None,
+                        capabilities: client_protocol::listings::ModelCapabilitiesDto {
+                            streaming: true,
+                            tools: true,
+                            vision: false,
+                            documents: false,
+                            reasoning: true,
+                            structured_output: false,
+                        },
+                        reasoning: client_protocol::controls::ReasoningControlSpecDto {
+                            options: vec![
+                                client_protocol::controls::ReasoningOptionDto {
+                                    selection:
+                                        client_protocol::controls::ReasoningSelectionDto::Automatic,
+                                    persistable: true,
+                                },
+                                client_protocol::controls::ReasoningOptionDto {
+                                    selection:
+                                        client_protocol::controls::ReasoningSelectionDto::Disabled,
+                                    persistable: true,
+                                },
+                                client_protocol::controls::ReasoningOptionDto {
+                                    selection:
+                                        client_protocol::controls::ReasoningSelectionDto::Enabled,
+                                    persistable: true,
+                                },
+                                client_protocol::controls::ReasoningOptionDto {
+                                    selection:
+                                        client_protocol::controls::ReasoningSelectionDto::Level {
+                                            id: "low".to_string(),
+                                        },
+                                    persistable: true,
+                                },
+                            ],
+                            budget_range: None,
+                            provider_default:
+                                client_protocol::controls::ReasoningSelectionDto::Automatic,
+                            forced_reasoning: false,
+                            editable: true,
+                            disabled_reason: None,
+                        },
+                        supports_fast_mode: false,
+                    }],
                 }],
             },
         ),

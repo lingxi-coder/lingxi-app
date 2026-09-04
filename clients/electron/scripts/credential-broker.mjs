@@ -233,7 +233,7 @@ export function validateProvisioningProfile(profilePath, teamId, bundleId) {
   }
 }
 
-export function validateSignedEntitlements(entitlements, teamId, bundleId) {
+export function validateSignedEntitlements(entitlements, teamId, bundleId, required = {}) {
   const expectedApplicationIdentifier = `${teamId}.${bundleId}`;
   if (entitlements?.['com.apple.application-identifier'] !== expectedApplicationIdentifier) {
     throw new Error(`signed entitlements do not contain ${expectedApplicationIdentifier}`);
@@ -241,18 +241,29 @@ export function validateSignedEntitlements(entitlements, teamId, bundleId) {
   if (entitlements?.['com.apple.developer.team-identifier'] !== teamId) {
     throw new Error(`signed entitlements do not contain TeamIdentifier ${teamId}`);
   }
+  for (const [key, value] of Object.entries(required)) {
+    if (entitlements?.[key] !== value) {
+      throw new Error(`signed entitlements do not contain ${key}=${String(value)}`);
+    }
+  }
 }
 
-export function verifySignedEntitlements(path, teamId, bundleId) {
+export function verifySignedEntitlements(path, teamId, bundleId, required = {}) {
   const plist = execFileSync('/usr/bin/codesign', ['--display', '--xml', '--entitlements', '-', path]);
   const entitlements = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '-'], {
     input: plist,
     encoding: 'utf8',
   }));
-  validateSignedEntitlements(entitlements, teamId, bundleId);
+  validateSignedEntitlements(entitlements, teamId, bundleId, required);
 }
 
-export function writeEntitlements(path, { teamId, bundleId, allowJit = false, disableLibraryValidation = false }) {
+export function writeEntitlements(path, {
+  teamId,
+  bundleId,
+  allowJit = false,
+  disableLibraryValidation = false,
+  audioInput = false,
+}) {
   const rows = [
     ['com.apple.application-identifier', `${teamId}.${bundleId}`],
     ['com.apple.developer.team-identifier', teamId],
@@ -260,6 +271,7 @@ export function writeEntitlements(path, { teamId, bundleId, allowJit = false, di
   if (allowJit) rows.push(['com.apple.security.cs.allow-jit', true]);
   if (allowJit) rows.push(['com.apple.security.cs.allow-unsigned-executable-memory', true]);
   if (disableLibraryValidation) rows.push(['com.apple.security.cs.disable-library-validation', true]);
+  if (audioInput) rows.push(['com.apple.security.device.audio-input', true]);
   const body = rows.map(([key, value]) => {
     const rendered = value === true ? '<true/>' : `<string>${plistEscape(String(value))}</string>`;
     return `  <key>${plistEscape(String(key))}</key>${rendered}`;

@@ -19,8 +19,9 @@ use client_protocol::events::ClientEvent;
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, SessionModeDto,
-    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    ProviderModelCatalogEntryDto, SessionModeDto, SessionRowDto, SlashCommandDto,
+    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 
@@ -216,6 +217,60 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
         panic!("model list")
     };
     assert!(details.is_empty());
+}
+
+#[test]
+fn provider_model_catalog_round_trips() {
+    let detail = ModelDetailsDto {
+        reference: "anthropic/claude-opus-4-8".into(),
+        provider_id: "anthropic".into(),
+        provider_label: "Anthropic".into(),
+        display_name: "Claude Opus 4.8".into(),
+        model_id: "claude-opus-4-8".into(),
+        description: Some("Large reasoning model".into()),
+        family: Some("claude".into()),
+        status: None,
+        release_date: None,
+        last_updated: None,
+        knowledge_cutoff: None,
+        input_modalities: vec!["text".into()],
+        output_modalities: vec!["text".into()],
+        context_window_tokens: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        open_weights: None,
+        attachments: None,
+        temperature_control: None,
+        pricing: None,
+        capabilities: ModelCapabilitiesDto {
+            streaming: true,
+            tools: true,
+            vision: false,
+            documents: false,
+            reasoning: true,
+            structured_output: false,
+        },
+        reasoning: ReasoningControlSpecDto {
+            options: Vec::new(),
+            budget_range: None,
+            provider_default: ReasoningSelectionDto::Automatic,
+            forced_reasoning: false,
+            editable: true,
+            disabled_reason: None,
+        },
+        supports_fast_mode: false,
+    };
+    let event = ClientEvent::ProviderModelCatalog {
+        providers: vec![ProviderModelCatalogEntryDto {
+            provider_id: "anthropic".into(),
+            provider_label: "Anthropic".into(),
+            models: vec![detail],
+        }],
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "provider_model_catalog");
+    assert_eq!(value["providers"][0]["provider_label"], "Anthropic");
+    assert_eq!(serde_json::from_value::<ClientEvent>(value).unwrap(), event);
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

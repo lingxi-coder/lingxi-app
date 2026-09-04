@@ -4,6 +4,23 @@ import Testing
 
 struct AudioHelperEncodingTests {
     @Test
+    func foregroundPermissionArgumentsAreStrictlyBounded() throws {
+        #expect(try permissionRequestFromArguments(["LingXiAudioHelper", "--jsonl"]) == nil)
+        #expect(try permissionRequestFromArguments([
+            "LingXiAudioHelper",
+            "--request-permissions",
+            "microphone,speech",
+        ]) == Set(["microphone", "speech"]))
+        #expect(throws: HelperError.self) {
+            try permissionRequestFromArguments([
+                "LingXiAudioHelper",
+                "--request-permissions",
+                "camera",
+            ])
+        }
+    }
+
+    @Test
     func archivePathRejectsTraversal() {
         #expect(validateArchivePath("model/tokens.txt"))
         #expect(!validateArchivePath("../escape"))
@@ -85,5 +102,28 @@ struct AudioHelperEncodingTests {
         let state = try #require(object["state"] as? [String: Any])
         #expect(state["type"] as? String == "failed")
         #expect(state["message"] as? String == "checksum mismatch")
+    }
+
+    @Test
+    func inputLevelEventIsLightweightAndOwnerScoped() throws {
+        let event = HelperEvent(
+            type: "input_level",
+            snapshot: nil,
+            owner: .init(kind: "dictation", id: "dictation-1"),
+            progress: nil,
+            model: nil,
+            state: nil,
+            error: nil,
+            message: nil,
+            level: 0.42
+        )
+        let encoded = try JSONEncoder().encode(event)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect(object["type"] as? String == "input_level")
+        #expect(object["snapshot"] == nil)
+        #expect(object["level"] as? Double == 0.42)
+        let owner = try #require(object["owner"] as? [String: Any])
+        #expect(owner["kind"] as? String == "dictation")
+        #expect(owner["id"] as? String == "dictation-1")
     }
 }

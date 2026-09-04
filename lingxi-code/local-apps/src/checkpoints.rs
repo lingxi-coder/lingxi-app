@@ -5,7 +5,7 @@
 //! therefore replace source files without ever touching application data.
 //!
 //! The service's OWN documents do live inside that directory
-//! (`workspace/.lingxi/{app.json,design-spec.json,app.manifest.json}`): they
+//! (`workspace/.lingxi/{app.json,app.manifest.json}`): they
 //! are application STATE, not generated source, and a restore must rewind the
 //! source without rewinding the store that records which checkpoint the app
 //! is on. Keeping them out takes three cooperating rules, because each covers

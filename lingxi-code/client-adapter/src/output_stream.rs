@@ -362,13 +362,14 @@ impl OutputStream for AdapterOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
-        _summary: &str,
+        summary: &str,
     ) {
         self.sink
             .emit(ClientEvent::CompactionCompleted {
                 messages_before,
                 messages_after,
                 bytes_saved,
+                summary: summary.to_string(),
             })
             .await;
     }
@@ -725,7 +726,7 @@ mod tests {
     }
 
     /// `emit_compaction_completed` → one `CompactionCompleted` carrying the
-    /// three counters verbatim.
+    /// counters and summary verbatim.
     #[tokio::test]
     async fn emit_compaction_completed_produces_compaction_completed() {
         let sink = MockSink::arc();
@@ -743,6 +744,7 @@ mod tests {
                 messages_before: 42,
                 messages_after: 8,
                 bytes_saved: 1_024,
+                summary: "Summary:\nkept context".to_string(),
             }
         );
     }

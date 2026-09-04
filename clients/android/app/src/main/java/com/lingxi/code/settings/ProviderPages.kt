@@ -52,6 +52,8 @@ import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
+import com.lingxi.code.model.ProviderModelVisibility
+import com.lingxi.code.model.ProviderModelVisibilityRules
 import com.lingxi.code.model.ProviderPreset
 import com.lingxi.code.theme.LXFont
 import com.lingxi.code.theme.LingXiTheme
@@ -278,23 +280,53 @@ fun ProviderPickerPage(
     onPicked: (newId: String) -> Unit,
 ) {
     val t = LingXiTheme.palette
-    val pickerPresets = remember(kind, state.llmCatalogEntries) {
+    if (kind == ProviderKind.Llm && !state.llmCatalogLoaded) {
+        Column(Modifier.fillMaxWidth()) {
+            Blurb(stringResource(R.string.settings_provider_picker_intro))
+            SettingsSection(label = stringResource(R.string.settings_provider_show_in_picker)) {
+                Text(
+                    stringResource(R.string.settings_provider_catalog_loading),
+                    color = t.text4,
+                    fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+        }
+        return
+    }
+    if (kind == ProviderKind.Llm && state.llmCatalogEntries.isEmpty()) {
+        Column(Modifier.fillMaxWidth()) {
+            Blurb(stringResource(R.string.settings_provider_picker_intro))
+            SettingsSection(label = stringResource(R.string.settings_provider_show_in_picker)) {
+                Text(
+                    stringResource(R.string.settings_provider_preset_not_in_catalog),
+                    color = t.text4,
+                    fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+        }
+        return
+    }
+    val pickerPresets = remember(kind, state.llmCatalogLoaded, state.llmCatalogEntries) {
         if (kind != ProviderKind.Llm || state.llmCatalogEntries.isEmpty()) {
             kind.presets
         } else {
             val fallback = kind.presets.associateBy { it.id }
-            val catalog = state.llmCatalogEntries.map { entry ->
+            val catalog = state.llmCatalogEntries.mapNotNull { entry ->
                 val id = if (entry.profileId == "gemini") "google" else entry.profileId
-                val base = fallback[id]
+                val base = fallback[id] ?: return@mapNotNull null
                 ProviderPreset(
                     id = id,
                     name = entry.displayName,
-                    sub = base?.sub ?: entry.protocol,
-                    color = base?.color ?: Color.Gray,
+                    sub = base.sub,
+                    color = base.color,
                     defaultUrl = entry.baseUrl,
-                    keyPrefix = base?.keyPrefix.orEmpty(),
+                    keyPrefix = base.keyPrefix,
                     models = entry.modelIds,
-                    needsCx = base?.needsCx ?: false,
+                    needsCx = base.needsCx,
                 )
             }
             (catalog + kind.presets.filter { it.id == "custom" }).distinctBy { it.id }
@@ -331,7 +363,7 @@ fun ProviderPickerPage(
                                     .firstOrNull { it.profileId == profileId }
                                     ?.modelDetails
                                     ?.size
-                                    ?: p.models.size
+                                    ?: 0
                             } else {
                                 p.models.size
                             }
@@ -511,6 +543,21 @@ fun ProviderEditPage(
                     },
                     onShowDetails = { selectedModelDetails = it },
                 )
+            } else {
+                Text(
+                    stringResource(
+                        if (state.llmCatalogLoaded) {
+                            R.string.settings_provider_preset_not_in_catalog
+                        } else {
+                            R.string.settings_provider_catalog_loading
+                        },
+                    ),
+                    color = t.text4,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, bottom = 10.dp),
+                )
             }
             FieldLabel(stringResource(R.string.settings_provider_model_id))
             SettingsField(
@@ -530,6 +577,119 @@ fun ProviderEditPage(
                     stringResource(R.string.settings_provider_preset_not_in_catalog)
                 },
             )
+            val visibility = ProviderModelVisibility(
+                showInModelPicker = editing.showInModelPicker,
+                visibleModelIds = editing.visibleModelIds,
+            )
+            val selectedModelIds = ProviderModelVisibilityRules.selectedCatalogModelIds(
+                candidateModelIds = catalogModels.map { it.modelId },
+                visibility = visibility,
+            )
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 10.dp, bottom = 14.dp),
+            ) {
+                SettingsRow(
+                    label = stringResource(R.string.settings_provider_show_in_picker),
+                    sub = stringResource(
+                        R.string.settings_provider_visible_models_count_fmt,
+                        selectedModelIds.size,
+                        catalogModels.size,
+                    ),
+                    chevron = false,
+                    trailing = {
+                        com.lingxi.code.components.LXToggle(
+                            checked = editing.showInModelPicker,
+                            onCheckedChange = { checked ->
+                                store.updateProvider(kind, providerId) {
+                                    it.copy(showInModelPicker = checked)
+                                }
+                            },
+                        )
+                    },
+                )
+                if (catalogModels.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(t.surface)
+                            .border(0.5.dp, t.border, RoundedCornerShape(10.dp)),
+                    ) {
+                        catalogModels.forEachIndexed { index, modelDetails ->
+                            val selected = selectedModelIds.contains(modelDetails.modelId)
+                            Column {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val base = editing.visibleModelIds ?: catalogModels.map { it.modelId }
+                                            val updated = if (selected) {
+                                                base.filterNot { it == modelDetails.modelId }
+                                            } else {
+                                                (base + modelDetails.modelId).distinct()
+                                            }
+                                            store.updateProvider(kind, providerId) {
+                                                it.copy(
+                                                    showInModelPicker = editing.showInModelPicker,
+                                                    visibleModelIds = updated,
+                                                )
+                                            }
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .border(1.25.dp, if (selected) t.accent else t.border, RoundedCornerShape(4.dp))
+                                            .background(if (selected) t.accent.tint(0.16f) else Color.Transparent),
+                                    ) {
+                                        if (selected) {
+                                            LXIcon(name = LXIconName.Check, size = 11.dp, color = t.accent, stroke = 2.1f)
+                                        }
+                                    }
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    ) {
+                                        Text(
+                                            modelDetails.displayName,
+                                            color = t.text,
+                                            fontSize = 12.5f.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            modelDetails.modelId,
+                                            color = t.text4,
+                                            fontSize = 11.sp,
+                                            fontFamily = LXFont.mono,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    ModelDetailsInfoButton(onClick = { selectedModelDetails = modelDetails })
+                                }
+                                if (index < catalogModels.lastIndex) {
+                                    Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (editing.showInModelPicker && selectedModelIds.isEmpty()) {
+                    Text(
+                        stringResource(R.string.settings_provider_picker_hidden_empty),
+                        color = t.statusTesting,
+                        fontSize = 11.5f.sp,
+                    )
+                }
+            }
         }
 
         if (kind == ProviderKind.Llm) {

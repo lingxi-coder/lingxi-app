@@ -66,6 +66,15 @@ export interface UsageSnapshot {
   readonly cacheCreationTokens: number;
 }
 
+/** One durable context summary produced by conversation compaction. */
+export interface ContextSummarySnapshot {
+  readonly id: string;
+  readonly content: string;
+  readonly messagesBefore: number;
+  readonly messagesAfter: number;
+  readonly bytesSaved?: number;
+}
+
 /**
  * The accumulated live conversation. `items` is what the Stage renders;
  * `running` drives the streaming/thinking affordance; `lastError` is the most
@@ -90,6 +99,8 @@ export interface ConversationState {
   readonly toolIndex: Readonly<Record<string, number>>;
   /** Latest live token-usage snapshot (`usage_update`), or `null`. */
   readonly usage: UsageSnapshot | null;
+  /** Oldest-first compact summaries available for the current session. */
+  readonly summaries: readonly ContextSummarySnapshot[];
   /**
    * The model-managed working plan, replaced wholesale by `plan_updated`.
    * It deliberately SURVIVES `turn_ended` — the terminal keeps the checklist
@@ -132,6 +143,7 @@ export function emptyConversation(): ConversationState {
     openThinkingIndex: -1,
     toolIndex: {},
     usage: null,
+    summaries: [],
     plan: [],
     sessionKey: '',
     nextId: 1,
@@ -483,6 +495,19 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       };
 
     case 'compaction_completed': {
+      const content = event.summary?.trim() ?? '';
+      const lastItem = state.items.at(-1);
+      const lastSummary = state.summaries.at(-1);
+      if (
+        state.activeCompactionId === null
+        && lastItem?.type === 'compaction'
+        && lastItem.status === 'complete'
+        && lastItem.messagesBefore === event.messages_before
+        && lastItem.messagesAfter === event.messages_after
+        && lastItem.bytesSaved === event.bytes_saved
+        && (!content || lastSummary?.content === content)
+      ) return state;
+
       const items = state.items.slice();
       const index = state.activeCompactionId === null
         ? -1
@@ -501,9 +526,26 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         items.push({ ...completed, id: itemId(nextId) });
         nextId += 1;
       }
+      const summaryId = index >= 0 ? items[index]!.id : itemId(nextId - 1);
+      const previousSummary = state.summaries.at(-1);
+      const summaries = !content || (
+        previousSummary !== undefined
+        && previousSummary.content === content
+        && previousSummary.messagesBefore === event.messages_before
+        && previousSummary.messagesAfter === event.messages_after
+      )
+        ? state.summaries
+        : [...state.summaries, {
+            id: summaryId,
+            content,
+            messagesBefore: event.messages_before,
+            messagesAfter: event.messages_after,
+            bytesSaved: event.bytes_saved,
+          }];
       return {
         ...state,
         items,
+        summaries,
         activeCompactionId: null,
         pendingSlashName: state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact'
           ? null
@@ -609,6 +651,7 @@ export function conversationFromMessages(
   messages: readonly MessageDto[],
 ): ConversationState {
   const items: RunItem[] = [];
+  const summaries: ContextSummarySnapshot[] = [];
   const toolIndex = new Map<string, number>();
   let nextId = 1;
 
@@ -646,16 +689,27 @@ export function conversationFromMessages(
             done: true,
           });
           break;
-        case 'compact_boundary':
+        case 'compact_boundary': {
+          const id = itemId(nextId++);
+          const summaryContent = block.summary?.trim() ?? '';
           items.push({
             type: 'narration',
-            id: itemId(nextId++),
+            id,
             text: block.messages_before > 0
               ? `Conversation compacted (${block.messages_before} messages)`
               : 'Conversation compacted',
             tone: 'muted',
           });
+          if (summaryContent) {
+            summaries.push({
+              id,
+              content: summaryContent,
+              messagesBefore: block.messages_before,
+              messagesAfter: block.messages_after,
+            });
+          }
           break;
+        }
         case 'tool_use': {
           const idx = items.length;
           items.push({
@@ -716,6 +770,7 @@ export function conversationFromMessages(
   return {
     ...emptyConversation(),
     items,
+    summaries,
     toolIndex: Object.fromEntries(toolIndex),
     nextId,
   };

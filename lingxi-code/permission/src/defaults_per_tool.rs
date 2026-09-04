@@ -8,10 +8,10 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! LINGXI DIVERGENCE: 33 further rows with no oracle counterpart, reported by
-//! [`is_divergence_tool`]. 32 are the `LocalApp*` first-party local-app host
+//! LINGXI DIVERGENCE: 35 further rows with no oracle counterpart, reported by
+//! [`is_divergence_tool`]. 34 are the `LocalApp*` first-party local-app host
 //! operations (`engine_mobile::local_apps_tools`) — claude-code has no
-//! host-owned local-app surface. The 33rd is `Workflow`: claude-code gates it
+//! host-owned local-app surface. The 35th is `Workflow`: claude-code gates it
 //! behind the `WORKFLOW_SCRIPTS` feature and it is absent from external builds
 //! (see `mode_policy`'s module doc), so the M5-05 table has no row for it and
 //! its default here is a LingXi decision, NOT oracle parity.
@@ -19,9 +19,9 @@
 //! The divergence rows are split by REVERSIBILITY: 14 `AllowByDefault`
 //! (read-only, plus the network-disabled build, the restartable local preview
 //! runtime, the shell-scaffolding commit, template-selection staging, and the
-//! `Workflow` hand-off), 19 `DenyByDefault` (user data, UI actuation, view
+//! `Workflow` hand-off), 21 `DenyByDefault` (user data, UI actuation, view
 //! capture, checkpoint restore, network, template validation, and the MCP
-//! proposal lifecycle).
+//! proposal / dependency-review lifecycle).
 //!
 //! 🚨 `AllowByDefault` is not merely a prompt default: it also short-circuits
 //! the Plan-mode mutation backstop and the `DontAsk` ask→deny transform. Every
@@ -190,6 +190,13 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppApproveMcpProposal", DenyByDefault);
     m.insert("LocalAppQaMcpCandidate", DenyByDefault);
     m.insert("LocalAppPromoteMcpCandidate", DenyByDefault);
+    // r2-never-wired-02: newly wired into `local_apps_tools::LOCAL_APP_TOOLS`.
+    // Same posture as the MCP proposal lifecycle above: a native confirmation
+    // sheet already gates the actual dependency change/apply inside the
+    // handler, but the row here is the POLICY prompt in front of that sheet,
+    // and network-reaching dependency resolution is not trivially undone.
+    m.insert("LocalAppConfirmDependencyChange", DenyByDefault);
+    m.insert("LocalAppUpdateDependencies", DenyByDefault);
     // Effects the user cannot trivially undo, or that reach the network.
     // These two expose an app's CONTENT — user records and the live WebView
     // DOM. Binding scopes them inside an app workspace, but a GLOBAL
@@ -210,9 +217,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 33 LingXi divergence rows (32 local-app
+    // 44 oracle-parity tools + 35 LingXi divergence rows (34 local-app
     // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 77, "tool defaults table must list all 77 tools");
+    debug_assert_eq!(m.len(), 79, "tool defaults table must list all 79 tools");
     m
 }
 
@@ -400,7 +407,7 @@ mod tests {
         let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
         let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(divergence, 33, "divergence row count changed");
+        assert_eq!(divergence, 35, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
         // the M5-05 table has no row for it.
@@ -435,7 +442,7 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::DenyByDefault),
-            19,
+            21,
             "divergence deny"
         );
     }

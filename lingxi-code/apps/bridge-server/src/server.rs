@@ -1609,6 +1609,7 @@ mod tests {
             messages_before: 2,
             messages_after: 1,
             bytes_saved: 10,
+            summary: "kept context".to_string(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::SystemNotice {
             message: "late notice".to_string(),

@@ -7544,8 +7544,11 @@ fn formal_workspace_contract(
 /// - "任何源文件都会被删除", because the first scaffold WIPES the editable
 ///   surface (§C.0.1). An agent that writes code here does not merely waste the
 ///   turn, it loses work it believes it has done;
-/// - "只有 `LocalAppScaffold` 对你有意义", because every other local-app tool
-///   is gated off for an unformed app and will refuse;
+/// - "不要自己直接调 `LocalAppScaffold`", because scaffold fails closed without
+///   the receipt the unified create flow issues (`scaffold_shell_app_value`
+///   refuses with "receipt_id is required; create scaffold only accepts a
+///   Host-issued unified create confirmation receipt"), and every OTHER
+///   local-app tool is gated off for an unformed app and will refuse too;
 /// - the surface vocabulary, because the surface is IMMUTABLE once scaffolded,
 ///   so it is the one decision the user has to make before anything is written;
 /// - "这一轮**不要用 `AskUserQuestion`**" on step 1, because `AskUserQuestion`

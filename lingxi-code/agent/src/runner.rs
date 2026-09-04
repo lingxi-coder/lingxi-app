@@ -1119,6 +1119,16 @@ async fn run_subagent_loop(
     // (`:1949` as of this change) is the sole enforcement mechanism, exactly
     // as the oracle does. See `<scratchpad>/WP3-oracle.txt` for the full
     // extracted evidence.
+    //
+    // 🚨 CORRECTING THE RECORD: commit `1c9cbd695`'s message says `tool_choice`
+    // is "forced after the nudge". That is WRONG and was never what shipped.
+    // `force_tool_choice_for_api` is computed ONCE, HERE, before the turn loop
+    // is entered, from the advertised-tool count alone; the nudge path below
+    // deliberately does NOT re-arm it, and there is no other assignment to this
+    // binding anywhere in the loop (it is a `let`, not a `let mut`). A run that
+    // advertises tools besides StructuredOutput sends `tool_choice = None` on
+    // every round-trip, before AND after the nudge. Believe this comment and
+    // the shipped test, not the commit message.
     let force_tool_choice_for_api: Option<&'static str> =
         if force_structured_tool.is_some() && tool_schemas.len() == 1 {
             force_structured_tool

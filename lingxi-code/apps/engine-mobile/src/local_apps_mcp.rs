@@ -2584,9 +2584,17 @@ impl LocalAppsMcpTransport {
                 }
                 Self::result(result)
             }
-            // The one way out of an empty shell, and the only local-app
-            // operation besides `list` / `get` / `create` that stays reachable
-            // while `scaffolded == false` (see `SHELL_ALLOWED_OPERATIONS`).
+            // The one way OUT of an empty shell. It is NOT the only operation
+            // reachable while `scaffolded == false`: `SHELL_ALLOWED_OPERATIONS`
+            // lists thirteen, because the whole create chain
+            // (`runtime_profiles` / `template_catalog` /
+            // `validate_template_selection` / `resolve_template_selection` /
+            // `stage_create` / `validate_mcp_proposal` /
+            // `approve_mcp_proposal` / `qa_mcp_candidate` /
+            // `promote_mcp_candidate`) runs against a shell BEFORE the
+            // scaffold lands — gating any of them would deadlock create the
+            // same way gating `scaffold` does. Read that constant, not this
+            // list.
             // The whole transaction lives on the host: it needs the app
             // layout, the build lock and the workspace seed, none of which
             // this layer has.

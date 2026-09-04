@@ -7572,9 +7572,17 @@ impl MobileEngineHandle {
             .enqueue_engine(ClientEvent::AppEvent { event });
     }
 
-    /// Post-mutation `AppsChanged` snapshot: every successful mutation
-    /// announces the full record set (records carry `workflow_state` /
-    /// `updated_at_ms`, so any mutation changes the set). Delegated to
+    /// Post-mutation `AppsChanged` snapshot: every mutating `submit` arm that
+    /// reaches THIS helper announces the full record set (records carry
+    /// `workflow_state` / `updated_at_ms`, so any mutation changes the set).
+    ///
+    /// 🚨 Not every successful mutation reaches it. `AppService::
+    /// set_init_session` — the create flow's init-session pin, the event the
+    /// "+" hand-off waits on — deliberately announces a SINGLE record
+    /// (`AppEvent::RecordChanged`), and `handle_create_app`'s fallback calls
+    /// `announce_record` for the same reason. A client must therefore fold
+    /// single-record events into its catalog and must NOT rebuild the catalog
+    /// from `AppsChanged` alone. Delegated to
     /// [`AppService::announce_apps`] — the snapshot and its emission ride the
     /// service's emission-order lock (through the installed
     /// `SinkAppEventObserver`), so a concurrent mutation on another `submit`
@@ -9207,14 +9215,18 @@ impl MobileEngineHandle {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
-            // `mode` FORKS the handler (`Shell` = the empty shell the "+"
-            // button creates, `Scaffolded` = create + scaffold in one step) and
+            // `mode` selects the create path. `Shell` — the empty shell the
+            // "+" button creates — is the ONLY success path since protocol v9;
+            // `Scaffolded` is retained purely as a wire-compat variant and is
+            // rejected typed by the handler (see the `AppCreateModeDto::
+            // Scaffolded` arm in `handle_create_app`). The live create is
+            // Shell first, then a runtime-profile confirmation in the native
+            // UI, then a later one-shot scaffold receipt.
             // `request_id` rides both outcomes — the `AppCreated` event and,
             // when the create fails, the `AppOperationFailed` event — so the
             // client that started this creation recognises its own result.
-            // Neither is optional plumbing: without the fork every create is a
-            // scaffolded one, and without the key a failing create leaves the
-            // client waiting out a 30-second timeout.
+            // Without that key a failing create leaves the client waiting out
+            // a 30-second timeout.
             ClientCommand::CreateApp {
                 name,
                 origin,

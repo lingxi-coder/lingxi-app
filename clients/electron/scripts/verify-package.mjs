@@ -56,6 +56,17 @@ function plistHasKey(plistPath, key) {
   }
 }
 
+export function assertSandboxedPreloadBundle(source) {
+  const externalRequires = [...source.matchAll(/\brequire\(["']([^"']+)["']\)/g)]
+    .map((match) => match[1])
+    .filter((dependency) => dependency !== 'electron');
+  if (externalRequires.length > 0) {
+    throw new Error(
+      `sandboxed preload contains unsupported external require(s): ${[...new Set(externalRequires)].join(', ')}`,
+    );
+  }
+}
+
 export function verifyPackage(root = packageRoot) {
   if (process.platform !== 'darwin') {
     throw new Error(`package verification requires macOS; received ${process.platform}`);
@@ -103,6 +114,7 @@ export function verifyPackage(root = packageRoot) {
   ];
   try {
   for (const path of expected) requirePath(path);
+  assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'index.cjs'), 'utf8'));
   const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
   const identifiers = brokerIdentifiers(manifest.channel);
   const audioIdentifiers = audioHelperIdentifiers(manifest.channel);

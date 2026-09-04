@@ -34,6 +34,7 @@ import {
   ensureAudioHelperResourceLayout,
   writeAudioHelperInfoPlist,
 } from '../scripts/audio-helper.mjs';
+import { assertSandboxedPreloadBundle } from '../scripts/verify-package.mjs';
 
 /**
  * A minimal but structurally real Info.plist — the same shape Electron's own
@@ -120,6 +121,14 @@ test('runtime manifests discard development-only install metadata', () => {
     main: 'index.js',
     dependencies: { ws: '1.0.0' },
   });
+});
+
+test('sandboxed preload accepts Electron only and rejects package requires', () => {
+  assert.doesNotThrow(() => assertSandboxedPreloadBundle(`const { ipcRenderer } = require("electron");`));
+  assert.throws(
+    () => assertSandboxedPreloadBundle(`require("electron"); require("@lingxi/bridge-client/protocol");`),
+    /unsupported external require\(s\): @lingxi\/bridge-client\/protocol/,
+  );
 });
 
 test('architecture validation accepts arm64 and rejects x86-only binaries', () => {

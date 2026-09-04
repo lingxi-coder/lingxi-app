@@ -15,7 +15,10 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    // Sandboxed Electron preload scripts can only require Electron's small
+    // built-in allowlist. Bundle the protocol constants reached through the
+    // native-audio validators instead of leaving a package require behind.
+    plugins: [externalizeDepsPlugin({ exclude: ['@lingxi/bridge-client'] })],
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, 'src/preload/index.ts') },

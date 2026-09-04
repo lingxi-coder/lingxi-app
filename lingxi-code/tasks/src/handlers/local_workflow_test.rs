@@ -22,7 +22,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
-static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+use crate::handlers::CONFIG_DIR_ENV_LOCK as ENV_LOCK;
 
 #[tokio::test]
 async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
@@ -2119,7 +2119,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
 
 #[tokio::test]
 async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let config_dir = tempdir().unwrap();
     let workflows_dir = config_dir.path().join("workflows");
     std::fs::create_dir_all(&workflows_dir).unwrap();
@@ -2188,7 +2188,7 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
     // Serializes with the CONFIG_DIR_ENV mutators above: this test does not
     // change the var itself, but `resolve_nested_script`'s project/user probe
     // (which must miss for this test to isolate the plugin branch) reads it.
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let script_dir = tempdir().unwrap();
     let script_path = script_dir.path().join("deploy.js");
     std::fs::write(&script_path, "return { source: 'plugin', n: args.n };").unwrap();

@@ -1459,7 +1459,7 @@ fn idle_fire_payload_shape() {
 // ---- Swarm auto-claim (oracle 2.1.223 zvb / Vvb / rIp) -------------------
 
 /// Serializes the env-mutating auto-claim tests (`LINGXI_CONFIG_DIR`).
-static CLAIM_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+use crate::handlers::CONFIG_DIR_ENV_LOCK as CLAIM_ENV_LOCK;
 
 /// Point the todo store at a throwaway config dir; restore on drop.
 struct ClaimEnvGuard {

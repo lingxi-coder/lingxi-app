@@ -929,12 +929,33 @@ pub(crate) fn remove_app_session_file(
     record: &local_apps::AppRecord,
     session_id: &str,
 ) -> bool {
+    std::fs::remove_file(app_session_file(lingxi_home, data_root, record, session_id)).is_ok()
+}
+
+/// The app's whole session CATALOG directory — `<lingxi_home>/projects/<dir>`,
+/// where `<dir>` is the sanitized spelling of the app workspace's canonical
+/// cwd.
+///
+/// This directory lives OUTSIDE the app's own `apps/<id>` tree, so
+/// `AppService::delete_app` cannot reach it: every transcript the host minted
+/// for the app — including a chat-origin app's full FORK of the user's
+/// conversation — survives the app unless a caller removes this directory
+/// explicitly (`handle_delete_app` does).
+///
+/// One derivation, three callers ([`remove_app_session_file`],
+/// [`app_session_file`] and the delete path), so none of them can disagree
+/// about which directory is the app's catalog. `canonical_cwd_string`'s
+/// ancestor walk means this stays the SAME spelling after the workspace has
+/// been deleted, which is exactly the state the delete path reads it in.
+pub(crate) fn app_session_dir(
+    lingxi_home: &std::path::Path,
+    data_root: &std::path::Path,
+    record: &local_apps::AppRecord,
+) -> std::path::PathBuf {
     let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
-    let path = lingxi_home
+    lingxi_home
         .join("projects")
         .join(session::jsonl::path::project_dir_name(&workspace_cwd))
-        .join(format!("{session_id}.jsonl"));
-    std::fs::remove_file(path).is_ok()
 }
 
 /// Where a session this host minted for an app lives on disk. The one spelling
@@ -947,11 +968,7 @@ fn app_session_file(
     record: &local_apps::AppRecord,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
-    lingxi_home
-        .join("projects")
-        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
-        .join(format!("{session_id}.jsonl"))
+    app_session_dir(lingxi_home, data_root, record).join(format!("{session_id}.jsonl"))
 }
 
 /// The session-catalog facts the `LocalAppScaffold` commit point needs in order
@@ -2634,6 +2651,40 @@ impl LocalAppsHostBroker {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
             Err(error) => return Err(format!("create_staging_design_missing: {error}")),
         };
+        // r4-failure-paths-09: `stage_create` already digested the exact
+        // design-spec bytes it committed and recorded them on this same
+        // evidence file as `designSpecSha256`, but this function used to
+        // re-hash whatever `design-spec.json` it found and hand THAT back as
+        // the run's `design_spec_sha256` without ever comparing the two. A
+        // `design-spec.json` left in the staging directory by an earlier,
+        // partial run — or one absent when evidence says it was staged — was
+        // therefore adopted silently. Compare, including the present/absent
+        // case, and fail with the same named error the other corruption
+        // checks above use.
+        let recorded_design_sha256 = match staging_evidence.get("designSpecSha256") {
+            None => {
+                return Err(
+                    "create_staging_evidence_invalid: staged evidence is missing designSpecSha256"
+                        .to_string(),
+                )
+            }
+            Some(Value::Null) => None,
+            Some(Value::String(digest)) => Some(digest.as_str()),
+            Some(_) => {
+                return Err(
+                    "create_staging_evidence_invalid: staged designSpecSha256 is not a string"
+                        .to_string(),
+                )
+            }
+        };
+        if recorded_design_sha256 != design_spec_sha256.as_deref() {
+            return Err(format!(
+                "create_staging_evidence_invalid: staged design-spec.json digest {observed:?} \
+                 does not match the designSpecSha256 recorded at stage time ({recorded:?})",
+                observed = design_spec_sha256.as_deref(),
+                recorded = recorded_design_sha256,
+            ));
+        }
         let context_candidates = [
             staging_root.join(".lingxi/mcp-flow-contexts.json"),
             staging_root.join("template/.lingxi/mcp-flow-contexts.json"),
@@ -4974,38 +5025,6 @@ impl LocalAppsHostBroker {
         }
     }
 
-    async fn install_uncommitted_create_dependencies(
-        &self,
-        record: &local_apps::AppRecord,
-        layout: &AppLayout,
-    ) -> Result<(), String> {
-        update_uncommitted_dependency_record(&self.root, record, |dependency| {
-            dependency.state = local_apps::AppDependencyState::Installing;
-            dependency.install_attempts = dependency.install_attempts.saturating_add(1);
-            dependency.last_error = None;
-            dependency.updated_at_ms = now_ms();
-        })?;
-        match self.dependency_install_once(layout, &record.id).await {
-            Ok(completion) => {
-                update_uncommitted_dependency_record(&self.root, record, |dependency| {
-                    dependency.state = local_apps::AppDependencyState::Ready;
-                    dependency.lockfile_sha256 = Some(completion.lockfile_sha256);
-                    dependency.toolchain_key = Some(completion.toolchain_key);
-                    dependency.last_error = None;
-                    dependency.updated_at_ms = now_ms();
-                })
-            }
-            Err(error) => {
-                let _ = update_uncommitted_dependency_record(&self.root, record, |dependency| {
-                    dependency.state = local_apps::AppDependencyState::Failed;
-                    dependency.last_error = Some(error.clone());
-                    dependency.updated_at_ms = now_ms();
-                });
-                Err(error)
-            }
-        }
-    }
-
     async fn run_dependency_install(&self, app_id: String) {
         let service = match self.service() {
             Ok(service) => service,
@@ -6715,11 +6734,11 @@ impl LocalAppsHostBroker {
     /// Write the GUIDED workspace contract for a `CreateMode::Shell` app —
     /// the pre-commit initializer of the "+" button's create.
     ///
-    /// This is the SHELL twin of [`Self::scaffold_app_value`], and the
-    /// difference is the whole point: it lays down no source, stamps no
-    /// surface, and touches nothing but `workspace/LINGXI.md`. A shell has no
-    /// shape yet, so there is nothing to scaffold; what it needs is a contract
-    /// that sends the agent to interview the user.
+    /// This is the twin of [`Self::land_scaffold`], and the difference is the
+    /// whole point: it lays down no source, stamps no surface, and touches
+    /// nothing but `workspace/LINGXI.md`. A shell has no shape yet, so there
+    /// is nothing to scaffold; what it needs is a contract that sends the
+    /// agent to interview the user.
     ///
     /// Runs inside the create transaction, after `layout.initialize()` (so the
     /// workspace directory exists) and BEFORE the index commit that makes the
@@ -6744,53 +6763,6 @@ impl LocalAppsHostBroker {
         })
         .await
         .map_err(|error| format!("join guided contract worker: {error}"))?
-    }
-
-    /// Initialize the host-owned metadata and repository-verified Vite
-    /// scaffold for a freshly created app.
-    pub(crate) async fn scaffold_app_value(
-        &self,
-        record: &local_apps::AppRecord,
-        surface: local_apps::AppSurface,
-        runtime_profile: Option<local_apps::AppRuntimeProfile>,
-    ) -> Result<(), String> {
-        let layout = self.layout(&record.id)?;
-        let requested_binding = runtime_profile
-            .map(crate::local_app_runtime_profiles::current_binding_for_family)
-            .transpose()
-            .map_err(|error| error.to_string())?;
-        let (build_lock, recovery_lock, recovery) = self
-            .land_scaffold(record, surface, requested_binding, None)
-            .await?;
-        if let Err(error) = self
-            .install_uncommitted_create_dependencies(record, &layout)
-            .await
-        {
-            let recovery_error = recovery.rollback().err();
-            drop(build_lock);
-            drop(recovery_lock);
-            return Err(match recovery_error {
-                Some(recovery_error) => {
-                    format!("{error}; scaffold rollback failed: {recovery_error}")
-                }
-                None => error,
-            });
-        }
-        if let Err(error) = recovery.commit() {
-            // This path is the initializer for the create-with-scaffold
-            // transaction. AppService still owns the outer index commit, so
-            // cleanup failure must not turn a successfully landed workspace
-            // into a false failure. A committed mirror lets the next load
-            // discard any leftover recovery material safely.
-            tracing::warn!(
-                app_id = %record.id,
-                %error,
-                "scaffold recovery cleanup deferred after initializer success"
-            );
-        }
-        drop(build_lock);
-        drop(recovery_lock);
-        Ok(())
     }
 
     /// `LocalAppScaffold` — the transaction that turns the "+" button's empty
@@ -7733,18 +7705,6 @@ fn refresh_runtime_profile_snapshot(
     Ok(artifacts.snapshot)
 }
 
-fn update_uncommitted_dependency_record(
-    root: &Path,
-    record: &local_apps::AppRecord,
-    op: impl FnOnce(&mut local_apps::AppDependencyRecord),
-) -> Result<(), String> {
-    let mut dependency = local_apps::storage::load_dependency_record(root, record)
-        .map_err(|error| error.to_string())?;
-    op(&mut dependency);
-    local_apps::storage::save_dependency_record(root, &dependency)
-        .map_err(|error| error.to_string())
-}
-
 /// What to tell the agent immediately after `LocalAppScaffold` commits.
 ///
 /// Unlike [`create_next_step_guidance`], this one runs in a session that IS
@@ -7942,8 +7902,8 @@ fn formal_workspace_contract(
 /// `workspace/LINGXI.md` says before the app has a shape.
 ///
 /// Written by [`LocalAppsHostBroker::write_guided_contract_value`] and
-/// OVERWRITTEN wholesale by the formal contract `scaffold_app_value` renders
-/// once `LocalAppScaffold` lands — the two never coexist, so this text does not
+/// OVERWRITTEN wholesale by the formal contract `land_scaffold` renders once
+/// `LocalAppScaffold` lands — the two never coexist, so this text does not
 /// have to compose with the formal one and deliberately does not try.
 ///
 /// Every clause is load-bearing:
@@ -8078,6 +8038,48 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          something you decide on their behalf.\n",
         id = record.id,
     )
+}
+
+/// r4-failure-paths-09: `stage_create` writes every individual file
+/// atomically (temp + rename) but is not atomic as a TRANSACTION. Between
+/// `create_dir_all(<staging>)` and the final `evidence.json` rename there are
+/// roughly eight fallible steps, each of which returns with `?`; before this
+/// guard existed, a failure at any of them left a half-materialized staging
+/// tree under
+/// `.lingxi-build-state/template-candidates/<app>/<run>/staging/<handle>` that
+/// nothing ever reclaimed, and a later `load_create_proposal_context` could
+/// read a `design-spec.json` from it.
+///
+/// `evidence.json` is the commit marker: `stage_create` renames it into place
+/// last, so a staging directory that HAS it is a complete candidate and a
+/// staging directory that lacks it is partial by definition. Keying the
+/// reclaim on that marker rather than on "this call created the directory"
+/// means a retry that fails early can never destroy a previously COMPLETED
+/// candidate, while a partial tree — this call's or an earlier call's — is
+/// always swept.
+struct PartialStagingReaper<'a> {
+    staging: &'a std::path::Path,
+    committed: bool,
+}
+
+impl Drop for PartialStagingReaper<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.staging.join("evidence.json").exists() {
+            return;
+        }
+        if let Err(error) = std::fs::remove_dir_all(self.staging) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    staging = %self.staging.display(),
+                    %error,
+                    "could not reclaim a partial create staging tree"
+                );
+            }
+        }
+    }
 }
 
 impl LocalAppsHostBroker {
@@ -8861,6 +8863,14 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .join(handle);
         std::fs::create_dir_all(&staging)
             .map_err(|error| format!("create isolated staging: {error}"))?;
+        // r4-failure-paths-09: armed for the whole materialization below and
+        // disarmed only once `evidence.json` has been renamed into place, so
+        // an I/O failure at any intermediate step reclaims the partial tree
+        // instead of leaving it for `load_create_proposal_context` to find.
+        let mut staging_reaper = PartialStagingReaper {
+            staging: &staging,
+            committed: false,
+        };
         // `load_create_proposal_context` (and therefore both
         // `approve_mcp_proposal`'s create-without-MCP branch and
         // `validate_mcp_proposal`'s pre-scaffold branch) require a staged
@@ -8970,6 +8980,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|error| format!("write staging evidence: {error}"))?;
         std::fs::rename(&temp_path, &evidence_path)
             .map_err(|error| format!("commit staging evidence: {error}"))?;
+        // The commit marker is on disk; the tree is a complete candidate now.
+        staging_reaper.committed = true;
         Ok(json!({
             "ok": true,
             "summary": "Create candidate staged in isolated Host storage.",
@@ -10768,16 +10780,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn background_retry(&self, input: Value) -> Result<Value, String> {
         self.background_retry_value(input).await
-    }
-
-    async fn scaffold_app(
-        &self,
-        record: local_apps::AppRecord,
-        surface: local_apps::AppSurface,
-        runtime_profile: Option<local_apps::AppRuntimeProfile>,
-    ) -> Result<(), String> {
-        self.scaffold_app_value(&record, surface, runtime_profile)
-            .await
     }
 
     async fn scaffold_shell_app(&self, input: Value) -> Result<Value, String> {
@@ -12656,9 +12658,183 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
+    /// INSIDE the one test that ran it, so no other model-facing text could be put
+    /// through it. Hoisted here so every caller in the module can reuse it.
+    ///
+    /// Names that legitimately appear as a bare backticked CamelCase span in
+    /// Host-authored, model-facing text but are NOT local-app tools. Anything else
+    /// shaped like a bare tool name is a typo or a retired name the model will try
+    /// to call and fail on.
+    #[cfg(test)]
+    const KNOWN_NON_LOCAL_APP_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Skill", "Workflow"];
+
+    /// r2-tests-honesty-008: the scanner's `take_while(is_ascii_alphanumeric)`
+    /// tokeniser stopped at the first `-` or `:`, so a plugin-qualified skill id —
+    /// the one spelling that actually resolves — was invisible to it and a typo in
+    /// it could never be caught. These are the plugin-qualified ids the contracts
+    /// and skills are allowed to name.
+    #[cfg(test)]
+    const KNOWN_PLUGIN_QUALIFIED_IDS: &[&str] = &[
+        "lingxi-local-app:create-local-app",
+        "lingxi-local-app:local-app-build",
+        "lingxi-local-app:local-app-mcp-authoring",
+        "lingxi-local-app:local-app-use-test",
+    ];
+
+    /// Assert that every backticked span in `contract` that is SHAPED like a tool
+    /// or skill name is one that actually exists.
+    ///
+    /// Three shapes are checked, and a span matching none of them (prose, a path,
+    /// a JSON example, a lower-case field name) is deliberately left alone:
+    ///
+    /// 1. a span whose leading ASCII-alphanumeric run starts with `LocalApp` —
+    ///    this is what catches `` `LocalAppBuild {"app_id":"…"}` `` examples;
+    /// 2. a bare CamelCase span the text immediately calls a *tool* (`` `X` tool ``)
+    ///    — checked against `LOCAL_APP_TOOLS` plus
+    ///    [`KNOWN_NON_LOCAL_APP_TOOL_NAMES`]; this is the half of
+    ///    r2-tests-honesty-008 that the alphanumeric `take_while` could not see,
+    ///    since it only ever compared the leading run against `LocalApp`;
+    /// 3. a span shaped `<plugin>:<name>` in lower kebab case — a plugin-qualified
+    ///    skill or workflow id, checked against [`KNOWN_PLUGIN_QUALIFIED_IDS`].
+    #[cfg(test)]
+    fn assert_only_real_tool_names(contract: &str, label: &str) {
+        // r2-tests-honesty-008: the scan below pairs backticks POSITIONALLY
+        // (1st-2nd, 3rd-4th, …) with no balance check, so a single stray backtick
+        // anywhere in `contract` silently shifts every later span and can hide a
+        // planted bad name behind an innocuous one. Fail loudly and specifically
+        // instead of scanning a text this gate cannot actually parse.
+        assert!(
+            contract.matches('`').count() % 2 == 0,
+            "{label} has an ODD number of backticks, so this scanner cannot pair them \
+             into spans without silently shifting every one after the stray mark: {contract}"
+        );
+        let mut offset = 0;
+        // r4-tests-honesty-08: this scanner only asserts INSIDE a span it finds,
+        // so if the contract stops using backticks altogether the `while` body
+        // never runs and the whole scan silently no-ops — indistinguishable from
+        // every span having checked out clean. Count the spans it actually walked
+        // and require at least one.
+        let mut spans = 0usize;
+        while let Some(found) = contract[offset..].find('`') {
+            let start = offset + found + 1;
+            let Some(found_end) = contract[start..].find('`') else {
+                break;
+            };
+            let end = start + found_end;
+            let span = &contract[start..end];
+            spans += 1;
+            let name: String = span
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            if let Some(rest) = name.strip_prefix("LocalApp") {
+                if !rest.is_empty() {
+                    assert!(
+                        crate::local_apps_tools::LOCAL_APP_TOOLS
+                            .iter()
+                            .any(|&(tool_name, _, _)| tool_name == name),
+                        "{label} names backticked tool `{name}`, which is not in \
+                         LOCAL_APP_TOOLS and cannot be called: {contract}"
+                    );
+                }
+            }
+            // Deliberately NOT "every backticked CamelCase span": these contracts
+            // legitimately backtick component and API names (`IonRouterOutlet`,
+            // `IonPage`, `Routes`, `Route`), and flagging those would make the
+            // gate cry wolf until someone deleted it. The idiom that actually
+            // means "call this" is `` `X` tool ``, which is exactly how the
+            // guided contract names `Skill` — the case r2-tests-honesty-008
+            // recorded as invisible, because `take_while(is_ascii_alphanumeric)`
+            // only ever compared against the `LocalApp` prefix.
+            let is_bare_tool_name = !span.is_empty()
+                && span.chars().all(|c| c.is_ascii_alphanumeric())
+                && span.starts_with(|c: char| c.is_ascii_uppercase())
+                && contract[end + 1..].starts_with(" tool");
+            if is_bare_tool_name {
+                assert!(
+                    crate::local_apps_tools::LOCAL_APP_TOOLS
+                        .iter()
+                        .any(|&(tool_name, _, _)| tool_name == span)
+                        || KNOWN_NON_LOCAL_APP_TOOL_NAMES.contains(&span),
+                    "{label} names backticked tool `{span}`, which is neither a LOCAL_APP_TOOLS \
+                     entry nor one of the known non-local-app tools \
+                     {KNOWN_NON_LOCAL_APP_TOOL_NAMES:?}: {contract}"
+                );
+            }
+            let is_plugin_qualified_id = span.matches(':').count() == 1
+                && span.split(':').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                });
+            if is_plugin_qualified_id {
+                assert!(
+                    KNOWN_PLUGIN_QUALIFIED_IDS.contains(&span),
+                    "{label} names backticked plugin-qualified id `{span}`, which is not one of \
+                     {KNOWN_PLUGIN_QUALIFIED_IDS:?} and will not resolve: {contract}"
+                );
+            }
+            offset = end + 1;
+        }
+        assert!(
+            spans > 0,
+            "{label} has no backtick-delimited spans at all, so this scanner never ran: {contract}"
+        );
+    }
+
+    /// r1-prompt-layer-20: the backtick scanner above is the right shape for a
+    /// workspace contract, where a tool name is always a backticked span — and the
+    /// WRONG shape for the shipped prompt FILES. In `local-app-build.js` the
+    /// backticks delimit whole JavaScript template literals, so a tool name sits
+    /// in the MIDDLE of a span and the leading-run tokeniser never sees it; in
+    /// `SKILL.md` a tool name may appear in a fenced block or in bare prose.
+    ///
+    /// So scan those files for the `LocalApp…` TOKEN wherever it appears and
+    /// require each one to be a real entry in `LOCAL_APP_TOOLS`. The token count
+    /// is asserted non-zero so a gate that scanned the wrong file, or a file that
+    /// stopped naming tools, cannot report "all clear".
+    #[cfg(test)]
+    fn assert_only_real_local_app_tool_tokens(text: &str, label: &str) {
+        let bytes = text.as_bytes();
+        let mut checked = 0usize;
+        let mut cursor = 0usize;
+        while let Some(relative) = text[cursor..].find("LocalApp") {
+            let start = cursor + relative;
+            let preceded_by_identifier = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let end = start
+                + text[start..]
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .unwrap_or(text.len() - start);
+            let token = &text[start..end];
+            cursor = end.max(start + 1);
+            // `LocalApps`/`LocalApp` on their own are prose ("the LocalApp tools"),
+            // not a call; a token glued to a preceding identifier is a Rust/JS
+            // symbol such as `LocalAppsHostBroker`'s caller, not a tool name.
+            if preceded_by_identifier || token == "LocalApp" || token == "LocalApps" {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                crate::local_apps_tools::LOCAL_APP_TOOLS
+                    .iter()
+                    .any(|&(tool_name, _, _)| tool_name == token),
+                "{label} names `{token}`, which is not in LOCAL_APP_TOOLS and cannot be called"
+            );
+        }
+        assert!(
+            checked > 0,
+            "{label} names no LocalApp* tool at all, so this scanner never ran — it is \
+             reading the wrong file or the file stopped naming tools"
+        );
+    }
     use async_trait::async_trait;
     use client_adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
@@ -13824,6 +14000,25 @@ mod tests {
         .expect("write fixture build receipt");
     }
 
+    /// Land the host-owned scaffold the way `LocalAppScaffold` does — through
+    /// `land_scaffold`, the one production landing point (`LocalAppScaffold`
+    /// reaches it via `scaffold_shell_app_value`) — minus the dependency
+    /// install, which none of the LINGXI.md / device-context assertions below
+    /// look at.
+    async fn land_test_scaffold(broker: &Arc<LocalAppsHostBroker>, record: &local_apps::AppRecord) {
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published react-dom runtime profile");
+        let (build_lock, recovery_lock, recovery) = broker
+            .land_scaffold(record, local_apps::AppSurface::Dom, Some(binding), None)
+            .await
+            .expect("land scaffold");
+        recovery.commit().expect("commit scaffold recovery");
+        drop(build_lock);
+        drop(recovery_lock);
+    }
+
     async fn scaffolded_lingxi(
         full_runtime: bool,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -13833,14 +14028,7 @@ mod tests {
             .create_app(Some("Tracker"), "a test app", None)
             .await
             .expect("create app");
-        broker
-            .scaffold_app_value(
-                &record,
-                local_apps::AppSurface::Dom,
-                Some(local_apps::AppRuntimeProfile::ReactDom),
-            )
-            .await
-            .expect("scaffold app");
+        land_test_scaffold(&broker, &record).await;
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
         let lingxi =
             std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
@@ -13864,14 +14052,7 @@ mod tests {
             .create_app(Some("Scaffolded"), "a test app", None)
             .await
             .expect("create app");
-        broker
-            .scaffold_app_value(
-                &record,
-                local_apps::AppSurface::Dom,
-                Some(local_apps::AppRuntimeProfile::ReactDom),
-            )
-            .await
-            .expect("scaffold app");
+        land_test_scaffold(&broker, &record).await;
 
         let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
         let recorded = load_manifest(&layout)
@@ -13977,14 +14158,7 @@ mod tests {
             .create_app(Some("Tracker"), "a test app", None)
             .await
             .expect("create app");
-        broker
-            .scaffold_app_value(
-                &record,
-                local_apps::AppSurface::Dom,
-                Some(local_apps::AppRuntimeProfile::ReactDom),
-            )
-            .await
-            .expect("scaffold app");
+        land_test_scaffold(&broker, &record).await;
         let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
         let lingxi =
             std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
@@ -13997,57 +14171,6 @@ mod tests {
         assert!(broker
             .create_next_step()
             .contains("do not install dependencies yet"));
-    }
-
-    #[tokio::test]
-    async fn create_initializer_persists_dependency_snapshot_before_the_app_becomes_visible() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
-        let host = Arc::clone(&broker);
-
-        let record = service
-            .create_app_with_git_and_workflow_model_and_initializer(
-                Some("Tracker"),
-                "a test app",
-                None,
-                false,
-                None,
-                local_apps::CreateMode::Scaffolded,
-                None,
-                move |record| {
-                    let host = Arc::clone(&host);
-                    async move {
-                        host.scaffold_app(
-                            record,
-                            local_apps::AppSurface::Dom,
-                            Some(local_apps::AppRuntimeProfile::ReactDom),
-                        )
-                        .await
-                        .map_err(local_apps::AppError::Io)
-                    }
-                },
-            )
-            .await
-            .expect("create app");
-
-        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
-        let manifest = load_manifest(&layout).expect("manifest");
-        assert!(
-            record.scaffolded,
-            "the returned app is visible only after commit"
-        );
-        assert_eq!(
-            service
-                .dependency_record(&record.id)
-                .await
-                .expect("dependency record")
-                .state,
-            local_apps::AppDependencyState::Ready
-        );
-        assert!(
-            manifest.dependency_snapshot.is_some(),
-            "the visible app must already carry a verified dependency snapshot"
-        );
     }
 
     // ---- §C.1 `LocalAppScaffold` — the create transaction --------------
@@ -14981,6 +15104,254 @@ mod tests {
         assert!(
             error.contains("create_staging_evidence_invalid") && error.contains("missing brief"),
             "expected the missing-brief hard fail to be named, got: {error}"
+        );
+    }
+
+    /// r4-failure-paths-09 (b): `stage_create` is atomic per FILE but was not
+    /// atomic as a transaction — an I/O failure anywhere between
+    /// `create_dir_all(<staging>)` and the final `evidence.json` rename left a
+    /// half-materialized tree under
+    /// `.lingxi-build-state/template-candidates/<app>/<run>/staging/<handle>`
+    /// that nothing ever reclaimed, and `load_create_proposal_context` reads
+    /// `design-spec.json` out of exactly that directory.
+    ///
+    /// Poison the ONE step that a test can make fail from outside without
+    /// touching the production code: `stage_create` creates
+    /// `<staging>/.lingxi/` for the seeded MCP flow contexts, so planting a
+    /// regular FILE at that path makes `create_dir_all` fail there. With the
+    /// reaper the whole staging tree is gone afterwards; without it the tree
+    /// (including the `.lingxi` poison) survives, which is what this pins.
+    #[tokio::test]
+    async fn a_failed_stage_create_reclaims_its_partial_staging_tree() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_partial_stage_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "partial staging reclaim test",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+
+        let staging_root = broker.create_staging_root(&shell.id, &workflow_run_id, &handle);
+        fs::create_dir_all(&staging_root).expect("pre-create the staging root");
+        // A regular file where `stage_create` needs a directory.
+        fs::write(staging_root.join(".lingxi"), b"poison").expect("plant the poison file");
+        // Vacuity guard: everything below is meaningless unless the poison is
+        // really sitting on the path `stage_create` is about to use.
+        assert!(
+            staging_root.join(".lingxi").is_file(),
+            "the poison must be a FILE at <staging>/.lingxi or stage_create never fails here"
+        );
+
+        let error = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": TEST_DEFAULT_APP_NAME,
+                "brief": TEST_DEFAULT_APP_BRIEF,
+            }))
+            .await
+            .expect_err("stage_create must fail once <staging>/.lingxi is a regular file");
+        assert!(
+            error.contains("create staged MCP flow context directory"),
+            "the failure must be the planted one, not some earlier refusal that never \
+             reached the staging materialization: {error}"
+        );
+        assert!(
+            !staging_root.exists(),
+            "a failed stage_create must reclaim its partial staging tree, but {} still exists",
+            staging_root.display()
+        );
+    }
+
+    /// The other side of the same guard: a COMPLETED staging tree — one that
+    /// carries the `evidence.json` commit marker — must survive a later failed
+    /// `stage_create` for the same run and handle. Without this the reaper
+    /// would be a data-loss bug of its own, because re-staging the same
+    /// not-yet-approved run is explicitly allowed.
+    #[tokio::test]
+    async fn a_committed_staging_tree_survives_a_later_failed_stage_create() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_committed_stage_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "committed staging survival test",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+        let stage_input = json!({
+            "app_id": shell.id,
+            "workflow_run_id": workflow_run_id,
+            "validated_selection_handle": handle,
+            "quality_level": "fast",
+            "name": TEST_DEFAULT_APP_NAME,
+            "brief": TEST_DEFAULT_APP_BRIEF,
+        });
+        broker
+            .stage_create(stage_input.clone())
+            .await
+            .expect("first stage_create must succeed");
+        let staging_root = broker.create_staging_root(&shell.id, &workflow_run_id, &handle);
+        assert!(
+            staging_root.join("evidence.json").is_file(),
+            "vacuity guard: the first stage must have left the commit marker behind"
+        );
+
+        // Poison the SAME staging tree so the second call fails after
+        // `create_dir_all(<staging>)` — the marker must protect it anyway.
+        fs::remove_dir_all(staging_root.join(".lingxi")).expect("clear the staged context dir");
+        fs::write(staging_root.join(".lingxi"), b"poison").expect("plant the poison file");
+        let error = broker
+            .stage_create(stage_input)
+            .await
+            .expect_err("the second stage_create must fail on the planted poison");
+        assert!(
+            error.contains("create staged MCP flow context directory"),
+            "the failure must be the planted one: {error}"
+        );
+        assert!(
+            staging_root.join("evidence.json").is_file(),
+            "a completed staging candidate must survive a later failed stage_create, but {} \
+             lost its commit marker",
+            staging_root.display()
+        );
+    }
+
+    /// r4-failure-paths-09 (a): `stage_create` records the digest of the exact
+    /// `design-spec.json` bytes it commits as `evidence.json`'s
+    /// `designSpecSha256`, and `load_create_proposal_context` re-hashes
+    /// whatever `design-spec.json` it finds — but nothing compared the two, so
+    /// a design spec left behind by an earlier run in the same staging
+    /// directory was adopted silently as this run's confirmed design.
+    #[tokio::test]
+    async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_fail() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_design_digest_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "design digest test",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": TEST_DEFAULT_APP_NAME,
+                "brief": TEST_DEFAULT_APP_BRIEF,
+                "design_spec": {"acceptance_checks": ["the staged spec"]},
+            }))
+            .await
+            .expect("stage create with a design spec");
+        let staging_root = broker.create_staging_root(&shell.id, &workflow_run_id, &handle);
+        let design_path = staging_root.join("design-spec.json");
+        // Vacuity guard: the swap below only tests anything if a design spec
+        // was staged at all and evidence really recorded a digest for it.
+        assert!(
+            design_path.is_file(),
+            "the staged design spec must exist before it can be swapped"
+        );
+        let evidence: Value = serde_json::from_str(
+            &fs::read_to_string(staging_root.join("evidence.json")).expect("staged evidence"),
+        )
+        .expect("parse staged evidence");
+        assert!(
+            evidence["designSpecSha256"].as_str().is_some(),
+            "evidence.json must record designSpecSha256 for this gate to compare anything: \
+             {evidence}"
+        );
+        // A clean staging tree must still load — otherwise a green failure
+        // below would prove nothing about the digest comparison.
+        broker
+            .load_create_proposal_context(&shell.id, &workflow_run_id)
+            .expect("an untouched staging tree must still load");
+
+        fs::write(
+            &design_path,
+            serde_json::to_vec_pretty(&json!({"acceptance_checks": ["a foreign spec"]}))
+                .expect("serialize the foreign design spec"),
+        )
+        .expect("swap the staged design spec");
+        let error = broker
+            .load_create_proposal_context(&shell.id, &workflow_run_id)
+            .expect_err("a design spec that does not match its recorded digest must be refused");
+        assert!(
+            error.contains("create_staging_evidence_invalid")
+                && error.contains("designSpecSha256"),
+            "expected a named designSpecSha256 mismatch, got: {error}"
+        );
+
+        // The absent/present mismatch is the same defect: deleting the file
+        // while evidence still records a digest must also refuse.
+        fs::remove_file(&design_path).expect("remove the staged design spec");
+        let error = broker
+            .load_create_proposal_context(&shell.id, &workflow_run_id)
+            .expect_err("a missing design spec that evidence says was staged must be refused");
+        assert!(
+            error.contains("create_staging_evidence_invalid")
+                && error.contains("designSpecSha256"),
+            "expected a named designSpecSha256 mismatch for the missing file, got: {error}"
         );
     }
 
@@ -19092,55 +19463,6 @@ mod tests {
     /// scan, rather than pretending the scan alone would have caught it.
     #[tokio::test]
     async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
-        fn assert_only_real_tool_names(contract: &str, label: &str) {
-            // r2-tests-honesty-008: the scan below pairs backticks
-            // POSITIONALLY (1st-2nd, 3rd-4th, …) with no balance check, so a
-            // single stray backtick anywhere in `contract` silently shifts
-            // every later span and can hide a planted bad name behind an
-            // innocuous one. Fail loudly and specifically instead of
-            // scanning a text this gate cannot actually parse.
-            assert!(
-                contract.matches('`').count() % 2 == 0,
-                "{label} has an ODD number of backticks, so this scanner cannot pair them \
-                 into spans without silently shifting every one after the stray mark: {contract}"
-            );
-            let mut offset = 0;
-            // r4-tests-honesty-08: this scanner only asserts INSIDE a span it
-            // finds, so if the contract stops using backticks altogether the
-            // `while` body never runs and the whole scan silently no-ops —
-            // indistinguishable from every span having checked out clean.
-            // Count the spans it actually walked and require at least one.
-            let mut spans = 0usize;
-            while let Some(found) = contract[offset..].find('`') {
-                let start = offset + found + 1;
-                let Some(found_end) = contract[start..].find('`') else {
-                    break;
-                };
-                let end = start + found_end;
-                let span = &contract[start..end];
-                spans += 1;
-                let name: String = span
-                    .chars()
-                    .take_while(char::is_ascii_alphanumeric)
-                    .collect();
-                if let Some(rest) = name.strip_prefix("LocalApp") {
-                    if !rest.is_empty() {
-                        assert!(
-                            crate::local_apps_tools::LOCAL_APP_TOOLS
-                                .iter()
-                                .any(|&(tool_name, _, _)| tool_name == name),
-                            "{label} names backticked tool `{name}`, which is not in \
-                             LOCAL_APP_TOOLS and cannot be called: {contract}"
-                        );
-                    }
-                }
-                offset = end + 1;
-            }
-            assert!(
-                spans > 0,
-                "{label} has no backtick-delimited spans at all, so this scanner never ran: {contract}"
-            );
-        }
 
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
@@ -19202,6 +19524,192 @@ mod tests {
             let formal = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
                 .expect("read the formal contract");
             assert_only_real_tool_names(&formal, &format!("the formal {surface} contract"));
+        }
+    }
+
+    /// r1-prompt-layer-20: the scanner used to run on the two workspace
+    /// contracts and nothing else, so the OTHER model-facing text the Host
+    /// ships could name a tool that does not exist and stay green forever.
+    /// The `create-local-app` skill and the create workflow script are both
+    /// `include_str!`-able from here and both spell local-app tool names, so
+    /// put them through the same gate.
+    ///
+    /// The skill file is the plugin mirror — the copy a plugin-loaded skill
+    /// actually reads. `verify-local-app-supply-chain.py`'s
+    /// `validate_create_skill` pins it byte-identical to `skills/`, so
+    /// scanning one scans both.
+    #[test]
+    fn shipped_prompt_files_name_no_tool_outside_local_app_tools() {
+        let skill =
+            include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
+        let workflow = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        // Vacuity guards: a gate that scans the wrong file, or a file that
+        // stopped naming tools at all, must not read as "all clear".
+        assert!(
+            skill.contains("name: create-local-app"),
+            "read the wrong file for the create skill"
+        );
+        assert!(
+            workflow.contains("LocalAppStageCreate"),
+            "read the wrong file for the create workflow, or it stopped naming local-app tools"
+        );
+        assert_only_real_tool_names(skill, "create-local-app/SKILL.md");
+        assert_only_real_local_app_tool_tokens(skill, "create-local-app/SKILL.md");
+        // NOT the backtick scanner for the workflow: its backticks delimit
+        // whole JS template literals, so every tool name it spells sits mid-
+        // span where the leading-run tokeniser cannot reach it. The token
+        // scanner is what actually covers this file.
+        assert_only_real_local_app_tool_tokens(workflow, "local-app-build.js");
+    }
+
+    /// r1-prompt-layer-20, re-opened: the other Host-authored, model-facing
+    /// prose is the next-step guidance family, and it reaches the model INSIDE
+    /// a tool result — [`create_next_step_guidance`] is returned in the
+    /// `LocalAppCreate` result, [`scaffold_next_step_guidance`] as the
+    /// `"next_step"` field of the `LocalAppScaffold` result. Both spell tool
+    /// names as BARE tokens (`LocalAppBuild`, `LocalAppScaffold`) and the create
+    /// one also names the backticked plugin-qualified skill id that is the only
+    /// spelling which resolves — and neither string was put through either
+    /// scanner. The one pre-existing test that walks both
+    /// (`the_workspace_contract_and_next_step_guidance_name_no_build_workflow`)
+    /// asserts only that they name no BUILD WORKFLOW, so a typo'd, renamed or
+    /// retired TOOL name sails straight past it and reaches the model on the
+    /// exact turn it is deciding what to call next.
+    #[test]
+    fn next_step_guidance_names_no_tool_outside_local_app_tools() {
+        let create = create_next_step_guidance();
+        let scaffold = scaffold_next_step_guidance();
+        // Vacuity guards: these two are the strings the create/scaffold
+        // results actually carry, so if a rewrite drops the sentence that
+        // makes each one identifiable this test must fail loudly rather than
+        // scan some other prose and report "all clear".
+        assert!(
+            create.contains("init_session_id"),
+            "create_next_step_guidance no longer points at the app's own session; \
+             confirm this is still the create-result prose before relaxing this guard: {create}"
+        );
+        assert!(
+            scaffold.contains("LINGXI.md"),
+            "scaffold_next_step_guidance no longer tells the agent to re-read the contract; \
+             confirm this is still the scaffold-result prose before relaxing this guard: {scaffold}"
+        );
+        // The token scanner is the one that matters here: both strings name
+        // their tools mid-sentence with no backticks, exactly the shape the
+        // backtick scanner cannot see.
+        assert_only_real_local_app_tool_tokens(&create, "create_next_step_guidance");
+        assert_only_real_local_app_tool_tokens(&scaffold, "scaffold_next_step_guidance");
+        // And the backtick scanner on top for the create string, because it is
+        // the one that carries `lingxi-local-app:create-local-app` — a
+        // plugin-qualified id the guidance itself says is the only spelling
+        // that resolves, so a typo in it is silently unrecoverable for the
+        // model.
+        assert_only_real_tool_names(&create, "create_next_step_guidance");
+        // `scaffold_next_step_guidance` carries no backticked span at all, so
+        // running the backtick scanner over it would trip that scanner's own
+        // `spans > 0` vacuity guard. Pin the reason instead of skipping in
+        // silence: the day it grows one, this fails and says where to wire it.
+        assert!(
+            !scaffold.contains('`'),
+            "scaffold_next_step_guidance has grown a backticked span, which is now unscanned — \
+             add it to the assert_only_real_tool_names calls above: {scaffold}"
+        );
+    }
+
+    /// The gate for the gate. Every assertion in
+    /// `assert_only_real_tool_names` is a NEGATIVE one — it only fires on text
+    /// nobody ships — so nothing in the suite proves it can fire at all, and a
+    /// tokeniser regression would look exactly like a clean scan. Feed it one
+    /// known-bad sample per rule and require the panic to NAME the offending
+    /// span, plus a positive control so a scanner that panicked on everything
+    /// could not pass this test either.
+    #[test]
+    fn the_tool_name_scanner_actually_rejects_the_shapes_it_exists_to_catch() {
+        fn rejection_message(sample: &'static str) -> String {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let outcome =
+                std::panic::catch_unwind(|| assert_only_real_tool_names(sample, "the sample"));
+            std::panic::set_hook(previous);
+            let payload = outcome.err().unwrap_or_else(|| {
+                panic!("the scanner accepted a sample it must reject: {sample}")
+            });
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .unwrap_or_else(|| panic!("the scanner's panic carried no message: {sample}"))
+        }
+
+        // Positive control FIRST: if this panics, every rejection below is
+        // meaningless because the scanner rejects everything.
+        assert_only_real_tool_names(
+            "call `LocalAppBuild {\"app_id\":\"x\"}`, ask with `AskUserQuestion`, then use \
+             the `Skill` tool for `lingxi-local-app:create-local-app`.",
+            "the positive control",
+        );
+
+        for (sample, needle) in [
+            // Rule 1: a `LocalApp*` prefix that is not a real tool.
+            (
+                "call `LocalAppConfirmRuntime {\"app_id\":\"x\"}` now",
+                "LocalAppConfirmRuntime",
+            ),
+            // Rule 2: a bare CamelCase name the old alphanumeric tokeniser
+            // walked straight past because it does not start with LocalApp.
+            ("use the `Skil` tool to continue", "`Skil`"),
+            // Rule 3: a plugin-qualified id the old tokeniser truncated at the
+            // first `-`, so a typo in it could never be seen.
+            (
+                "start `lingxi-local-app:create-local-application` to continue",
+                "lingxi-local-app:create-local-application",
+            ),
+            // The balance guard.
+            (
+                "a `stray backtick `LocalAppScaffold` here",
+                "ODD number of backticks",
+            ),
+            // The vacuity guard.
+            ("no backticks at all in this text", "no backtick-delimited"),
+        ] {
+            let message = rejection_message(sample);
+            assert!(
+                message.contains(needle),
+                "the scanner rejected {sample:?} but its message never named {needle:?}: {message}"
+            );
+        }
+
+        // Same treatment for the token scanner that covers the shipped prompt
+        // files, including its vacuity guard.
+        fn token_rejection_message(sample: &'static str) -> String {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let outcome = std::panic::catch_unwind(|| {
+                assert_only_real_local_app_tool_tokens(sample, "the sample")
+            });
+            std::panic::set_hook(previous);
+            let payload = outcome.err().unwrap_or_else(|| {
+                panic!("the token scanner accepted a sample it must reject: {sample}")
+            });
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .unwrap_or_else(|| panic!("the token scanner's panic carried no message"))
+        }
+        assert_only_real_local_app_tool_tokens(
+            "then call LocalAppStageCreate and LocalAppScaffold.",
+            "the token positive control",
+        );
+        for (sample, needle) in [
+            ("then call LocalAppConfirmRuntime.", "LocalAppConfirmRuntime"),
+            ("this text names no tool at all", "never ran"),
+        ] {
+            let message = token_rejection_message(sample);
+            assert!(
+                message.contains(needle),
+                "the token scanner rejected {sample:?} but its message never named \
+                 {needle:?}: {message}"
+            );
         }
     }
 

@@ -108,6 +108,7 @@ class WorkflowProgressTest {
                 taskId = "task-1",
                 status = TaskStatusDto.PAUSED,
                 originSessionId = "session-a",
+                error = null,
             ),
         )
 

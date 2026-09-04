@@ -1316,29 +1316,22 @@ fun RootScreen(
                         }
                     } else {
                         // The scope switch itself succeeded, but the session
-                        // never reported ready within budget: without this, the
-                        // kickoff is silently dropped and nothing tells the user
-                        // anything happened.
+                        // never reported ready within budget. PARK the kickoff
+                        // rather than dropping it: the dedicated consumer
+                        // below keeps watching for this app's scope to report
+                        // ready with an empty transcript, on its own separate
+                        // stop-loss, the same "park it" behaviour as iOS's
+                        // `pendingInitKickoff` (`RootView.swift`) — that latch
+                        // also survives past ITS OWN switch-side wait, fired by
+                        // whichever session-adoption event lands next, instead
+                        // of giving up the instant one bounded wait expires.
                         //
-                        // Reusing the switch-exhausted branch's banner here is a
-                        // KNOWN imprecision, deliberately accepted, not an
-                        // oversight. By this point the app exists and the user is
-                        // already sitting inside its conversation (the cover was
-                        // closed at the top of this body), so 「创建结果未知，
-                        // 请在应用库确认。」 both overstates the damage and stays
-                        // silent about the one thing that actually went wrong:
-                        // the interview kickoff was never sent, so the user has
-                        // to type the first message themselves.
-                        //
-                        // Saying that needs its OWN string key, and every
-                        // local_apps_ string is generated — one entry per locale
-                        // under clients/translations plus a generate.py run,
-                        // never a hand-edit of the generated Android or iOS
-                        // catalogs. An approximate banner is still strictly
-                        // better than the silent drop this branch replaces;
-                        // sharpen the copy the next time the catalogs are
-                        // touched for other reasons.
-                        localAppsViewModel.reportCreatedAppLandingExhausted()
+                        // No banner here: the consumer is the sole owner of
+                        // `reportCreatedAppLandingExhausted()` for this
+                        // landing now, so the user sees at most ONE "result
+                        // unknown" banner rather than one now and a second,
+                        // contradictory one if the park later fires anyway.
+                        localAppsViewModel.armPendingAppKickoff(landing.appId)
                     }
                 } else {
                     // The switch budget is spent and the landing came off a
@@ -1351,6 +1344,49 @@ fun RootScreen(
                 localAppsViewModel.rearmCreatedAppLanding(landing)
                 throw c
               }
+            }
+        }
+    }
+
+    // Fires (or gives up on) the kickoff parked by `armPendingAppKickoff`
+    // above. Split into its OWN effect, rather than folded into the
+    // collector above, because by the time a kickoff is parked that
+    // collector's own `SESSION_READY_TIMEOUT_MS` budget is already spent —
+    // this one starts a fresh, independent stop-loss, the way iOS's
+    // `pendingInitKickoff` timeout (`RootView.swift`) is independent of
+    // `openCreatedAppSession`'s own bounded retry.
+    //
+    // `StateFlow.collect`, not `receiveAsFlow()`: a `repeatOnLifecycle
+    // (RESUMED)` cancellation mid-wait (the user backgrounds the app) must
+    // re-observe the SAME pending app id on the next resume rather than
+    // losing it the way a one-shot channel element would be lost.
+    LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            localAppsViewModel.pendingAppKickoff.collect { appId ->
+                if (appId == null) return@collect
+                val fired = withTimeoutOrNull(SESSION_READY_TIMEOUT_MS) {
+                    chatViewModel.state.first {
+                        it.sessionReady &&
+                            !it.sessionTransitioning &&
+                            it.session.id.isNotBlank() &&
+                            chatViewModel.sourceScope.value == ConversationScope.LocalApp(appId) &&
+                            it.messages.isEmpty()
+                    }
+                }
+                // Consumed unconditionally, fired or not: a fired kickoff must
+                // never resend on a later empty-transcript visit to this app,
+                // and a timed-out one must never linger to fire into some much
+                // later, unrelated visit once the transcript happens to still
+                // be empty.
+                localAppsViewModel.clearPendingAppKickoff(appId)
+                if (fired != null) {
+                    chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                } else {
+                    // Same "known imprecision" banner the switch-exhausted
+                    // path uses; see the comment at `armPendingAppKickoff`'s
+                    // call site for why this is now its sole owner.
+                    localAppsViewModel.reportCreatedAppLandingExhausted()
+                }
             }
         }
     }

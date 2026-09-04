@@ -804,6 +804,7 @@ fn task_row_round_trips() {
             description: "Build the docs".to_string(),
             can_resume: false,
             started_at_ms: None,
+            error: None,
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskRow");
@@ -840,6 +841,7 @@ fn task_status_changed_round_trips() {
         task_id: "b1234abcd".to_string(),
         status: TaskStatusDto::Completed,
         origin_session_id: None,
+        error: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskStatusChanged");
     assert_eq!(json["type"], "task_status_changed");

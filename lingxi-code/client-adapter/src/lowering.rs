@@ -462,6 +462,14 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         // validation before launching; this flag is only an affordance hint.
         can_resume: rec.task_type == "local_workflow" && rec.status == "paused",
         started_at_ms: rec.started_at_ms,
+        // Terminal failure reason, when the handler reported one. Only a
+        // `failed` row can carry one, so a non-failed record never leaks a
+        // stale reason onto the panel.
+        error: if rec.status == "failed" {
+            rec.error.clone()
+        } else {
+            None
+        },
     }
 }
 

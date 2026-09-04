@@ -409,13 +409,20 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
+    /// The drawer has THREE tabs — `DrawerSection` is `chat`/`code`/`cron` —
+    /// and no projects tab: a project is a workspace CARD inside the chat and
+    /// code sections, and `drawer.project.create` lives in
+    /// `conversationActions`, rendered for every non-cron section. This test
+    /// used to drive `drawer.tab.projects`, `drawer.tab.crons`,
+    /// `drawer.scope.global` and `drawer.scope.project.<name>`, none of which
+    /// any `accessibilityIdentifier` in `Sources/` has produced since the
+    /// workspace-card rework.
     func testDrawerTabsCreateAndSwitchProject() {
         openDrawer()
         XCTAssertTrue(app.buttons["drawer.tab.chat"].exists)
-        XCTAssertTrue(app.buttons["drawer.tab.projects"].exists)
-        XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)
+        XCTAssertTrue(app.buttons["drawer.tab.code"].exists)
+        XCTAssertTrue(app.buttons["drawer.tab.cron"].exists)
 
-        app.buttons["drawer.tab.projects"].tap()
         let create = app.buttons["drawer.project.create"]
         XCTAssertTrue(create.waitForExistence(timeout: 5))
         create.tap()
@@ -433,16 +440,31 @@ final class LingxiCodeUITests: XCTestCase {
 
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
         openDrawer()
-        let projectScope = app.buttons["drawer.scope.project.\(projectName)"]
-        XCTAssertTrue(projectScope.waitForExistence(timeout: 5))
-        XCTAssertEqual(projectScope.value as? String, "当前项目")
+        // A workspace card is `drawer.workspace.<ConversationScope.workspaceKey>`
+        // — `project.<id>` — and the id is minted by the engine, so match the
+        // prefix and read the name off the card. The card itself is the
+        // group's container `VStack`, not a control, so it is matched over
+        // every element type rather than `app.buttons`. The card declares
+        // `.accessibilityElement(children: .contain)`, which is what keeps it
+        // addressable here AND keeps the buttons inside it
+        // (`drawer.workspace.new.*`, `drawer.session.*`) addressable below —
+        // without it the card id overwrites every one of them.
+        let projectWorkspace = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "drawer.workspace.project.")
+        ).firstMatch
+        XCTAssertTrue(projectWorkspace.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts[projectName].waitForExistence(timeout: 5), app.debugDescription)
 
-        app.buttons["drawer.scope.global"].tap()
+        // Leaving the project: the global card's own new-conversation button,
+        // which routes through `startNewConversation(in: .global)`.
+        app.buttons["drawer.workspace.new.global"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
         openDrawer()
-        let persistedProjectScope = app.buttons["drawer.scope.project.\(projectName)"]
-        XCTAssertTrue(persistedProjectScope.waitForExistence(timeout: 5))
-        persistedProjectScope.tap()
+        let backToProject = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "drawer.workspace.new.project.")
+        ).firstMatch
+        XCTAssertTrue(backToProject.waitForExistence(timeout: 5), app.debugDescription)
+        backToProject.tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
@@ -452,8 +474,9 @@ final class LingxiCodeUITests: XCTestCase {
     /// it: an edge drag on the chat must land on the sidebar.
     ///
     /// Only the opening direction is a gesture. iOS has no forward swipe, so
-    /// returning to the chat is a tap — here the already-active scope pill,
-    /// which routes through `switchProject` and its `closeSidebar()`.
+    /// returning to the chat is a tap — here the global workspace card's
+    /// new-conversation button, which routes through
+    /// `startNewConversation(in: .global)` and its `closeSidebar()`.
     func testEdgeSwipeOpensTheSidebar() {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
 
@@ -466,7 +489,7 @@ final class LingxiCodeUITests: XCTestCase {
             app.debugDescription
         )
 
-        app.buttons["drawer.scope.global"].tap()
+        app.buttons["drawer.workspace.new.global"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
@@ -648,6 +671,13 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["drawer.tab.chat"].exists, app.debugDescription)
     }
 
+    /// The name is now WIDER than what the test asserts, and the name is kept
+    /// only because `docs/superpowers/plans/` still cites it: scheduled tasks
+    /// are no longer hidden anywhere — `Drawer.tabs` renders `tab(.cron, …)`
+    /// unconditionally. What this covers is the provider-settings round trip
+    /// (open Settings → LLM providers → a preset sheet → back out) and that it
+    /// leaves the drawer intact. See the trailing assertions for what the two
+    /// vacuous cron checks it used to end on were replaced with.
     func testProviderManagementDoesNotExposeScheduledTasksInDrawer() {
         openDrawer()
         app.buttons["drawer.settings"].tap()
@@ -707,8 +737,16 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
         settingsClose.tap()
         openDrawer()
-        XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)
-        XCTAssertFalse(app.buttons["drawer.shortcut.cron"].exists)
+        // This leg used to assert `drawer.tab.crons` and `drawer.shortcut.cron`
+        // were ABSENT. Neither identifier has ever been produced by anything in
+        // `Sources/` — the tab is `drawer.tab.cron` (`DrawerSection`'s rawValue
+        // is singular) and there is no cron shortcut at all — so both were
+        // vacuously true and asserted nothing. Scheduled tasks are an
+        // unconditional drawer section now (`Drawer.tabs` renders
+        // `tab(.cron, …)` with no gate), so what this leg can honestly pin is
+        // that the provider round-trip leaves the drawer intact.
+        XCTAssertTrue(app.buttons["drawer.tab.chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.tab.cron"].exists, app.debugDescription)
     }
 
     func testChatToolbarIconsShareSizeAndSpacing() {

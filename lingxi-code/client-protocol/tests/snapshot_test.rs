@@ -795,6 +795,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 task_id: "b12345678".to_string(),
                 status: TaskStatusDto::Running,
                 origin_session_id: None,
+                error: None,
             },
         ),
         (
@@ -2303,6 +2304,7 @@ fn canonical_task_row() -> TaskRowDto {
         description: "run the test suite".to_string(),
         can_resume: false,
         started_at_ms: None,
+        error: None,
     }
 }
 

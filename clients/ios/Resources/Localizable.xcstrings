@@ -104,74 +104,6 @@
         }
       }
     },
-    "settings_provider_picker_hidden_empty": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "目前沒有可顯示的模型，因此此 Provider 會從對話模型列表中隱藏。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No models are visible, so this provider will be hidden from the conversation model list."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "表示できるモデルがないため、このプロバイダーは会話モデル一覧に表示されません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "표시할 모델이 없어 이 제공자는 대화 모델 목록에서 숨겨집니다."
-          }
-        }
-      }
-    },
-    "settings_provider_show_in_picker": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "显示在对话模型列表"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "顯示在對話模型列表"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show in conversation model list"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会話モデル一覧に表示"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "대화 모델 목록에 표시"
-          }
-        }
-      }
-    },
     "NSPhotoLibraryUsageDescription": {
       "localizations": {
         "zh-Hans": {
@@ -2212,6 +2144,40 @@
         }
       }
     },
+    "chat_compacting_context": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在压缩上下文"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在壓縮上下文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compacting context"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コンテキストを圧縮中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 압축 중"
+          }
+        }
+      }
+    },
     "chat_compaction %u %u %llu": {
       "localizations": {
         "zh-Hans": {
@@ -2242,6 +2208,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "컨텍스트 압축: %u → %u, %llu B 확보"
+          }
+        }
+      }
+    },
+    "chat_compaction_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上下文压缩失败"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上下文壓縮失敗"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Context compaction failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コンテキストの圧縮に失敗しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 압축 실패"
+          }
+        }
+      }
+    },
+    "chat_compaction_progress": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理上下文：%1$d%（%2$d 秒）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理上下文：%1$d%（%2$d 秒）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Organizing context: %1$d% (%2$d s)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コンテキストを整理中：%1$d%（%2$d 秒）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 정리 중: %1$d%(%2$d초)"
           }
         }
       }
@@ -7494,6 +7528,74 @@
         }
       }
     },
+    "chat_task_failed_reason %@ %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %@ 失败：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %@ 失敗：%@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %@ failed: %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %@ が失敗しました: %@"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %@ 실패: %@"
+          }
+        }
+      }
+    },
+    "chat_task_failed_reason_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台任务 %1$s 已失败：%2$s"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "背景任務 %1$s 已失敗：%2$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background task %1$s failed: %2$s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バックグラウンドタスク %1$s が失敗しました: %2$s"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "백그라운드 작업 %1$s이(가) 실패했습니다: %2$s"
+          }
+        }
+      }
+    },
     "chat_tasks_collapse_hint": {
       "localizations": {
         "zh-Hans": {
@@ -10371,31 +10473,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "当前没有可显示模型"
+            "value": "没有可显示模型"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "目前沒有可顯示的模型"
+            "value": "沒有可顯示模型"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No models are visible right now"
+            "value": "No visible models"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "現在表示できるモデルはありません"
+            "value": "表示できるモデルがありません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "현재 표시할 수 있는 모델이 없습니다"
+            "value": "표시 가능한 모델이 없습니다"
           }
         }
       }
@@ -15976,74 +16078,6 @@
         }
       }
     },
-    "drawer_apps_count": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "本地应用 %1$d 个"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "本地應用 %1$d 個"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$d local apps"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ローカルアプリ %1$d 個"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "로컬 앱 %1$d개"
-          }
-        }
-      }
-    },
-    "drawer_apps_empty_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "描述你想要的应用，AI 会问几个问题后为你生成并运行。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "描述你想要的應用，AI 會問幾個問題後為你生成並執行。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Describe the app you want — AI asks a few questions, then builds and runs it."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "作りたいアプリを説明してください。AI がいくつか質問してから作成・実行します。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "원하는 앱을 설명해 주세요. AI가 몇 가지 질문 후 앱을 만들고 실행합니다."
-          }
-        }
-      }
-    },
     "drawer_apps_library": {
       "localizations": {
         "zh-Hans": {
@@ -16414,40 +16448,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "현재 프로젝트"
-          }
-        }
-      }
-    },
-    "drawer_empty_apps": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "还没有本地应用"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "還沒有本地應用"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No local apps yet"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ローカルアプリはまだありません"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "아직 로컬 앱이 없습니다"
           }
         }
       }
@@ -51298,6 +51298,40 @@
         }
       }
     },
+    "settings_provider_catalog_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载 Provider 模型目录…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入 Provider 模型目錄…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the provider model catalog…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider のモデルカタログを読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider 모델 카탈로그를 불러오는 중…"
+          }
+        }
+      }
+    },
     "settings_provider_clear_credential": {
       "localizations": {
         "zh-Hans": {
@@ -52998,40 +53032,6 @@
         }
       }
     },
-    "settings_provider_model_id": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型 ID"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型 ID"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Model ID"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "モデル ID"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "모델 ID"
-          }
-        }
-      }
-    },
     "settings_provider_model_catalog_loading": {
       "localizations": {
         "zh-Hans": {
@@ -53096,6 +53096,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "현재 이 제공자의 공유 모델 카탈로그를 가져올 수 없습니다."
+          }
+        }
+      }
+    },
+    "settings_provider_model_id": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型 ID"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型 ID"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model ID"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "モデル ID"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델 ID"
           }
         }
       }
@@ -53402,6 +53436,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "URL, 모델, 활성화 상태 또는 기본 제공업체가 기기 설정에 기록되었습니다. 재연결 후에야 새 요청에 사용됩니다."
+          }
+        }
+      }
+    },
+    "settings_provider_picker_hidden_empty": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有可顯示模型，這個 Provider 會從對話模型列表隱藏。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No models are visible, so this provider will be hidden from the conversation model list."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表示できるモデルがないため、この Provider は会話モデル一覧から非表示になります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "표시 가능한 모델이 없어 이 Provider는 대화 모델 목록에서 숨겨집니다."
           }
         }
       }
@@ -54834,6 +54902,40 @@
         }
       }
     },
+    "settings_provider_show_in_picker": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示在对话模型列表"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "顯示在對話模型列表"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show in conversation model list"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話モデル一覧に表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 모델 목록에 표시"
+          }
+        }
+      }
+    },
     "settings_provider_show_key": {
       "localizations": {
         "zh-Hans": {
@@ -55612,6 +55714,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "기본값 `%1$s` · 프록시 / 미러 주소 입력 가능"
+          }
+        }
+      }
+    },
+    "settings_provider_visible_models_count_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选 %1$d / %2$d 个模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已選 %1$d / %2$d 個模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d of %2$d models selected"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d / %2$d 件のモデルを表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d / %2$d개 모델 선택됨"
           }
         }
       }

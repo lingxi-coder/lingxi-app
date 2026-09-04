@@ -451,7 +451,8 @@ struct ConversationAskQuestion: Equatable, Hashable {
 /// a background bash job, … — the row the pinned tasks panel renders. Fed by
 /// `TaskRow` (TaskList replies, which carry the description) and
 /// `TaskStatusChanged` pushes (which may arrive first — the panel shows the
-/// bare id until the row backfills).
+/// bare id until the row backfills). A failed row additionally carries the
+/// engine's `error` reason.
 struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     enum Status: Equatable, Hashable {
         case pending
@@ -488,6 +489,13 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     /// workflows. This is a hint only; the engine remains authoritative.
     var canResume: Bool = false
     var startedAtMs: UInt64? = nil
+    /// Terminal failure reason reported by the engine (`TaskRowDto.error` /
+    /// `TaskStatusChanged.error`). Only a `.failed` row carries one; the panel
+    /// renders it under the description so a failed task explains itself even
+    /// when the transient conversation notice was never shown (a status push
+    /// for a task whose origin session is no longer the visible one is dropped
+    /// by design — the row list is how the user still learns why).
+    var errorText: String? = nil
     /// Structured Claude-style workflow progress for this task when the
     /// engine exposes it as connection-scoped events.
     var workflow: ConversationWorkflowRunSnapshot? = nil

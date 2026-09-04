@@ -347,6 +347,11 @@ pub enum ClientEvent {
         status: TaskStatusDto,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_session_id: Option<String>,
+        /// Failure reason accompanying a `failed` transition, when the
+        /// producing handler reported one. APPENDED field (additive default
+        /// `None`) — clients render it instead of a bare task id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     CommandsChanged {

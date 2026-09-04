@@ -3699,6 +3699,9 @@ impl CommandRouter for EngineCommandRouter {
                             task_id: rec.task_id,
                             status: client_adapter::lowering::lower_task_status(&rec.status),
                             origin_session_id: None,
+                            // A user stop is `killed`, never `failed` — no
+                            // handler-reported reason to forward.
+                            error: None,
                         })
                         .await;
                     }

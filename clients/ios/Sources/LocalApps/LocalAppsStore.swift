@@ -100,6 +100,21 @@ final class LocalAppsStore {
     /// `switchScope` submits `cancelAndWait()`, so landing mid-turn would kill
     /// the very turn that produced the app.
     private(set) var createdAppLanding: CreatedAppLanding?
+    /// Landings published while [`createdAppLanding`] was still occupied — the
+    /// BACKLOG behind the observed head.
+    ///
+    /// This slot used to be one overwritable Optional where Android buffers a
+    /// channel (`LocalAppsViewModel.createdAppLandingChannel`, consumed by
+    /// `RootScreen`), and `RootView.landCreatedAppIfReady` refuses to consume
+    /// while a turn is streaming, while `pendingWidgetSetup` is armed, or
+    /// while Settings is open. A second create finishing inside any of those
+    /// windows therefore REPLACED the first, and the single
+    /// `consumeCreatedAppLanding()` then drained only the newest — the first
+    /// app was created, listed in the library, and never handed off at all.
+    ///
+    /// FIFO: the older landing is the one the user has been waiting on
+    /// longest, so it stays at the head and the newcomer queues behind it.
+    @ObservationIgnored private var queuedCreatedAppLandings: [CreatedAppLanding] = []
     /// The landing built on `AppCreated`, held until `AppRecordChanged` can
     /// attach the init-session pin the engine mints immediately afterwards.
     @ObservationIgnored private var landingAwaitingPin: CreatedAppLanding?
@@ -1046,6 +1061,26 @@ final class LocalAppsStore {
         errorMessage = String(localized: "local_apps_creation_result_unknown")
     }
 
+    /// A scope switch this store's UI asked `RootView` for was REFUSED.
+    ///
+    /// `RootView.switchScope` returns a bare `Bool`, so the caller picks the
+    /// copy from the two reasons its guard tests; both keys already exist and
+    /// are the ones Android reports at the matching two sites —
+    /// `ChatViewModel.refuseWhileDurableTurnParked` sends
+    /// `chat_error_finish_background_turn_first` and
+    /// `ChatViewModel.switchWorkspaceSource`'s streaming / pending-transition
+    /// branch sends `chat_error_stop_before_switch_project`.
+    ///
+    /// Routed through the store rather than `projectStore.errorMessage`
+    /// because every caller is a tap made INSIDE the local-apps cover, and
+    /// while that cover is up `LocalAppsRootView`'s own alert is the presenter
+    /// that owns the error channel (`RootView.localAppErrorPresenterIsFree`
+    /// yields to `presentedRoute`). A message put anywhere else would have no
+    /// presenter until the user closed the cover.
+    func reportScopeSwitchRefused(_ message: String) {
+        errorMessage = message
+    }
+
     /// Arm the stop-loss for one pin still awaited on `landingAwaitingPin`.
     private func armPinWaitTimeout(appID: String) {
         pinWaitTimeoutTask?.cancel()
@@ -1077,7 +1112,7 @@ final class LocalAppsStore {
         landingAwaitingPin = nil
         var landing = armed
         landing.initSessionID = nil
-        createdAppLanding = landing
+        publishCreatedAppLanding(landing)
     }
 
     /// Disarm the pending create — but ONLY if `requestID` is the one still in
@@ -1111,10 +1146,39 @@ final class LocalAppsStore {
         publishWidgetSnapshotNow()
     }
 
-    /// Take the post-creation landing, if any. One-shot.
+    /// Take the post-creation landing at the head of the queue, if any.
+    /// One-shot per landing: draining the head PROMOTES the next queued one
+    /// rather than clearing the slot, which is what makes the observed
+    /// property change again and re-drives `RootView`'s
+    /// `onChange(of: localAppsStore.createdAppLanding)` sink for the backlog.
     func consumeCreatedAppLanding() -> CreatedAppLanding? {
-        defer { createdAppLanding = nil }
-        return createdAppLanding
+        let head = createdAppLanding
+        createdAppLanding = queuedCreatedAppLandings.isEmpty
+            ? nil
+            : queuedCreatedAppLandings.removeFirst()
+        return head
+    }
+
+    /// Publish one landing without losing whatever is already queued.
+    ///
+    /// Same-app republication SUPERSEDES in place instead of queuing: the two
+    /// producers for one app are the pin arriving on `AppRecordChanged` and
+    /// the pin-wait stop-loss giving up, and delivering both would take the
+    /// user into the same app twice.
+    private func publishCreatedAppLanding(_ landing: CreatedAppLanding) {
+        guard let head = createdAppLanding else {
+            createdAppLanding = landing
+            return
+        }
+        if head.appID == landing.appID {
+            createdAppLanding = landing
+            return
+        }
+        if let index = queuedCreatedAppLandings.firstIndex(where: { $0.appID == landing.appID }) {
+            queuedCreatedAppLandings[index] = landing
+            return
+        }
+        queuedCreatedAppLandings.append(landing)
     }
 
     /// Re-arm a landing `RootView` already consumed but could not deliver —
@@ -1128,7 +1192,14 @@ final class LocalAppsStore {
     /// path's guard does not test whatever refused the switch, so an
     /// unlatched re-arm is a fresh retry window every time — see
     /// `RootView.openCreatedAppSession`'s per-app latch.
+    ///
+    /// The re-armed landing is OLDER than anything published since it was
+    /// consumed, so it goes back at the head and whatever took the slot in the
+    /// meantime is pushed to the front of the backlog rather than overwritten.
     func restoreCreatedAppLanding(_ landing: CreatedAppLanding) {
+        if let displaced = createdAppLanding, displaced.appID != landing.appID {
+            queuedCreatedAppLandings.insert(displaced, at: 0)
+        }
         createdAppLanding = landing
     }
 
@@ -1551,7 +1622,7 @@ final class LocalAppsStore {
                     clearPinWaitTimeout()
                     var landing = armed
                     landing.initSessionID = summary.initSessionId
-                    createdAppLanding = landing
+                    publishCreatedAppLanding(landing)
                 }
                 lastRefreshAt = .now
                 scheduleWidgetSnapshotPublish()

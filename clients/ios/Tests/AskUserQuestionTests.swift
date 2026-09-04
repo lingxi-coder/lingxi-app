@@ -136,13 +136,13 @@ visionDelegationEnabled: true)
             XCTAssertFalse(source.model.streaming, "precondition: the turn already ended")
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "task-abc12", status: .running, originSessionId: nil))
+                taskId: "task-abc12", status: .running, originSessionId: nil, error: nil))
             XCTAssertTrue(source.model.items.isEmpty, "a running transition is not a notice")
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "task-abc12", status: .completed, originSessionId: nil))
+                taskId: "task-abc12", status: .completed, originSessionId: nil, error: nil))
             source.applyForTesting(.taskStatusChanged(
-                taskId: "task-def34", status: .failed, originSessionId: nil))
+                taskId: "task-def34", status: .failed, originSessionId: nil, error: nil))
 
             let notices: [ConversationExecutionNotice] = source.model.items.compactMap {
                 if case let .notice(notice) = $0 { return notice }

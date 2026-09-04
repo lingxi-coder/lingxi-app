@@ -202,17 +202,38 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
         _write_text(target / "strings.xml", "\n".join(lines) + "\n")
 
 
+# Hand-maintained Android resource files that intentionally live alongside
+# generator output and are NOT produced by this script (see
+# clients/android/app/src/main/res/values/strings_local_apps_v3.xml's own
+# header comment for why a separate file exists). Excluded from the orphan
+# scan below so they don't get flagged as stray generator output.
+# ⚠️ Mirror this against ANDROID_COMPANION_STRINGS_FILES in
+# lingxi-code/scripts/check_i18n_pairing.py if it changes.
+ANDROID_KNOWN_COMPANION_BASENAMES = {"strings_local_apps_v3.xml"}
+
+
 def _generator_produced_files(out_dir: Path, kind: str) -> list[Path]:
     """Relative paths under out_dir that the generator owns (for the orphan scan)."""
     if kind == "ios":
         path = out_dir / "Localizable.xcstrings"
         return [Path("Localizable.xcstrings")] if path.exists() else []
     produced = []
+    # Previously this only ever looked for "strings.xml" directly inside each
+    # values* directory, so any OTHER strings*.xml sitting there (stray,
+    # stale, or simply misspelled) was invisible to the stale/orphan scan
+    # below. Scope stays to values*/ (not layout/, drawable/, mipmap/, xml/
+    # etc. — those hold unrelated Android resources this generator has no
+    # opinion on) and to the "strings*.xml" family specifically (values/ also
+    # legitimately holds colors.xml, themes.xml and other non-string resource
+    # types this generator never touches), but within that family it now
+    # matches every file, not just the one literal name, and explicitly
+    # allowlists the ones known to be hand-maintained on purpose.
     for dir_path in sorted(out_dir.glob("values*")):
         if not dir_path.is_dir():
             continue
-        path = dir_path / "strings.xml"
-        if path.exists():
+        for path in sorted(dir_path.glob("strings*.xml")):
+            if path.name in ANDROID_KNOWN_COMPANION_BASENAMES:
+                continue
             produced.append(path.relative_to(out_dir))
     return produced
 

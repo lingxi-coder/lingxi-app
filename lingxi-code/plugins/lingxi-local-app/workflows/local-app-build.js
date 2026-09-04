@@ -19,6 +19,15 @@ const INTERNAL_KEYS = ['host_context', 'workflow_run_id', 'selector_capability',
 const QUALITY = ['fast', 'balanced', 'thorough'];
 const FINDING_KINDS = ['render', 'motion', 'data', 'webview', 'acceptance', 'build'];
 const HOST_CHROME_CONTRACT = 'The host draws NO chrome around a running app: the app must provide every visible title, navigation and back affordance. The host floats ONE control over the BOTTOM-LEADING corner, so keep the leading 80 CSS px by the bottom 80 CSS px clear from the safe area and keep time-critical controls off its temporary expansion strip.';
+// r1-backlog-prompt-layer-19: LocalAppResolveTemplateSelection refuses with
+// `catalog_stale:` (the template catalog moved out from under this run; Host
+// local_apps_host.rs and local_app_template_catalog.rs both emit it) or
+// `validated_selection_invalid:` (the handle is not this run's, or the run's
+// selection row no longer matches the catalog). Both are PERMANENT for the
+// run — the same call resolves the same way on every retry — but nothing in
+// the model-visible layer said so, so an agent that hit one had no text
+// telling it to stop rather than loop or improvise a template of its own.
+const RESOLVE_REFUSAL_CONTRACT = 'If LocalAppResolveTemplateSelection refuses with catalog_stale or validated_selection_invalid, this run\'s template selection is permanently invalid: retrying it, re-selecting a template yourself, or continuing without the resolved profile are all wrong. Write nothing, call no other LocalApp tool, and report the refusal text verbatim so the run can be restarted.';
 const BUILDER_STAGE_DENIES = ['LocalAppGet', 'LocalAppScaffold', 'LocalAppBuild', 'LocalAppRuntime', 'Write', 'Edit'];
 const BUILDER_CREATE_BUILD_DENIES = ['LocalAppStageCreate', 'LocalAppGet'];
 const BUILDER_UPDATE_DENIES = ['LocalAppGet', 'LocalAppScaffold', 'LocalAppStageCreate'];
@@ -169,7 +178,7 @@ if (input.operation === 'create') {
   if (typeof selection.validated_selection_handle !== 'string' || !selection.validated_selection_handle.startsWith('vsel_')) throw new Error(`${WORKFLOW_ID}: selector did not return a Host-issued validated_selection_handle`);
   selectedTemplateId = selection.template_id;
   if (quality === 'fast' && !selection.template_id.startsWith('react-dom-')) throw new Error(`${WORKFLOW_ID}: CANVAS_FAST_REJECTED: selector chose a canvas profile for fast quality`);
-  if (quality !== 'fast') designSpec = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection for app ${input.app_id}, workflow_run_id ${context.workflow_run_id}, handle ${selection.validated_selection_handle}; produce the platform-aware design spec for the resolved profile. ${HOST_CHROME_CONTRACT} Confirmed specification: ${input.spec || ''}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
+  if (quality !== 'fast') designSpec = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection for app ${input.app_id}, workflow_run_id ${context.workflow_run_id}, handle ${selection.validated_selection_handle}; produce the platform-aware design spec for the resolved profile. ${RESOLVE_REFUSAL_CONTRACT} ${HOST_CHROME_CONTRACT} Confirmed specification: ${input.spec || ''}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
 }
 // Rendered only when present so a fast-quality run (no designer call) never
 // interpolates the literal string "null" into a prompt.
@@ -186,7 +195,7 @@ if (input.operation !== 'verify') phase('Generate and Build');
 if (input.operation === 'create') {
   const handle = selection?.validated_selection_handle;
   if (!handle) throw new Error(`${WORKFLOW_ID}: CREATE_HANDLE_REQUIRED`);
-  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, ${stageNaming}${mcpIntentClause}${designSpecClause}. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
+  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, ${stageNaming}${mcpIntentClause}${designSpecClause}. ${RESOLVE_REFUSAL_CONTRACT} Prepare only the run-scoped isolated staging candidate; LocalAppStageCreate returns dependency_input_sha256 for provenance and there is nothing for you to verify it against. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
   if (staged.ok !== true) throw new Error(`${WORKFLOW_ID}: create staging did not succeed`);
   createApproval = await run(`Call LocalAppApproveMcpProposal exactly once for app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, create_without_mcp=true. This is the native create confirmation path: do not propose MCP tools, do not call the MCP authoring workflow, and do not publish or enable MCP. If the tool call fails with "user denied the Local App create proposal", the user declined: do NOT call LocalAppApproveMcpProposal again — return {approved:false, status:'create_declined'} instead. Otherwise return the Host-issued create receipt unchanged.`, { agentType: 'mcp-designer', label: 'native-create-approval', phase: 'Generate and Build', schema: createApprovalSchema });
   if (createApproval.approved === false && createApproval.status === 'create_declined') {
@@ -210,7 +219,7 @@ let repairRounds = 0;
 phase('Operate and Verify');
 for (;;) {
   const identityInstruction = selection?.validated_selection_handle
-    ? `Resolve the Host selection with LocalAppResolveTemplateSelection using app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${selection.validated_selection_handle}.`
+    ? `Resolve the Host selection with LocalAppResolveTemplateSelection using app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${selection.validated_selection_handle}. ${RESOLVE_REFUSAL_CONTRACT}`
     : `Use only the Host-persisted runtime profile in host_context; do not call the create-only template-selection resolver. Host context: ${JSON.stringify(context)}`;
   const qualityInstruction = `quality_level=${quality}; verification breadth must follow the create-local-app skill's step-4 contract for that level.`;
   const operator = await run(`${identityInstruction} ${qualityInstruction} Drive app ${input.app_id} through bounded scenarios and collect raw runtime, DOM/canvas, render, motion, data and WebView evidence, including whether the app supplies its own navigation affordances and respects this layout contract: ${HOST_CHROME_CONTRACT} Do not judge pass/fail: ok means only that you completed the scenarios and gathered evidence, and findings here means evidence you could not gather, never a scenario outcome.`, { agentType: 'operator', label: `operator-${repairRounds}`, phase: 'Operate and Verify', schema: reportSchema });

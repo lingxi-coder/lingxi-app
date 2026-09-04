@@ -193,6 +193,46 @@ class LocalAppsViewModel(
     }
 
     /**
+     * A kickoff message parked for [appId] because the freshly-switched
+     * conversation had not reported ready within `RootScreen`'s own
+     * `SESSION_READY_TIMEOUT_MS` wait.
+     *
+     * A [Channel] (as [createdAppLandingChannel] uses) is wrong here: this is
+     * re-checked against every later state the conversation passes through
+     * until it fires or its own stop-loss gives up, not handed to a single
+     * collector once. [StateFlow] is what lets `RootScreen`'s consumer
+     * re-observe the same value across a `repeatOnLifecycle(RESUMED)`
+     * restart (e.g. the user backgrounds the app mid-wait) instead of losing
+     * it the way a one-shot channel element would be lost to a cancelled
+     * collector body.
+     *
+     * This is the "park it" half of iOS's `pendingInitKickoff`
+     * (`RootView.swift`): that latch survives past its own switch-side wait
+     * too, fired by whichever session-adoption event lands next in the same
+     * scope, rather than dropping the brief the instant one bounded wait
+     * expires.
+     */
+    private val _pendingAppKickoff = MutableStateFlow<String?>(null)
+
+    /** The [appId] with a parked kickoff, or null; see [_pendingAppKickoff]. */
+    val pendingAppKickoff: StateFlow<String?> = _pendingAppKickoff.asStateFlow()
+
+    /** Arms (or re-arms) the park for [appId]; see [_pendingAppKickoff]. */
+    fun armPendingAppKickoff(appId: String) {
+        _pendingAppKickoff.value = appId
+    }
+
+    /**
+     * Clears the park for [appId] — called by the consumer whether the
+     * kickoff actually fired or its stop-loss gave up, either way exactly
+     * once, so a later unrelated visit to this app's conversation can never
+     * re-fire it.
+     */
+    fun clearPendingAppKickoff(appId: String) {
+        _pendingAppKickoff.compareAndSet(appId, null)
+    }
+
+    /**
      * A created app whose init-session pin has not arrived yet.
      *
      * `AppCreated` is emitted inside the create transaction and the pin is

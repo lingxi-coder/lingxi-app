@@ -347,13 +347,13 @@ class ChatViewModelReducerTest {
         )
 
         vm.send("start an asynchronous task")
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         vm.reduce(ReplyEvent.End)
         runCurrent()
 
         assertEquals(listOf(true), execution.activeStates)
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }
@@ -663,7 +663,7 @@ class ChatViewModelReducerTest {
         )
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null),
+                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null, null),
             ),
         )
         val waiting = TurnRecoverySnapshotDto(
@@ -698,7 +698,7 @@ class ChatViewModelReducerTest {
         // The remaining lease is the unrelated workflow task, not the parked
         // recovered turn's unmatched tool/run state.
         vm.reduceClientEvent(
-            ClientEvent.TaskStatusChanged("workflow-1", TaskStatusDto.PAUSED, null),
+            ClientEvent.TaskStatusChanged("workflow-1", TaskStatusDto.PAUSED, null, null),
         )
         runCurrent()
         assertFalse(vm.state.value.requiresBackgroundExecution)
@@ -804,11 +804,11 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         runCurrent()
         assertEquals(listOf(true), execution.activeStates)
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null, null))
         runCurrent()
 
         assertFalse(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
@@ -832,6 +832,7 @@ class ChatViewModelReducerTest {
                 taskId = "task-b",
                 status = TaskStatusDto.RUNNING,
                 originSessionId = "session-b",
+                error = null,
             ),
         )
         runCurrent()
@@ -845,6 +846,7 @@ class ChatViewModelReducerTest {
                 taskId = "task-a",
                 status = TaskStatusDto.RUNNING,
                 originSessionId = "session-a",
+                error = null,
             ),
         )
         assertEquals("后台任务 task-a 运行中", vm.state.value.statusLine)
@@ -859,7 +861,7 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         runCurrent()
         assertEquals(listOf(true), execution.activeStates)
 
@@ -872,7 +874,7 @@ class ChatViewModelReducerTest {
             execution.activeStates,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }
@@ -887,7 +889,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null, null),
             ),
         )
         runCurrent()
@@ -895,7 +897,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null, null),
             ),
         )
         runCurrent()

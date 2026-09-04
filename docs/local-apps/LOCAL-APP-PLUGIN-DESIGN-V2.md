@@ -1216,7 +1216,16 @@ template ID、family/revision/contract SHA、inventory SHA 和创建时间；不
 - Template snapshot 是 managed-file 恢复来源。
 - App-managed source 永不由 Plugin update 或模板恢复覆盖。
 - Plugin disabled 或 bundle 不再加载时，已 scaffold App 仍能 build/run/restore。
-- Build 不读取“最新 Plugin template”替代 App snapshot。
+- Build 不读取”最新 Plugin template”替代 App snapshot。
+
+**实现现状（复核 2026-09-04）**：以上 per-App snapshot 机制尚未在任何语言中落地——
+`grep -rn 'templates/' lingxi-code/local-apps/src/*.rs` 只命中 `packer.rs:21` 的一行注释，
+没有代码写入 `<app-data>/templates/<snapshot-digest>/{descriptor.json,inventory.json,files/}`。
+在此之前，`lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs` 的
+`published_available_contracts()`（同文件 `r1-critic-05` 注释）已标注了对应风险：已
+scaffold App 的 Manifest 若 pin 住某个 revision，而该 revision 之后从
+`published_available_contracts()` 下线，App 目前没有任何恢复来源。退役一个仍被在用 App
+pin 住的 revision，只能配合 App 侧迁移，或等 §9.6 真正落地后再做。
 
 ## 10. Create、Update 与 Verify
 

@@ -856,25 +856,68 @@ mod tests {
         }
     }
 
-    /// The lease allow-list is a THIRD hand-written copy of a subset of these
-    /// names. A rename that misses it silently drops the build loop's lease
-    /// authorization.
+    /// This does not retype the lease allow-list: it drives the PRODUCTION
+    /// entry point (`permission::WorkspacePermissionLeaseRegistry::
+    /// allows_for_token`, which wraps the private `allows_for_lease` `matches!`
+    /// arm) with a real lease over every declared `LocalApp*` tool name and
+    /// asserts the resulting true/false split against the known five-name set.
+    /// A prior version of this test only asserted the five names are members
+    /// of `LOCAL_APP_TOOLS` — that compared a test constant to a test
+    /// constant and would stay green even if the production arm were
+    /// narrowed to zero names. This would fail on that mutation: every
+    /// `allows_for_token` call would return `false` and the loop below would
+    /// panic on the first expected-true name.
     #[test]
-    fn the_lease_allowlist_names_are_real_tools() {
-        let known: std::collections::BTreeSet<&str> =
-            LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
-        for name in [
+    fn the_lease_allowlist_matches_the_production_arm() {
+        const LEASE_AUTHORIZED: &[&str] = &[
             "LocalAppBuild",
             "LocalAppLogs",
             "LocalAppRuntime",
             "LocalAppManifest",
             "LocalAppQueryData",
-        ] {
+        ];
+        let known: std::collections::BTreeSet<&str> =
+            LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
+        for name in LEASE_AUTHORIZED {
             assert!(
                 known.contains(name),
                 "lease allow-list names unknown tool {name}"
             );
         }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "app-lease-probe";
+        let workspace = root.path().join("apps").join(app_id).join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let registry = permission::WorkspacePermissionLeaseRegistry::new();
+        let lease = registry
+            .begin_local_app(app_id, &workspace)
+            .expect("canonical local-app layout must grant a lease");
+        let token = Some(lease.token());
+        // The `LocalApp*` branch of `allows_for_lease` returns before
+        // consulting `roots`, so a dummy value proves nothing was skipped.
+        let roots = permission::FsRoots {
+            cwd: root.path().to_path_buf(),
+            home: None,
+            lingxi_home: root.path().to_path_buf(),
+        };
+        let input = serde_json::json!({"app_id": app_id});
+
+        for &(name, _, _) in LOCAL_APP_TOOLS {
+            let expected = LEASE_AUTHORIZED.contains(&name);
+            let actual = registry.allows_for_token(token, name, &input, &roots);
+            assert_eq!(
+                actual, expected,
+                "{name}: production lease allow-list disagrees with the known set"
+            );
+        }
+        // Vacuity guard: the mismatched app_id path of the same production
+        // call must still refuse, proving `input` above was actually load-bearing.
+        let wrong_app_input = serde_json::json!({"app_id": "someone-elses-app"});
+        assert!(
+            !registry.allows_for_token(token, "LocalAppBuild", &wrong_app_input, &roots),
+            "a mismatched app_id must never be authorized by this lease"
+        );
     }
 
     /// These are builtins, not MCP. Reporting `is_mcp` would put them back on

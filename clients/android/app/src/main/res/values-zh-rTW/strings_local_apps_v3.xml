@@ -21,6 +21,7 @@
     <string name="chat_task_status_paused">背景任務 %1$s 已暫停</string>
     <string name="chat_task_status_completed">背景任務 %1$s 已完成</string>
     <string name="chat_task_status_failed">背景任務 %1$s 已失敗</string>
+    <string name="chat_task_status_failed_reason">背景任務 %1$s 已失敗：%2$s</string>
     <string name="chat_task_status_cancelled">背景任務 %1$s 已取消</string>
     <string name="drawer_app_scope_label">應用 · %1$s</string>
     <string name="drawer_app_sessions_empty">這個應用還沒有會話。</string>

@@ -7,6 +7,7 @@ import com.lingxi.code.bindings.AskQuestionDto
 import com.lingxi.code.bindings.AskUserQuestionRequestDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.TaskRowDto
 import com.lingxi.code.bindings.TaskStatusDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
@@ -72,6 +73,7 @@ class AskUserQuestionQueueTest {
                     taskId = "abc123def",
                     status = TaskStatusDto.RUNNING,
                     originSessionId = null,
+                    error = null,
                 ),
             )
             assertEquals(2, viewModel.state.value.pendingQuestions.size)
@@ -145,6 +147,7 @@ class AskUserQuestionQueueTest {
                     taskId = "abc123def",
                     status = TaskStatusDto.COMPLETED,
                     originSessionId = null,
+                    error = null,
                 ),
             )
             assertEquals("后台任务 abc123def 已完成", viewModel.state.value.statusLine)
@@ -154,9 +157,62 @@ class AskUserQuestionQueueTest {
                     taskId = "abc123def",
                     status = TaskStatusDto.FAILED,
                     originSessionId = null,
+                    error = null,
                 ),
             )
             assertEquals("后台任务 abc123def 已失败", viewModel.state.value.statusLine)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /**
+     * r3-failure-paths-07 — a failed task must reach the user as
+     * "<what it was> failed: <why>", not as a bare 9-char id.
+     */
+    @Test
+    fun `a failed task names the task and the reason`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val viewModel = ChatViewModel(source = RecordingSource())
+            runCurrent()
+
+            viewModel.reduceClientEvent(
+                ClientEvent.TaskRow(
+                    TaskRowDto(
+                        "abc123def",
+                        "local_workflow",
+                        TaskStatusDto.RUNNING,
+                        "创建应用「食谱盒」",
+                        false,
+                        null,
+                        null,
+                    ),
+                ),
+            )
+            // Vacuity guard: the row must actually be in the map, otherwise the
+            // assertion below would be satisfied by the bare-id fallback.
+            assertEquals(
+                "创建应用「食谱盒」",
+                viewModel.state.value.backgroundTasks["abc123def"]?.description,
+            )
+
+            viewModel.reduceClientEvent(
+                ClientEvent.TaskStatusChanged(
+                    taskId = "abc123def",
+                    status = TaskStatusDto.FAILED,
+                    originSessionId = null,
+                    error = "第 2 步 `build` 退出码 1",
+                ),
+            )
+            assertEquals(
+                "后台任务 创建应用「食谱盒」 已失败：第 2 步 `build` 退出码 1",
+                viewModel.state.value.statusLine,
+            )
+            assertEquals(
+                "第 2 步 `build` 退出码 1",
+                viewModel.state.value.backgroundTasks["abc123def"]?.error,
+            )
         } finally {
             Dispatchers.resetMain()
         }

@@ -320,15 +320,16 @@ pub fn read_script_path_after_permission(
 /// `scriptPath` over `name` over `script` (a named workflow must resolve before
 /// an optional inline body can override its source). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks first under the
-/// immutable built-ins, then the project saved-workflow directory
-/// (`.lingxi/workflows/<name>`), then the user config directory
-/// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
-/// common script extensions, then — when a plugin-workflow registry is
-/// wired (§14) — a plugin's declared/auto-scanned workflow by its namespaced
-/// name. Built-ins win before filesystem lookup so a project checkout cannot
-/// shadow bundled workflow code; the plugin registry is checked LAST so a
-/// project/user file always wins a name collision (oracle precedence
-/// project/user > plugin > built-in — see `workflow::PluginWorkflowRegistry`).
+/// project saved-workflow directory (`.lingxi/workflows/<name>`), then the
+/// user config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
+/// `~/.lingxi/workflows/<name>`) with common script extensions, then a
+/// plugin's declared/auto-scanned workflow by its namespaced name (when a
+/// plugin-workflow registry is passed), and only last the immutable
+/// built-ins. A project/user file always wins a name collision; the plugin
+/// registry is checked before built-ins so a plugin can supply a workflow
+/// the built-in table does not, but a saved project/user file still shadows
+/// both (oracle precedence project/user > plugin > built-in — see
+/// `workflow::PluginWorkflowRegistry`).
 pub fn resolve_script_at<R>(
     cwd: &Path,
     spec: &WorkflowLaunchSpec,

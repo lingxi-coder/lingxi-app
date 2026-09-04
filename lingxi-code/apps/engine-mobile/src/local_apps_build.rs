@@ -4305,6 +4305,78 @@ mod tests {
         );
     }
 
+    /// This is the MODEL-reachable `dependencies_dirty` copy
+    /// (`LocalAppBuild` -> `build_workspace` -> `build_workspace_locked` ->
+    /// `validate_dependency_snapshot_files`), not the sibling copies in
+    /// `local_apps_host.rs`. Before this test, only the sibling copies had a
+    /// behavioural assertion; this one was pinned solely by a doc comment.
+    /// A regression that dropped the wording entirely, or that reintroduced
+    /// the dead `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies`
+    /// suggestion, would stay green under every other test in this file.
+    #[tokio::test]
+    async fn build_workspace_locked_refuses_a_tampered_workspace_package_json_without_naming_a_dead_tool()
+    {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        let workspace = layout.root().join(layout.workspace_rel());
+
+        // A model editing the workspace's dependency-owning file directly,
+        // instead of going through the dependency-review receipt flow.
+        let tampered = br#"{"name":"tampered","dependencies":{"left-pad":"9.9.9"}}"#.to_vec();
+        fs::write(workspace.join("package.json"), &tampered).expect("tamper package.json");
+
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
+                platform_api::SandboxBackend::IosIsh,
+                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test runtime never executes node",
+            ));
+        let builder = LocalAppBuilder {
+            mobile_linux: Some(runtime),
+            host: broker.as_ref(),
+        };
+        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+        dependency.state = local_apps::AppDependencyState::Ready;
+
+        let error = builder
+            .build_workspace_locked(&layout, &dependency)
+            .await
+            .expect_err(
+                "a tampered workspace package.json must refuse the build before it can be masked by restore",
+            );
+        let message = match error {
+            AppError::InvalidRequest(message) => message,
+            other => panic!("expected InvalidRequest(dependencies_dirty), got {other:?}"),
+        };
+        assert!(
+            message.contains("dependencies_dirty"),
+            "the model-reachable copy must still name the drift: {message}"
+        );
+        assert!(
+            !message.contains("LocalAppConfirmDependencyChange")
+                && !message.contains("LocalAppUpdateDependencies"),
+            "neither dead tool name may be offered as a retry path: {message}"
+        );
+
+        // Vacuity guard: the tampered bytes are still exactly what was
+        // written, proving the refusal fired before `restore_host_managed_files`
+        // ran (which would have overwritten package.json and hidden the drift).
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("package.json"),
+            tampered
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_build_cleans_up_its_staging_directory() {
         let root = tempfile::tempdir().expect("tempdir");

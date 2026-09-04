@@ -41,9 +41,27 @@ pub(crate) fn is_plugin_workflow_id(workflow_id: &str) -> bool {
     )
 }
 
+/// Every [`LocalAppBuildTarget`] variant currently requires the same
+/// workflow, so this has no reason to disagree with any of them today — but
+/// it is written as a wildcard-free `match`, not `let _ = build_target;
+/// PLUGIN_BUILD_WORKFLOW_ID`, on purpose: the module doc and
+/// `build_targets!`'s doc comment both claim that adding a sixth (now tenth)
+/// `LocalAppBuildTarget` variant forces this function to gain an arm
+/// (`error[E0004]` otherwise). A wildcard or an unconditional constant would
+/// make that claim false — a new variant would compile silently and inherit
+/// `PLUGIN_BUILD_WORKFLOW_ID` whether or not that is still correct.
 fn required_workflow_id_for(build_target: LocalAppBuildTarget) -> &'static str {
-    let _ = build_target;
-    PLUGIN_BUILD_WORKFLOW_ID
+    match build_target {
+        LocalAppBuildTarget::ReactDomR1
+        | LocalAppBuildTarget::ReactDomR2
+        | LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Canvas2dR2
+        | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Three3dR2
+        | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Phaser2dR2
+        | LocalAppBuildTarget::Babylon3dR1 => PLUGIN_BUILD_WORKFLOW_ID,
+    }
 }
 
 /// A resolved workflow identity for a Local App build target.

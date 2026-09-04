@@ -137,6 +137,14 @@ pub struct TaskRecord {
     /// dropped by that filter clause). Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_backgrounded: Option<bool>,
+    /// Terminal failure reason for a task whose `status` is `failed`, when the
+    /// producing handler reported one. `local_workflow` fills it from
+    /// [`WorkflowTerminalOutcome::error`] and `local_agent` from the agent's
+    /// recorded error; every other task type leaves it `None`. Appended field
+    /// (default `None`) — the clients render it next to `description` so a
+    /// failed background task is not a bare id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A `local_workflow` run projected for the interactive `/workflows` picker

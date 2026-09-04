@@ -303,7 +303,7 @@ import SwiftUI
                 message: MessageDto(role: "assistant", blocks: [.text(text: "完成")])
             ))
             source.applyForTesting(.taskStatusChanged(
-                taskId: "late-task", status: .completed, originSessionId: nil))
+                taskId: "late-task", status: .completed, originSessionId: nil, error: nil))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
 

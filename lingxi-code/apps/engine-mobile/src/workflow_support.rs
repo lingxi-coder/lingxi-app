@@ -68,7 +68,13 @@ const WORKFLOW_PROVENANCE_FILE: &str = "provenance.json";
 /// window is real even though the worker waits for registry registration.
 #[derive(Debug, Clone)]
 enum PendingWorkflowEvent {
-    Status(tasks::TaskStatus),
+    Status {
+        status: tasks::TaskStatus,
+        /// Terminal failure reason, when `finish_workflow_terminal` supplied
+        /// one. Buffered alongside the status so a transition that lands
+        /// before the ownership checkpoint does not lose its reason.
+        error: Option<String>,
+    },
     Progress {
         run_id: String,
         progress: tasks::handlers::local_workflow::WorkflowProgressUpdate,
@@ -712,6 +718,7 @@ impl MobileWorkflowStatusSink {
         task_id: &str,
         status: tasks::TaskStatus,
         origin_session_id: String,
+        error: Option<String>,
     ) {
         if !self.is_active_origin(&origin_session_id) {
             return;
@@ -728,6 +735,13 @@ impl MobileWorkflowStatusSink {
                     tasks::TaskStatus::Killed => "killed",
                 }),
                 origin_session_id: Some(origin_session_id),
+                // Only a real failure carries a reason; a completed/killed
+                // transition must never inherit a stale one.
+                error: if matches!(status, tasks::TaskStatus::Failed) {
+                    error
+                } else {
+                    None
+                },
             })
             .await;
     }
@@ -777,14 +791,49 @@ impl MobileWorkflowStatusSink {
             .await;
     }
 
+    /// Persist a transition in the registry, then publish it to the owning
+    /// session with its optional failure reason. Shared by `set_status`,
+    /// `set_failed` and `finish_workflow_terminal` so all three buffer and
+    /// de-register identically.
+    async fn publish_status(
+        &self,
+        task_id: &str,
+        status: tasks::TaskStatus,
+        error: Option<String>,
+    ) {
+        tasks::handlers::TaskStatusSink::set_status(&*self.registry, task_id, status).await;
+        self.deliver_status(task_id, status, error).await;
+    }
+
+    /// The client-facing half of [`Self::publish_status`], for callers that
+    /// already persisted the transition in the registry (the atomic
+    /// `finish_workflow_terminal` path).
+    async fn deliver_status(
+        &self,
+        task_id: &str,
+        status: tasks::TaskStatus,
+        error: Option<String>,
+    ) {
+        let Some((origin_session_id, _)) = self.checkpoints.task_owner(task_id) else {
+            self.checkpoints
+                .buffer_event(task_id, PendingWorkflowEvent::Status { status, error });
+            return;
+        };
+        if status.is_terminal() {
+            self.checkpoints.remove_task(task_id);
+        }
+        self.emit_status_for_owner(task_id, status, origin_session_id, error)
+            .await;
+    }
+
     async fn flush_pending_events(&self, task_id: &str, pending: Vec<PendingWorkflowEvent>) {
         let Some((origin_session_id, _)) = self.checkpoints.task_owner(task_id) else {
             return;
         };
         for event in pending {
             match event {
-                PendingWorkflowEvent::Status(status) => {
-                    self.emit_status_for_owner(task_id, status, origin_session_id.clone())
+                PendingWorkflowEvent::Status { status, error } => {
+                    self.emit_status_for_owner(task_id, status, origin_session_id.clone(), error)
                         .await;
                     if status.is_terminal() {
                         self.checkpoints.remove_task(task_id);
@@ -807,17 +856,53 @@ impl MobileWorkflowStatusSink {
 #[async_trait::async_trait]
 impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
     async fn set_status(&self, task_id: &str, status: tasks::TaskStatus) {
-        tasks::handlers::TaskStatusSink::set_status(&*self.registry, task_id, status).await;
-        let Some((origin_session_id, _)) = self.checkpoints.task_owner(task_id) else {
-            self.checkpoints
-                .buffer_event(task_id, PendingWorkflowEvent::Status(status));
-            return;
-        };
-        if status.is_terminal() {
-            self.checkpoints.remove_task(task_id);
-        }
-        self.emit_status_for_owner(task_id, status, origin_session_id)
+        self.publish_status(task_id, status, None).await;
+    }
+
+    /// Forward the failure reason so a `failed` transition reported through the
+    /// dedicated `set_failed` seam reaches the client event, not just the log.
+    async fn set_failed(&self, task_id: &str, error: &str) {
+        self.publish_status(
+            task_id,
+            tasks::TaskStatus::Failed,
+            Some(error.to_string()),
+        )
+        .await;
+    }
+
+    /// Persist the workflow's terminal payload in the registry — the default
+    /// trait method is a no-op, so without this override a mobile workflow's
+    /// result/error never reached `TaskRecord` and the `TaskList` rows showed a
+    /// reason-less failure.
+    async fn set_workflow_outcome(
+        &self,
+        task_id: &str,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+    ) {
+        tasks::handlers::TaskStatusSink::set_workflow_outcome(&*self.registry, task_id, outcome)
             .await;
+    }
+
+    /// Atomic terminal publish: store the payload in the registry (so the
+    /// `TaskList` row carries `error`), then push the status transition WITH
+    /// the reason attached (so the conversation notice can name it).
+    async fn finish_workflow_terminal(
+        &self,
+        task_id: &str,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        status: tasks::TaskStatus,
+    ) {
+        let error = outcome.error.clone();
+        // Keep the registry's ATOMIC payload+status publish (it closes the
+        // outcome/status race a concurrent kill would otherwise win).
+        tasks::handlers::TaskStatusSink::finish_workflow_terminal(
+            &*self.registry,
+            task_id,
+            outcome,
+            status,
+        )
+        .await;
+        self.deliver_status(task_id, status, error).await;
     }
 
     async fn is_registered(&self, task_id: &str) -> bool {
@@ -4009,6 +4094,89 @@ mod run_id_tests {
                 .as_ref()
                 .and_then(|args| args.get("expected_writable_collections")),
             Some(&serde_json::json!(["caller_choice"]))
+        );
+    }
+
+    /// r3-failure-paths-07: a workflow that FAILS must reach the client with
+    /// the engine's reason attached, not as a bare task id.
+    ///
+    /// Both halves are asserted: the terminal payload lands in the registry
+    /// (so the `TaskList` row a later session refresh pulls carries `error`),
+    /// and the pushed `TaskStatusChanged` carries the same reason. The
+    /// completed case is the vacuity guard — it proves the assertion below is
+    /// reading a field that is genuinely `None` for a non-failure, i.e. the
+    /// test cannot pass by always finding a reason.
+    #[tokio::test]
+    async fn failed_workflow_terminal_carries_the_reason_to_the_client() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let listener = Arc::new(FakeListener::default());
+        let root = tempfile::tempdir().expect("tempdir");
+        let checkpoints = Arc::new(super::MobileWorkflowCheckpointStore::new(
+            root.path().join(".claude"),
+            root.path().to_path_buf(),
+        ));
+        let active_session = Arc::new(std::sync::Mutex::new("session-a".to_string()));
+        let sink = super::MobileWorkflowStatusSink::new(
+            listener.clone(),
+            checkpoints,
+            active_session.clone(),
+        );
+        let _ = sink
+            .checkpoints
+            .track_task_owner("w12345678", "session-a", "wf_failing");
+        let _ = sink
+            .checkpoints
+            .track_task_owner("w87654321", "session-a", "wf_ok");
+
+        sink.finish_workflow_terminal(
+            "w12345678",
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                error: Some("step 2 `build` exited 1".to_string()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Failed,
+        )
+        .await;
+        sink.finish_workflow_terminal(
+            "w87654321",
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some("done".to_string()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let events = listener.received.lock().await.clone();
+        let statuses: Vec<(String, Option<String>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                client_protocol::events::ClientEvent::TaskStatusChanged {
+                    task_id, error, ..
+                } => Some((task_id.clone(), error.clone())),
+                _ => None,
+            })
+            .collect();
+        // Vacuity guard: without BOTH transitions on the wire the assertions
+        // below would pass over an empty list.
+        assert_eq!(
+            statuses.len(),
+            2,
+            "expected both terminal transitions, got {statuses:?}"
+        );
+        assert_eq!(
+            statuses[0],
+            (
+                "w12345678".to_string(),
+                Some("step 2 `build` exited 1".to_string())
+            ),
+            "the failed transition must name the reason"
+        );
+        assert_eq!(
+            statuses[1],
+            ("w87654321".to_string(), None),
+            "a completed transition must not carry a reason"
         );
     }
 

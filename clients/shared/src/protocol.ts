@@ -992,6 +992,8 @@ export interface TaskRowDto {
   description: string;
   can_resume?: boolean;
   started_at_ms?: number;
+  /** Terminal failure reason for a `failed` row, when the handler reported one. */
+  error?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2129,6 +2131,8 @@ export type ClientEvent =
       task_id: string;
       status: TaskStatusDto;
       origin_session_id?: string;
+      /** Failure reason accompanying a `failed` transition, when reported. */
+      error?: string;
     }
   | {
       type: 'workflow_resumed';

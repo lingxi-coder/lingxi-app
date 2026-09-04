@@ -27,6 +27,20 @@ surface, an empty workspace, and an app-scoped conversation — and hands that
 conversation to you. Its `LINGXI.md` names the app id and says the app has no
 shape yet. Settling what the app IS is your work in that conversation:
 
+**If the shell's workspace contract already handed off to this skill, RESUME AT
+STEP 3.** That contract is the `LINGXI.md` a `+`-created shell carries; it runs
+its own steps 1-4 before it invokes `lingxi-local-app:create-local-app`, and its
+step 5 says so in as many words. By the time you are reading this file through
+that hand-off, the opening question, the one clarification round, the display
+**name**, the **shape** (`dom` or `canvas`) and the MCP choice have all been
+answered in this same conversation. Carry those answers forward verbatim and ask
+none of them a second time — re-asking throws away what the user just told you.
+Step 3 below is where you re-enter, and inside it only the one-line **brief** and
+the runtime sub-profile *within the already-confirmed shape* are still open; the
+name is confirmed, so restate it rather than re-propose it. Steps 1-2 apply only
+when you entered this skill WITHOUT that hand-off — for instance from a
+conversation that never went through a shell contract.
+
 1. Open in ORDINARY ASSISTANT TEXT: ask what they want to build, in one short
    open question, and wait for their answer. Do NOT use `AskUserQuestion` here.
    That tool renders a picker, and on this turn you know nothing about the app,

@@ -111,8 +111,8 @@ use tool_workflow::WorkflowLauncher as _;
 
 use crate::{
     local_apps_host::{
-        canonical_cwd_string, remove_app_session_file, AgentOutputRouter, AgentOutputStream,
-        AgentTurnUsageState, LocalAppsAgentExecutor, LocalAppsHostBroker,
+        app_session_dir, canonical_cwd_string, remove_app_session_file, AgentOutputRouter,
+        AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor, LocalAppsHostBroker,
     },
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
@@ -5086,6 +5086,32 @@ async fn build_mobile_inner_with_ask(
              commands/skills/agents it would have contributed are unavailable this boot"
         ),
     }
+    // r2-critic-1 (coverage half): the agent-facing `LocalAppCreate` MCP tool
+    // is a SECOND live create entry point — it never enters
+    // `handle_create_app`, so that handler's plugin gate does not cover it, and
+    // the local-apps transport itself stays connected while the plugin is
+    // disabled (`disabled: false, always_load: true` above;
+    // `set_builtin_plugin_enabled` only calls `PluginManager::disable`). Hand
+    // the transport THIS manager — the same one `handle_create_app` and
+    // `PluginCommand::SetEnabled` read and mutate — so both create paths answer
+    // one question from one source of truth. Attached here, in the function
+    // that owns both halves, so every runtime this composition root builds has
+    // it; the probe is fail-closed, so a future root that drops this call
+    // refuses creates loudly instead of reopening the hole.
+    {
+        let manager = plugin_manager.clone();
+        let _ = local_apps_mcp.attach_plugin_availability(Arc::new(move || {
+            let manager = manager.clone();
+            Box::pin(async move {
+                matches!(
+                    manager
+                        .plugin_state(&crate::mobile_builtin_plugin_id())
+                        .await,
+                    Some(plugin::PluginState::Loaded { .. })
+                )
+            })
+        }));
+    }
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_usage_home(cfg.lingxi_home.clone());
     let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
@@ -7674,6 +7700,42 @@ impl MobileEngineHandle {
                 return;
             }
         };
+        // r2-critic-1: `self.local_apps` loading is orthogonal to the
+        // built-in plugin's activation state — the store can be healthy
+        // while the plugin is disabled or its bundle failed to materialize.
+        // Nothing upstream of this handler checks that, so a disabled or
+        // unmaterialized bundle used to leave every create entry point live
+        // and only fail much later at an unresolvable skill (or never, on
+        // the client's 30s timeout). Gate HERE, before any workspace/session
+        // work starts, so the refusal is immediate and typed. `NotYetAvailable`
+        // is the closest existing `AppErrorCode` to "the capability behind
+        // this command is not currently on offer" — there is no dedicated
+        // plugin-disabled code in this wire enum (`LocalAppPluginErrorCodeDto`
+        // is a distinct enum for the native-approval/MCP-authoring family, not
+        // `AppErrorCodeDto`).
+        match self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+        {
+            Some(plugin::PluginState::Loaded { .. }) => {}
+            _ => {
+                self.emit_app_failure_for_request(
+                    None,
+                    &local_apps::AppError::NotYetAvailable(
+                        // One sentence, one definition: the agent-facing
+                        // `LocalAppCreate` gate in `local_apps_mcp.rs` raises
+                        // the SAME constant, so the two create entry points
+                        // cannot drift into two explanations of one condition.
+                        crate::local_apps_mcp::LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
+                    ),
+                    request_id,
+                )
+                .await;
+                return;
+            }
+        }
         // Raising the origin is fallible like every other inbound DTO raise
         // (W1): an unknown `#[non_exhaustive]` future origin must fail typed
         // instead of silently laundering into a library create.
@@ -7999,11 +8061,53 @@ impl MobileEngineHandle {
             .await;
             return;
         }
+        // The app's session catalog lives OUTSIDE `apps/<id>`, under
+        // `<lingxi_home>/projects/<project_dir_name(workspace)>`, so
+        // `delete_app` cannot reach it. Derive the directory HERE, before the
+        // delete, and remove it after the delete commits — otherwise every
+        // transcript this host minted for the app (including a chat-origin
+        // app's full fork of the user's conversation) outlives the app, and
+        // the create-vs-delete race's losing anchor is stranded in a catalog
+        // nothing owns any more.
+        let session_dir = match service.record(&app_id).await {
+            Ok(record) => Some(app_session_dir(
+                &self.lingxi_home,
+                &mobile_apps_data_root(&self.firer_cfg),
+                &record,
+            )),
+            // Not a reason to refuse the delete: a record we cannot read is a
+            // delete `delete_app` is about to reject on its own, and the
+            // catalog is a leak, not the user's requested outcome.
+            Err(error) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %error,
+                    "DeleteApp: could not derive the session catalog directory"
+                );
+                None
+            }
+        };
         // Success needs no extra emit: `delete_app` announces the shrunken
         // record set via its own `AppsChanged` domain event.
         if let Err(error) = service.delete_app(&app_id).await {
             self.emit_app_failure(Some(app_id), &error).await;
             return;
+        }
+        if let Some(session_dir) = session_dir {
+            // Best effort by design: the record is already gone, so a catalog
+            // that refuses to go is a storage leak — never a failure the user
+            // sees on a delete that already succeeded. `NotFound` is the
+            // ordinary case for an app whose init-session mint never ran.
+            match std::fs::remove_dir_all(&session_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    app_id = %app_id,
+                    path = %session_dir.display(),
+                    error = %error,
+                    "DeleteApp: session catalog removal failed"
+                ),
+            }
         }
         if let Err(message) = self
             .local_apps_host
@@ -9462,6 +9566,8 @@ impl MobileEngineHandle {
                             task_id: record.task_id.clone(),
                             status: client_adapter::lowering::lower_task_status(&record.status),
                             origin_session_id: None,
+                            // A user stop is `killed`, never `failed`.
+                            error: None,
                         })
                         .await;
                 }
@@ -11782,7 +11888,17 @@ pub(crate) async fn mint_app_init_session(
                 Err(error) => {
                     // Degrade to an empty anchor — a brand-new conversation
                     // has nothing to fork, and that must not fail the create.
-                    tracing::debug!(
+                    // r1-backlog-engine-create-10: `warn!`, not `debug!` — a
+                    // record here always claims a `conversation_id`, so this
+                    // is never the ordinary no-source-to-fork case; it is
+                    // either a genuinely vanished source session or (for a
+                    // boot-repaired pin, whose `source_cwd` is the
+                    // CONNECTION's cwd rather than the app's actual origin
+                    // scope) a fork attempted against the wrong catalog. A
+                    // silent degrade to an empty anchor here has swallowed
+                    // the user's real transcript before; it must be visible
+                    // by default.
+                    tracing::warn!(
                         app_id = %record.id,
                         %error,
                         "init-session fork degraded to an empty anchor"
@@ -11817,6 +11933,37 @@ pub(crate) async fn mint_app_init_session(
         return Err(format!("persist app init session mode: {error}"));
     }
     Ok(init_id)
+}
+
+/// r1-backlog-engine-create-11: `run_app_boot_backfill_sweep`'s own doc says
+/// "once per launch", but its only caller sits inside
+/// `build_mobile_engine_inner`, which re-runs on every scope switch /
+/// reconnect within one process, not just at process start. Keyed by the
+/// apps data root (not a single flag) because more than one profile/scope
+/// can share a process. Returns `true` the first time a given root is seen
+/// in this process, `false` on every later call for the same root — which is
+/// exactly what "once per launch" means for a process that never restarts
+/// between reconnects.
+fn boot_backfill_sweep_should_run(data_root: &std::path::Path) -> bool {
+    static STARTED: std::sync::OnceLock<StdMutex<std::collections::HashSet<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(|| StdMutex::new(std::collections::HashSet::new()));
+    let mut started = started
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    started.insert(data_root.to_path_buf())
+}
+
+/// r1-engine-core-013: when the boot sweep's promote-rename fails, the
+/// candidate that HOLDS the pinned init session (`base`) must be merged
+/// FIRST, not last. The merge loop right after this call is first-writer-wins
+/// (`if target.exists() { continue; }`), so whichever directory lands in
+/// `drifted` earliest is the one whose files survive a name collision.
+/// `base` is the one carrying the forked user transcript the promotion
+/// exists to protect — pushing it to the back handed that protection to
+/// whichever unrelated drifted directory happened to read-dir first instead.
+fn requeue_failed_catalog_promotion(base: std::path::PathBuf, drifted: &mut Vec<std::path::PathBuf>) {
+    drifted.insert(0, base);
 }
 
 /// The boot backfill sweep, as a named function so it has a test.
@@ -11952,9 +12099,9 @@ pub(crate) async fn run_app_boot_backfill_sweep(
                             error = %error,
                             "app catalog migration rename failed; merging instead"
                         );
-                        // Keep it in the merge set rather than
-                        // dropping it on the floor.
-                        drifted.push(base);
+                        // r1-engine-core-013: requeue at the FRONT, not the
+                        // back — see `requeue_failed_catalog_promotion`.
+                        requeue_failed_catalog_promotion(base, &mut drifted);
                     }
                 }
             }
@@ -12445,14 +12592,23 @@ pub fn build_mobile_engine_inner(
             // the shared worker runtime (this builder is sync); see
             // `run_app_boot_backfill_sweep` for what it repairs and why each
             // repair is retried rather than rolled back.
-            crate::local_apps_profile::worker_runtime().spawn(run_app_boot_backfill_sweep(
-                firer_cfg.lingxi_home.clone(),
-                firer_cfg.cwd.to_string_lossy().to_string(),
-                mobile_apps_data_root(&firer_cfg),
-                fs.clone(),
-                service.clone(),
-                local_apps_host.clone(),
-            ));
+            //
+            // r1-backlog-engine-create-11: `boot_backfill_sweep_should_run`
+            // keeps this call matching the function's own "once per launch"
+            // doc — this builder re-runs on every scope switch/reconnect
+            // within the same process, and without the guard the sweep would
+            // re-walk every app record on each one.
+            let apps_data_root = mobile_apps_data_root(&firer_cfg);
+            if boot_backfill_sweep_should_run(&apps_data_root) {
+                crate::local_apps_profile::worker_runtime().spawn(run_app_boot_backfill_sweep(
+                    firer_cfg.lingxi_home.clone(),
+                    firer_cfg.cwd.to_string_lossy().to_string(),
+                    apps_data_root,
+                    fs.clone(),
+                    service.clone(),
+                    local_apps_host.clone(),
+                ));
+            }
         }
         Err(error) => {
             tracing::warn!(
@@ -16595,6 +16751,7 @@ mod tests {
                     task_id: task_id.clone(),
                     status: client_protocol::listings::TaskStatusDto::Cancelled,
                     origin_session_id: None,
+                    error: None,
                 })
                 .await;
 
@@ -19223,6 +19380,173 @@ mod tests {
         });
     }
 
+    /// r2-critic-1: a disabled built-in plugin must refuse `CreateApp`
+    /// immediately with a typed failure instead of letting the app land and
+    /// dead-end later. Proves the gate can go RED (no plugin state check ->
+    /// `AppCreated` fires) and GREEN (checked -> refused, nothing created)
+    /// by exercising the same handler both ways within one test.
+    #[test]
+    fn create_app_is_refused_when_the_builtin_plugin_is_disabled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // Control: with the plugin in its default Loaded state, the
+            // create succeeds -- this is what would happen for EVERY create
+            // if the new gate above were silently miscompiled to a no-op.
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Control".into(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "plugin is enabled, this must succeed".into(),
+                    git_enabled: true,
+                    workflow_model: None,
+                    conversation_id: None,
+                    surface: None,
+                    mode: AppCreateModeDto::Shell,
+                    request_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(
+                created_row(&events).is_some(),
+                "control create with the plugin enabled must succeed, got {events:?}"
+            );
+
+            handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: false,
+                    },
+                })
+                .await
+                .expect("submit(PluginCommand::SetEnabled false)");
+            let _ = drain_events(&handle, &listener).await;
+
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Blocked".into(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "plugin is disabled, this must be refused".into(),
+                    git_enabled: true,
+                    workflow_model: None,
+                    conversation_id: None,
+                    surface: None,
+                    mode: AppCreateModeDto::Shell,
+                    request_id: Some("req-plugin-disabled".into()),
+                })
+                .await
+                .expect("submit(CreateApp) resolves Ok even for a domain refusal");
+            let events = drain_events(&handle, &listener).await;
+            assert!(
+                created_row(&events).is_none(),
+                "a disabled plugin must not let CreateApp mint a record, got {events:?}"
+            );
+            let (code, message, request_id) =
+                first_failure(&events).expect("CreateApp must report a typed failure");
+            assert_eq!(code, AppErrorCodeDto::NotYetAvailable);
+            assert_eq!(request_id.as_deref(), Some("req-plugin-disabled"));
+            assert!(
+                message.contains("plugin"),
+                "failure message should name the plugin as the cause, got {message:?}"
+            );
+        });
+    }
+
+    /// r2-critic-1 (coverage half): `handle_create_app`'s plugin gate covers
+    /// only `ClientCommand::CreateApp`. The agent-facing `LocalAppCreate` tool
+    /// is a SECOND live create entry point — `LocalAppTool` dispatches it
+    /// through `LocalAppsMcpTransport::call_host_operation("create", ..)`,
+    /// which reaches `AppService::create_app_…` without ever entering that
+    /// handler — and the local-apps MCP server stays connected while the
+    /// plugin is disabled (bootstrap registers it `disabled: false,
+    /// always_load: true`, and `set_builtin_plugin_enabled` only calls
+    /// `PluginManager::disable`). So this drives the TOOL, not the command,
+    /// against the very transport the engine wired, and asserts the same
+    /// plugin state refuses it with the same typed code and sentence.
+    #[test]
+    fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        // THE production transport — the one `build_mobile_inner` attached the
+        // availability probe to and `local_app_builtin_tools` hands to
+        // `LocalAppTool`. A transport built by the test would prove nothing
+        // about what the engine actually wired.
+        let transport = handle.inner.local_apps_mcp.clone();
+
+        handle.runtime().block_on(async {
+            // Control: with the plugin in its default Loaded state the tool
+            // create succeeds. Without this the refusal below could equally
+            // come from an unattached host/service or a malformed payload.
+            let created = transport
+                .call_host_operation(
+                    "create",
+                    serde_json::json!({ "brief": "plugin is enabled, this must succeed" }),
+                )
+                .await
+                .expect("LocalAppCreate dispatch");
+            assert!(
+                !created.is_error,
+                "control create through the MCP tool must succeed, got {created:?}"
+            );
+            let structured = created
+                .structured_content
+                .clone()
+                .expect("create returns structured content");
+            assert!(
+                structured["app"]["id"].as_str().is_some(),
+                "control create must mint a record: {structured}"
+            );
+
+            handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: false,
+                    },
+                })
+                .await
+                .expect("submit(PluginCommand::SetEnabled false)");
+            let _ = drain_events(&handle, &listener).await;
+
+            let refused = transport
+                .call_host_operation(
+                    "create",
+                    serde_json::json!({ "brief": "plugin is disabled, this must be refused" }),
+                )
+                .await
+                .expect("a domain refusal is a tool result, not a transport error");
+            assert!(
+                refused.is_error,
+                "a disabled plugin must refuse the agent-facing create, got {refused:?}"
+            );
+            let text = refused.content.to_string();
+            assert!(
+                text.contains("not_yet_available"),
+                "the refusal must carry the same typed code the ClientCommand                  path reports: {text}"
+            );
+            assert!(
+                text.contains("the Local App plugin is disabled or unavailable"),
+                "the refusal must say the same thing handle_create_app says: {text}"
+            );
+
+            // …and it must refuse BEFORE minting: the catalog still holds only
+            // the control app.
+            let listed = transport
+                .call_host_operation("list", serde_json::json!({}))
+                .await
+                .expect("list dispatch")
+                .structured_content
+                .expect("list returns structured content");
+            assert_eq!(
+                listed["total"], 1,
+                "a refused create must not mint a second record: {listed}"
+            );
+        });
+    }
+
     /// v3 Phase 4: a library create pins an init session — the record gains
     /// `init_session_id`, the anchor lands in the APP WORKSPACE's own
     /// catalog, and `ListAppSessions` returns that row marked `Init`.
@@ -19669,6 +19993,28 @@ mod tests {
         );
     }
 
+    /// r1-engine-core-013: when the promote-rename fails, the directory
+    /// holding the pinned init session must be merged FIRST so the
+    /// first-writer-wins collision loop right after it protects that copy,
+    /// not whichever unrelated drifted directory already sat in the vector.
+    /// Before the fix this pushed to the back (`drifted.push(base)`), which
+    /// would have failed this assertion (`drifted[0]` would have been
+    /// `sibling`, not `base`).
+    #[test]
+    fn requeue_failed_catalog_promotion_puts_the_pin_holder_first() {
+        let sibling = std::path::PathBuf::from("/tmp/apps/sibling-apps-x-workspace");
+        let base = std::path::PathBuf::from("/tmp/apps/base-holds-the-pin-apps-x-workspace");
+        let mut drifted = vec![sibling.clone()];
+
+        super::requeue_failed_catalog_promotion(base.clone(), &mut drifted);
+
+        assert_eq!(
+            drifted,
+            vec![base, sibling],
+            "the pin holder must be merged before any other drifted directory"
+        );
+    }
+
     /// r1-failure-paths-012: a pin-less record is not necessarily an empty
     /// shell -- a create that minted a REAL conversation and then failed
     /// before `set_init_session` leaves exactly this state. Seeds a
@@ -20072,6 +20418,88 @@ mod tests {
         assert!(
             !tmp.path().join("apps").join(&app_id).exists(),
             "DeleteApp must remove the app directory"
+        );
+    }
+
+    /// r1-engine-core-015 / r1-backlog-engine-create-06: an app's transcripts
+    /// do NOT live under `apps/<id>` — they live in the ordinary per-cwd
+    /// catalog `<lingxi_home>/projects/<sanitize(workspace)>/`, which
+    /// `AppService::delete_app` cannot see. Without an explicit removal every
+    /// session this host minted for the app — for a chat-origin app, a full
+    /// FORK of the user's own conversation — outlives the app forever.
+    #[test]
+    fn delete_app_removes_the_apps_session_catalog() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        let (app_id, catalog_dir) = handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Catalog".into(),
+                    origin: AppCreateOriginDto::Library,
+                    brief: "a test app".into(),
+                    git_enabled: true,
+                    workflow_model: None,
+                    conversation_id: None,
+                    surface: None,
+                    mode: AppCreateModeDto::Shell,
+                    request_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+            let app_id = record.id;
+            // Derived independently of the production helper, and while the
+            // workspace still exists, so this test cannot agree with the code
+            // by simply calling the same function.
+            let workspace_cwd = crate::local_apps_host::canonical_cwd_string(
+                &tmp.path().join("apps").join(&app_id).join("workspace"),
+            );
+            let catalog_dir = tmp
+                .path()
+                .join(branding::DOT_DIR)
+                .join("projects")
+                .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+            (app_id, catalog_dir)
+        });
+
+        // Vacuity guard: with no transcript on disk the post-delete assertion
+        // would pass against an app that never had a catalog at all.
+        let minted: Vec<_> = std::fs::read_dir(&catalog_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            !minted.is_empty(),
+            "CreateApp must have minted an init session under {}",
+            catalog_dir.display()
+        );
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::DeleteApp {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(DeleteApp)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Ev::AppsChanged { apps } if apps.is_empty())));
+        });
+
+        assert!(
+            !catalog_dir.exists(),
+            "DeleteApp must remove the app's session catalog; {} survived with {:?}",
+            catalog_dir.display(),
+            std::fs::read_dir(&catalog_dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
         );
     }
 

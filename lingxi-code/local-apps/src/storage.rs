@@ -513,14 +513,105 @@ fn remove_owned_path(path: &Path) -> Result<(), AppError> {
     }
 }
 
-fn copy_tree_entry(source: &Path, destination: &Path) -> Result<(), AppError> {
+/// The relative target of a symlink inside a snapshot tree, refused unless it
+/// stays inside `tree_root`.
+///
+/// LEXICAL, not `canonicalize`: a legitimate link can dangle (a `.bin` shim
+/// whose target has not been written yet), and a snapshot must be judged on
+/// what it SPELLS, not on what happens to exist right now. The link's own
+/// position inside the tree is part of the arithmetic, so
+/// `deps/.bin/vite -> ../vite/bin/vite.js` is contained while
+/// `deps/../../../etc/passwd` is not.
+///
+/// Absolute targets are refused outright even when they currently point inside
+/// the tree: the snapshot is copied to a DIFFERENT path, so an absolute link
+/// would silently keep pointing at the original app's directory.
+fn contained_symlink_target(link: &Path, tree_root: &Path) -> Result<PathBuf, AppError> {
+    use std::path::Component;
+
+    let escape = |reason: &str, target: &Path| {
+        AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot symlink {} -> {} {reason}",
+            link.display(),
+            target.display()
+        ))
+    };
+    let target = std::fs::read_link(link)
+        .map_err(|error| AppError::Io(format!("read link {}: {error}", link.display())))?;
+    if target.is_absolute() {
+        return Err(escape("must be relative", &target));
+    }
+    let parent_rel = link
+        .parent()
+        .and_then(|parent| parent.strip_prefix(tree_root).ok())
+        .ok_or_else(|| {
+            AppError::StorageCorrupt(format!(
+                "scaffold recovery snapshot symlink {} is outside {}",
+                link.display(),
+                tree_root.display()
+            ))
+        })?;
+    let mut resolved: Vec<std::ffi::OsString> = Vec::new();
+    for component in parent_rel.components().chain(target.components()) {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return Err(escape("escapes the snapshot", &target));
+                }
+            }
+            Component::Normal(name) => resolved.push(name.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(escape("must be relative", &target));
+            }
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(unix)]
+fn recreate_snapshot_symlink(target: &Path, destination: &Path) -> Result<(), AppError> {
+    std::os::unix::fs::symlink(target, destination).map_err(|error| {
+        AppError::Io(format!(
+            "recreate scaffold recovery symlink {} -> {}: {error}",
+            destination.display(),
+            target.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn recreate_snapshot_symlink(target: &Path, destination: &Path) -> Result<(), AppError> {
+    Err(AppError::StorageCorrupt(format!(
+        "scaffold recovery snapshot symlink {} -> {} is unsupported on this platform",
+        destination.display(),
+        target.display()
+    )))
+}
+
+/// Copy one entry of a snapshot tree. `source_root` is the root of the tree
+/// being copied (the app directory when taking the backup, the backup when
+/// restoring it) and is what symlink containment is judged against — passing
+/// the directory currently being walked instead would let a nested link climb
+/// out one level at a time.
+fn copy_tree_entry(source: &Path, destination: &Path, source_root: &Path) -> Result<(), AppError> {
     let metadata = std::fs::symlink_metadata(source)
         .map_err(|error| AppError::Io(format!("inspect {}: {error}", source.display())))?;
     if metadata.file_type().is_symlink() {
-        return Err(AppError::StorageCorrupt(format!(
-            "scaffold recovery snapshot contains symlink {}",
-            source.display()
-        )));
+        // Reproduced, not followed and not refused. Refusing was the old
+        // behaviour and it made a workspace containing ANY symlink
+        // permanently unscaffoldable: this snapshot is taken BEFORE the wipe
+        // that would have removed the link, so the shell could never get past
+        // its first scaffold.
+        let target = contained_symlink_target(source, source_root)?;
+        if let Some(parent) = destination.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Io(format!("create {}: {error}", parent.display()))
+                })?;
+            }
+        }
+        return recreate_snapshot_symlink(&target, destination);
     }
     if metadata.is_dir() {
         private_dir(destination)?;
@@ -530,7 +621,11 @@ fn copy_tree_entry(source: &Path, destination: &Path) -> Result<(), AppError> {
             let entry = entry.map_err(|error| {
                 AppError::Io(format!("read {} entry: {error}", source.display()))
             })?;
-            copy_tree_entry(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_tree_entry(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                source_root,
+            )?;
         }
         return Ok(());
     }
@@ -581,7 +676,7 @@ fn copy_app_snapshot(source: &Path, destination: &Path) -> Result<(), AppError> 
         {
             continue;
         }
-        copy_tree_entry(&entry.path(), &destination.join(name))?;
+        copy_tree_entry(&entry.path(), &destination.join(name), source)?;
     }
     Ok(())
 }
@@ -647,27 +742,28 @@ fn restore_app_snapshot(root: &Path, journal: &ScaffoldRecoveryJournal) -> Resul
     // Validate the complete source before removing the live app. If the
     // backup is damaged, fail closed and leave the journal for an operator;
     // never turn a corrupted snapshot into a silently empty app.
-    validate_snapshot_tree(&backup)?;
+    validate_snapshot_tree(&backup, &backup)?;
     clear_app_directory_for_restore(&app_dir)?;
     for entry in std::fs::read_dir(&backup)
         .map_err(|error| AppError::Io(format!("read {}: {error}", backup.display())))?
     {
         let entry = entry
             .map_err(|error| AppError::Io(format!("read {} entry: {error}", backup.display())))?;
-        copy_tree_entry(&entry.path(), &app_dir.join(entry.file_name()))?;
+        copy_tree_entry(&entry.path(), &app_dir.join(entry.file_name()), &backup)?;
     }
     Ok(())
 }
 
-fn validate_snapshot_tree(path: &Path) -> Result<(), AppError> {
+fn validate_snapshot_tree(path: &Path, tree_root: &Path) -> Result<(), AppError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         AppError::StorageCorrupt(format!("inspect {}: {error}", path.display()))
     })?;
     if metadata.file_type().is_symlink() {
-        return Err(AppError::StorageCorrupt(format!(
-            "scaffold recovery snapshot contains symlink {}",
-            path.display()
-        )));
+        // Same rule as `copy_tree_entry`, and it has to be: a validator
+        // stricter than the writer would refuse to restore a backup this
+        // module had just written itself.
+        contained_symlink_target(path, tree_root)?;
+        return Ok(());
     }
     if metadata.is_dir() {
         for entry in std::fs::read_dir(path).map_err(|error| {
@@ -676,7 +772,7 @@ fn validate_snapshot_tree(path: &Path) -> Result<(), AppError> {
             let entry = entry.map_err(|error| {
                 AppError::StorageCorrupt(format!("read {} entry: {error}", path.display()))
             })?;
-            validate_snapshot_tree(&entry.path())?;
+            validate_snapshot_tree(&entry.path(), tree_root)?;
         }
     } else if !metadata.is_file() {
         return Err(AppError::StorageCorrupt(format!(
@@ -970,7 +1066,8 @@ impl ScaffoldRecoveryHandle {
         // TRUNCATED backup still named by a live journal, and the next
         // `load_all` would wipe the app we just restored correctly and copy
         // that partial tree over it — `validate_snapshot_tree` only rejects
-        // symlinks, so nothing catches it. A backup left behind by a failed
+        // escaping symlinks and special files, so nothing catches it. A
+        // backup left behind by a failed
         // removal is merely unreachable disk, reclaimed by
         // `sweep_orphaned_scaffold_backups` once the app is deleted; the
         // error is propagated (not warned) so the caller still learns.
@@ -1882,6 +1979,106 @@ mod tests {
             .path()
             .join(scaffold_recovery_journal_rel("scaffold1"))
             .exists());
+    }
+
+    /// Build the "+" button's shell on disk: index row, layout, manifest and
+    /// the guided `workspace/LINGXI.md`. Returns the workspace path.
+    #[cfg(unix)]
+    fn shell_on_disk(root: &Path, app_id: &str) -> PathBuf {
+        let mut app = AppState::create(
+            app_id.into(),
+            "untitled".into(),
+            "original brief".into(),
+            None,
+            1_700_000_000_000,
+        );
+        app.record.scaffolded = false;
+        save_full(root, std::slice::from_ref(&app));
+        let layout = crate::manifest::AppLayout::new(root, app.record.id.clone()).unwrap();
+        layout.initialize().unwrap();
+        let manifest = crate::manifest::AppManifest::for_new_app(app_id, "untitled");
+        crate::manifest::save_manifest(&layout, &manifest).unwrap();
+        let workspace = root.join(layout.workspace_rel());
+        std::fs::write(workspace.join("LINGXI.md"), "guided shell\n").unwrap();
+        workspace
+    }
+
+    /// r1-backlog-scaffold-build-09. The recovery snapshot is taken BEFORE the
+    /// wipe that would have removed the workspace's links, so refusing every
+    /// symlink outright made a shell containing ANY link impossible to
+    /// scaffold — ever, on any retry. A link that stays inside the tree must
+    /// survive the snapshot/rollback round trip AS A LINK.
+    #[test]
+    #[cfg(unix)]
+    fn scaffold_recovery_round_trips_a_contained_relative_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = shell_on_disk(dir.path(), "symlink1");
+        std::fs::create_dir_all(workspace.join("bin")).unwrap();
+        std::os::unix::fs::symlink("../LINGXI.md", workspace.join("bin/contract.md")).unwrap();
+
+        let lock = lock_app_build(dir.path(), "symlink1").unwrap();
+        let recovery =
+            begin_scaffold_recovery(dir.path(), "symlink1", "formed name", "formed brief")
+                .expect("a contained symlink must not block the first scaffold");
+        // What a landing scaffold does: wipe the editable surface, write the
+        // formal contract.
+        std::fs::remove_dir_all(workspace.join("bin")).unwrap();
+        std::fs::write(workspace.join("LINGXI.md"), "formal contract\n").unwrap();
+        recovery.rollback().expect("rollback");
+        drop(lock);
+
+        let link = workspace.join("bin/contract.md");
+        let metadata = std::fs::symlink_metadata(&link)
+            .expect("the rolled-back workspace must have the link back");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "restored as a {:?}, not a symlink",
+            metadata.file_type()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("../LINGXI.md"),
+            "the link must be reproduced, not dereferenced into a copy"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("LINGXI.md")).unwrap(),
+            b"guided shell\n",
+            "and the rest of the rollback must still work"
+        );
+    }
+
+    /// The other half: containment is the rule, not "symlinks are fine now".
+    #[test]
+    #[cfg(unix)]
+    fn scaffold_recovery_refuses_an_escaping_or_absolute_symlink() {
+        for (label, target, needle) in [
+            ("escaping", "../../../../etc/passwd", "escapes the snapshot"),
+            ("absolute", "/etc/passwd", "must be relative"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = shell_on_disk(dir.path(), "symlink2");
+            std::os::unix::fs::symlink(target, workspace.join("stowaway")).unwrap();
+
+            let lock = lock_app_build(dir.path(), "symlink2").unwrap();
+            let error = begin_scaffold_recovery(dir.path(), "symlink2", "formed", "brief")
+                .expect_err("{label}: a link out of the tree must fail closed");
+            drop(lock);
+            assert!(
+                matches!(&error, AppError::StorageCorrupt(_)),
+                "{label}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(needle),
+                "{label}: expected {needle:?}, got {error}"
+            );
+            assert!(
+                !dir.path()
+                    .join(scaffold_recovery_dir_rel())
+                    .join("symlink2")
+                    .exists(),
+                "{label}: the refused snapshot must not leave a backup behind"
+            );
+        }
     }
 
     #[test]

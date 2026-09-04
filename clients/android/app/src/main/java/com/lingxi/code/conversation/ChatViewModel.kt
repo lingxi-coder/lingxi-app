@@ -644,11 +644,26 @@ class ChatViewModel(
                     if (!belongsToVisibleSession) return@update it
                     it.copy(
                         statusLine = if (belongsToVisibleSession) {
-                            taskStatusLine(event.taskId, event.status, strings)
+                            // Name the task by its human description when the
+                            // row list already supplied one; the bare id is the
+                            // last resort, not the default.
+                            taskStatusLine(
+                                it.backgroundTasks[event.taskId]
+                                    ?.description
+                                    ?.takeIf { label -> label.isNotBlank() }
+                                    ?: event.taskId,
+                                event.status,
+                                strings,
+                                event.error,
+                            )
                         } else {
                             it.statusLine
                         },
-                        backgroundTasks = it.backgroundTasks.updateStatus(event.taskId, event.status),
+                        backgroundTasks = it.backgroundTasks.updateStatus(
+                            event.taskId,
+                            event.status,
+                            event.error,
+                        ),
                         activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
                             event.taskId,
                             event.status,
@@ -2756,8 +2771,15 @@ internal fun reconstructTerminalAgentRuns(messages: List<Message>): Map<String, 
 private fun Map<String, BackgroundTaskUi>.updateStatus(
     taskId: String,
     status: TaskStatusDto,
+    error: String? = null,
 ): Map<String, BackgroundTaskUi> = mapNotNull { (id, task) ->
-    if (id == taskId) id to task.copy(status = status) else id to task
+    if (id == taskId) {
+        // Never clear a reason already learned from a `TaskRow` backfill — the
+        // push and the row list are two sources for the same field.
+        id to task.copy(status = status, error = error?.takeIf { it.isNotBlank() } ?: task.error)
+    } else {
+        id to task
+    }
 }.toMap()
 
 private fun Set<String>.withTaskStatus(taskId: String, status: TaskStatusDto): Set<String> =
@@ -2877,6 +2899,7 @@ internal fun taskStatusLine(
     taskId: String,
     status: TaskStatusDto,
     strings: ConversationStrings = DefaultConversationStrings,
+    error: String? = null,
 ): String = when (status) {
     TaskStatusDto.PENDING ->
         strings.resolve(R.string.chat_task_status_pending, "后台任务 %1\$s 已排队", taskId)
@@ -2886,8 +2909,14 @@ internal fun taskStatusLine(
         strings.resolve(R.string.chat_task_status_paused, "后台任务 %1\$s 已暂停", taskId)
     TaskStatusDto.COMPLETED ->
         strings.resolve(R.string.chat_task_status_completed, "后台任务 %1\$s 已完成", taskId)
-    TaskStatusDto.FAILED ->
-        strings.resolve(R.string.chat_task_status_failed, "后台任务 %1\$s 已失败", taskId)
+    TaskStatusDto.FAILED -> error?.takeIf { it.isNotBlank() }?.let { reason ->
+        strings.resolve(
+            R.string.chat_task_status_failed_reason,
+            "后台任务 %1\$s 已失败：%2\$s",
+            taskId,
+            reason,
+        )
+    } ?: strings.resolve(R.string.chat_task_status_failed, "后台任务 %1\$s 已失败", taskId)
     TaskStatusDto.CANCELLED ->
         strings.resolve(R.string.chat_task_status_cancelled, "后台任务 %1\$s 已取消", taskId)
 }

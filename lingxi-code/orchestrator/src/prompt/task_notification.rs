@@ -83,6 +83,41 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// r1-workflow-runtime-05: `host_context.selector_capability` /
+/// `host_context.invocation_capability` are host-minted authority tokens the
+/// `local-app-build`/`update`/`verify` workflow launch enriches `spec.args`
+/// with AFTER `sanitize_namespaced_local_app_args` strips the caller-supplied
+/// copies (`apps/engine-mobile/src/workflow_support.rs`); they are read back
+/// only by the workflow script's own `context.selector_capability` /
+/// `context.invocation_capability`, never by the model. `n.workflow_args` is
+/// that fully-enriched `spec.args`, echoed here for a human to eyeball a
+/// resume command — it must not hand a still-valid capability token back into
+/// the model's conversation. Redact just those two leaves; everything else in
+/// the args JSON is left byte-for-byte so a resume command a user copies
+/// still runs.
+const REDACTED_HOST_CAPABILITY_KEYS: &[&str] = &["selector_capability", "invocation_capability"];
+const REDACTED_HOST_CAPABILITY_PLACEHOLDER: &str = "[redacted]";
+
+fn redact_host_capabilities(args_json: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        // Not parseable JSON (should not happen: this is always
+        // `serde_json::to_string` output) -- nothing structured to redact, so
+        // echo it back unchanged rather than fail the whole notification.
+        return args_json.to_string();
+    };
+    if let Some(host_context) = value
+        .get_mut("host_context")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in REDACTED_HOST_CAPABILITY_KEYS {
+            if let Some(slot) = host_context.get_mut(*key) {
+                *slot = serde_json::Value::String(REDACTED_HOST_CAPABILITY_PLACEHOLDER.into());
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| args_json.to_string())
+}
+
 const WORKFLOW_RESULT_PREVIEW_UTF16: usize = 8_000;
 const TASK_NOTIFICATION_MAX_UTF16: usize = 100_000;
 const TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16: usize = 1_024;
@@ -380,7 +415,7 @@ fn render_one(n: &TaskNotification) -> String {
             let args_clause = n
                 .workflow_args
                 .as_deref()
-                .map(|args| format!(", args: {args}"))
+                .map(|args| format!(", args: {}", redact_host_capabilities(args)))
                 .unwrap_or_default();
             let recovery_section = if matches!(n.status.as_str(), "failed" | "killed") {
                 let mut lines = Vec::new();
@@ -792,6 +827,61 @@ mod tests {
         ));
         assert!(!block.contains("<diagnostics>"));
         assert!(!block.contains("<result>"));
+    }
+
+    /// r1-workflow-runtime-05: the `local-app-build`/`update`/`verify`
+    /// launch enriches `spec.args` with `host_context.selector_capability` /
+    /// `host_context.invocation_capability` AFTER the caller-supplied copies
+    /// are stripped (`sanitize_namespaced_local_app_args`); those minted
+    /// tokens must never echo back into the model's conversation through the
+    /// `<recovery>` resume command, even though everything else in the args
+    /// object (including sibling `host_context` keys) must survive verbatim
+    /// so a copied resume command still runs.
+    #[test]
+    fn workflow_recovery_command_redacts_host_capability_tokens() {
+        let mut n = base("w12345678", "local_workflow", "failed", "review");
+        n.error = Some("boom".into());
+        n.workflow_script_path = Some("/tmp/a.js".into());
+        n.workflow_run_id = Some("wf_abcdef".into());
+        n.workflow_args = Some(
+            r#"{"q":"x","host_context":{"selector_capability":"sel_live_token","invocation_capability":"mcpv_live_token","source":"caller"}}"#
+                .into(),
+        );
+
+        let block = render_one(&n);
+        assert!(
+            block.contains(
+                r#"args: {"q":"x","host_context":{"selector_capability":"[redacted]","invocation_capability":"[redacted]","source":"caller"}}"#
+            ),
+            "got: {block}"
+        );
+        assert!(!block.contains("sel_live_token"), "got: {block}");
+        assert!(!block.contains("mcpv_live_token"), "got: {block}");
+        // Non-capability keys, at top level and inside `host_context`, are
+        // untouched byte-for-byte.
+        assert!(block.contains(r#""q":"x""#));
+        assert!(block.contains(r#""source":"caller""#));
+    }
+
+    /// Same guard for the "completed" path's `<diagnostics>` re-run command,
+    /// which shares `args_clause` with `<recovery>` but is only reachable
+    /// from a *different* status branch — proving one fix covers both call
+    /// sites rather than only the one under direct test above.
+    #[test]
+    fn workflow_diagnostics_rerun_command_redacts_host_capability_tokens() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.workflow_script_path = Some("/tmp/a.js".into());
+        n.workflow_run_id = Some("wf_abcdef".into());
+        n.workflow_args =
+            Some(r#"{"host_context":{"selector_capability":"sel_live_token"}}"#.into());
+        n.workflow_transcript_dir = Some("/tmp/transcripts/wf_abcdef".into());
+
+        let block = render_one(&n);
+        assert!(
+            block.contains(r#"args: {"host_context":{"selector_capability":"[redacted]"}}"#),
+            "got: {block}"
+        );
+        assert!(!block.contains("sel_live_token"), "got: {block}");
     }
 
     #[test]

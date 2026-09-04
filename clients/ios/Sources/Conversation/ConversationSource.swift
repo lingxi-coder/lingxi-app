@@ -3404,8 +3404,10 @@ final class MockConversationSource: ConversationSource {
             description: String?,
             status: BackgroundTaskSnapshot.Status,
             canResume: Bool = false,
-            startedAtMs: UInt64? = nil
+            startedAtMs: UInt64? = nil,
+            errorText: String? = nil
         ) {
+            let reason = errorText.flatMap { $0.isEmpty ? nil : $0 }
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
                 if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
                     model.backgroundTasks[index].status = status
@@ -3415,6 +3417,12 @@ final class MockConversationSource: ConversationSource {
                 }
                 model.backgroundTasks[index].canResume = canResume || model.backgroundTasks[index].canResume
                 model.backgroundTasks[index].startedAtMs = startedAtMs ?? model.backgroundTasks[index].startedAtMs
+                // Never clear a reason already learned from the other source
+                // (`TaskRow` backfill vs. the `TaskStatusChanged` push) — only
+                // ever fill it in.
+                if let reason {
+                    model.backgroundTasks[index].errorText = reason
+                }
             } else {
                 model.backgroundTasks.append(BackgroundTaskSnapshot(
                     id: id,
@@ -3422,6 +3430,7 @@ final class MockConversationSource: ConversationSource {
                     status: status,
                     canResume: canResume,
                     startedAtMs: startedAtMs,
+                    errorText: reason,
                     workflow: nil
                 ))
             }
@@ -4529,7 +4538,8 @@ final class MockConversationSource: ConversationSource {
                         description: task.description,
                         status: mapped,
                         canResume: task.canResume,
-                        startedAtMs: task.startedAtMs
+                        startedAtMs: task.startedAtMs,
+                        errorText: task.error
                     )
                 }
 
@@ -4561,7 +4571,7 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 model.planTasks = tasks.map(Self.planTask(from:))
 
-            case let .taskStatusChanged(taskId, status, originSessionId):
+            case let .taskStatusChanged(taskId, status, originSessionId, taskError):
                 // Allowlisted through the turn gate: a background task
                 // normally finishes after its spawning turn already ended.
                 guard acceptTurnEvent(event) else { return }
@@ -4573,7 +4583,12 @@ final class MockConversationSource: ConversationSource {
                 }
                 if let mapped = Self.backgroundTaskStatus(status) {
                     let known = model.backgroundTasks.contains { $0.id == taskId }
-                    upsertBackgroundTask(id: taskId, description: nil, status: mapped)
+                    upsertBackgroundTask(
+                        id: taskId,
+                        description: nil,
+                        status: mapped,
+                        errorText: taskError
+                    )
                     if !known {
                         // First sighting via a push — pull the row list so
                         // the panel can show the human description instead
@@ -4581,11 +4596,23 @@ final class MockConversationSource: ConversationSource {
                         refreshBackgroundTasks()
                     }
                 }
+                // Name the task by its human description when one is already
+                // known (a `TaskRow` reply, or an earlier push that triggered
+                // the refresh above); fall back to the bare id only when it is
+                // genuinely all we have.
+                let label = model.backgroundTasks
+                    .first { $0.id == taskId }
+                    .map(\.descriptionText)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    ?? taskId
+                let reason = taskError.flatMap { $0.isEmpty ? nil : $0 }
                 let text: String?
                 switch status {
-                case .completed: text = String(localized: "chat_task_completed \(taskId)")
-                case .failed: text = String(localized: "chat_task_failed \(taskId)")
-                case .cancelled: text = String(localized: "chat_task_cancelled \(taskId)")
+                case .completed: text = String(localized: "chat_task_completed \(label)")
+                case .failed:
+                    text = reason.map { String(localized: "chat_task_failed_reason \(label) \($0)") }
+                        ?? String(localized: "chat_task_failed \(label)")
+                case .cancelled: text = String(localized: "chat_task_cancelled \(label)")
                 case .pending, .running, .paused: text = nil
                 @unknown default: text = nil
                 }

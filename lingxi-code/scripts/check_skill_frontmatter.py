@@ -110,37 +110,51 @@ def main():
     agents = []
     for root in AGENT_ROOTS:
         base = repo / root
-        if base.is_dir():
-            agents.extend(sorted(base.glob("*.md")))
+        if not base.is_dir():
+            print("check-skill-frontmatter: agent root missing at %s — refusing to report a clean "
+                  "result from a root that does not exist" % base, file=sys.stderr)
+            return 1
+        # rglob, not glob: matches discovery.rs's glob_md, which recurses —
+        # a nested reorg the plugin loader still finds must not go unseen here.
+        agents.extend(sorted((p, base) for p in base.rglob("*.md")))
+
+    if not agents:
+        print("check-skill-frontmatter: enumerated ZERO agents under %s — refusing to report clean "
+              "from an empty enumeration" % ", ".join(AGENT_ROOTS), file=sys.stderr)
+        return 1
 
     problems = []
     rows = []
-    for path in agents:
+    for path, agent_base in agents:
         stem = path.stem
+        # `stem` is the IDENTITY (discovery.rs keys agents by file name, not by
+        # relative path); `rel` is only for the message, so a nested agent the
+        # rglob above now finds is reported at a path that actually exists.
+        rel = path.relative_to(agent_base)
         text = path.read_text(encoding="utf-8", errors="replace")
         m = FRONTMATTER.match(text)
         if not m:
-            problems.append("agents/%s.md: no YAML frontmatter block" % stem)
+            problems.append("agents/%s: no YAML frontmatter block" % rel)
             continue
         block = m.group(1)
         name = scalar(block, "name")
         if not name:
-            problems.append("agents/%s.md: frontmatter has no non-empty `name`" % stem)
+            problems.append("agents/%s: frontmatter has no non-empty `name`" % rel)
         elif name != stem:
             problems.append(
-                "agents/%s.md: frontmatter name is %r but the file is %r.md — agent identity comes "
-                "from the FILE NAME" % (stem, name, stem)
+                "agents/%s: frontmatter name is %r but the file is %r.md — agent identity comes "
+                "from the FILE NAME" % (rel, name, stem)
             )
         if not scalar(block, "description"):
-            problems.append("agents/%s.md: frontmatter has no non-empty `description`" % stem)
+            problems.append("agents/%s: frontmatter has no non-empty `description`" % rel)
         for field in FORBIDDEN_AGENT_FIELDS:
             if re.search(r"^%s\s*:" % re.escape(field), block, re.M):
                 how = ("makes validate_plugin_agent_frontmatter fail, which fails the WHOLE plugin load"
                        if field in ("hooks", "permissionMode")
                        else "is parsed then silently cleared with only a tracing warning")
                 problems.append(
-                    "agents/%s.md declares `%s`, which a plugin agent must never set — it %s"
-                    % (stem, field, how)
+                    "agents/%s declares `%s`, which a plugin agent must never set — it %s"
+                    % (rel, field, how)
                 )
 
         # An agent that GRANTS a tool must not also tell itself the tool does
@@ -160,10 +174,10 @@ def main():
                     continue
                 if DENIES_EXISTENCE.search(sentence):
                     problems.append(
-                        "agents/%s.md grants `%s` in its frontmatter but its prose says the tool "
+                        "agents/%s grants `%s` in its frontmatter but its prose says the tool "
                         "does not exist: %r — an agent told its own granted tool is missing will "
                         "skip the step that needs it"
-                        % (stem, tool, " ".join(sentence.split())[:160])
+                        % (rel, tool, " ".join(sentence.split())[:160])
                     )
                     break
 

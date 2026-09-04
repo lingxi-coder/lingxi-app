@@ -1257,6 +1257,7 @@ G3	lingxi-code/plugin/tests/discovery_bootstrap.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/enabled_discovery.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/materialize.rs	.lingxi-plugin
 G3	lingxi-code/plugins/lingxi-local-app/agents/builder.md	.lingxi
+G3	lingxi-code/plugins/lingxi-local-app/agents/builder.md	.lingxi-*
 G3	lingxi-code/plugins/lingxi-local-app/agents/builder.md	LINGXI.md
 G3	lingxi-code/plugins/lingxi-local-app/agents/designer.md	.lingxi
 G3	lingxi-code/plugins/lingxi-local-app/assets/templates/babylon-3d/r1/.gitignore	.lingxi-*

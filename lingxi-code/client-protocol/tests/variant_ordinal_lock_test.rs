@@ -55,7 +55,22 @@ const COMMANDS_SRC: &str = include_str!("../src/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/events.rs");
 
 /// `ClientCommand`'s variants in declaration order as of the 9.0.0 bless
-/// (`391d89fff`). 50 entries; ordinal N here is UniFFI ordinal N+1.
+/// (`391d89fff`), MINUS one row. 49 entries; ordinal N here is UniFFI ordinal
+/// N+1.
+///
+/// 🚨 PROVENANCE, stated as fact rather than as policy: the 9.0.0 bless froze
+/// 50 entries, with `ResolveAppRuntimeProfileSelection` at ordinal 38. Commit
+/// `77d1ec7fb` deleted that one row from this list. It was NOT a re-cut: at
+/// `77d1ec7fb^` and at `77d1ec7fb` alike `CLIENT_PROTOCOL_VERSION` reads
+/// `"10.0.0"` and `snapshots/blessed_major.txt` reads `10`, so nothing was
+/// bumped and nothing was re-blessed. Per this file's own rule above, dropping
+/// a row from the frozen prefix is a MAJOR bump plus a re-bless, and a re-cut
+/// then takes the FULL current order — not the old list minus a row. So this
+/// 49-entry list is a hybrid that has never been sanctioned; do not read it as
+/// precedent, and do not shrink it further to turn a red run green. Resolving
+/// it (restore ordinal 38, or re-cut both lists from the blessed 11.0.0 and
+/// rename them `_AT_11_0_0`) belongs with the owner of
+/// `client-protocol/src/{commands,events}.rs`.
 const CLIENT_COMMAND_ORDINALS_AT_9_0_0: &[&str] = &[
     "SendPrompt",
     "Cancel",
@@ -227,6 +242,48 @@ fn variants_in_declaration_order(src: &str, enum_name: &str) -> Vec<String> {
     out
 }
 
+/// A SECOND, deliberately different reading of the same enum body, used only by
+/// `the_parser_reads_the_whole_enum_body` to catch a truncating
+/// `variants_in_declaration_order`.
+///
+/// It shares no logic with that function: instead of tracking brace depth it
+/// takes everything between the enum header and the first column-0 `}`, and
+/// treats a line indented by exactly four spaces and starting with an uppercase
+/// ASCII letter as a variant. `rustfmt` puts every top-level variant there and
+/// nothing else (fields sit at eight, doc comments start with `/`, attributes
+/// with `#`). A depth bug — an unbalanced brace inside a string or a comment —
+/// truncates the depth parser without touching this one, so the two disagree.
+fn variants_by_flat_scan(src: &str, enum_name: &str) -> Vec<String> {
+    let header = format!("pub enum {enum_name} {{");
+    let start = src
+        .find(&header)
+        .unwrap_or_else(|| panic!("`{header}` not found in the source"))
+        + header.len();
+
+    let mut out = Vec::new();
+    for line in src[start..].lines() {
+        if line == "}" {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("    ") else {
+            continue;
+        };
+        if !rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let tail = rest[ident.len()..].trim_start();
+        if tail.starts_with('{') || tail.starts_with('(') || tail.starts_with(',') || tail.is_empty()
+        {
+            out.push(ident);
+        }
+    }
+    out
+}
+
 /// The shared assertion. Reports the first divergence BY ORDINAL AND NAME, so a
 /// red run says which variant moved and what now occupies its slot — never just
 /// "not equal".
@@ -309,16 +366,36 @@ fn the_parser_reads_the_whole_enum_body() {
         events.len()
     );
 
-    // The last variant of each enum, read from the source rather than assumed:
-    // if the parser stopped early it cannot see these.
-    assert!(
-        commands.contains(&"PauseTurn".to_string()),
-        "parser missed `ClientCommand::PauseTurn`; parsed: {commands:?}"
-    );
-    assert!(
-        events.contains(&"Skills".to_string()),
-        "parser missed `ClientEvent::Skills`; parsed: {events:?}"
-    );
+    // The TAIL of each enum, established by a second, independent reading of
+    // the same source (see `variants_by_flat_scan`) rather than by a hardcoded
+    // name: a hardcoded name silently stops covering the tail as soon as
+    // anything is appended past it, which is precisely where every new variant
+    // lands. The two readers disagree exactly when the depth-tracking parser
+    // truncates.
+    for (enum_name, src, parsed) in [
+        ("ClientCommand", COMMANDS_SRC, &commands),
+        ("ClientEvent", EVENTS_SRC, &events),
+    ] {
+        let flat = variants_by_flat_scan(src, enum_name);
+        assert_eq!(
+            parsed.len(),
+            flat.len(),
+            "the depth-tracking parser read {} `{enum_name}` variants but the independent \
+             flat scan of {} reads {}. A truncating parser makes the ordinal locks above \
+             pass on a short list.\nparser: {parsed:?}\nflat:   {flat:?}",
+            parsed.len(),
+            enum_name,
+            flat.len(),
+        );
+        assert_eq!(
+            parsed.last(),
+            flat.last(),
+            "the depth-tracking parser ends `{enum_name}` at {:?} but the independent flat \
+             scan ends it at {:?}",
+            parsed.last(),
+            flat.last(),
+        );
+    }
 }
 
 /// Proof that the gate can go red: feed the parser a synthetic enum with a

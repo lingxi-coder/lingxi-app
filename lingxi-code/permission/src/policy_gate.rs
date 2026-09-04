@@ -1718,20 +1718,25 @@ fn read_only_default_auto_allows(
     reason: &PermissionDecisionReason,
     mode: PermissionMode,
 ) -> bool {
-    // MOBILE DIVERGENCE, narrowly scoped to the local-app family.
+    // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle
+    // counterpart (`defaults_per_tool::is_divergence_tool`: the `LocalApp*`
+    // family plus `Workflow`).
     //
     // `AllowByDefault` short-circuits the Plan-mode backstop, so a mutating
     // tool that is auto-allowed for convenience would RUN while the user
     // believes they are only planning — `LocalAppBuild` starts a 30-minute
-    // build and `LocalAppRuntime {action:"open"}` puts an app on screen.
-    // `PLAN_SAFE_TOOLS` is the existing statement of what may run in Plan
-    // mode, and none of these are in it.
+    // build, `LocalAppRuntime {action:"open"}` puts an app on screen, and
+    // `Workflow` fans out a whole crew of side-effecting agents
+    // (`WorkflowTool::is_read_only` answers `false`). `PLAN_SAFE_TOOLS` is the
+    // existing statement of what may run in Plan mode, and none of these are
+    // in it.
     //
     // Deliberately NOT applied to the oracle tools: several of them are
     // `AllowByDefault` without being plan-safe, and changing that would be a
-    // parity change rather than a fix.
+    // parity change rather than a fix. A divergence row carries no such
+    // constraint — its default is ours to set — so it fails closed here.
     if mode == PermissionMode::Plan
-        && name.starts_with("LocalApp")
+        && crate::defaults_per_tool::is_divergence_tool(name)
         && !crate::mode_policy::is_plan_safe_tool(name)
     {
         return false;
@@ -2652,6 +2657,107 @@ fn rule_settings_source(reason: &PermissionDecisionReason) -> Option<String> {
 #[cfg(test)]
 #[path = "policy_gate_test.rs"]
 mod policy_gate_test;
+
+// PLAN-DIVERGENCE-01: separate inline module (kept out of the concurrently
+// edited policy_gate_test.rs) proving that the LingXi-only `AllowByDefault`
+// rows do not short-circuit the Plan-mode mutation backstop, while still being
+// frictionless in the modes the row exists for.
+#[cfg(test)]
+mod plan_mode_divergence_test {
+    use super::*;
+    use crate::{PermissionMode, PermissionPolicy, PermissionRuleSource};
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Stands in for the interactive prompt transport. Asserting its CALL COUNT
+    /// is what separates "the gate asked" from "the gate silently auto-allowed"
+    /// — the two are indistinguishable from the returned decision alone when
+    /// the user would have answered yes.
+    struct CountingInner {
+        calls: AtomicUsize,
+        decision: PermissionDecision,
+    }
+
+    impl CountingInner {
+        fn new(decision: PermissionDecision) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                decision,
+            })
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PermissionGate for CountingInner {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.decision.clone()
+        }
+    }
+
+    fn gate_in(mode: PermissionMode, inner: Arc<CountingInner>) -> PolicyPermissionGate {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": {} }"#,
+            PermissionRuleSource::LocalSettings,
+        )
+        .unwrap();
+        let policy = Arc::new(PermissionPolicy::from_rules(mode, rules));
+        PolicyPermissionGate::new(policy, inner)
+    }
+
+    /// `Workflow` is `AllowByDefault` so the create-app hand-off does not
+    /// double-prompt — but `AllowByDefault` also short-circuits the Plan-mode
+    /// backstop, and a workflow fans out side-effecting agents. It is not in
+    /// `PLAN_SAFE_TOOLS`, so Plan mode must still reach the prompt transport.
+    #[tokio::test]
+    async fn plan_mode_still_gates_the_workflow_launcher() {
+        let inner = CountingInner::new(PermissionDecision::Deny {
+            reason: "planning".into(),
+        });
+        let gate = gate_in(PermissionMode::Plan, inner.clone());
+
+        let decision = gate
+            .check("Workflow", &serde_json::json!({"scriptPath": "/w/build.js"}))
+            .await;
+        assert!(
+            matches!(decision, PermissionDecision::Deny { .. }),
+            "a workflow launch must not run in plan mode, got {decision:?}"
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "the prompt transport must be consulted — a silent auto-allow \
+             never reaches it"
+        );
+    }
+
+    /// The other half of the row: outside Plan mode the hand-off is still
+    /// frictionless, and the prompt transport is never touched. Without this
+    /// the test above would pass just as well with the row reverted.
+    #[tokio::test]
+    async fn default_mode_auto_allows_the_workflow_launcher_without_prompting() {
+        let inner = CountingInner::new(PermissionDecision::Deny {
+            reason: "should not be reached".into(),
+        });
+        let gate = gate_in(PermissionMode::Default, inner.clone());
+
+        assert_eq!(
+            gate.check("Workflow", &serde_json::json!({"scriptPath": "/w/build.js"}))
+                .await,
+            PermissionDecision::Allow,
+            "the create-app hand-off must not double-prompt"
+        );
+        assert_eq!(
+            inner.calls(),
+            0,
+            "the auto-allow must short-circuit before the prompt transport"
+        );
+    }
+}
 
 // GATE-SYSMSG-01: separate inline module (kept out of the concurrently-edited
 // policy_gate_test.rs) covering the `oin` reason filter and the

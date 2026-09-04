@@ -4,11 +4,64 @@ import { createRoot } from 'react-dom/client';
 import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import {
+  defaultNativeAudioSnapshot,
+  type NativeAudioCommand,
+  type NativeAudioResponse,
+} from '../../src/shared/nativeAudio';
 
 const projectPath = '/tmp/composer-draft-project';
 let resolvePendingSend: (() => void) | undefined;
 let sendPending = false;
 let lastSentPrompt = '';
+const audioRequests: NativeAudioCommand[] = [];
+
+function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
+  const idleSnapshot = defaultNativeAudioSnapshot();
+  switch (command.type) {
+    case 'request_authorization':
+      return { type: 'authorization', snapshot: idleSnapshot };
+    case 'start_listening':
+      return {
+        type: 'listening_started',
+        snapshot: { ...idleSnapshot, owner: command.owner, activity: 'listening' },
+      };
+    case 'finish_listening':
+      return {
+        type: 'listening_finished',
+        snapshot: idleSnapshot,
+        transcript: { text: 'dictated text', language: 'en-US' },
+      };
+    case 'cancel':
+      return { type: 'cancelled', snapshot: idleSnapshot };
+    case 'speak':
+      return { type: 'speaking_started', snapshot: { ...idleSnapshot, owner: command.owner, activity: 'speaking' } };
+    case 'stop_speaking':
+      return { type: 'speaking_stopped', snapshot: idleSnapshot };
+    case 'list_models':
+      return { type: 'models', snapshot: idleSnapshot, models: [] };
+    case 'install_model':
+    case 'cancel_model':
+    case 'remove_model':
+      return {
+        type: 'model_operation',
+        snapshot: idleSnapshot,
+        model: { modelId: command.modelId, state: { type: 'not-installed' } },
+      };
+    case 'get_snapshot':
+      return { type: 'snapshot', snapshot: idleSnapshot };
+  }
+}
+
+(window as unknown as { lingxi: { audio: unknown } }).lingxi = {
+  audio: {
+    request: async (command: NativeAudioCommand) => {
+      audioRequests.push(command);
+      return audioResponse(command);
+    },
+    onEvent: () => () => undefined,
+  },
+};
 
 function bridgeFixture(sessionId: string, running: boolean) {
   return {
@@ -92,6 +145,8 @@ function Fixture() {
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
+      clearAudioRequests: () => { audioRequests.length = 0; },
+      audioRequestTypes: () => audioRequests.map((request) => request.type),
     };
     return () => { delete window.__composerDraftTest; };
   }, []);
@@ -118,6 +173,8 @@ declare global {
       sendPending(): boolean;
       lastSentPrompt(): string;
       resolveSend(): void;
+      clearAudioRequests(): void;
+      audioRequestTypes(): string[];
     };
   }
 }

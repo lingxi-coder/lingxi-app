@@ -2339,9 +2339,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             aria-pressed={flowMode}
             title={flowMode ? '关闭心流模式' : '开启心流模式'}
             onClick={toggleFlowMode}
-            style={{ ...composerPrimaryActionStyle(t, ready), background: flowMode ? t.accent : t.text, color: t.windowBg, boxShadow: flowMode ? `0 0 0 3px ${t.accentBg}` : 'none' }}
+            style={{ ...composerPrimaryActionStyle(t, ready), color: flowMode ? t.accent : t.text }}
           >
-            <Icon name="waveform" size={18} color={flowMode ? '#fff' : t.windowBg} stroke={2.15} />
+            <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>
           {bridge.running && (
             <button

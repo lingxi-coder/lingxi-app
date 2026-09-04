@@ -51,6 +51,35 @@ async function main() {
     const { webContents } = window;
     await waitFor(webContents, `Boolean(window.__composerDraftTest && document.querySelector('[aria-label="Prompt"]'))`);
 
+    const composerScreenshotPath = process.env.LINGXI_COMPOSER_SCREENSHOT;
+    if (composerScreenshotPath) {
+      const bounds = await webContents.executeJavaScript(`(() => {
+        const composer = document.querySelector('[aria-label="Prompt"]')?.closest('[data-composer-surface]')
+          ?? document.querySelector('[aria-label="Prompt"]')?.parentElement?.parentElement;
+        const rect = composer.getBoundingClientRect();
+        return { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+      })()`);
+      const image = await webContents.capturePage(bounds);
+      await writeFile(composerScreenshotPath, image.toPNG());
+    }
+
+    await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Start ordinary recording"]').click()`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Stop ordinary recording"]')?.disabled === false`);
+    const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop ordinary recording"]').click()`);
+    await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
+    const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
+
+    await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
+    await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);
+    await waitFor(webContents, `window.__composerDraftTest.audioRequestTypes().includes('start_listening')`);
+    const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+    const audioInteraction = { dictationStartRequests, dictatedText, flowStartRequests };
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="关闭心流模式"]').click()`);
+    await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="心流模式"]')`);
+
     await webContents.executeJavaScript(`document.querySelector('button[aria-label^="Model:"]').click()`);
     await waitFor(webContents, `Boolean(document.querySelector('[aria-label="Model settings"]'))`);
     const modelSettings = await webContents.executeJavaScript(`({
@@ -161,7 +190,7 @@ async function main() {
     await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === ''`);
 
-    process.stdout.write(`${JSON.stringify({ modelSettings, initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
+    process.stdout.write(`${JSON.stringify({ audioInteraction, modelSettings, initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

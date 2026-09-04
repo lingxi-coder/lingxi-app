@@ -17,6 +17,22 @@ function phaseColor(phase: VoiceFlowPhase, accent: string, danger: string, text:
   }
 }
 
+export function canvasColorWithAlpha(color: string, alpha: number): string {
+  const normalized = color.trim();
+  const boundedAlpha = Math.min(1, Math.max(0, alpha));
+  const hex = normalized.match(/^#([\da-f]{6})$/i);
+  if (hex) {
+    const alphaHex = Math.round(boundedAlpha * 255).toString(16).padStart(2, '0');
+    return `#${hex[1]}${alphaHex}`;
+  }
+  const modernFunction = normalized.match(/^(oklch|oklab|lch|lab)\((.*)\)$/i);
+  if (modernFunction) {
+    const body = modernFunction[2].replace(/\s*\/\s*[^)]+$/, '').trim();
+    return `${modernFunction[1]}(${body} / ${boundedAlpha})`;
+  }
+  return normalized;
+}
+
 export function VoiceOrbCanvas({ phase, size = 124 }: { phase: VoiceFlowPhase; size?: number }) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -55,8 +71,8 @@ export function VoiceOrbCanvas({ phase, size = 124 }: { phase: VoiceFlowPhase; s
       context.clearRect(0, 0, cssSize, cssSize);
 
       const glow = context.createRadialGradient(center, center, coreRadius * 0.4, center, center, cssSize * 0.48);
-      glow.addColorStop(0, `${color}44`);
-      glow.addColorStop(0.58, `${color}18`);
+      glow.addColorStop(0, canvasColorWithAlpha(color, 0.27));
+      glow.addColorStop(0.58, canvasColorWithAlpha(color, 0.09));
       glow.addColorStop(1, 'transparent');
       context.fillStyle = glow;
       context.beginPath();
@@ -67,7 +83,7 @@ export function VoiceOrbCanvas({ phase, size = 124 }: { phase: VoiceFlowPhase; s
       for (let index = 0; index < ringCount; index += 1) {
         const ringPulse = (pulse + index / ringCount) % 1;
         const radius = coreRadius + 10 + index * 10 + ringPulse * (phase === 'paused' ? 2 : 7);
-        context.strokeStyle = `${color}${phase === 'paused' ? '22' : '33'}`;
+        context.strokeStyle = canvasColorWithAlpha(color, phase === 'paused' ? 0.13 : 0.2);
         context.lineWidth = 1.5;
         context.globalAlpha = phase === 'paused' ? 0.35 : Math.max(0.12, 0.45 - index * 0.1 - ringPulse * 0.15);
         context.beginPath();
@@ -82,8 +98,8 @@ export function VoiceOrbCanvas({ phase, size = 124 }: { phase: VoiceFlowPhase; s
       context.fill();
 
       const innerGlow = context.createRadialGradient(center, center, 6, center, center, coreRadius + 2);
-      innerGlow.addColorStop(0, `${color}ee`);
-      innerGlow.addColorStop(1, `${color}88`);
+      innerGlow.addColorStop(0, canvasColorWithAlpha(color, 0.93));
+      innerGlow.addColorStop(1, canvasColorWithAlpha(color, 0.53));
       context.fillStyle = innerGlow;
       context.beginPath();
       context.arc(center, center, coreRadius, 0, Math.PI * 2);

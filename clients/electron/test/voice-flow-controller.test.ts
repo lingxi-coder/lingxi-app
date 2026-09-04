@@ -14,6 +14,7 @@ import {
   type NativeAudioOwner,
   type NativeAudioResponse,
 } from '../src/shared/nativeAudio';
+import { canvasColorWithAlpha } from '../src/renderer/components/voice/VoiceOrbCanvas';
 import { shouldAutoplayTrackedReply } from '../src/renderer/audio/autoplay';
 
 function flush(): Promise<void> {
@@ -24,6 +25,18 @@ test('ordinary autoplay rejects hidden or stale-session completions', () => {
   assert.equal(shouldAutoplayTrackedReply('session-1', 'session-1', false), true);
   assert.equal(shouldAutoplayTrackedReply('session-2', 'session-1', false), false);
   assert.equal(shouldAutoplayTrackedReply('session-1', 'session-1', true), false);
+});
+
+test('the flow orb adds alpha without corrupting modern theme colors', () => {
+  assert.equal(
+    canvasColorWithAlpha('oklch(72% 0.18 268)', 0.27),
+    'oklch(72% 0.18 268 / 0.27)',
+  );
+  assert.equal(
+    canvasColorWithAlpha('oklch(72% 0.18 268 / 0.8)', 0.2),
+    'oklch(72% 0.18 268 / 0.2)',
+  );
+  assert.equal(canvasColorWithAlpha('#336699', 0.5), '#33669980');
 });
 
 class FakeTimers {

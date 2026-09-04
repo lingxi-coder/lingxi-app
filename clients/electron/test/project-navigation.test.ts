@@ -262,6 +262,12 @@ test('composer keeps its idle input compact and aligns the primary action contro
     assert.match(tag, /border-radius:50%/);
   }
 
+  const microphoneTag = openingTag(markup, 'aria-label="Start ordinary recording"');
+  const flowTag = openingTag(markup, 'aria-label="开启心流模式"');
+  assert.match(microphoneTag, /background:transparent/);
+  assert.match(flowTag, /background:transparent/, 'the flow icon must use the same transparent treatment as the microphone');
+  assert.doesNotMatch(flowTag, /box-shadow/, 'the flow icon must not restore the old circular halo');
+
   assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(markup, /Enter to send/);
   assert.doesNotMatch(markup, /Goal mode enabled/);

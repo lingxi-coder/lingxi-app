@@ -80,6 +80,7 @@ test('empty conversation is not running and has no items', () => {
   const s = emptyConversation();
   assert.equal(s.running, false);
   assert.deepEqual(s.items, []);
+  assert.deepEqual(s.summaries, []);
   assert.equal(s.lastError, null);
   assert.deepEqual(s.plan, []);
 });
@@ -362,14 +363,31 @@ test('manual compaction immediately adds one visible running status and settles 
     messages_before: 18,
     messages_after: 4,
     bytes_saved: 32_768,
+    summary: '## Work completed\n\nPreserved the provider routing fix.',
   });
   const status = s.items[1] as Compaction;
   assert.equal(status.status, 'complete');
   assert.equal(status.messagesBefore, 18);
   assert.equal(status.messagesAfter, 4);
   assert.equal(status.bytesSaved, 32_768);
+  assert.deepEqual(s.summaries, [{
+    id: 'i2',
+    content: '## Work completed\n\nPreserved the provider routing fix.',
+    messagesBefore: 18,
+    messagesAfter: 4,
+    bytesSaved: 32_768,
+  }]);
   assert.equal(s.activeCompactionId, null);
   assert.equal(s.pendingSlashName, null);
+
+  const duplicate = reduceEvent(s, {
+    type: 'compaction_completed',
+    messages_before: 18,
+    messages_after: 4,
+    bytes_saved: 32_768,
+    summary: '## Work completed\n\nPreserved the provider routing fix.',
+  });
+  assert.equal(duplicate, s, 'the production output stream and command reply may report the same compact result');
 });
 
 test('palette compaction echoes /compact and a compact failure settles the same status row', () => {
@@ -583,6 +601,12 @@ test('session_resumed atomically replaces the transcript with lowered history', 
   const boundary = s.items[1] as Narration;
   assert.equal(boundary.text, 'Conversation compacted (12 messages)');
   assert.doesNotMatch(boundary.text, /hidden compact summary/);
+  assert.deepEqual(s.summaries, [{
+    id: 'i2',
+    content: 'hidden compact summary',
+    messagesBefore: 12,
+    messagesAfter: 3,
+  }]);
   // A rehydrated reasoning block is NOT `streamed`, so it starts collapsed.
   assert.equal((s.items[2] as Thinking).streamed, undefined);
   const tool = s.items[3] as Tool;

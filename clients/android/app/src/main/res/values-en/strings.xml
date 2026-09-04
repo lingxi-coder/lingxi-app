@@ -1168,6 +1168,9 @@
     <string name="chat_error_session_switch_failed">Failed to switch session: %1$s</string>
     <string name="chat_error_cancel_generation_failed">Failed to cancel generation: %1$s</string>
     <string name="chat_retry_status">Retrying request %1$d/%2$d (%3$s)</string>
+    <string name="chat_compacting_context">Compacting context</string>
+    <string name="chat_compaction_failed">Context compaction failed</string>
+    <string name="chat_compaction_progress">Organizing context: %1$d%% (%2$d s)</string>
     <string name="chat_compaction_status">Context compacted: %1$d → %2$d messages, freed %3$s</string>
     <string name="composer_more">More</string>
     <string name="composer_camera">Take photo</string>

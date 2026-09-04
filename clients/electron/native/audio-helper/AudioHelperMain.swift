@@ -226,13 +226,36 @@ struct HelperRecognitionProgress: Encodable, Sendable {
 
 struct HelperEvent: Encodable, Sendable {
     let type: String
-    let snapshot: HelperSnapshot
+    let snapshot: HelperSnapshot?
     let owner: HelperOwner?
     let progress: HelperRecognitionProgress?
     let model: HelperModelSnapshot?
     let state: String?
     let error: HelperErrorPayload?
     let message: String?
+    let level: Double?
+
+    init(
+        type: String,
+        snapshot: HelperSnapshot?,
+        owner: HelperOwner?,
+        progress: HelperRecognitionProgress?,
+        model: HelperModelSnapshot?,
+        state: String?,
+        error: HelperErrorPayload?,
+        message: String?,
+        level: Double? = nil
+    ) {
+        self.type = type
+        self.snapshot = snapshot
+        self.owner = owner
+        self.progress = progress
+        self.model = model
+        self.state = state
+        self.error = error
+        self.message = message
+        self.level = level
+    }
 }
 
 enum HelperEngineResult: Sendable {
@@ -751,6 +774,7 @@ final class ListeningSession {
     private let outputSampleRate: Int
     private let wantsRecording: Bool
     private let onPartial: @Sendable (HelperTranscript) async -> Void
+    private let onLevel: @Sendable (Double) async -> Void
     private let onSilence: @Sendable () async -> Void
 
     private let engine = AVAudioEngine()
@@ -762,6 +786,7 @@ final class ListeningSession {
     private var samples: [Float] = []
     private var lastSpeechAt = Date()
     private var hasHeardSpeech = false
+    private var lastLevelPublishedAt = Date.distantPast
     private var monitorTask: Task<Void, Never>?
 
     init(
@@ -771,6 +796,7 @@ final class ListeningSession {
         outputSampleRate: Int,
         wantsRecording: Bool,
         onPartial: @escaping @Sendable (HelperTranscript) async -> Void,
+        onLevel: @escaping @Sendable (Double) async -> Void,
         onSilence: @escaping @Sendable () async -> Void
     ) {
         self.owner = owner
@@ -779,6 +805,7 @@ final class ListeningSession {
         self.outputSampleRate = outputSampleRate
         self.wantsRecording = wantsRecording
         self.onPartial = onPartial
+        self.onLevel = onLevel
         self.onSilence = onSilence
     }
 
@@ -859,6 +886,12 @@ final class ListeningSession {
             : resample(Array(source), from: sourceRate, to: outputSampleRate)
         samples.append(contentsOf: converted)
         let rms = sqrt(converted.reduce(0) { $0 + ($1 * $1) } / Float(max(1, converted.count)))
+        let now = Date()
+        if rms.isFinite, now.timeIntervalSince(lastLevelPublishedAt) >= 0.05 {
+            lastLevelPublishedAt = now
+            let level = Double(min(1, max(0, rms)))
+            Task { await onLevel(level) }
+        }
         if rms >= silenceThreshold {
             lastSpeechAt = Date()
             hasHeardSpeech = true
@@ -1386,6 +1419,26 @@ actor HelperStateStore {
         ))
     }
 
+    private func publishInputLevel(owner: HelperOwner, level: Double) async {
+        await writer.writeEnvelope(OutputEnvelope(
+            id: nil,
+            type: "event",
+            result: nil,
+            event: HelperEvent(
+                type: "input_level",
+                snapshot: nil,
+                owner: owner,
+                progress: nil,
+                model: nil,
+                state: nil,
+                error: nil,
+                message: nil,
+                level: level
+            ),
+            error: nil
+        ))
+    }
+
     private func publishSpeechState(owner: HelperOwner, state: String) async {
         await writer.writeEnvelope(OutputEnvelope(
             id: nil,
@@ -1677,6 +1730,9 @@ actor HelperStateStore {
                 wantsRecording: wantsRecording,
                 onPartial: { [weak self] transcript in
                     await self?.publishRecognitionProgress(owner: nextOwner, text: transcript.text, isFinal: false)
+                },
+                onLevel: { [weak self] level in
+                    await self?.publishInputLevel(owner: nextOwner, level: level)
                 },
                 onSilence: { [weak self] in
                     guard nextOwner.kind == "flow" else { return }

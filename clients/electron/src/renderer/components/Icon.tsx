@@ -77,6 +77,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'braces': return <svg {...p}><path d="M8 3C6 3 6 5 6 7s0 3-2 4c2 1 2 2 2 4s0 4 2 4M16 3c2 0 2 2 2 4s0 3 2 4c-2 1-2 2-2 4s0 4-2 4" /></svg>;
     case 'activity': return <svg {...p}><path d="M22 12h-4l-3 8-6-16-3 8H2" /></svg>;
     case 'compact': return <svg {...p}><path d="M7 3h7l4 4v8a4 4 0 0 1-4 4H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M14 3v5h5M8 11h6M8 15h3" /><circle cx="16.5" cy="17.5" r="2.5" /></svg>;
+    case 'summary': return <svg {...p}><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>;
     case 'info': return <svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5v.01" /></svg>;
     default: return null;
   }

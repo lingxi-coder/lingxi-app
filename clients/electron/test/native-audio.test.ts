@@ -5,7 +5,12 @@ import { test } from 'node:test';
 
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { NativeAudioManager } from '../src/main/audio/nativeAudioManager';
-import { defaultNativeAudioSnapshot, validateNativeAudioSnapshot, type NativeAudioSnapshot } from '../src/shared/nativeAudio';
+import {
+  defaultNativeAudioSnapshot,
+  validateNativeAudioEvent,
+  validateNativeAudioSnapshot,
+  type NativeAudioSnapshot,
+} from '../src/shared/nativeAudio';
 
 class FakeHelperProcess extends EventEmitter {
   readonly stdout = new PassThrough();
@@ -39,6 +44,21 @@ function snapshot(overrides: Partial<NativeAudioSnapshot> = {}): NativeAudioSnap
     ...overrides,
   };
 }
+
+test('input level events carry only a bounded real microphone amplitude', () => {
+  const owner = { kind: 'dictation', id: 'dictation-1' } as const;
+  assert.deepEqual(validateNativeAudioEvent({
+    type: 'input_level',
+    owner,
+    level: 0.42,
+  }), {
+    type: 'input_level',
+    owner,
+    level: 0.42,
+  });
+  assert.throws(() => validateNativeAudioEvent({ type: 'input_level', owner, level: -0.01 }), /audio input level/);
+  assert.throws(() => validateNativeAudioEvent({ type: 'input_level', owner, level: 1.01 }), /audio input level/);
+});
 
 function lastEnvelope(process: FakeHelperProcess): { id: string; kind: string } {
   const raw = process.writes.at(-1);
@@ -85,6 +105,56 @@ test('snapshot requests start the helper and return its real capabilities', asyn
     const response = await responsePromise;
     assert.equal(response.type, 'snapshot');
     assert.equal(response.snapshot.recognizerAvailable, true);
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
+test('native audio manager forwards input levels without replacing the capability snapshot', async () => {
+  const helper = new FakeHelperProcess();
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any,
+  });
+  try {
+    const responsePromise = manager.request({ type: 'get_snapshot' });
+    const envelope = await nextEnvelope(helper);
+    const currentSnapshot = snapshot({ localeTag: 'en-US' });
+    helper.stdout.write(`${JSON.stringify({
+      id: envelope.id,
+      type: 'response',
+      result: { type: 'snapshot', snapshot: currentSnapshot },
+    })}\n`);
+    await responsePromise;
+
+    const eventPromise = new Promise((resolve) => {
+      const unsubscribe = manager.onEvent((event) => {
+        unsubscribe();
+        resolve(event);
+      });
+    });
+    helper.stdout.write(`${JSON.stringify({
+      type: 'event',
+      event: {
+        type: 'input_level',
+        owner: { kind: 'dictation', id: 'dictation-1' },
+        level: 0.37,
+      },
+    })}\n`);
+
+    assert.deepEqual(await eventPromise, {
+      type: 'input_level',
+      owner: { kind: 'dictation', id: 'dictation-1' },
+      level: 0.37,
+    });
+    assert.deepEqual(manager.getSnapshot(), currentSnapshot);
   } finally {
     await manager.dispose();
     helper.stdin.end();

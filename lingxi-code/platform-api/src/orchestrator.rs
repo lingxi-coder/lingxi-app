@@ -490,6 +490,8 @@ pub struct CompactionSummary {
     /// Approximate bytes saved (summary token count delta × 4, as a UX
     /// estimate — exact accounting lives in `lingxi-compaction`).
     pub bytes_saved: u64,
+    /// Full model-generated continuation summary retained after compaction.
+    pub summary: String,
 }
 
 /// Outcome of a successful [`OrchestratorHandle::fork_conversation`] — the

@@ -1538,9 +1538,7 @@ impl crate::api::SubagentApiClient for RecordingForceApiClient {
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
     ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
-        unreachable!(
-            "run_subagent_loop drives every round through the _opts streaming seam only"
-        )
+        unreachable!("run_subagent_loop drives every round through the _opts streaming seam only")
     }
 
     async fn messages_create_stream_in_opts(
@@ -1628,7 +1626,11 @@ async fn schema_with_other_tools_never_pins_tool_choice_even_after_a_nudge() {
     // dispatch path. (This one line is polarity-neutral — the canned response
     // names `OtherTool` whether or not the round was forced; the
     // `forced_tools()` assertion below is what flips.)
-    assert_eq!(invoker.call_count(), 1, "OtherTool must have been dispatched");
+    assert_eq!(
+        invoker.call_count(),
+        1,
+        "OtherTool must have been dispatched"
+    );
     // (a) no round is forced while another tool is advertised.
     let forced = api.forced_tools();
     assert_eq!(

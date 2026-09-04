@@ -316,6 +316,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CompactionCompleted.messages_before", "u32");
     put("ClientEvent::CompactionCompleted.messages_after", "u32");
     put("ClientEvent::CompactionCompleted.bytes_saved", "u64");
+    put("ClientEvent::CompactionCompleted.summary", "String");
 
     put("ClientEvent::SessionStarted", "session_started");
     put("ClientEvent::SessionStarted.session_id", "String");

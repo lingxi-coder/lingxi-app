@@ -116,6 +116,7 @@ export interface NativeAudioRecognitionProgress {
 }
 
 export type NativeAudioEvent =
+  | { type: 'input_level'; owner: NativeAudioOwner; level: number }
   | { type: 'snapshot_changed'; snapshot: NativeAudioSnapshot }
   | { type: 'helper_state'; snapshot: NativeAudioSnapshot; state: NativeAudioSnapshot['helper']['state']; message?: string }
   | { type: 'owner_changed'; snapshot: NativeAudioSnapshot; owner: NativeAudioOwner | null }
@@ -568,8 +569,16 @@ export function validateNativeAudioEngineResponse(value: unknown): NativeAudioEn
 
 export function validateNativeAudioEvent(value: unknown): NativeAudioEvent {
   const input = object(value, 'audio event');
-  exactKeys(input, ['type', 'snapshot', 'state', 'message', 'owner', 'progress', 'model', 'error'], 'audio event');
   const type = boundedString(input['type'], 'audio event type', 32);
+  if (type === 'input_level') {
+    exactKeys(input, ['type', 'owner', 'level'], 'audio input level event');
+    return {
+      type,
+      owner: validateOwner(input['owner']),
+      level: boundedNumber(input['level'], 'audio input level', 0, 1),
+    };
+  }
+  exactKeys(input, ['type', 'snapshot', 'state', 'message', 'owner', 'progress', 'model', 'error'], 'audio event');
   const snapshot = validateNativeAudioSnapshot(input['snapshot']);
   switch (type) {
     case 'snapshot_changed':

@@ -1775,11 +1775,10 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // `{scriptPath, resumeFromRunId}` with no `name` -- proves it instead
         // through `expected_workflow_id`, the host-owned checkpoint
         // provenance resolved above. Either must inject the same key.
-        let is_build_workflow_launch = spec
-            .name
-            .as_deref()
-            .is_some_and(|name| name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)
-            || expected_workflow_id
+        let is_build_workflow_launch =
+            spec.name.as_deref().is_some_and(|name| {
+                name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+            }) || expected_workflow_id
                 == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
         if is_build_workflow_launch {
             if let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) {
@@ -2380,8 +2379,7 @@ mod plugin_args_tests {
     /// script's declared contract against the real validator, key by key.
     #[test]
     fn build_workflow_script_external_contract_is_accepted_by_the_host() {
-        let script =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let script = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let declaration = script
             .lines()
             .find(|line| line.starts_with("const ALLOWED_EXTERNAL ="))
@@ -2459,7 +2457,9 @@ mod plugin_args_tests {
             let declaration = script
                 .lines()
                 .find(|line| line.starts_with(declaration_prefix))
-                .unwrap_or_else(|| panic!("script must declare a line starting {declaration_prefix:?}"));
+                .unwrap_or_else(|| {
+                    panic!("script must declare a line starting {declaration_prefix:?}")
+                });
             declaration
                 .split_once('[')
                 .and_then(|(_, rest)| rest.split_once(']'))
@@ -4398,11 +4398,13 @@ mod run_id_tests {
             let args_json = state.args.as_deref().unwrap_or_else(|| {
                 panic!("operation {operation:?}: the launcher must persist args onto the task row")
             });
-            let after: serde_json::Value = serde_json::from_str(args_json)
-                .unwrap_or_else(|error| panic!("operation {operation:?}: persisted args are not valid json: {error}"));
-            let after_object = after
-                .as_object()
-                .unwrap_or_else(|| panic!("operation {operation:?}: persisted args are not an object"));
+            let after: serde_json::Value =
+                serde_json::from_str(args_json).unwrap_or_else(|error| {
+                    panic!("operation {operation:?}: persisted args are not valid json: {error}")
+                });
+            let after_object = after.as_object().unwrap_or_else(|| {
+                panic!("operation {operation:?}: persisted args are not an object")
+            });
 
             assert_eq!(
                 after_object
@@ -4457,7 +4459,10 @@ mod run_id_tests {
             let expected_by_layer: std::collections::BTreeMap<String, &'static str> =
                 if operation == "create" {
                     vec![
-                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "workflow_run_id",
+                            "`launch` itself, workflow_support.rs:1711",
+                        ),
                         (
                             "host_context",
                             "the seam, workflow_support.rs:1331 (create-only), including its \
@@ -4467,7 +4472,10 @@ mod run_id_tests {
                     ]
                 } else {
                     vec![
-                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "workflow_run_id",
+                            "`launch` itself, workflow_support.rs:1711",
+                        ),
                         (
                             "runtime_profile",
                             "the seam `apply_materialized_local_app_collections_with_identity`, \

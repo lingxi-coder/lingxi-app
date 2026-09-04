@@ -1982,6 +1982,8 @@ export type ClientEvent =
       messages_before: number;
       messages_after: number;
       bytes_saved: number;
+      /** Empty or absent when connected to an older engine. */
+      summary?: string;
     }
   // ── Session lifecycle ───────────────────────────────────────────────────────
   | { type: 'session_started'; session_id: string; mode: SessionModeDto }

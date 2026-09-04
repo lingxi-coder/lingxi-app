@@ -4061,7 +4061,9 @@ mod tests {
             .map(|(tools, _)| tools)
             .expect("builder.md must have a `tools:` list followed by `skills:`");
         assert!(
-            tools_block.lines().any(|line| line.trim() == "- LocalAppManifest"),
+            tools_block
+                .lines()
+                .any(|line| line.trim() == "- LocalAppManifest"),
             "builder.md's tools: list must grant LocalAppManifest, or the data-collection \
              declaration the formal contract and create-local-app/SKILL.md both require is \
              impossible for the one agent that writes App-managed source: {tools_block}"
@@ -4076,8 +4078,7 @@ mod tests {
     /// because no collection was ever declared.
     #[test]
     fn build_workflow_create_branch_requires_manifest_declaration_before_source() {
-        let source =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let build_call = source
             .lines()
             .find(|line| line.contains("Call LocalAppScaffold with app_id="))
@@ -4089,8 +4090,10 @@ mod tests {
              them: {build_call}"
         );
         assert!(
-            build_call.contains("Before writing any source that reads or writes a data \
-             collection"),
+            build_call.contains(
+                "Before writing any source that reads or writes a data \
+             collection"
+            ),
             "the manifest declaration must be ordered BEFORE writing source, not left as an \
              unordered mention the model can defer past the write it is meant to gate: \
              {build_call}"
@@ -4108,8 +4111,7 @@ mod tests {
     /// crate, not here.
     #[test]
     fn build_workflow_designer_prompt_carries_the_confirmed_spec() {
-        let source =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let designer_call = source
             .lines()
             .find(|line| line.contains("agentType: 'designer'"))
@@ -5328,8 +5330,7 @@ mod tests {
             .expect("create");
         let structured = result.structured_content.expect("structured");
         assert!(
-            structured.get("init_session_id").is_none()
-                || structured["init_session_id"].is_null(),
+            structured.get("init_session_id").is_none() || structured["init_session_id"].is_null(),
             "a failed mint must not fabricate an init_session_id: {structured}"
         );
         let next_step = structured["next_step"].as_str().expect("next_step string");

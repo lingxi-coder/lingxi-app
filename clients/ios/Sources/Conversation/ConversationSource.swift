@@ -4776,7 +4776,7 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 updateActiveRun { $0.costFormatted = formatted }
 
-            case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved):
+            case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved, _):
                 guard acceptTurnEvent(event) else { return }
                 model.compactionStatus = .completed(
                     messagesBefore: messagesBefore,

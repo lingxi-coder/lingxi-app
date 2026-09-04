@@ -1163,6 +1163,9 @@
     <string name="chat_error_session_switch_failed">세션 전환 실패: %1$s</string>
     <string name="chat_error_cancel_generation_failed">생성 취소 실패: %1$s</string>
     <string name="chat_retry_status">요청 재시도 %1$d/%2$d(%3$s)</string>
+    <string name="chat_compacting_context">컨텍스트 압축 중</string>
+    <string name="chat_compaction_failed">컨텍스트 압축 실패</string>
+    <string name="chat_compaction_progress">컨텍스트 정리 중: %1$d%%(%2$d초)</string>
     <string name="chat_compaction_status">컨텍스트 압축됨: %1$d → %2$d개, %3$s 확보</string>
     <string name="composer_more">더 보기</string>
     <string name="composer_camera">사진 촬영</string>

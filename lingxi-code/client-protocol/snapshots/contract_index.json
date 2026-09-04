@@ -540,6 +540,7 @@
   "ClientEvent::CompactionCompleted.bytes_saved": "u64",
   "ClientEvent::CompactionCompleted.messages_after": "u32",
   "ClientEvent::CompactionCompleted.messages_before": "u32",
+  "ClientEvent::CompactionCompleted.summary": "String",
   "ClientEvent::ConversationControlsChanged": "conversation_controls_changed",
   "ClientEvent::ConversationControlsChanged.controls": "ConversationControlsDto",
   "ClientEvent::CoordinatorStatus": "coordinator_status",

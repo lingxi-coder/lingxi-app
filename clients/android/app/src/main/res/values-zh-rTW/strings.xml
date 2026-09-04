@@ -1163,6 +1163,9 @@
     <string name="chat_error_session_switch_failed">會話切換失敗：%1$s</string>
     <string name="chat_error_cancel_generation_failed">取消生成失敗：%1$s</string>
     <string name="chat_retry_status">請求重試 %1$d/%2$d（%3$s）</string>
+    <string name="chat_compacting_context">正在壓縮上下文</string>
+    <string name="chat_compaction_failed">上下文壓縮失敗</string>
+    <string name="chat_compaction_progress">正在整理上下文：%1$d%%（%2$d 秒）</string>
     <string name="chat_compaction_status">上下文已壓縮：%1$d → %2$d 條，釋放 %3$s</string>
     <string name="composer_more">更多</string>
     <string name="composer_camera">拍照</string>

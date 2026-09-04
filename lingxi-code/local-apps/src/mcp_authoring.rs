@@ -2089,8 +2089,7 @@ mod tests {
     fn issue_lets_an_expired_leaked_claim_self_clear() {
         let digest = "0".repeat(64);
         let mut book = McpReceiptBook::default();
-        let leaked =
-            McpConfirmationReceipt::new("app", "run-1", digest.clone(), digest.clone(), 0);
+        let leaked = McpConfirmationReceipt::new("app", "run-1", digest.clone(), digest.clone(), 0);
         let leaked_id = leaked.receipt_id.clone();
         book.issue(leaked).unwrap();
         // Claim it and never release — the shape of the leak this fix exists
@@ -2123,8 +2122,7 @@ mod tests {
             digest,
             McpConfirmationReceipt::TTL_MS,
         );
-        book.issue(after_ttl).expect(
-            "an expired claimed slot must not block a new receipt from being issued",
-        );
+        book.issue(after_ttl)
+            .expect("an expired claimed slot must not block a new receipt from being issued");
     }
 }

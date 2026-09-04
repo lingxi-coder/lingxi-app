@@ -11,9 +11,6 @@ importers:
       '@lingxi/bridge-client':
         specifier: file:../shared
         version: file:../shared
-      highlight.js:
-        specifier: ^11.12.0
-        version: 11.12.0
     devDependencies:
       '@electron/asar':
         specifier: ^3.4.1
@@ -36,6 +33,9 @@ importers:
       electron-vite:
         specifier: ^5.0.0
         version: 5.0.0(vite@7.3.6(@types/node@22.20.1))
+      highlight.js:
+        specifier: ^11.12.0
+        version: 11.12.0
       react:
         specifier: ^18.3.1
         version: 18.3.1

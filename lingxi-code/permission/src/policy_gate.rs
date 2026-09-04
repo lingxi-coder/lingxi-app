@@ -2721,7 +2721,10 @@ mod plan_mode_divergence_test {
         let gate = gate_in(PermissionMode::Plan, inner.clone());
 
         let decision = gate
-            .check("Workflow", &serde_json::json!({"scriptPath": "/w/build.js"}))
+            .check(
+                "Workflow",
+                &serde_json::json!({"scriptPath": "/w/build.js"}),
+            )
             .await;
         assert!(
             matches!(decision, PermissionDecision::Deny { .. }),
@@ -2746,8 +2749,11 @@ mod plan_mode_divergence_test {
         let gate = gate_in(PermissionMode::Default, inner.clone());
 
         assert_eq!(
-            gate.check("Workflow", &serde_json::json!({"scriptPath": "/w/build.js"}))
-                .await,
+            gate.check(
+                "Workflow",
+                &serde_json::json!({"scriptPath": "/w/build.js"})
+            )
+            .await,
             PermissionDecision::Allow,
             "the create-app hand-off must not double-prompt"
         );

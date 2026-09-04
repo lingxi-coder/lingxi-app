@@ -414,12 +414,14 @@ fn compaction_completed_round_trips() {
         messages_before: 50,
         messages_after: 12,
         bytes_saved: 4096,
+        summary: "Summary:\nkept context".to_string(),
     };
     let json = serde_json::to_value(&ev).expect("serialize CompactionCompleted");
     assert_eq!(json["type"], "compaction_completed");
     assert_eq!(json["messages_before"], 50);
     assert_eq!(json["messages_after"], 12);
     assert_eq!(json["bytes_saved"], 4096);
+    assert_eq!(json["summary"], "Summary:\nkept context");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize CompactionCompleted");
     assert_eq!(back, ev);
 }

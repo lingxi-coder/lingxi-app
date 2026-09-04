@@ -8808,6 +8808,7 @@ impl MobileEngineHandle {
                                 messages_before: summary.messages_before,
                                 messages_after: summary.messages_after,
                                 bytes_saved: summary.bytes_saved,
+                                summary: summary.summary,
                             })
                             .await;
                         Ok(())

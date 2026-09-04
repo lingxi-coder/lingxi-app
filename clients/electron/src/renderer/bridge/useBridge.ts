@@ -892,7 +892,7 @@ export function useBridge(): UseBridge {
       if (!cancelled) setAudioSnapshot(defaultNativeAudioSnapshot());
     });
     const offAudio = host.audio.onEvent((event) => {
-      if (!cancelled) setAudioSnapshot(event.snapshot);
+      if (!cancelled && event.type !== 'input_level') setAudioSnapshot(event.snapshot);
     });
     return () => {
       cancelled = true;

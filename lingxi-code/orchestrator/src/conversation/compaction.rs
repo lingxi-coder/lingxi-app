@@ -1101,6 +1101,7 @@ impl ConversationOrchestrator {
             messages_before,
             messages_after,
             bytes_saved,
+            summary: visible_summary,
         })
     }
 

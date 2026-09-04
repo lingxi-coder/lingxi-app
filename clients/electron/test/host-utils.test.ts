@@ -69,6 +69,35 @@ test("parseSettings keeps 'system' and still rejects garbage", () => {
   );
 });
 
+test('model picker visibility defaults open, dedupes ids, and persists empty allowlists', () => {
+  const parsed = parseSettings({
+    version: 1,
+    projects: [],
+    modelPickerVisibility: {
+      openai: { visibleModelIds: ['gpt-5.6-sol', 'gpt-5.6-sol', '', 'gpt-5.7-preview'] },
+      deepseek: { showInModelPicker: false, visibleModelIds: [] },
+    },
+  });
+  assert.deepEqual(parsed.modelPickerVisibility, {
+    openai: { visibleModelIds: ['gpt-5.6-sol', 'gpt-5.7-preview'] },
+    deepseek: { showInModelPicker: false, visibleModelIds: [] },
+  });
+  assert.deepEqual(publicSettings(parsed).modelPickerVisibility, parsed.modelPickerVisibility);
+
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  store.update({
+    modelPickerVisibility: {
+      openai: { visibleModelIds: ['gpt-5.6-sol'] },
+      anthropic: { showInModelPicker: false, visibleModelIds: [] },
+    },
+  });
+  assert.deepEqual(new SettingsStore(userData).getPublic().modelPickerVisibility, {
+    openai: { visibleModelIds: ['gpt-5.6-sol'] },
+    anthropic: { showInModelPicker: false, visibleModelIds: [] },
+  });
+});
+
 test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
   // Persisted acceptance survives a parse.
   assert.equal(

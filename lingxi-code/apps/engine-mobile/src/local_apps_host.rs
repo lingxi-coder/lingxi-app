@@ -2330,8 +2330,14 @@ impl LocalAppsHostBroker {
         app_id: &str,
         event: AppEventDto,
     ) -> Result<bool, String> {
-        self.wait_for_native_approval_with_timeout(pending, request_id, app_id, event, APPROVAL_TIMEOUT)
-            .await
+        self.wait_for_native_approval_with_timeout(
+            pending,
+            request_id,
+            app_id,
+            event,
+            APPROVAL_TIMEOUT,
+        )
+        .await
     }
 
     /// Same as [`Self::wait_for_native_approval`] with an injectable deadline.
@@ -13938,12 +13944,12 @@ mod tests {
         // case; the (possibly invalid) `name`/`brief` args still reach the
         // returned scaffold input unchanged, so the validation under test
         // still sees exactly what the caller asked for.
-        let stage_name = if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES
-        {
-            name
-        } else {
-            TEST_DEFAULT_APP_NAME
-        };
+        let stage_name =
+            if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES {
+                name
+            } else {
+                TEST_DEFAULT_APP_NAME
+            };
         let stage_brief =
             if !brief.trim().is_empty() && brief.len() <= local_apps::service::MAX_BRIEF_BYTES {
                 brief
@@ -14252,7 +14258,8 @@ mod tests {
             .expect("read the guided contract");
 
         assert!(
-            guided.contains("**ordinary conversational text**, ask the user what they want to build"),
+            guided
+                .contains("**ordinary conversational text**, ask the user what they want to build"),
             "step 1 must ask for a description in ordinary text: {guided}"
         );
         assert!(
@@ -14656,7 +14663,10 @@ mod tests {
         let sealed_journal =
             local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
                 .expect("sealed journal after first approval");
-        assert_eq!(sealed_journal.stage, local_apps::McpAuthoringStage::Approved);
+        assert_eq!(
+            sealed_journal.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
 
         // A SECOND identical call must reuse the sealed approval promptly —
         // it must NOT raise a second native confirmation sheet and hang
@@ -14747,7 +14757,9 @@ mod tests {
                 &journal_after.proposal_sha256,
                 now_ms(),
             )
-            .expect("the receipt handed back by the reuse arm must be claimable by LocalAppScaffold");
+            .expect(
+                "the receipt handed back by the reuse arm must be claimable by LocalAppScaffold",
+            );
 
         // With that claim now live (an in-flight scaffold), a THIRD call must
         // still refuse to raise a native sheet: it fails fast with a named
@@ -15526,8 +15538,14 @@ mod tests {
             .expect("scaffold from unified create receipt");
         let record = service.record(&shell.id).await.expect("record");
         assert!(record.scaffolded);
-        assert_eq!(record.name, STAGED_NAME, "scaffold must commit the staged name, not the model's echoed value");
-        assert_eq!(record.brief, STAGED_BRIEF, "scaffold must commit the staged brief, not the model's echoed value");
+        assert_eq!(
+            record.name, STAGED_NAME,
+            "scaffold must commit the staged name, not the model's echoed value"
+        );
+        assert_eq!(
+            record.brief, STAGED_BRIEF,
+            "scaffold must commit the staged brief, not the model's echoed value"
+        );
         let manifest = load_manifest(&layout).expect("scaffolded manifest");
         assert_eq!(
             manifest
@@ -15603,9 +15621,7 @@ mod tests {
                 } if app_id == shell.id => Some(publication_state),
                 _ => None,
             })
-            .expect(
-                "promoting an MCP candidate must emit VerificationSummaryChanged for the app",
-            );
+            .expect("promoting an MCP candidate must emit VerificationSummaryChanged for the app");
         assert_eq!(
             verification_publication_state,
             AppWorkflowStateDto::PublishedUnverified
@@ -16421,13 +16437,8 @@ mod tests {
             let _guard = ReceiptClaim::held(Arc::clone(&book), receipt_id.clone());
         }
 
-        let reissued = local_apps::McpConfirmationReceipt::new(
-            "app",
-            "run-2",
-            digest.clone(),
-            digest,
-            0,
-        );
+        let reissued =
+            local_apps::McpConfirmationReceipt::new("app", "run-2", digest.clone(), digest, 0);
         book.lock().unwrap().issue(reissued).expect(
             "the dropped ReceiptClaim guard must have released the claim so a fresh \
              receipt can be issued for this app -- otherwise the app can never be \
@@ -16630,7 +16641,9 @@ mod tests {
         // (30s) deadline, so the second call below races a REAL pending
         // entry rather than an empty map.
         assert!(
-            timeout(Duration::from_millis(50), &mut first).await.is_err(),
+            timeout(Duration::from_millis(50), &mut first)
+                .await
+                .is_err(),
             "the first wait must still be in flight for the guard to be exercised"
         );
 
@@ -18267,7 +18280,10 @@ mod tests {
                 };
                 let end = start + found_end;
                 let span = &contract[start..end];
-                let name: String = span.chars().take_while(char::is_ascii_alphanumeric).collect();
+                let name: String = span
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect();
                 if let Some(rest) = name.strip_prefix("LocalApp") {
                     if !rest.is_empty() {
                         assert!(
@@ -18312,9 +18328,14 @@ mod tests {
             let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
             let (root, service, broker) = create_broker(false, Some(runtime)).await;
             let shell = shell_app_fixture(&broker, &service).await;
-            let input =
-                confirmed_scaffold_input(&broker, &shell.id, "契约扫描", "扫描正文的工具名", surface)
-                    .await;
+            let input = confirmed_scaffold_input(
+                &broker,
+                &shell.id,
+                "契约扫描",
+                "扫描正文的工具名",
+                surface,
+            )
+            .await;
             broker
                 .scaffold_shell_app_value(input)
                 .await
@@ -21382,7 +21403,10 @@ mod tests {
         // state this test needs. Removing it too makes that starting point
         // explicit regardless of what the fixture happens to do.
         let _ = fs::remove_file(&lingxi_md);
-        assert!(!lingxi_md.exists(), "the guided contract must be absent before the sweep runs");
+        assert!(
+            !lingxi_md.exists(),
+            "the guided contract must be absent before the sweep runs"
+        );
 
         shell.run_boot_backfill_sweep().await;
 
@@ -21400,12 +21424,13 @@ mod tests {
     async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
         let shell = pinned_shell().await;
         let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-        fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
+        fs::write(&lingxi_md, "")
+            .expect("truncate the guided contract to simulate a partial write");
 
         shell.run_boot_backfill_sweep().await;
 
-        let repaired = fs::read_to_string(&lingxi_md)
-            .expect("guided contract still present after repair");
+        let repaired =
+            fs::read_to_string(&lingxi_md).expect("guided contract still present after repair");
         assert!(
             repaired.contains("has no shape yet"),
             "a truncated guided contract must be rewritten, not left empty: {repaired}"

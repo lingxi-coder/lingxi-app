@@ -8,6 +8,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import { type UseBridge } from '../bridge/useBridge';
+import type { ContextSummarySnapshot } from '../bridge/conversation';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
@@ -52,6 +53,7 @@ import {
 import { sanitizeSpeakableText } from '../audio/flow/segmenter';
 import { shouldAutoplayTrackedReply } from '../audio/autoplay';
 import { Icon } from './Icon';
+import { MarkdownContent } from './MarkdownContent';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
@@ -663,25 +665,179 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   );
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, theme, onTheme, onOpenSettingsPage, onOpenCommandPalette }: {
+function contextSummaryPreview(content: string): string {
+  const line = content
+    .split('\n')
+    .map((part) => part.trim().replace(/^#{1,6}\s+/, '').replace(/^summary\s*:\s*/i, ''))
+    .find(Boolean);
+  if (!line) return 'Context preserved by compaction';
+  return line.length > 76 ? `${line.slice(0, 73).trimEnd()}…` : line;
+}
+
+function contextSummaryStats(summary: ContextSummarySnapshot): string {
+  const messages = summary.messagesBefore > 0
+    ? summary.messagesAfter > 0
+      ? `${summary.messagesBefore} → ${summary.messagesAfter} messages`
+      : `${summary.messagesBefore} messages summarized`
+    : 'Compacted context';
+  if (!summary.bytesSaved) return messages;
+  const bytes = summary.bytesSaved < 1024
+    ? `${summary.bytesSaved} B`
+    : summary.bytesSaved < 1024 * 1024
+      ? `${Math.round(summary.bytesSaved / 1024)} KB`
+      : `${(summary.bytesSaved / (1024 * 1024)).toFixed(1)} MB`;
+  return `${messages} · ${bytes} freed`;
+}
+
+export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }: {
+  summaries: readonly ContextSummarySnapshot[];
+  selectedId: string | null;
+  onSelect(id: string): void;
+  onClose(): void;
+}) {
+  const t = useT();
+  const selected = summaries.find((summary) => summary.id === selectedId) ?? summaries.at(-1);
+  const selectedIndex = selected ? summaries.findIndex((summary) => summary.id === selected.id) : -1;
+
+  return (
+    <section
+      id="context-summary-panel"
+      className="no-drag context-summary-panel"
+      role="dialog"
+      aria-label="Context summaries"
+      style={{
+        '--summary-panel-bg': t.surface,
+        '--summary-panel-subtle': t.surfaceHover,
+        '--summary-panel-active': t.accentBg,
+        '--summary-panel-ring': t.borderStrong,
+        '--summary-panel-divider': t.border,
+        '--summary-panel-text': t.text,
+        '--summary-panel-secondary': t.text3,
+        '--summary-panel-muted': t.text4,
+        '--summary-panel-accent': t.accent,
+      } as CSSProperties}
+    >
+      <div className="context-summary-sidebar">
+        <div className="context-summary-heading">
+          <div>
+            <strong>Context summaries</strong>
+            <span>{summaries.length ? `${summaries.length} saved` : 'No saved summary'}</span>
+          </div>
+        </div>
+        <div className="context-summary-list" role="listbox" aria-label="Saved context summaries">
+          {[...summaries].reverse().map((summary, reverseIndex) => {
+            const originalIndex = summaries.length - reverseIndex - 1;
+            const current = selected?.id === summary.id;
+            return (
+              <button
+                key={summary.id}
+                type="button"
+                role="option"
+                aria-selected={current}
+                className="context-summary-item"
+                data-active={current ? 'true' : undefined}
+                onClick={() => onSelect(summary.id)}
+              >
+                <span className="context-summary-item-icon" aria-hidden="true"><Icon name="summary" size={15} stroke={1.75} /></span>
+                <span className="context-summary-item-copy">
+                  <span className="context-summary-item-title">
+                    Summary {originalIndex + 1}
+                    {reverseIndex === 0 ? <em>Current</em> : null}
+                  </span>
+                  <span className="context-summary-item-preview">{contextSummaryPreview(summary.content)}</span>
+                  <span className="context-summary-item-meta">{contextSummaryStats(summary)}</span>
+                </span>
+                <Icon name="chevronR" size={13} stroke={1.8} />
+              </button>
+            );
+          })}
+          {summaries.length === 0 ? (
+            <div className="context-summary-empty-list">
+              <span aria-hidden="true"><Icon name="summary" size={19} stroke={1.6} /></span>
+              <p>Summaries appear after the conversation is compacted.</p>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <article className="context-summary-detail">
+        <div className="context-summary-detail-heading">
+          <div>
+            <span>Context summary</span>
+            <strong>{selected ? `Summary ${selectedIndex + 1}` : 'No summary yet'}</strong>
+          </div>
+          <button type="button" className="context-summary-close" aria-label="Close context summaries" onClick={onClose}>
+            <Icon name="x" size={14} stroke={1.8} />
+          </button>
+        </div>
+        {selected ? (
+          <>
+            <div className="context-summary-detail-meta">{contextSummaryStats(selected)}</div>
+            <div className="context-summary-markdown"><MarkdownContent text={selected.content} /></div>
+          </>
+        ) : (
+          <div className="context-summary-empty-detail">
+            <span aria-hidden="true"><Icon name="summary" size={24} stroke={1.45} /></span>
+            <strong>No compacted context</strong>
+            <p>When LingXi compacts this session, the preserved context will be available here.</p>
+          </div>
+        )}
+      </article>
+    </section>
+  );
+}
+
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, theme, onTheme }: {
   bridge: UseBridge;
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
-  onOpenSettingsPage(pageId?: string): void;
-  onOpenCommandPalette(): void;
 }) {
   const t = useT();
-  const [statusOpen, setStatusOpen] = useState(false);
-  const busy = bridge.running || bridge.sessionLoading;
-  const status = bridge.desktop.status;
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
+  const summaryTriggerRef = useRef<HTMLButtonElement>(null);
+  const summaryPanelRef = useRef<HTMLDivElement>(null);
+  const summaries = bridge.conversation.summaries;
+  const currentSummaryId = summaries.at(-1)?.id ?? null;
 
-  const durationLabel = status?.started_at
-    ? `${Math.max(0, Math.floor((Date.now() - Date.parse(status.started_at)) / 60_000))} min`
-    : '—';
+  useEffect(() => {
+    if (!summaryOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (summaryTriggerRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
+      setSummaryOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setSummaryOpen(false);
+      summaryTriggerRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', closeOnPointerDown, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [summaryOpen]);
+
+  useEffect(() => {
+    setSummaryOpen(false);
+    setSelectedSummaryId(null);
+  }, [bridge.conversation.sessionKey]);
+
+  const topbarActionTokens = {
+    '--topbar-action-focus': t.surfaceHover,
+    '--topbar-action-active': t.surfaceHover,
+    '--topbar-action-ring': t.border,
+    '--topbar-action-color': t.text3,
+    '--topbar-action-hover-color': t.text,
+    '--topbar-action-active-color': t.text,
+  } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 58, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
+    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
@@ -691,57 +847,162 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
           {(bridge.usage.inputTokens + bridge.usage.outputTokens).toLocaleString()} tok
         </span>
       )}
-      <button className="no-drag desktop-topbar-action" type="button" aria-label="Toggle theme" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 40, height: 40, display: 'grid', placeItems: 'center', borderRadius: 10, border: 0, boxShadow: `0 0 0 1px ${t.border}`, background: t.surface, color: t.text3, cursor: 'pointer' }}>
-        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
+      <button className="no-drag desktop-topbar-action" type="button" aria-label="Toggle theme" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')} style={topbarActionTokens}>
+        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
       </button>
-      <button className="no-drag desktop-topbar-action" type="button" aria-label="Open command palette" onClick={() => { onOpenCommandPalette(); setStatusOpen(false); }} style={{ minWidth: 96, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '0 10px', borderRadius: 10, border: 0, boxShadow: `0 0 0 1px ${t.border}`, background: t.surface, color: t.text3, cursor: 'pointer' }}>
-        <span style={{ fontSize: 12.5 }}>Commands</span>
-        <span className="mono" style={{ fontSize: 10 }}>{navigator.platform.toLowerCase().includes('mac') ? '⌘K' : 'Ctrl+K'}</span>
+      <button
+        ref={summaryTriggerRef}
+        className="no-drag desktop-topbar-action"
+        type="button"
+        aria-label="Open context summaries"
+        aria-controls="context-summary-panel"
+        aria-expanded={summaryOpen}
+        data-active={summaryOpen ? 'true' : undefined}
+        onClick={() => {
+          setSummaryOpen((open) => {
+            if (!open) setSelectedSummaryId((current) => summaries.some((summary) => summary.id === current) ? current : currentSummaryId);
+            return !open;
+          });
+        }}
+        style={topbarActionTokens}
+      >
+        <Icon name="summary" size={17} stroke={1.7} />
       </button>
-      <button className="no-drag desktop-topbar-action" type="button" aria-label="Open session status" onClick={() => setStatusOpen((open) => !open)} style={{ minWidth: 112, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '0 10px', borderRadius: 10, border: 0, boxShadow: `0 0 0 1px ${statusOpen ? t.accentBorder : t.border}`, background: statusOpen ? t.accentBg : t.surface, color: statusOpen ? t.accent : t.text3, cursor: 'pointer' }}>
-        <ConnectionDot bridge={bridge} />
-        <Icon name="chevron" size={13} />
+      <button className="no-drag desktop-topbar-action" type="button" data-runtime-center-trigger="true" aria-label="Toggle runtime center" aria-controls="runtime-center-overview" aria-expanded={runtimeCenterOpen} data-active={runtimeCenterOpen ? 'true' : undefined} onClick={onToggleRuntimeCenter} style={topbarActionTokens}>
+        <Icon name="tasks" size={17} stroke={1.7} />
       </button>
-      <button className="no-drag desktop-topbar-action" type="button" data-runtime-center-trigger="true" aria-label="Toggle runtime center" aria-controls="runtime-center-overview" aria-expanded={runtimeCenterOpen} onClick={onToggleRuntimeCenter} style={{ width: 40, height: 40, display: 'grid', placeItems: 'center', borderRadius: 10, border: 0, boxShadow: `0 0 0 1px ${runtimeCenterOpen ? t.accentBorder : t.border}`, background: runtimeCenterOpen ? t.accentBg : t.surface, color: runtimeCenterOpen ? t.accent : t.text3, cursor: 'pointer' }}>
-        <Icon name="tasks" size={15} />
-      </button>
-      {statusOpen && (
-        <div className="no-drag" style={{ position: 'absolute', right: 66, top: 52, width: 360, padding: 12, borderRadius: 14, background: t.surface, boxShadow: `0 12px 32px color-mix(in oklab, ${t.text} 12%, transparent)`, border: `0.5px solid ${t.border}`, display: 'grid', gap: 10, zIndex: 20 }}>
-          <div style={{ display: 'grid', gap: 4 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600, color: t.text }}>Session</div>
-            <div className="mono" style={{ fontSize: 11, color: t.text3 }}>
-              {status ? `${status.model} · ${durationLabel} · ${status.input_tokens + status.output_tokens} tok` : 'No status snapshot yet'}
-            </div>
-            <div style={{ fontSize: 12, color: t.text3 }}>
-              {bridge.authState?.type === 'signed_in' ? `${bridge.authState.email} · org ${bridge.authState.org_id}` : 'Signed out'}
-            </div>
-          </div>
-          <div className="mono" style={{ fontSize: 11, color: t.text3, lineHeight: 1.6 }}>
-            <div>MCP {status ? `${status.n_mcp_connected}/${status.n_mcp_total}` : '—'}</div>
-            <div>Hooks {status?.n_hooks ?? bridge.hooksCatalog.length}</div>
-            <div>Agents {status?.n_agents ?? bridge.agentCatalog.length}</div>
-            <div>Cost {bridge.cost?.formatted ?? (status ? `$${status.total_cost_usd.toFixed(4)}` : '—')}</div>
-            <div>Last compact {bridge.lastCompaction ? `${bridge.lastCompaction.messages_before}→${bridge.lastCompaction.messages_after}` : '—'}</div>
-            <div>Retry {bridge.retryState ? `${bridge.retryState.attempt}/${bridge.retryState.max_retries}` : '—'}</div>
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            <Button onClick={() => invoke(() => bridge.refresh())} disabled={bridge.sessionLoading}>Refresh</Button>
-            <Button onClick={() => invoke(() => bridge.forceCompact())} disabled={busy}>Compact</Button>
-            <Button onClick={() => invoke(async () => { if (window.confirm('Clear the current session and start a new draft?')) await bridge.clearSession(); })} disabled={busy} danger>Clear</Button>
-            <Button onClick={() => onOpenSettingsPage('account')} disabled={bridge.sessionLoading}>Account</Button>
-            <Button onClick={() => onOpenSettingsPage('diagnostics')} disabled={bridge.sessionLoading}>Doctor</Button>
-            {bridge.authState?.type === 'signed_in'
-              ? <Button onClick={() => invoke(() => bridge.logout())} disabled={busy}>Logout</Button>
-              : <Button onClick={() => invoke(() => bridge.login())} disabled={busy}>Login</Button>}
-          </div>
+      {summaryOpen ? (
+        <div ref={summaryPanelRef} style={{ display: 'contents' }}>
+          <ContextSummaryPanel
+            summaries={summaries}
+            selectedId={selectedSummaryId}
+            onSelect={setSelectedSummaryId}
+            onClose={() => { setSummaryOpen(false); summaryTriggerRef.current?.focus(); }}
+          />
         </div>
-      )}
+      ) : null}
     </header>
   );
 }
 
 function nativeAudioApi(): NativeAudioApi | undefined {
   return typeof window === 'undefined' ? undefined : window.lingxi?.audio;
+}
+
+const DICTATION_WAVEFORM_SAMPLES = 160;
+
+export function DictationRecorderBar({ audio, owner, onCancel, onFinish }: {
+  audio: NativeAudioApi | undefined;
+  owner: NativeAudioOwner;
+  onCancel(): void;
+  onFinish(): void;
+}) {
+  const t = useT();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const levelsRef = useRef<Float32Array>(new Float32Array(DICTATION_WAVEFORM_SAMPLES));
+  const frameRef = useRef<number | null>(null);
+
+  const drawWaveform = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const width = Math.max(1, Math.floor(canvas.clientWidth));
+    const height = Math.max(1, Math.floor(canvas.clientHeight));
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const renderWidth = Math.floor(width * pixelRatio);
+    const renderHeight = Math.floor(height * pixelRatio);
+    if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
+      canvas.width = renderWidth;
+      canvas.height = renderHeight;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.lineWidth = 2.5;
+    context.lineCap = 'round';
+
+    const spacing = 7;
+    const count = Math.max(1, Math.min(levelsRef.current.length, Math.floor(width / spacing)));
+    const startX = (width - ((count - 1) * spacing)) / 2;
+    const offset = levelsRef.current.length - count;
+    for (let index = 0; index < count; index += 1) {
+      const rawLevel = levelsRef.current[offset + index] ?? 0;
+      const visibleLevel = rawLevel <= 0.004
+        ? 0
+        : Math.min(1, Math.sqrt((rawLevel - 0.004) / 0.12));
+      const barHeight = 2.5 + (visibleLevel * Math.max(0, height - 8));
+      const x = startX + (index * spacing);
+      context.strokeStyle = visibleLevel > 0.02 ? t.text3 : t.text4;
+      context.globalAlpha = visibleLevel > 0.02 ? 0.82 : 0.48;
+      context.beginPath();
+      context.moveTo(x, (height - barHeight) / 2);
+      context.lineTo(x, (height + barHeight) / 2);
+      context.stroke();
+    }
+    context.globalAlpha = 1;
+  }, [t.text3, t.text4]);
+
+  useEffect(() => {
+    drawWaveform();
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(drawWaveform);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [drawWaveform]);
+
+  useEffect(() => {
+    if (!audio) return;
+    const unsubscribe = audio.onEvent((event) => {
+      if (event.type !== 'input_level' || event.owner.id !== owner.id || event.owner.kind !== owner.kind) return;
+      const levels = levelsRef.current;
+      levels.copyWithin(0, 1);
+      levels[levels.length - 1] = event.level;
+      if (frameRef.current !== null) return;
+      frameRef.current = window.requestAnimationFrame(() => {
+        frameRef.current = null;
+        drawWaveform();
+      });
+    });
+    return () => {
+      unsubscribe();
+      if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  }, [audio, drawWaveform, owner.id, owner.kind]);
+
+  const actionStyle: CSSProperties = {
+    width: 40,
+    height: 40,
+    flex: '0 0 40px',
+    display: 'grid',
+    placeItems: 'center',
+    padding: 0,
+    border: 0,
+    borderRadius: '50%',
+    background: t.surfaceHover,
+    color: t.text,
+    cursor: 'pointer',
+  };
+
+  return (
+    <div role="group" aria-label="Audio dictation controls" style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 48, padding: '0 8px 8px' }}>
+      <button className="dictation-recorder-action" type="button" aria-label="Cancel dictation" title="Cancel dictation" onClick={onCancel} style={actionStyle}>
+        <Icon name="x" size={16} color="currentColor" stroke={1.8} />
+      </button>
+      <canvas
+        ref={canvasRef}
+        role="img"
+        aria-label="Live microphone amplitude"
+        width={640}
+        height={36}
+        style={{ display: 'block', flex: '1 1 auto', width: '100%', minWidth: 0, height: 36 }}
+      />
+      <button className="dictation-recorder-action" type="button" aria-label="Stop dictation" title="Stop dictation" onClick={onFinish} style={actionStyle}>
+        <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: 2, background: 'currentColor' }} />
+      </button>
+    </div>
+  );
 }
 
 function resolvedVoiceLanguage(configured: string): string {
@@ -2020,6 +2281,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             </div>
           </div>
         )}
+        {voiceState === 'listening' && !flowMode ? (
+          <DictationRecorderBar
+            audio={audio}
+            owner={dictationOwner.current ?? audioOwner('dictation')}
+            onCancel={() => { void cancelStandardListening(); }}
+            onFinish={() => { void finishStandardListening(); }}
+          />
+        ) : (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 48, padding: '0 8px 8px 10px' }}>
           <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
           <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
@@ -2382,6 +2651,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
           ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
         </div>
+        )}
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
           {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}
           {voiceState === 'denied' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.danger, fontSize: 10.5 }}>Microphone permission denied</span>}

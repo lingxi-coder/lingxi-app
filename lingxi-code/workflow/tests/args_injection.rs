@@ -100,9 +100,8 @@ fn line_separators_in_args_stay_inside_the_string() {
         "fixture guard: serde_json must be emitting U+2028 RAW, or this test \
          proves nothing about the engine"
     );
-    let script = format!(
-        "{META}return JSON.stringify({{ name_len: args.name.length, tail: args.tail }})"
-    );
+    let script =
+        format!("{META}return JSON.stringify({{ name_len: args.name.length, tail: args.tail }})");
     let result = run(&script, Some(args))
         .expect("a U+2028 in a string value must not break the run")
         .expect("the script must return a value");

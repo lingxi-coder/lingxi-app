@@ -11,6 +11,9 @@ import { canResumePendingSession } from '../src/renderer/bridge/useBridge';
 import {
   BetaComposer,
   BetaSidebar,
+  BetaTopBar,
+  ContextSummaryPanel,
+  DictationRecorderBar,
   clampSidebarWidth,
   composerGoalActive,
   SIDEBAR_DEFAULT_WIDTH,
@@ -115,6 +118,82 @@ function composerBridgeFixture() {
     cancel: async () => undefined,
   };
 }
+
+test('dictation recording bar exposes live amplitude with separate cancel and finish actions', () => {
+  const audio = {
+    request: async () => ({ type: 'cancelled', snapshot: {} }),
+    onEvent: () => () => undefined,
+    executeEngineRequest: async () => ({ type: 'ok' }),
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(DictationRecorderBar, {
+      audio: audio as any,
+      owner: { kind: 'dictation', id: 'dictation-1' },
+      onCancel: () => undefined,
+      onFinish: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /aria-label="Cancel dictation"/);
+  assert.match(markup, /aria-label="Live microphone amplitude"/);
+  assert.match(markup, /aria-label="Stop dictation"/);
+  assert.match(openingTag(markup, 'aria-label="Cancel dictation"'), /width:40px/);
+  assert.match(openingTag(markup, 'aria-label="Stop dictation"'), /width:40px/);
+});
+
+test('desktop topbar keeps command and engine controls out of the chrome', () => {
+  const bridge = {
+    ...bridgeFixture(),
+    usage: null,
+    conversation: { sessionKey: 'session-a', summaries: [] },
+  };
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaTopBar, {
+      bridge: bridge as any,
+      runtimeCenterOpen: false,
+      onToggleRuntimeCenter: () => undefined,
+      theme: 'dark',
+      onTheme: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /aria-label="Toggle theme"/);
+  assert.match(markup, /aria-label="Open context summaries"/);
+  assert.match(markup, /aria-label="Toggle runtime center"/);
+  assert.doesNotMatch(markup, /Open command palette|Open session status|Engine ready|>Commands</);
+  assert.doesNotMatch(openingTag(markup, 'aria-label="Open context summaries"'), /background:/);
+
+  const css = readFileSync(join(import.meta.dirname, '../src/renderer/global.css'), 'utf8');
+  assert.match(css, /\.desktop-topbar-action\s*\{[^}]*background:\s*transparent/s);
+  assert.match(css, /\.desktop-topbar-action:focus-visible\s*\{[^}]*background:/s);
+});
+
+test('context summary panel selects one saved item and expands its full detail', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(ContextSummaryPanel, {
+      summaries: [
+        { id: 'summary-1', content: '## Provider routing\n\nKeep the OpenRouter key bound to the session.', messagesBefore: 24, messagesAfter: 6, bytesSaved: 8192 },
+        { id: 'summary-2', content: '## Topbar polish\n\nUse transparent icon controls.', messagesBefore: 18, messagesAfter: 4, bytesSaved: 4096 },
+      ],
+      selectedId: 'summary-1',
+      onSelect: () => undefined,
+      onClose: () => undefined,
+    }),
+  ));
+
+  assert.match(markup, /role="listbox"/);
+  assert.equal((markup.match(/role="option"/g) ?? []).length, 2);
+  assert.match(markup, /aria-selected="true"/);
+  assert.match(markup, /Context summary/);
+  assert.match(markup, /Provider routing/);
+  assert.match(markup, /Keep the OpenRouter key bound to the session/);
+});
 
 test('pending sessions resume only after the matching project is trusted and connected', () => {
   const pending = { projectPath, sessionId: '11111111-1111-4111-8111-111111111111' };

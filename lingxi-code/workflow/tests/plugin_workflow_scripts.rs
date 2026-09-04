@@ -139,8 +139,9 @@ fn phase4_and_phase6_workflows_use_real_orchestration() {
         // appear somewhere (a comment mentioning the namespace used to be
         // enough to satisfy this).
         assert!(
-            code.lines()
-                .any(|line| line.trim_start().starts_with("const WORKFLOW_ID = 'lingxi-local-app:")),
+            code.lines().any(|line| line
+                .trim_start()
+                .starts_with("const WORKFLOW_ID = 'lingxi-local-app:")),
             "{name} must declare `const WORKFLOW_ID = 'lingxi-local-app:...'`, not merely \
              mention the namespace"
         );
@@ -287,7 +288,8 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     let prompts = seen_prompts.lock().expect("prompt log");
     let agent_calls = prompts.len();
     assert_eq!(
-        agent_calls, 8,
+        agent_calls,
+        8,
         "a hermetic create run with quality_level 'balanced' and every stub reporting success \
          must make exactly template-selector, designer, builder-stage, native-create-approval, \
          builder-build, operator, tester, verifier — 8 agent calls (saw: {:?})",

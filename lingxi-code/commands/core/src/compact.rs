@@ -187,6 +187,7 @@ mod tests {
             messages_before: 42,
             messages_after: 7,
             bytes_saved: 18_345,
+            summary: "kept context".to_string(),
         });
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
@@ -315,6 +316,7 @@ mod tests {
             messages_before: 0,
             messages_after: 0,
             bytes_saved: 0,
+            summary: String::new(),
         });
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {

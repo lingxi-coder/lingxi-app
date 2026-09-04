@@ -559,7 +559,7 @@ export class NativeAudioManager {
     const envelope = value as NativeAudioHelperEnvelope;
     if (envelope.type === 'event') {
       const event = validateNativeAudioEvent(envelope.event);
-      this.applySnapshot(event.snapshot);
+      if (event.type !== 'input_level') this.applySnapshot(event.snapshot);
       this.emit(event);
       return;
     }

@@ -1163,6 +1163,9 @@
     <string name="chat_error_session_switch_failed">会話の切り替えに失敗しました：%1$s</string>
     <string name="chat_error_cancel_generation_failed">生成のキャンセルに失敗しました：%1$s</string>
     <string name="chat_retry_status">リクエスト再試行 %1$d/%2$d（%3$s）</string>
+    <string name="chat_compacting_context">コンテキストを圧縮中</string>
+    <string name="chat_compaction_failed">コンテキストの圧縮に失敗しました</string>
+    <string name="chat_compaction_progress">コンテキストを整理中：%1$d%%（%2$d 秒）</string>
     <string name="chat_compaction_status">コンテキストを圧縮しました：%1$d → %2$d 件、%3$s を解放</string>
     <string name="composer_more">その他</string>
     <string name="composer_camera">カメラ撮影</string>

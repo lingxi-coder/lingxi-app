@@ -138,6 +138,8 @@ pub enum ClientEvent {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
+        #[serde(default)]
+        summary: String,
     },
 
     // ── Listing / screen events (F1-05) ───────────────────────────────────

@@ -353,6 +353,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 messages_before: 50,
                 messages_after: 12,
                 bytes_saved: 4096,
+                summary: "Summary:\nkept context".to_string(),
             },
         ),
         (

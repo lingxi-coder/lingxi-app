@@ -4,6 +4,23 @@ import Testing
 
 struct AudioHelperEncodingTests {
     @Test
+    func foregroundPermissionArgumentsAreStrictlyBounded() throws {
+        #expect(try permissionRequestFromArguments(["LingXiAudioHelper", "--jsonl"]) == nil)
+        #expect(try permissionRequestFromArguments([
+            "LingXiAudioHelper",
+            "--request-permissions",
+            "microphone,speech",
+        ]) == Set(["microphone", "speech"]))
+        #expect(throws: HelperError.self) {
+            try permissionRequestFromArguments([
+                "LingXiAudioHelper",
+                "--request-permissions",
+                "camera",
+            ])
+        }
+    }
+
+    @Test
     func archivePathRejectsTraversal() {
         #expect(validateArchivePath("model/tokens.txt"))
         #expect(!validateArchivePath("../escape"))

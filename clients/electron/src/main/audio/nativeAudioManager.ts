@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import type { AudioOpDto, AudioResultDto } from '@lingxi/bridge-client';
 
 import type { DiagnosticBuffer } from '../host-utils.js';
+import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 import { offlineVoiceModelById } from '../../shared/voiceModelCatalog.js';
 import {
   defaultNativeAudioSnapshot,
@@ -33,6 +34,10 @@ const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 type HelperProcess = Pick<ChildProcessWithoutNullStreams, 'pid' | 'stdin' | 'stdout' | 'stderr' | 'kill' | 'once'>;
 type SpawnHelper = (path: string, args: string[], env: NodeJS.ProcessEnv) => HelperProcess;
+type AudioPermission = 'microphone' | 'speech';
+type LaunchPermissionHelper = (appPath: string, permissions: AudioPermission[]) => Promise<void>;
+type VerifyPackagedHelper = (appPath: string) => void;
+type RequestMicrophoneAccess = () => Promise<MicrophonePermissionStatus>;
 
 interface PendingCommandRequest {
   kind: 'command';
@@ -59,7 +64,39 @@ export interface NativeAudioManagerOptions {
   userDataPath: string;
   diagnostics: DiagnosticBuffer;
   spawnHelper?: SpawnHelper;
+  launchPermissionHelper?: LaunchPermissionHelper;
+  verifyPackagedHelper?: VerifyPackagedHelper;
+  requestMicrophoneAccess?: RequestMicrophoneAccess;
   helperPath?: string;
+}
+
+function launchPermissionHelper(appPath: string, permissions: AudioPermission[]): Promise<void> {
+  return new Promise((resolveLaunch, rejectLaunch) => {
+    const child = spawn('/usr/bin/open', [
+      '-W',
+      '-n',
+      appPath,
+      '--args',
+      '--request-permissions',
+      permissions.join(','),
+    ], { stdio: 'ignore' });
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectLaunch(new Error('timed out waiting for the macOS audio permission prompt'));
+    }, REQUEST_TIMEOUT_MS);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      rejectLaunch(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolveLaunch();
+        return;
+      }
+      rejectLaunch(new Error(`audio permission helper exited (code=${String(code)} signal=${String(signal)})`));
+    });
+  });
 }
 
 function cloneOwner(owner: NativeAudioOwner | null): NativeAudioOwner | null {
@@ -147,11 +184,13 @@ export function resolveNativeAudioHelperPath(opts: Pick<NativeAudioManagerOption
 export class NativeAudioManager {
   private readonly storageRoot: string;
   private readonly spawnHelper: SpawnHelper;
+  private readonly launchPermissionHelper: LaunchPermissionHelper;
   private readonly subscribers = new Set<(event: NativeAudioEvent) => void>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly helperPath: string | null;
   private helper: HelperProcess | null = null;
   private helperStartup: Promise<void> | null = null;
+  private permissionResolution: Promise<NativeAudioSnapshot> | null = null;
   private helperStdoutBuffer = '';
   private snapshot = defaultNativeAudioSnapshot();
   private reservedOwner: NativeAudioOwner | null = null;
@@ -162,6 +201,7 @@ export class NativeAudioManager {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams);
+    this.launchPermissionHelper = opts.launchPermissionHelper ?? launchPermissionHelper;
     this.helperPath = resolveNativeAudioHelperPath(opts);
     if (!this.helperPath) {
       this.snapshot = {
@@ -202,6 +242,16 @@ export class NativeAudioManager {
     if (commandClaimsOwner(command) && owner) this.reservedOwner = { ...owner };
     try {
       await this.ensureHelper();
+      if (command.type === 'request_authorization' && this.opts.isPackaged) {
+        const snapshot = await this.resolvePackagedPermissions(command.permissions);
+        return { type: 'authorization', snapshot };
+      }
+      if (command.type === 'start_listening' && this.opts.isPackaged) {
+        await this.resolvePackagedPermissions([
+          'microphone',
+          ...(command.recognitionMode === 'automatic' ? ['speech' as const] : []),
+        ]);
+      }
       const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'command', command }, owner);
       const normalized = this.normalizeCommandResponse(command, response);
       return normalized;
@@ -228,6 +278,9 @@ export class NativeAudioManager {
     if (opClaimsOwner(op)) this.reservedOwner = { ...owner };
     try {
       await this.ensureHelper();
+      if (op.type === 'start_recording' && this.opts.isPackaged) {
+        await this.resolvePackagedPermissions(['microphone']);
+      }
       const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'engine_request', owner, op }, owner);
       if (response.type === 'engine_result') {
         this.applySnapshot(response.snapshot);
@@ -378,6 +431,53 @@ export class NativeAudioManager {
     }
   }
 
+  private helperAppPath(): string {
+    if (!this.helperPath) throw new Error('native audio helper is unavailable');
+    return resolve(this.helperPath, '..', '..', '..');
+  }
+
+  private async refreshHelperSnapshot(): Promise<NativeAudioSnapshot> {
+    const response = await this.sendHelperEnvelope({
+      id: randomUUID(),
+      kind: 'command',
+      command: { type: 'get_snapshot' },
+    }, null);
+    const normalized = this.normalizeCommandResponse({ type: 'get_snapshot' }, response);
+    if (normalized.type === 'error') throw new Error(normalized.error.message);
+    return this.getSnapshot();
+  }
+
+  private async resolvePackagedPermissions(permissions: AudioPermission[]): Promise<NativeAudioSnapshot> {
+    if (this.permissionResolution) {
+      await this.permissionResolution;
+      return this.resolvePackagedPermissions(permissions);
+    }
+    const resolution = this.performPackagedPermissionResolution(permissions);
+    this.permissionResolution = resolution;
+    try {
+      return await resolution;
+    } finally {
+      if (this.permissionResolution === resolution) this.permissionResolution = null;
+    }
+  }
+
+  private async performPackagedPermissionResolution(permissions: AudioPermission[]): Promise<NativeAudioSnapshot> {
+    if (permissions.includes('microphone')) {
+      if (!this.opts.requestMicrophoneAccess) {
+        throw new Error('outer application microphone authorization is unavailable');
+      }
+      await this.opts.requestMicrophoneAccess();
+    }
+    const before = await this.refreshHelperSnapshot();
+    const unresolved = permissions.filter((permission, index) => {
+      if (permissions.indexOf(permission) !== index) return false;
+      return permission === 'speech' && before.permissions.speech === 'not_determined';
+    });
+    if (unresolved.length === 0) return before;
+    await this.launchPermissionHelper(this.helperAppPath(), unresolved);
+    return this.refreshHelperSnapshot();
+  }
+
   private async startHelper(): Promise<void> {
     this.setHelperState('starting');
     this.verifyHelper();
@@ -416,7 +516,11 @@ export class NativeAudioManager {
   private verifyHelper(): void {
     if (!this.helperPath) return;
     if (!this.opts.isPackaged) return;
-    const helperAppPath = resolve(this.helperPath, '..', '..', '..');
+    const helperAppPath = this.helperAppPath();
+    if (this.opts.verifyPackagedHelper) {
+      this.opts.verifyPackagedHelper(helperAppPath);
+      return;
+    }
     const verification = spawnSync('/usr/bin/codesign', ['--verify', '--strict', helperAppPath], {
       encoding: 'utf8',
     });

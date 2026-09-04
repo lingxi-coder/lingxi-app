@@ -38,6 +38,10 @@ export interface MediaAccessReader {
   getMediaAccessStatus(mediaType: 'microphone'): string;
 }
 
+export interface MediaAccessRequester extends MediaAccessReader {
+  askForMediaAccess(mediaType: 'microphone'): Promise<boolean>;
+}
+
 /**
  * Reads the OS microphone grant. Never throws: a platform without the API, or
  * an Electron that raises for an unsupported media type, is reported as
@@ -52,5 +56,20 @@ export function readMicrophoneAccess(
     return microphonePermissionFromMediaAccessStatus(reader.getMediaAccessStatus('microphone'));
   } catch {
     return 'unavailable';
+  }
+}
+
+/** Requests microphone access from the signed outer Electron application. */
+export async function requestMicrophoneAccess(
+  requester: MediaAccessRequester | undefined = systemPreferences,
+): Promise<MicrophonePermissionStatus> {
+  const current = readMicrophoneAccess(requester);
+  if (current !== 'prompt') return current;
+  if (!requester || typeof requester.askForMediaAccess !== 'function') return 'unavailable';
+  try {
+    await requester.askForMediaAccess('microphone');
+    return readMicrophoneAccess(requester);
+  } catch {
+    return readMicrophoneAccess(requester);
   }
 }

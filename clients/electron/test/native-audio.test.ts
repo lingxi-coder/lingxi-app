@@ -46,6 +46,15 @@ function lastEnvelope(process: FakeHelperProcess): { id: string; kind: string } 
   return JSON.parse(raw.trim()) as { id: string; kind: string };
 }
 
+async function envelopeAt(process: FakeHelperProcess, index: number): Promise<{ id: string; kind: string; command?: { type?: string } }> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const raw = process.writes[index];
+    if (raw) return JSON.parse(raw.trim()) as { id: string; kind: string; command?: { type?: string } };
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`expected helper request at index ${index}`);
+}
+
 async function nextEnvelope(process: FakeHelperProcess): Promise<{ id: string; kind: string }> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (process.writes.length > 0) return lastEnvelope(process);
@@ -76,6 +85,65 @@ test('snapshot requests start the helper and return its real capabilities', asyn
     const response = await responsePromise;
     assert.equal(response.type, 'snapshot');
     assert.equal(response.snapshot.recognizerAvailable, true);
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
+test('packaged permissions use the outer app for microphone and foreground helper for Speech', async () => {
+  const helper = new FakeHelperProcess();
+  const launches: Array<{ appPath: string; permissions: string[] }> = [];
+  const microphoneRequests: string[] = [];
+  const manager = new NativeAudioManager({
+    isPackaged: true,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/resources/LingXiAudioHelper.app/Contents/MacOS/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any,
+    verifyPackagedHelper: () => {},
+    requestMicrophoneAccess: async () => {
+      microphoneRequests.push('microphone');
+      return 'granted';
+    },
+    launchPermissionHelper: async (appPath: string, permissions: string[]) => {
+      launches.push({ appPath, permissions });
+    },
+  });
+  try {
+    const authorization = manager.request({
+      type: 'request_authorization',
+      permissions: ['microphone', 'speech'],
+    });
+    const before = await envelopeAt(helper, 0);
+    assert.equal(before.command?.type, 'get_snapshot');
+    helper.stdout.write(`${JSON.stringify({
+      id: before.id,
+      type: 'response',
+      result: {
+        type: 'snapshot',
+        snapshot: snapshot({ permissions: { microphone: 'denied', speech: 'not_determined' } }),
+      },
+    })}\n`);
+
+    const after = await envelopeAt(helper, 1);
+    assert.deepEqual(launches, [{
+      appPath: '/resources/LingXiAudioHelper.app',
+      permissions: ['speech'],
+    }]);
+    assert.deepEqual(microphoneRequests, ['microphone']);
+    assert.equal(after.command?.type, 'get_snapshot');
+    helper.stdout.write(`${JSON.stringify({
+      id: after.id,
+      type: 'response',
+      result: { type: 'snapshot', snapshot: snapshot() },
+    })}\n`);
+
+    assert.deepEqual(await authorization, { type: 'authorization', snapshot: snapshot() });
+    assert.equal(helper.writes.length, 2, 'the background JSONL helper must not request TCC permission itself');
   } finally {
     await manager.dispose();
     helper.stdin.end();

@@ -1526,6 +1526,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       void stopFlowMode();
       return;
     }
+    if (voiceState === 'denied') {
+      void bridge.openSystemSettings('microphone');
+      return;
+    }
     if (standardListeningRef.current) {
       void finishStandardListening();
       return;

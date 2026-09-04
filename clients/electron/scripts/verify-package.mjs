@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import {
   APP_NAME,
   NS_MICROPHONE_USAGE_DESCRIPTION,
+  NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   artifactPaths,
   assertArm64Executable,
   commandAvailable,
@@ -143,6 +144,7 @@ export function verifyPackage(root = packageRoot) {
     CFBundleShortVersionString: metadata.version,
     CFBundleVersion: metadata.version,
     NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
+    NSSpeechRecognitionUsageDescription: NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(expectedPlist)) {
     const actual = plistValue(plistPath, key);
@@ -254,9 +256,13 @@ export function verifyPackage(root = packageRoot) {
       verifyIdentifier(join(resources, AUDIO_HELPER_APP), audioIdentifiers.bundleId, teamId);
       verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
       verifyIdentifier(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
-      verifySignedEntitlements(join(resources, AUDIO_HELPER_APP), teamId, audioIdentifiers.bundleId);
+      verifySignedEntitlements(join(resources, AUDIO_HELPER_APP), teamId, audioIdentifiers.bundleId, {
+        'com.apple.security.device.audio-input': true,
+      });
       verifySignedEntitlements(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
-      verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId);
+      verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId, {
+        'com.apple.security.device.audio-input': true,
+      });
       verifyTeamIdentifier(join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
       for (const path of findMachOFiles(join(contents, 'Frameworks'))) {
         verifyTeamIdentifier(path, teamId);

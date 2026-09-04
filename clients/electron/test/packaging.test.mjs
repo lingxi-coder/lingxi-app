@@ -307,6 +307,18 @@ test('signed entitlement validation requires the exact team and application iden
     'ZZZZZZZZZZ',
     'com.lingxi.code.credential-broker',
   ), /signed entitlements/);
+  assert.throws(() => validateSignedEntitlements(
+    entitlements,
+    'ABCDEFGHIJ',
+    'com.lingxi.code.credential-broker',
+    { 'com.apple.security.device.audio-input': true },
+  ), /audio-input/);
+  assert.doesNotThrow(() => validateSignedEntitlements(
+    { ...entitlements, 'com.apple.security.device.audio-input': true },
+    'ABCDEFGHIJ',
+    'com.lingxi.code.credential-broker',
+    { 'com.apple.security.device.audio-input': true },
+  ));
 });
 
 test('provisioning profile validation rejects an iOS profile before macOS signing starts', () => {
@@ -386,7 +398,7 @@ test('package scanning permits the public source prefix embedded by the official
   }
 });
 
-test('the rewritten Info.plist declares a concrete, honest microphone usage string', () => {
+test('the rewritten outer app Info.plist declares real native voice usage', () => {
   // This does not read back a constant the implementation just wrote: it
   // runs the REAL `rewriteInfoPlist` export against a REAL plist file
   // through the REAL `plutil` binary (the same tool `package-mac.mjs` shells
@@ -405,47 +417,18 @@ test('the rewritten Info.plist declares a concrete, honest microphone usage stri
     const rewritten = execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plistPath], { encoding: 'utf8' });
     const plist = JSON.parse(rewritten);
 
-    const description = plist.NSMicrophoneUsageDescription;
-    assert.equal(typeof description, 'string', 'macOS kills the app on first getUserMedia without this key');
-    assert.ok(
-      description.length > 10,
-      'the string is shown to the user verbatim in the permission dialog and must actually explain the use',
+    const microphoneDescription = plist.NSMicrophoneUsageDescription;
+    const speechDescription = plist.NSSpeechRecognitionUsageDescription;
+    assert.equal(
+      microphoneDescription,
+      'LingXi Code uses the microphone only while you actively use voice input or Flow Mode. '
+      + 'Audio stays on this Mac and is never sent to the language model or a third-party transcription provider.',
     );
     assert.equal(
-      description,
-      'LingXi Code only uses the microphone to record a short audio clip when you choose to start recording, '
-      + 'for example by pressing the microphone button in the composer. It never listens in the background, '
-      + 'and this build does not transcribe the recording into text, whether on this device or on a server.',
+      speechDescription,
+      'LingXi Code uses on-device speech recognition to transcribe spoken prompts while you actively use voice input or Flow Mode.',
+      'macOS terminates a nested helper speech request when the responsible outer app omits this key',
     );
-    // Desktop speech recognition is unconditionally unavailable in this build
-    // (`renderer/audio/requests.ts`'s `DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE`
-    // answers every `transcribe` op with `failed`/`unavailable`, regardless of
-    // permission or provider state — see `Voice.tsx`'s
-    // `RECOGNITION_UNAVAILABLE_NOTICE`). A usage string that implied
-    // dictation/transcription would mislead the user reading the system
-    // permission dialog.
-    //
-    // The negation must sit NEXT TO the transcription word, not merely in the
-    // same sentence. A same-sentence rule passed this false string:
-    //   "It never listens in the background, and this build automatically
-    //    transcribes the recording into text."
-    // because `never` in an unrelated clause satisfied it. A blanket
-    // "never mention transcription" ban is also wrong — the honest thing to
-    // write is an explicit DENIAL, which such a ban would reject.
-    const transcriptionWord = /transcri|dictat|speech.to.text|recogni[sz]e/gi;
-    const negatesIt = /\b(does not|doesn't|do not|don't|never|cannot|can't|no|not)\b/i;
-    const NEGATION_WINDOW = 30;
-    let match;
-    let checked = 0;
-    while ((match = transcriptionWord.exec(description)) !== null) {
-      checked += 1;
-      const before = description.slice(Math.max(0, match.index - NEGATION_WINDOW), match.index);
-      assert.ok(
-        negatesIt.test(before),
-        `"${match[0]}" is not denied within ${NEGATION_WINDOW} characters before it: "...${before}${match[0]}..."`,
-      );
-    }
-    assert.ok(checked > 0, 'the string must address transcription explicitly, not by omission');
 
     // Sanity that this exercised the real rewrite, not a stub: other keys
     // landed, the version was substituted, and the permissive template key

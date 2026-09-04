@@ -30,6 +30,7 @@ let package = Package(
         "GeneratedVoiceModels.swift",
       ],
       linkerSettings: [
+        .linkedFramework("AppKit"),
         .linkedFramework("AVFoundation"),
         .linkedFramework("Speech"),
         .linkedFramework("CoreMedia"),

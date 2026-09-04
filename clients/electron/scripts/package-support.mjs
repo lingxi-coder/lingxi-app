@@ -37,16 +37,9 @@ export const DEFAULT_SECRET_CANARY = 'LINGXI_SECRET_CANARY_DO_NOT_PACKAGE';
  * ("this app needs microphone access") is both bad UX and a common App
  * Store rejection reason.
  *
- * It deliberately does NOT claim speech recognition/dictation happens:
- * desktop speech recognition is unconditionally unavailable in this build
- * (`renderer/audio/requests.ts`'s `serviceAudioOp` answers every
- * `AudioOpDto::Transcribe` with `failed`/`unavailable` regardless of
- * microphone permission or which provider is configured — see that file's
- * `DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE` and `Voice.tsx`'s
- * `RECOGNITION_UNAVAILABLE_NOTICE`, which says the same thing in the
- * settings UI). Recording and speech OUTPUT (synthesis) both really work;
- * this string only has to be honest about recording, since synthesis does
- * not touch the microphone.
+ * Native voice requests execute in the bundled helper, but macOS can assign
+ * the TCC responsibility chain to this outer application. Both bundles must
+ * therefore carry accurate microphone and Speech usage descriptions.
  *
  * Exported (rather than inlined into `rewriteInfoPlist`'s replacement map)
  * so `verify-package.mjs`'s static check on the ACTUAL packaged
@@ -54,9 +47,10 @@ export const DEFAULT_SECRET_CANARY = 'LINGXI_SECRET_CANARY_DO_NOT_PACKAGE';
  * independently-typed copy that could silently drift from it.
  */
 export const NS_MICROPHONE_USAGE_DESCRIPTION =
-  'LingXi Code only uses the microphone to record a short audio clip when you choose to start recording, '
-  + 'for example by pressing the microphone button in the composer. It never listens in the background, '
-  + 'and this build does not transcribe the recording into text, whether on this device or on a server.';
+  'LingXi Code uses the microphone only while you actively use voice input or Flow Mode. '
+  + 'Audio stays on this Mac and is never sent to the language model or a third-party transcription provider.';
+export const NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION =
+  'LingXi Code uses on-device speech recognition to transcribe spoken prompts while you actively use voice input or Flow Mode.';
 export const FIXED_MTIME_SECONDS = Number(process.env['SOURCE_DATE_EPOCH'] ?? 946684800);
 export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const repoRoot = resolve(packageRoot, '..', '..');
@@ -325,6 +319,7 @@ export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
     CFBundleShortVersionString: version,
     CFBundleVersion: version,
     NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
+    NSSpeechRecognitionUsageDescription: NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(replacements)) {
     execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plistPath], { stdio: 'pipe' });

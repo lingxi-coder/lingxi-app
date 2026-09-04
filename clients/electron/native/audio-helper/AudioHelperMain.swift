@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+@preconcurrency import AppKit
 import AudioToolbox
 import CryptoKit
 import Foundation
@@ -50,6 +51,46 @@ enum HelperError: Error {
             return message
         }
     }
+}
+
+func permissionRequestFromArguments(_ arguments: [String]) throws -> Set<String>? {
+    guard let flagIndex = arguments.firstIndex(of: "--request-permissions") else { return nil }
+    guard arguments.indices.contains(flagIndex + 1) else {
+        throw HelperError.invalidRequest("missing audio permission list")
+    }
+    let requested = Set(arguments[flagIndex + 1]
+        .split(separator: ",")
+        .map(String.init)
+        .filter { !$0.isEmpty })
+    guard !requested.isEmpty, requested.isSubset(of: ["microphone", "speech"]) else {
+        throw HelperError.invalidRequest("unsupported audio permission")
+    }
+    return requested
+}
+
+@MainActor
+func requestSystemPermissions(_ requested: Set<String>) async throws {
+    guard requested.isSubset(of: ["microphone", "speech"]) else {
+        throw HelperError.invalidRequest("unsupported audio permission")
+    }
+    if requested.contains("speech"), SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+        _ = await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+        }
+    }
+    if requested.contains("microphone"), AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+        _ = await withCheckedContinuation { continuation in
+            AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+        }
+    }
+}
+
+@MainActor
+func requestForegroundSystemPermissions(_ requested: Set<String>) async throws {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    app.activate(ignoringOtherApps: true)
+    try await requestSystemPermissions(requested)
 }
 
 struct HelperOwner: Codable, Equatable, Sendable {
@@ -1554,19 +1595,7 @@ actor HelperStateStore {
 
     private func requestPermissions(_ permissions: [String]) async throws {
         let requested = Set(permissions)
-        guard requested.isSubset(of: ["microphone", "speech"]) else {
-            throw HelperError.invalidRequest("unsupported audio permission")
-        }
-        if requested.contains("speech"), SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-            _ = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-            }
-        }
-        if requested.contains("microphone"), AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            _ = await withCheckedContinuation { continuation in
-                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
-            }
-        }
+        try await requestSystemPermissions(requested)
         await publishSnapshotChanged()
     }
 
@@ -1583,16 +1612,17 @@ actor HelperStateStore {
         guard (8_000...48_000).contains(sampleRate) else {
             throw HelperError.invalidRequest("sample rate must be between 8000 and 48000 Hz")
         }
-        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-            try await requestPermissions(["microphone"])
-            if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-                throw HelperError.permission("microphone access is required")
-            }
+        let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if microphoneStatus == .notDetermined {
+            throw HelperError.permission("microphone permission must be decided in the foreground authorization flow")
+        }
+        if microphoneStatus != .authorized {
+            throw HelperError.permission("microphone access is required")
         }
         if recognitionMode == "automatic",
            nextOwner.kind != "engine",
            SFSpeechRecognizer.authorizationStatus() == .notDetermined {
-            try await requestPermissions(["speech"])
+            throw HelperError.permission("speech recognition permission must be decided in the foreground authorization flow")
         }
         activeLanguage = language
         let systemAvailable = recognitionMode == "automatic"
@@ -1923,6 +1953,18 @@ func readInputLoop(state: HelperStateStore) async {
 @main
 struct LingXiAudioHelperApp {
     static func main() async {
+        do {
+            if let permissions = try permissionRequestFromArguments(CommandLine.arguments) {
+                try await requestForegroundSystemPermissions(permissions)
+                return
+            }
+        } catch {
+            let message = (error as? HelperError)?.message ?? error.localizedDescription
+            if let data = "audio permission helper failed: \(message)\n".data(using: .utf8) {
+                try? FileHandle.standardError.write(contentsOf: data)
+            }
+            return
+        }
         let rootPath = ProcessInfo.processInfo.environment["LINGXI_AUDIO_MODELS_ROOT"]
             ?? NSHomeDirectory().appending("/Library/Application Support/LingXi/voice-models")
         let storageRoot = URL(fileURLWithPath: rootPath, isDirectory: true)

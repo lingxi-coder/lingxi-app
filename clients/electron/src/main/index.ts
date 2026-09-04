@@ -14,6 +14,7 @@ import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
+import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
 import { ignoreBrokenPipe } from './process-streams.js';
 import { PROVIDER_IDS } from '../shared/providers.js';
@@ -161,6 +162,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         resourcesPath: process.resourcesPath,
         userDataPath: userData,
         diagnostics,
+        requestMicrophoneAccess: () => requestMicrophoneAccess(),
       })
     : null;
   const sessionCatalog = new ProjectSessionCatalog({

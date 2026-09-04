@@ -17,6 +17,7 @@ import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio';
 import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
+import { requestMicrophoneAccess } from '../src/main/microphoneAccess';
 import { SettingsStore } from '../src/main/settings';
 
 /**
@@ -46,6 +47,34 @@ import { SettingsStore } from '../src/main/settings';
 
 /** The wire name of the channel — kept as a literal here on purpose: it is a contract between `main/host.ts` and `preload/index.ts`, and a shared constant would let both drift together. */
 const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
+
+test('the outer Electron app requests an undecided microphone grant exactly once', async () => {
+  let rawStatus = 'not-determined';
+  const calls: string[] = [];
+  const result = await requestMicrophoneAccess({
+    getMediaAccessStatus: () => rawStatus,
+    askForMediaAccess: async (mediaType) => {
+      calls.push(mediaType);
+      rawStatus = 'granted';
+      return true;
+    },
+  });
+  assert.equal(result, 'granted');
+  assert.deepEqual(calls, ['microphone']);
+});
+
+test('the outer Electron app does not re-prompt a microphone decision', async () => {
+  let asked = false;
+  const result = await requestMicrophoneAccess({
+    getMediaAccessStatus: () => 'denied',
+    askForMediaAccess: async () => {
+      asked = true;
+      return false;
+    },
+  });
+  assert.equal(result, 'denied');
+  assert.equal(asked, false);
+});
 
 interface HostHarness {
   handlers: Map<string, (...args: unknown[]) => unknown>;

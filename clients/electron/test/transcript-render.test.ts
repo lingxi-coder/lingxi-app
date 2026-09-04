@@ -301,6 +301,7 @@ test('code cards escape model HTML and fall back safely for unknown, unfinished,
 test('code card styles cap height and preserve code lines without wrapping', () => {
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
   assert.match(css, /\.code-card-scroll\s*\{[^}]*max-height:\s*520px;[^}]*overflow:\s*auto;/s);
+  assert.match(css, /\.code-card-scroll\s*\{[^}]*overscroll-behavior-x:\s*contain;[^}]*overscroll-behavior-y:\s*auto;/s);
   assert.match(css, /\.code-card pre\s*\{[^}]*white-space:\s*pre;/s);
   assert.doesNotMatch(css, /transition(?:-property)?:[^;]*height/);
 });

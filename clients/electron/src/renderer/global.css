@@ -1300,7 +1300,8 @@ body {
   max-width: 100%;
   max-height: 520px;
   overflow: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
 }
 .code-card pre {
   width: max-content;

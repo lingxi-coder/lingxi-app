@@ -1,6 +1,6 @@
 ---
 name: create-local-app
-description: Orchestrate confirmed local-capability-first app design, React generation, offline build, and Browser/native WebView verification inside the host-scaffolded workspace.
+description: Orchestrate confirmed local-capability-first app design, React generation, offline build, and native WebView verification (Browser if available) in the host-scaffolded workspace.
 ---
 
 # Create a local app
@@ -48,7 +48,8 @@ shape yet. Settling what the app IS is your work in that conversation:
    confirmation. Profile family is immutable once committed, so it is the
    user's call to confirm.
 4. After the conversational confirmation, call the unified
-   `lingxi-local-app:local-app-build` create branch for this shell app. That
+   `lingxi-local-app:local-app-build` create branch through the `Workflow`
+   tool for this shell app. That
    Host-owned path re-reads the template catalog, stages the create candidate,
    shows one trusted native create confirmation, and only then calls
    `LocalAppScaffold`. Pass the display **name** and **brief** the user just
@@ -60,7 +61,7 @@ shape yet. Settling what the app IS is your work in that conversation:
    app-owned MCP remains unconfigured and disabled until the user explicitly
    starts MCP setup from that app's settings. Never call a
    standalone runtime-profile selector or pass a model-authored
-   surface/profile override. Do not supply `args.runtime_profile` as an authority; the host reads the materialized manifest and overwrites it:
+   surface/profile override. Do not supply `args.runtime_profile` as an authority; on a create launch the host strips any caller-supplied `runtime_profile` at the launch boundary and injects no profile at all — the profile is fixed later in the run by the Host-verified template selection:
 
 ```json
 {"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}}
@@ -368,7 +369,7 @@ local implementation, or a specific external service; never switch silently.
 ## Image assets (conditional)
 
 Only when the brief needs an original photo, illustration, texture, hero,
-background, or other bitmap, detect whether the built-in ImageGen skill/tool is
+background, or other bitmap, detect whether an ImageGen skill/tool is
 available. If available and configured, generate the asset into `public/` and
 record prompt, source, and use in the spec. If unavailable, ask once whether
 to guide installation/configuration or skip it; on skip, use CSS, gradients,
@@ -380,7 +381,7 @@ and enable immediately if ready. Use inline SVG or CSS for ordinary icons.
 
 ## Build orchestration
 
-Call one namespaced build workflow with the confirmed spec. Host enriches the
+Call one namespaced build workflow through the `Workflow` tool, with the confirmed spec. Host enriches the
 launch with the verified catalog (Create) or persisted profile/snapshot
 (Update/Verify); caller input never selects a renderer or profile:
 
@@ -390,8 +391,10 @@ launch with the verified catalog (Create) or persisted profile/snapshot
 
 `name` and `brief` are create-only and carry the user-confirmed wording; every
 other identity field stays Host-derived.
-For update use `operation: "update"` and for a verification-only run use
-`operation: "verify"`; both fail closed unless Host can read the persisted
+For update use `operation: "update"` and pass the user-confirmed change as
+`revision_prompt` (a plain string carrying what the user asked to change —
+`spec` is create-only and ignored on update); for a verification-only run use
+`operation: "verify"`. Both fail closed unless Host can read the persisted
 Runtime Profile and dependency snapshot. `quality_level` is the only quality
 selector. `fast` is rejected after Host resolves a Canvas family. Repair
 budgets are fast=1, balanced=1, thorough=2. Host derives writable collection

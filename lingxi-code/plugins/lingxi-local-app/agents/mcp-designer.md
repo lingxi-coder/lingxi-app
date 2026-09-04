@@ -9,7 +9,6 @@ tools:
 skills:
   - mcp-tool-design
   - mcp-flow-binding
-  - mcp-qa
 ---
 
 # Design a Local App's MCP tool surface
@@ -47,8 +46,8 @@ available to you and never infer internal paths or catalog identity:
 The rest of §12.1's input list — Flow definitions, the Host capability
 graph, active build identity beyond what `LocalAppGet` returns, smoke/
 use-test/QA evidence, and the current active MCP catalog — has no
-model-callable tool in the 24-operation builtin table
-(`local_apps_tools.rs:53-93`). `$mcp-flow-binding` names where
+model-callable tool in the 32-operation builtin table
+(`local_apps_tools.rs:53-123`). `$mcp-flow-binding` names where
 `FlowDefinition` actually lives today
 (`local_apps::runtime_v2::FlowDefinition`, `local-apps/src/runtime_v2.rs:
 943`) — that's an internal Rust type, not something exposed to you. Where

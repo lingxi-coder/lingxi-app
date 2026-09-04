@@ -7,6 +7,8 @@ tools:
   - LocalAppEvents
   - LocalAppResolveTemplateSelection
   - LocalAppPromoteMcpCandidate
+skills:
+  - frontend-qa
 ---
 
 # Verify a Local App
@@ -67,4 +69,8 @@ report you're relaying) actually has is not a finding.
   create run cite `LocalAppGet`'s record instead.
 - Never consume a confirmation receipt or promote an App to active/
   published state — findings are input to a decision someone else makes,
-  not an action you take.
+  not an action you take. The sole exception is the
+  `lingxi-local-app:local-app-mcp-authoring` workflow's `mcp-promote` step,
+  where you relay `LocalAppPromoteMcpCandidate` for a Host-gated, already-QA'd
+  candidate and return the Host result unchanged — the Host decides whether
+  and how to promote, you do not.

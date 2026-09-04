@@ -822,7 +822,15 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "Never advertise or pass",
         "`fast` for a canvas surface",
         "expected_writable_collections",
-        "host reads the materialized manifest and overwrites it",
+        # Re-pointed: the skill used to say the host "reads the materialized
+        # manifest and overwrites it", which is what the UPDATE path does. On a
+        # create launch `sanitize_namespaced_local_app_args`
+        # (engine-mobile/src/workflow_support.rs:2224-2248) REMOVES
+        # `runtime_profile` from the caller's args outright and the create
+        # branch injects none, so the profile is not overwritten — it is absent
+        # until the Host-verified template selection fixes it later in the run.
+        # Pin the sentence that is true of the path this skill drives.
+        "strips any caller-supplied `runtime_profile` at the launch boundary",
         "Do not supply `args.runtime_profile` as an authority",
         "reserve the bottom-leading",
         "Profile family CANNOT be changed afterwards",
@@ -895,7 +903,15 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "the Host commits the staged values",
         "call LocalAppManifest to declare every collection",
         "LocalAppScaffold",
-        "Invoke exactly the matching runtime specialist",
+        # Re-pointed: the prompt used to say "Invoke exactly the matching
+        # runtime specialist", an action the builder cannot take. All five
+        # renderer guides are PRELOADED from builder.md's `skills:` frontmatter
+        # (agents/builder.md:18-26) and its `tools:` list holds no `Skill`
+        # (:4-17), so there is nothing to invoke. What the contract actually
+        # needs pinned is that exactly one of the five preloaded guides is
+        # applied and the other four are ignored.
+        "already-preloaded runtime specialist guide",
+        "ignoring the other four preloaded renderer guides",
         "LocalAppBuild",
         "LocalAppRuntime",
         "MCP remains unconfigured and disabled until the user starts MCP authoring",

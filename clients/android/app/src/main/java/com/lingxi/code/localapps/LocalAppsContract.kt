@@ -693,7 +693,12 @@ sealed interface LocalAppsAction {
     data class AcknowledgeBridgeResult(val appId: String, val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
     data class ResolveDependencyChangeConfirmation(val approved: Boolean) : LocalAppsAction
-    data class ResolveApprovalSheet(val approved: Boolean) : LocalAppsAction
+    // Carries the sheet's own `requestId` so a tap that lands after the
+    // pending sheet has already been swapped (a supersede, or the next queued
+    // sheet shifting in) resolves the sheet the user actually saw, not
+    // whatever is current when the action arrives. See
+    // `LocalAppsViewModel.resolveApprovalSheet`.
+    data class ResolveApprovalSheet(val requestId: String, val approved: Boolean) : LocalAppsAction
     data class UiActionHandled(
         val requestId: String,
         val resultJson: String?,

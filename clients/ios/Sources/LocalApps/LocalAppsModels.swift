@@ -151,7 +151,16 @@ struct LocalAppBuiltinPluginDescriptor: Hashable, Sendable {
         pluginID: "lingxi-local-app",
         displayName: "LingXi Local App",
         version: "1.0.0",
-        archiveDigest: "7d7bbbee751efdbebadfe8184f69d205bc93681d53870ae8442be16cee7fce34",
+        // Intentionally blank, NOT a hand-typed hash: this constant is only
+        // ever shown before the live `pluginInventoryChanged` event arrives
+        // (`LocalAppsStore.swift` overwrites `archiveDigest` with the
+        // engine-computed `bundleDigest` the moment it does), so a literal
+        // here can only ever be a snapshot of some past build's real digest
+        // — one that silently drifts as the plugin bundle changes and, once
+        // wrong, reads as an authoritative hash while claiming nothing true.
+        // `digestSummary` (Settings/MCPPages.swift) renders an empty string
+        // as an empty value rather than a plausible-looking wrong one.
+        archiveDigest: "",
         skillCount: 27,
         agentCount: 7,
         workflowCount: 3,

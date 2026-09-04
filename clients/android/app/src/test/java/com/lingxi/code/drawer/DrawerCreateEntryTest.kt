@@ -26,6 +26,32 @@ import org.junit.Test
 class DrawerCreateEntryTest {
     private val source = File("src/main/java/com/lingxi/code/drawer/DrawerContent.kt").readText()
 
+    /**
+     * True when `DrawerAppQuickActions(` is reached from the branch arm's own
+     * opening brace without first entering a nested block.
+     *
+     * Deliberately NOT a regex over the wrapper's condition. The obvious
+     * spelling -- an `(if|when)` followed by a bracketed condition, a brace and
+     * then the call -- cannot span a condition that itself contains
+     * parentheses. So the single most likely regression this assertion exists
+     * to catch, `if (chatWorkspaceGroups.isNotEmpty()) { DrawerAppQuickActions(
+     * ...) }` gating the row on a non-empty app list, slipped through it in
+     * silence. That is measured, not theorised: planting exactly that wrap into
+     * the Chat arm left the regex form of this assertion GREEN.
+     *
+     * Counting braces is spelling-independent instead. The head of an
+     * unconditional arm holds exactly the arm's own `{` and no `}` at all; any
+     * wrapper -- `if`, `when`, `apps.forEach`, `AnimatedVisibility`, a `?.let`
+     * -- opens a second one, and a call moved BELOW the workspace list drags
+     * that list's own lambda braces into the head.
+     */
+    private fun rendersQuickActionsUnconditionally(branch: String): Boolean {
+        val call = branch.indexOf("DrawerAppQuickActions(")
+        if (call < 0) return false
+        val head = branch.substring(0, call)
+        return head.count { it == '{' } == 1 && head.none { it == '}' }
+    }
+
     private fun branchBody(sectionArm: String, nextArm: String): String {
         val start = source.indexOf(sectionArm)
         assertTrue("expected to find `$sectionArm` in DrawerContent.kt", start >= 0)
@@ -52,6 +78,19 @@ class DrawerCreateEntryTest {
             "the Chat tab's quick actions must be wired to the live onOpenApps callback, not a no-op",
             "onOpenApps = onOpenApps" in chatBranch,
         )
+        assertTrue(
+            "the quick actions must render ABOVE the workspace list (the row's own name — " +
+                "\"quick actions\" ahead of the session list, matching iOS) and UNCONDITIONALLY: a " +
+                "call that appears in the branch but after WorkspaceGroupsSection( — or behind an " +
+                "`if` — would satisfy every assertion above while still leaving a zero-apps user " +
+                "without the row on first render",
+            chatBranch.indexOf("DrawerAppQuickActions(") in 0 until chatBranch.indexOf("WorkspaceGroupsSection("),
+        )
+        assertTrue(
+            "quick actions must not be wrapped in a conditional (e.g. gated on a non-empty app " +
+                "list) — the whole point of this row is to be there when the list is EMPTY",
+            rendersQuickActionsUnconditionally(chatBranch),
+        )
     }
 
     @Test
@@ -72,6 +111,51 @@ class DrawerCreateEntryTest {
             "the Code tab's quick actions must be wired to the live onOpenApps callback, not a no-op",
             "onOpenApps = onOpenApps" in codeBranch,
         )
+        assertTrue(
+            "the quick actions must render ABOVE the workspace list and UNCONDITIONALLY, same " +
+                "reasoning as the Chat tab's sibling assertion above",
+            codeBranch.indexOf("DrawerAppQuickActions(") in 0 until codeBranch.indexOf("WorkspaceGroupsSection("),
+        )
+        assertTrue(
+            "quick actions must not be wrapped in a conditional",
+            rendersQuickActionsUnconditionally(codeBranch),
+        )
+    }
+
+    @Test
+    fun `the quick actions row wires its two visible affordances to the create and browse callbacks`() {
+        val body = branchBody("private fun DrawerAppQuickActions(", "private fun SectionTab(")
+
+        assertTrue(
+            "vacuity guard: the sliced region must still be DrawerAppQuickActions' body",
+            "onCreateApp: () -> Unit" in body,
+        )
+        assertTrue(
+            "the create row must be clickable via the onCreateApp callback",
+            ".clickable(onClick = onCreateApp)" in body,
+        )
+        assertTrue(
+            "the create row must use the generated create-app string, not a raw literal",
+            "R.string.drawer_create_app" in body,
+        )
+        assertTrue(
+            "the create row must carry a stable testTag for instrumented tests, sourced from " +
+                "UiTags rather than a raw literal that could silently drift from its sibling in " +
+                "androidTest",
+            "UiTags.DRAWER_CREATE_APP" in body,
+        )
+        assertTrue(
+            "the browse row must be clickable via the onOpenApps callback",
+            ".clickable(onClick = onOpenApps)" in body,
+        )
+        assertTrue(
+            "the browse row must use the generated open-library string, not a raw literal",
+            "R.string.drawer_open_apps_library" in body,
+        )
+        assertTrue(
+            "the browse row must carry a stable testTag sourced from UiTags",
+            "UiTags.DRAWER_OPEN_APPS_LIBRARY" in body,
+        )
     }
 
     @Test
@@ -80,18 +164,45 @@ class DrawerCreateEntryTest {
             "AppsSection (the old dedicated-Apps-tab composable, zero call sites since " +
                 "DrawerSection.Apps was removed in 47d92dc28) must be deleted once its two " +
                 "action rows are reused by DrawerAppQuickActions above — leaving it in place " +
-                "alongside the new composable would be a second dead function",
-            "private fun AppsSection(" !in source,
+                "alongside the new composable would be a second dead function. Keyed on the " +
+                "declaration shape rather than one exact visibility-modifier spelling, so a " +
+                "reformat (or `internal fun`) cannot silently defeat this by no longer matching " +
+                "the literal `private fun AppsSection(`",
+            !Regex("fun\\s+AppsSection\\s*\\(").containsMatchIn(source),
         )
     }
 
     @Test
     fun `SectionTabs no longer carries the unused apps count parameter`() {
+        val start = source.indexOf("private fun SectionTabs(")
+        assertTrue("expected to find SectionTabs' declaration in DrawerContent.kt", start >= 0)
+        val end = source.indexOf(") {", start)
+        assertTrue("expected to find the end of SectionTabs' parameter list", end > start)
+        val declaration = source.substring(start, end)
+
         assertTrue(
             "SectionTabs never rendered a 4th tab from its `apps: Int` parameter (only " +
                 "Chat/Code/Cron SectionTab rows were emitted) — once DrawerContent stops " +
-                "passing `apps = appsCount` to it, the dead parameter must be removed too",
-            "apps: Int" !in source,
+                "passing `apps = appsCount` to it, the dead parameter must be removed too. Scoped " +
+                "to SectionTabs' own declaration (not the whole file), so an unrelated `apps: Int` " +
+                "elsewhere in this file cannot make this pass without the dead parameter actually " +
+                "being gone",
+            "apps: Int" !in declaration,
+        )
+    }
+
+    @Test
+    fun `DrawerContent no longer computes or forwards the dead apps count`() {
+        assertTrue(
+            "DrawerContent's own `appsCount` parameter has zero readers in its body (SectionTabs " +
+                "never rendered a 4th tab from it) — once RootScreen stops passing " +
+                "`appsCount = localAppsState.apps.size`, the dead parameter must be deleted here too",
+            "appsCount" !in source,
+        )
+        val rootScreen = File("src/main/java/com/lingxi/code/RootScreen.kt").readText()
+        assertTrue(
+            "RootScreen must stop computing and passing the now-deleted appsCount argument",
+            "appsCount" !in rootScreen,
         )
     }
 }

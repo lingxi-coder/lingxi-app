@@ -528,6 +528,16 @@ struct RootView: View {
             .task(id: sourceGeneration) {
                 let generation = sourceGeneration
                 let sessionToRestore = pendingSessionRestoreID ?? activeSession
+                // `providerCatalogBootstrapped` flips true exactly once, on
+                // this task's very first run, and never resets — so reading
+                // it BEFORE that flip is a reliable "is this the app's first
+                // ever bootstrap, not a rebind" signal. The very first run
+                // has no prior engine session to disown a create FROM: a
+                // create started during this same task's async gap (the UI
+                // is already interactive while `prepare()`/catalog refresh
+                // are in flight) must not be mistaken for one that predates
+                // a rebind and discarded.
+                let isInitialBootstrap = !providerCatalogBootstrapped
                 var current = source
                 wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
                 do {
@@ -557,7 +567,15 @@ struct RootView: View {
                         )
                     }
                     await providerRepository.refreshCredentialStatus()
-                    await localAppsStore.refreshAfterEngineRebind()
+                    // `&& !preparedByCatalogRebuild`: the first bootstrap is
+                    // exempt from the disown ONLY when it did not itself rebind.
+                    // When the catalog load rebuilt `source` above, that IS a
+                    // rebind — a create armed against the source it replaced can
+                    // never resolve its claim, and exempting it would leave the
+                    // permanent `local_apps_error_create_in_progress` latch the
+                    // disown exists to prevent.
+                    await localAppsStore.refreshAfterEngineRebind(
+                        isInitialBootstrap: isInitialBootstrap && !preparedByCatalogRebuild)
                 } catch {
                     guard generation == sourceGeneration else { return }
                     current.warmUp()
@@ -1428,7 +1446,25 @@ struct RootView: View {
         initialPrompt: String? = nil,
         allowRecoveryRouting: Bool = false
     ) -> Bool {
-        let targetMode = mode ?? activeMode
+        // MINTING a conversation in a local-app scope is pinned to Code: the
+        // app's `LINGXI.md` contract requires the create-local-app skill and
+        // the `Workflow`/`LocalApp*`/`Write` tools, all of which
+        // `apply_mobile_session_tool_policy` strips in Chat mode. Pinned HERE
+        // so `onNewAppChat` (Drawer.swift), which passes whatever the global
+        // `activeMode` happens to be at tap time, cannot mint an app-scoped
+        // Chat conversation by omission.
+        //
+        // ONLY `startNew`. An explicit resume must keep the session's own
+        // recorded mode — `host.rs` rejects a cross-mode resume outright
+        // ("session … belongs to chat mode, but this source runs code mode"),
+        // and the app's session catalog lists every row regardless of mode, so
+        // pinning a resume made every pre-existing Chat-mode app session
+        // un-openable. A bare same-scope mode toggle (`switchMode`, the
+        // drawer's Chat/Code tabs) is likewise left alone: pinning it made the
+        // tap a silent no-op that collapsed the sidebar and desynced the tab
+        // from `activeMode`, and that tab is also the only route from inside an
+        // app scope to a project's Chat sessions.
+        let targetMode = (scope.isLocalApp && startNew) ? .code : (mode ?? activeMode)
         guard !projectSwitching,
               allowRecoveryRouting || ConversationSessionMutationPolicy.allowsCallerMutation(
                   hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
@@ -1490,6 +1526,16 @@ struct RootView: View {
                 #endif
                 try await replacement.prepare()
                 activeScope = scope
+                // A kickoff armed for a DIFFERENT scope than the one we just
+                // entered has missed its window: it did not fire in the
+                // scope it was armed for (that switch either raced this one
+                // or never landed), so leaving it armed would let it match
+                // ANY later session subsequently adopted back in that scope
+                // — including one with no relation to the create that armed
+                // it, whenever `kickoff.sessionID == nil`.
+                if let kickoff = pendingInitKickoff, kickoff.scope != scope {
+                    pendingInitKickoff = nil
+                }
                 activeMode = targetMode
                 collapsedWorkspaceKeys = scopedPreferences.workspaceCollapsedKeys(mode: targetMode)
                 draft = scopedPreferences.draft(scope: scope, mode: targetMode)
@@ -1612,6 +1658,16 @@ struct RootView: View {
         pendingSessionRestoreID = nil
         activeSession = rollbackSelection
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
+        // The session this kickoff was waiting for failed its transition
+        // entirely — unlike the sibling handlers above, `source` here is not
+        // known to be pointed at a session where re-firing the brief is
+        // safe, so drop the latch rather than resend it. Dropping (not
+        // leaving it armed) is still required: otherwise it survives as a
+        // stale latch and can later fire into an unrelated session that
+        // happens to match `kickoff.sessionID`.
+        if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID {
+            pendingInitKickoff = nil
+        }
         if let pending = pendingSessionFork,
            pending.sourceSessionID == sessionID {
             rollbackPendingSessionFork(pending, message: nil)

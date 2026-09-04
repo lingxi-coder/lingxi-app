@@ -49,6 +49,7 @@ import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.conversation.ReplyEvent
 import com.lingxi.code.model.EngineModelState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -114,10 +115,22 @@ class LocalAppsViewModelTest {
         var commandFailure: Throwable? = null
         val models = MutableStateFlow(EngineModelState())
 
+        /**
+         * Optional suspension point, unused (and so a no-op) unless a test
+         * sets it: lets a test hold [submitClientCommand] suspended so it can
+         * interleave OTHER events (a rebind, a second command) before letting
+         * this one resolve — modeling an async submit that fails LATE,
+         * relative to state changes that happened while it was still in
+         * flight. Every other test leaves this null and sees the previous
+         * instant behavior.
+         */
+        var gate: CompletableDeferred<Unit>? = null
+
         override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
         override val modelState = models
 
         override suspend fun submitClientCommand(command: ClientCommand) {
+            gate?.await()
             commandFailure?.let { throw it }
             commands += command
         }
@@ -1242,8 +1255,15 @@ class LocalAppsViewModelTest {
                                 contractSha256 = "contract-1",
                                 surface = AppSurfaceDto.DOM,
                                 corePackages = listOf(AppRuntimeProfilePackageDto("react", "19.1.1")),
-                                cacheStatus = "bundled",
-                                downloadStatus = "not_needed",
+                                // The tokens `dependency_status` actually
+                                // produces (local_apps_host.rs:2422-2443 assigns
+                                // BOTH fields the same value out of
+                                // bundled / cached / download_required /
+                                // unavailable). The old `not_needed` here came
+                                // from the OTHER DTO's vocabulary and could
+                                // never reach this sheet.
+                                cacheStatus = "download_required",
+                                downloadStatus = "download_required",
                                 available = true,
                                 reason = null,
                             ),
@@ -1287,8 +1307,18 @@ class LocalAppsViewModelTest {
             assertEquals("receipt-create", pending.receiptId)
             assertEquals("CRM board", pending.templateName)
             assertEquals(LocalAppRuntimeProfileFamily.ReactDom, pending.runtimeProfile.family)
+            assertEquals(
+                "the dependency's downloadStatus must be the SINGLE raw token the engine sent, so " +
+                    "LocalAppsScreen.localizedRuntimeProfileStatus can match one of its arms. It " +
+                    "previously joined cacheStatus + downloadStatus into one " +
+                    "\"download_required · download_required\" string, which no single-token " +
+                    "localizer could ever match — and the localizer joined into it did nothing " +
+                    "anyway (every arm returned its own input verbatim)",
+                "download_required",
+                pending.dependencies.single().downloadStatus,
+            )
 
-            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(true))
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(pending.requestId, true))
             runCurrent()
 
             val command = source.commands.last() as? ClientCommand.PluginCommand
@@ -1393,7 +1423,7 @@ class LocalAppsViewModelTest {
                 pending.toolDiffs.single().changedFields.take(2),
             )
 
-            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(false))
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(pending.requestId, false))
             runCurrent()
 
             val command = source.commands.last() as? ClientCommand.PluginCommand
@@ -2453,6 +2483,386 @@ class LocalAppsViewModelTest {
             assertEquals("ui-noop", noopResolution.requestId)
             assertNull(noopResolution.resultJson)
             assertEquals("WebView UI automation returned no result", noopResolution.error)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `a source rebind drops the pending approval sheet and its queue rather than resolve into the new engine`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val first = RecordingSource()
+            val sources = MutableStateFlow<ConversationSource>(first)
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = sources,
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            // Two different apps so the second QUEUES rather than superseding
+            // the first in place.
+            first.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-a",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "a",
+                            reason = "a",
+                        ),
+                    ),
+                ),
+            )
+            first.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = OTHER_APP_ID,
+                            approvalToken = "token-b",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "b",
+                            reason = "b",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            assertEquals(
+                "token-a",
+                (viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet)?.receiptId,
+            )
+
+            // Rebind: the old source (and its requestIds) is gone.
+            val second = RecordingSource()
+            sources.value = second
+            runCurrent()
+
+            assertNull(
+                "the pending sheet must be dropped on rebind, not left resolvable against the new source",
+                viewModel.uiState.value.pendingApprovalSheet,
+            )
+            assertEquals(
+                "a sheet vanishing from under the user's finger must SAY so, the same way an " +
+                    "abandoned create does — there is no create claim behind an MCP/profile " +
+                    "approval, so gating the banner on the create claim alone left this rebind " +
+                    "silent",
+                "创建结果未知，请在应用库确认。",
+                viewModel.uiState.value.error,
+            )
+
+            // Prove the QUEUE was cleared too, not just the visible slot: raise
+            // a third, unrelated sheet (nothing pending, so it surfaces
+            // immediately) and resolve it. If "token-b" had survived in the
+            // queue, resolving here would shift it back in as the new
+            // pendingApprovalSheet.
+            second.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = "third-app",
+                            approvalToken = "token-c",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "c",
+                            reason = "c",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            val third = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("the third proposal must surface as the pending approval sheet")
+            assertEquals("token-c", third.receiptId)
+
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(third.requestId, true))
+            runCurrent()
+
+            assertNull(
+                "the queue must have been cleared on rebind: if \"token-b\" survived in it, " +
+                    "resolving the third sheet would have shifted it back in here",
+                viewModel.uiState.value.pendingApprovalSheet,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `resolving a stale approval action (wrong requestId) is a no-op`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-real",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "x",
+                            reason = "x",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            assertEquals(
+                "token-real",
+                (viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet)?.receiptId,
+            )
+
+            // A tap whose action was built against a sheet that has since been
+            // superseded — the id it carries no longer matches what is current.
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet("stale-request-id", true))
+            runCurrent()
+
+            assertTrue(
+                "a stale requestId must not resolve anything: no command may reach the source",
+                source.commands.filterIsInstance<ClientCommand.ResolveAppProfileProposal>().isEmpty(),
+            )
+            assertEquals(
+                "the real pending sheet must be untouched by a stale resolution",
+                "token-real",
+                (viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet)?.receiptId,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `a failed approval submit restores the sheet instead of losing the user's decision`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-fail",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "x",
+                            reason = "x",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("profile proposal must surface as the pending approval sheet")
+
+            source.commandFailure = IllegalStateException("engine unreachable")
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(pending.requestId, true))
+            runCurrent()
+
+            val restored = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError(
+                    "a failed submit must restore the sheet so the user can re-answer, not " +
+                        "silently drop their decision",
+                )
+            assertEquals("token-fail", restored.receiptId)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `a create submit that fails LATE releases only its own claim, not a newer create's`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val first = RecordingSource()
+            val sources = MutableStateFlow<ConversationSource>(first)
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = sources,
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            // Create A's submit is gated: it stays suspended in flight rather
+            // than resolving instantly, so it can fail AFTER other state
+            // changes below rather than before them.
+            val gate = CompletableDeferred<Unit>()
+            first.gate = gate
+            first.commandFailure = IllegalStateException("connection dropped")
+            viewModel.createAppFromDrawer()
+            runCurrent()
+            assertTrue(
+                "fixture sanity: A's submit must be suspended on the gate, not yet failed",
+                first.commands.filterIsInstance<ClientCommand.CreateApp>().isEmpty(),
+            )
+
+            // A's claim is abandoned by a rebind while A is still in flight —
+            // this is what frees pendingCreateRequestId to be reused; A's own
+            // launch (bound to the OLD source, still suspended on the gate) is
+            // untouched by it.
+            val second = RecordingSource()
+            sources.value = second
+            runCurrent()
+
+            // Create B now starts CLEANLY on the new source.
+            viewModel.createAppFromDrawer()
+            runCurrent()
+            val createB = second.commands.filterIsInstance<ClientCommand.CreateApp>().single()
+
+            // NOW let A's stale submit fail — after B has already armed the
+            // claim. An unkeyed release here would clear B's claim out from
+            // under it.
+            gate.complete(Unit)
+            runCurrent()
+            // A's failure raises its own (unrelated) error message here — that
+            // is expected and not what this test is about. What matters is
+            // whether it also cleared B's claim.
+
+            val createCountBeforeThirdAttempt = second.commands.filterIsInstance<ClientCommand.CreateApp>().size
+            viewModel.createAppFromDrawer()
+            runCurrent()
+            assertEquals(
+                "the third attempt must not have submitted a new CreateApp: pendingCreateRequestId " +
+                    "must still be B's, proving A's late failure did not clear it out from under B. " +
+                    "An unkeyed release from A's failure would have freed the claim and let this " +
+                    "third attempt through",
+                createCountBeforeThirdAttempt,
+                second.commands.filterIsInstance<ClientCommand.CreateApp>().size,
+            )
+            assertEquals(
+                "the third attempt must have been refused as \"already in progress\", overwriting " +
+                    "whatever error A's own failure raised",
+                "已有一个本地应用正在创建中，请稍候。",
+                viewModel.uiState.value.error,
+            )
+
+            // B itself must still resolve normally afterwards.
+            second.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppCreated(record = appRecord(APP_ID), requestId = createB.requestId),
+                ),
+            )
+            runCurrent()
+            viewModel.createAppFromDrawer()
+            runCurrent()
+            assertTrue(
+                "once B resolves, the claim must be free again for a genuinely new create",
+                second.commands.filterIsInstance<ClientCommand.CreateApp>().size > 1,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /**
+     * The intersection of the two mechanisms above: a rebind that lands WHILE
+     * an approval submit is still in flight. Neither of the two tests above
+     * covers it — the rebind test has no failing submit outstanding, and the
+     * restore test never rebinds — yet it is the single most likely ordering
+     * in production, because "the source went away" is the usual reason the
+     * submit fails at all.
+     */
+    @Test
+    fun `a rebind while an approval submit is in flight must not resurrect the dropped sheet`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val first = RecordingSource()
+            val sources = MutableStateFlow<ConversationSource>(first)
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = sources,
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            first.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-inflight",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "x",
+                            reason = "x",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("profile proposal must surface as the pending approval sheet")
+
+            // The submit hangs, then fails — the shape of an engine that goes
+            // away mid-request.
+            val gate = CompletableDeferred<Unit>()
+            first.gate = gate
+            first.commandFailure = IllegalStateException("engine unreachable")
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(pending.requestId, true))
+            runCurrent()
+            assertNull(
+                "fixture sanity: the sheet is dismissed the moment it is resolved, before the " +
+                    "submit's outcome is known",
+                viewModel.uiState.value.pendingApprovalSheet,
+            )
+
+            // The rebind that deliberately drops every sheet bound to `first`.
+            val second = RecordingSource()
+            sources.value = second
+            runCurrent()
+
+            // Only NOW does the in-flight submit fail.
+            gate.complete(Unit)
+            runCurrent()
+
+            assertNull(
+                "the failed submit must not restore a sheet the rebind deliberately dropped: its " +
+                    "requestId belongs to an engine that no longer exists, so re-prompting the user " +
+                    "here would submit \"token-inflight\" into the NEW source — exactly the " +
+                    "cross-engine resolution the rebind clear exists to prevent",
+                viewModel.uiState.value.pendingApprovalSheet,
+            )
+
+            // And the queue must not have been used as a back door either: a
+            // fresh sheet on the new source must surface alone, with nothing
+            // shifting in behind it.
+            second.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = OTHER_APP_ID,
+                            approvalToken = "token-fresh",
+                            baseRevision = 1u,
+                            currentRevision = 2u,
+                            instructions = "y",
+                            reason = "y",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            val fresh = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("the new source's proposal must surface")
+            assertEquals("token-fresh", fresh.receiptId)
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(fresh.requestId, true))
+            runCurrent()
+            assertNull(
+                "nothing may have been parked at the head of the queue by the stale failure",
+                viewModel.uiState.value.pendingApprovalSheet,
+            )
         } finally {
             releaseMain()
         }

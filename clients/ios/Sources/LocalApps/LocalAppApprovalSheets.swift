@@ -61,10 +61,13 @@ struct LocalAppCreateConfirmationSheet: View {
               label: String(localized: "local_apps_create_confirm_rejected_candidates")
             ) {
               ForEach(Array(prompt.rejected.enumerated()), id: \.element.id) { index, rejected in
+                // `LocalAppRejectedCandidate` carries no surface of its own —
+                // rendering `prompt.selectedTemplate.surface` here showed the
+                // WINNING template's surface as if it belonged to every
+                // REJECTED candidate. No `value:` beats a wrong one.
                 SettingsRow(
                   label: rejected.templateID,
                   sub: rejected.reason,
-                  value: approvalSurfaceTitle(prompt.selectedTemplate.surface),
                   chevron: false,
                   isLast: index == prompt.rejected.count - 1
                 )

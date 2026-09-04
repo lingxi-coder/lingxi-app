@@ -72,6 +72,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
 import java.text.DateFormat
@@ -166,7 +167,14 @@ fun LocalAppApprovalSheetDialog(
     val context = LocalContext.current
     val canApprove = sheet.state == LocalAppApprovalReceiptState.Pending
     AlertDialog(
-        onDismissRequest = { onAction(LocalAppsAction.ResolveApprovalSheet(false)) },
+        // An outside tap or back press must NOT reject the sheet: this is a
+        // create/MCP/profile approval, not a dismissible notice, and a stray
+        // dismiss (or a system back gesture) would silently decline an app
+        // creation the user never chose to reject. Rejection is only ever the
+        // explicit dismissButton below. iOS disables interactive dismissal on
+        // the same prompt with `.interactiveDismissDisabled()`.
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
         title = {
             Text(
                 when (sheet) {
@@ -213,7 +221,7 @@ fun LocalAppApprovalSheetDialog(
                                             listOfNotNull(
                                                 dependency.packageName,
                                                 dependency.version?.let { "@$it" },
-                                                dependency.downloadStatus?.localizedDependencyStatus(context),
+                                                dependency.downloadStatus?.localizedRuntimeProfileStatus(context),
                                             ).joinToString(" ")
                                         },
                                     )
@@ -357,7 +365,7 @@ fun LocalAppApprovalSheetDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(true)) },
+                onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(sheet.requestId, true)) },
                 enabled = canApprove,
             ) {
                 Text(
@@ -370,7 +378,7 @@ fun LocalAppApprovalSheetDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(false)) }) {
+            TextButton(onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(sheet.requestId, false)) }) {
                 Text(
                     when (sheet) {
                         is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_reject)
@@ -2050,20 +2058,29 @@ private fun LocalAppApprovalToolSurface.valueFor(field: LocalAppApprovalToolFiel
     LocalAppApprovalToolField.PermissionCeiling -> permissionCeiling
 }
 
-@Composable
-private fun String.localizedRuntimeProfileStatus(): String = when (this) {
-    "bundled" -> stringResource(R.string.local_apps_runtime_profile_status_bundled)
-    "cached" -> stringResource(R.string.local_apps_runtime_profile_status_cached)
-    "download_required" -> stringResource(R.string.local_apps_runtime_profile_status_download_required)
-    "unavailable" -> stringResource(R.string.local_apps_runtime_profile_status_unavailable)
-    "gated" -> stringResource(R.string.local_apps_runtime_profile_status_gated)
-    else -> this
-}
-
-private fun String.localizedDependencyStatus(context: android.content.Context): String = when (this) {
-    "may_be_required" -> context.getString(R.string.local_apps_dependency_change_download_may_be_required)
-    "not_required" -> context.getString(R.string.local_apps_dependency_change_download_not_required)
-    "not_needed" -> context.getString(R.string.local_apps_dependency_change_cache_not_needed)
+// The ONE localizer for runtime-profile dependency tokens. Deliberately
+// non-composable and context-taking: its only call site (the
+// create-confirmation sheet's dependency list) builds its text inside
+// `buildString { ... }`, a plain lambda rather than a @Composable context, so
+// `stringResource` cannot be called there. A @Composable twin of this mapping
+// used to sit here with ZERO call sites; keeping two spellings of one token
+// table is how the next divergence gets introduced (an arm added to one, the
+// sheet still rendering the raw token), so only this one survives.
+//
+// A `may_be_required` / `not_required` / `not_needed` vocabulary lived here
+// before, but nothing feeding this call site ever emits those tokens — the
+// runtime profile option's status comes from `dependency_status`
+// (local_apps_host.rs:2422-2443), whose vocabulary is
+// bundled / cached / download_required / unavailable — so every arm of the old
+// mapping was unreachable. Those three tokens belong to the OTHER DTO
+// (`AppDependencyChangeDto`) and are still localized by
+// `localizedDependencyStatus` above.
+private fun String.localizedRuntimeProfileStatus(context: android.content.Context): String = when (this) {
+    "bundled" -> context.getString(R.string.local_apps_runtime_profile_status_bundled)
+    "cached" -> context.getString(R.string.local_apps_runtime_profile_status_cached)
+    "download_required" -> context.getString(R.string.local_apps_runtime_profile_status_download_required)
+    "unavailable" -> context.getString(R.string.local_apps_runtime_profile_status_unavailable)
+    "gated" -> context.getString(R.string.local_apps_runtime_profile_status_gated)
     else -> this
 }
 

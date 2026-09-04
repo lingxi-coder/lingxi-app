@@ -336,7 +336,16 @@ private fun WorkspaceSessionRow(
     ) {
         Column {
             Text(
-                text = row.title,
+                // The pinned create-interview session carries no other marker
+                // in this compact row (unlike the Local Apps screen's own
+                // session list, which has room for a separate AssistChip via
+                // `LocalAppSessionCard`), so it gets the same badge copy
+                // suffixed onto the title instead.
+                text = if (row.isInit) {
+                    "${row.title} · ${stringResource(R.string.local_apps_session_init_badge)}"
+                } else {
+                    row.title
+                },
                 color = if (active) t.text else t.text2,
                 fontSize = 13.5f.sp,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,

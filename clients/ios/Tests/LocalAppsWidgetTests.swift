@@ -64,18 +64,85 @@ final class LocalAppsWidgetTests: XCTestCase {
         XCTAssertTrue(source.contains("LocalAppCreateConfirmationSheet(store: localAppsStore, prompt: prompt)"))
         XCTAssertTrue(source.contains(".sheet(item: localAppMcpProposalApprovalItem)"))
         XCTAssertTrue(source.contains("LocalAppMcpProposalApprovalSheet(store: localAppsStore, prompt: prompt)"))
-        XCTAssertTrue(source.contains("localAppsStore.pendingCreateConfirmation == nil"))
+
+        // Sliced, not whole-file: `pendingCreateConfirmation == nil` also
+        // appears in the UNRELATED `localAppApprovalPresenterIsFree` gate
+        // above this property, so a whole-file `contains` stays green even
+        // after BOTH gates below are deleted. The property has two —
+        // getter and setter — so the MCP sheet cannot outlive (or write
+        // through while) a create confirmation is pending; a bare
+        // `.contains` is satisfied by either one alone, or even by the
+        // unrelated gate, so it cannot catch either gate going missing.
+        guard let start = source.range(of: "private var localAppMcpProposalApprovalItem"),
+              let end = source.range(
+                  of: "private var ",
+                  range: start.upperBound..<source.endIndex)
+        else {
+            return XCTFail("read the wrong file: localAppMcpProposalApprovalItem not found")
+        }
+        let body = source[start.lowerBound..<end.lowerBound]
+        let gateCount = body.components(separatedBy: "localAppsStore.pendingCreateConfirmation == nil").count - 1
+        XCTAssertEqual(
+            gateCount, 2,
+            "localAppMcpProposalApprovalItem must gate BOTH its getter and its "
+                + "setter on no create confirmation being pending — deleting either "
+                + "gate must turn this test red")
     }
 
     func testApprovalSheetsStayScrollableAndDetentedForLargeTextAndKeyboard() throws {
         let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
 
-        XCTAssertTrue(source.contains("NavigationStack"))
-        XCTAssertTrue(source.contains("ScrollView"))
-        XCTAssertTrue(source.contains(".presentationDetents([.medium, .large])"))
-        XCTAssertTrue(source.contains(".interactiveDismissDisabled()"))
-        XCTAssertTrue(source.contains("accessibilityIdentifier(\"local-apps.create-confirm."))
-        XCTAssertTrue(source.contains("accessibilityIdentifier(\"local-apps.mcp-proposal."))
+        // This file hosts TWO sheets. A whole-file `.contains` is satisfied
+        // by either one alone, so dropping a modifier from just ONE sheet —
+        // say `.interactiveDismissDisabled()` off the create sheet — leaves
+        // every assertion here green as long as the OTHER sheet still has
+        // it. Split at the second sheet's declaration and check both halves
+        // independently so either sheet regressing turns this red.
+        guard let split = source.range(of: "struct LocalAppMcpProposalApprovalSheet") else {
+            return XCTFail("read the wrong file: LocalAppMcpProposalApprovalSheet not found")
+        }
+        let createSheet = source[source.startIndex..<split.lowerBound]
+        let mcpSheet = source[split.lowerBound...]
+
+        for (name, sheet) in [("create", createSheet), ("mcp-proposal", mcpSheet)] {
+            XCTAssertTrue(sheet.contains("NavigationStack"), "\(name) sheet lost NavigationStack")
+            XCTAssertTrue(sheet.contains("ScrollView"), "\(name) sheet lost ScrollView")
+            XCTAssertTrue(
+                sheet.contains(".presentationDetents([.medium, .large])"),
+                "\(name) sheet lost its detents")
+            XCTAssertTrue(
+                sheet.contains(".interactiveDismissDisabled()"),
+                "\(name) sheet lost .interactiveDismissDisabled()")
+        }
+        XCTAssertTrue(createSheet.contains("accessibilityIdentifier(\"local-apps.create-confirm."))
+        XCTAssertTrue(mcpSheet.contains("accessibilityIdentifier(\"local-apps.mcp-proposal."))
+    }
+
+    /// `LocalAppRejectedCandidate` carries no surface of its own — the
+    /// rejected-candidates row must not render `prompt.selectedTemplate`'s
+    /// surface as if it belonged to the rejected candidate.
+    func testRejectedCandidateRowDoesNotBorrowTheSelectedTemplatesSurface() throws {
+        let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
+
+        guard let start = source.range(of: "local_apps_create_confirm_rejected_candidates"),
+              let end = source.range(of: "SettingsSection(", range: start.upperBound..<source.endIndex)
+        else {
+            return XCTFail("read the wrong file: rejected-candidates section not found")
+        }
+        // Comment lines stripped before asserting: this fix's own comment
+        // names the removed code so a maintainer does not reintroduce it,
+        // which would otherwise defeat a bare `contains` check below.
+        let body = source[start.lowerBound..<end.lowerBound]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(body.contains("rejected.templateID"), "the row must still show the candidate")
+        XCTAssertTrue(body.contains("rejected.reason"), "the row must still show why it lost")
+        XCTAssertFalse(
+            body.contains("prompt.selectedTemplate.surface"),
+            "the WINNING template's surface must not be rendered as if it were "
+                + "this REJECTED candidate's own surface")
     }
 
     func testMcpPagesKeepsGenericEditorAlongsideManagedLocalAppRestrictions() throws {

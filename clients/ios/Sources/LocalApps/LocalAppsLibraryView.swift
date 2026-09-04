@@ -59,6 +59,11 @@ struct LocalAppsRootView: View {
                 destination(route)
             }
         }
+        // This cover is the ONLY consumer of the library's create-landing
+        // fallback (`createdAppID`) — see `clearLibraryFallbackArm()`.
+        // Dismissing it between the '+' tap and `AppCreated` must not leave
+        // that claim armed for a much later, unrelated visit to walk into.
+        .onDisappear { store.clearLibraryFallbackArm() }
         .task {
             await store.refresh()
             if let initialAppID {

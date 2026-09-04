@@ -2518,6 +2518,92 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(store.consumeCreatedAppID())
         }
 
+        /// `landingAwaitingPin` is a SECOND latch — armed by `AppCreated`,
+        /// cleared only by a matching `AppRecordChanged` — separate from
+        /// `pendingCreateRequestID`. A rebind must drop both: dropping only
+        /// the request-id latch (what `refreshAfterEngineRebind` did before
+        /// this test) leaves a record update for the same app id, arriving
+        /// arbitrarily later for any unrelated reason, free to publish a
+        /// landing and pull the user into a session they never asked to
+        /// enter — mirroring `LocalAppsViewModel.kt:308` on Android, which
+        /// already clears both on rebind.
+        func testEngineRebindDropsALandingStillAwaitingItsPin() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            let created = shellRecord(id: "notes", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
+            XCTAssertNil(
+                store.createdAppLanding,
+                "AppCreated never carries the pin — landingAwaitingPin is armed, "
+                    + "not createdAppLanding")
+
+            await store.refreshAfterEngineRebind()
+
+            // A record update for the SAME app id, arriving long after the
+            // rebind, must not resurrect a landing for a session the user
+            // never asked to enter.
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "notes", name: "untitled", initSessionId: "session-9"))))
+
+            XCTAssertNil(
+                store.createdAppLanding,
+                "a rebind must drop the pin latch, not just the request-id latch")
+        }
+
+        /// The app's very first bootstrap has no prior engine session to
+        /// disown a create FROM: a create started while that bootstrap's
+        /// catalog/`prepare()` round-trip is still in flight (the UI is
+        /// already interactive) is not stale the way one surviving an ACTUAL
+        /// rebind is, and must still be claimable when its `AppCreated` /
+        /// `AppRecordChanged` pair arrives.
+        func testInitialBootstrapDoesNotDisownACreateStartedDuringItsAsyncGap() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+
+            await store.refreshAfterEngineRebind(isInitialBootstrap: true)
+
+            XCTAssertNil(
+                store.errorMessage,
+                "the first bootstrap must not report the create's result as unknown")
+
+            let created = shellRecord(id: "notes", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "notes", name: "untitled", initSessionId: "session-9"))))
+
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "notes",
+                "a create started during the first bootstrap's async gap must "
+                    + "still be claimed, not disowned as if it predated a rebind")
+        }
+
+        /// A subsequent (non-initial) rebind still disowns a create in
+        /// flight — `isInitialBootstrap` must not blanket-disable the
+        /// stop-loss, only exempt the one bootstrap that has no prior
+        /// session to rebind from.
+        func testANonInitialRebindStillDisownsAPendingCreate() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            XCTAssertNotNil(sentCreateRequestID(submitted))
+
+            await store.refreshAfterEngineRebind(isInitialBootstrap: false)
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_creation_result_unknown"))
+        }
+
         /// A failure carrying OUR request id disarms the create and surfaces
         /// its message; a failure carrying somebody else's does neither.
         ///
@@ -2653,6 +2739,52 @@ final class LocalAppsStoreTests: XCTestCase {
                 "the second failure must reach the presenter too")
         }
 
+        /// `pendingProfileProposal` is a single overwritable slot with no
+        /// queue: a second proposal arriving before the first is answered
+        /// must not just silently replace it, stranding the engine holding
+        /// the first one's approval token with nothing that will ever answer
+        /// it — mirroring the same-app supersession already proven for
+        /// create confirmations and MCP proposals below.
+        func testASecondProfileProposalDeclinesTheSupersededOne() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            store.handle(event: .appEvent(event: .appProfileProposal(
+                proposal: AppAgentProfileProposalDto(
+                    appId: "tracker",
+                    approvalToken: "token-1",
+                    baseRevision: 1,
+                    currentRevision: 2,
+                    instructions: "Add a filter",
+                    reason: "User asked for a filter"
+                )
+            )))
+            XCTAssertEqual(store.pendingProfileProposal?.approvalToken, "token-1")
+
+            store.handle(event: .appEvent(event: .appProfileProposal(
+                proposal: AppAgentProfileProposalDto(
+                    appId: "tracker",
+                    approvalToken: "token-2",
+                    baseRevision: 2,
+                    currentRevision: 3,
+                    instructions: "Add sorting",
+                    reason: "User asked for sorting"
+                )
+            )))
+
+            XCTAssertEqual(
+                store.pendingProfileProposal?.approvalToken, "token-2",
+                "the newer proposal must be the one shown")
+            try await waitUntil {
+                submitted.contains { command in
+                    guard case let .resolveAppProfileProposal(appId, approvalToken, approved) = command
+                    else { return false }
+                    return appId == "tracker" && approvalToken == "token-1" && approved == false
+                }
+            }
+        }
+
         func testCreateConfirmationSupersedesSameAppAndRejectsOldToken() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
@@ -2697,6 +2829,27 @@ final class LocalAppsStoreTests: XCTestCase {
                 else { return false }
                 return requestId == "create-1" && approved
             })
+        }
+
+        /// A failed send must not strand the engine holding an approval token
+        /// with nothing left to re-answer it: the sheet the user just
+        /// answered has to come back, not silently vanish.
+        func testAFailedResolveSendRestoresTheCreateConfirmationSheet() async throws {
+            enum SendFailure: Error { case offline }
+            let store = LocalAppsStore()
+            store.configure { _ in throw SendFailure.offline }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
+
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(
+                store.pendingCreateConfirmation?.requestID, "create-1",
+                "a failed send must restore the sheet the user just answered, "
+                    + "not discard it and advance the queue as if it had succeeded")
         }
 
         func testMcpProposalShowsAllDiffKindsRejectsExplicitlyAndFailsClosedWhenUnchanged() async throws {
@@ -2834,8 +2987,63 @@ final class LocalAppsStoreTests: XCTestCase {
                 "the primary landing arms for a library create too")
         }
 
-        /// The kickoff message resolves to real copy, in every locale the
-        /// catalog carries.
+        /// The comments above name the two call sites; this pins them. A
+        /// hand-passed literal in a test proves the STORE honours
+        /// `armLibraryFallback` — it says nothing about which value each
+        /// PRODUCT call site actually passes, and the drawer/library split
+        /// silently inverting at either call site would leave every test
+        /// above green.
+        func testDrawerAndLibraryCreateCallSitesPassTheDocumentedFallbackFlag() throws {
+            let rootView = try clientSource("Sources/App/RootView.swift")
+            let libraryView = try clientSource("Sources/LocalApps/LocalAppsLibraryView.swift")
+
+            XCTAssertTrue(
+                rootView.contains("createShellApp(armLibraryFallback: false)"),
+                "RootView.createLocalAppFromDrawer must pass false: the drawer "
+                    + "mounts no library cover to consume the fallback")
+            XCTAssertTrue(
+                libraryView.contains("createShellApp(armLibraryFallback: true)"),
+                "LocalAppsLibraryView.createShellApp must pass true: this screen "
+                    + "IS the fallback's only consumer")
+        }
+
+        /// Dismissing the library cover between the '+' tap and `AppCreated`
+        /// must not leave `createdAppID` armed for the process lifetime: the
+        /// cover — the fallback's only consumer — is gone, so nothing will
+        /// ever drain it, and a much later, unrelated visit to the library
+        /// would otherwise be hijacked onto that stale app's details page.
+        ///
+        /// The PRIMARY landing must survive this: it is a separate latch
+        /// (`createdAppLanding`), consumed by `RootView` independently of
+        /// whether this cover is on screen, so dropping only the fallback
+        /// claim cannot lose the create.
+        func testClearingTheLibraryFallbackArmDropsTheStaleClaimButNotThePrimaryLanding() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            let created = shellRecord(id: "from-library", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: created)))
+
+            XCTAssertEqual(store.createdAppID, "from-library")
+
+            store.clearLibraryFallbackArm()
+
+            XCTAssertNil(
+                store.createdAppID,
+                "the library cover disappeared before it could consume this — "
+                    + "leaving it armed would hijack a later, unrelated visit")
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "from-library",
+                "clearing the FALLBACK claim must not touch the PRIMARY landing "
+                    + "RootView consumes independently of this cover")
+        }
+
+        /// The kickoff message resolves to real copy rather than falling
+        /// through as its own key, in the test host's current locale.
         ///
         /// This is the ONLY thing that can catch a mistyped localization key:
         /// `String(localized:)` returns the key itself when it is absent, so a
@@ -3592,6 +3800,45 @@ final class LocalAppsStoreTests: XCTestCase {
         return try String(
             contentsOf: clientRoot.appendingPathComponent(relativePath),
             encoding: .utf8)
+    }
+
+    /// The local-app Code pin must cover MINTING only, never a resume.
+    ///
+    /// `switchScope` is the one seam every caller funnels through, so a pin
+    /// written here with no `startNew` term also rewrites the mode of an
+    /// explicit RESUME. `apps/engine-mobile/src/host.rs` rejects a cross-mode
+    /// resume outright ("session ... belongs to chat mode, but this source runs
+    /// code mode") and the app's session catalog lists rows of BOTH modes, so
+    /// an unconditional pin makes every pre-existing Chat-mode app session
+    /// permanently un-openable. It also turns the drawer's Chat tab into a
+    /// silent no-op inside an app scope, since `switchMode` funnels through
+    /// here too.
+    func testTheLocalAppCodePinCoversMintingOnlyAndNotAResume() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+
+        guard let start = source.range(of: "private func switchScope("),
+              let end = source.range(
+                  of: "voiceInteraction.handleContextChange()",
+                  range: start.upperBound ..< source.endIndex)
+        else {
+            return XCTFail("read the wrong file: switchScope's mode resolution not found")
+        }
+        let pin = try XCTUnwrap(
+            String(source[start.lowerBound ..< end.lowerBound])
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .first(where: { $0.contains("let targetMode") }),
+            "switchScope must still resolve a targetMode")
+
+        XCTAssertTrue(
+            pin.contains("scope.isLocalApp"),
+            "a conversation MINTED in an app scope must still be pinned to Code")
+        XCTAssertTrue(
+            pin.contains("startNew"),
+            """
+            the pin must be gated on startNew: applied to a resume it discards the \
+            session's own recorded mode, and host.rs rejects a cross-mode resume, so \
+            every pre-existing Chat-mode app session becomes un-openable
+            """)
     }
 
     /// Everything below is source-text containment INSIDE the sliced body of

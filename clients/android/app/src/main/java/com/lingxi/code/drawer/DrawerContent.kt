@@ -128,7 +128,6 @@ fun DrawerContent(
     onReauthorizeProject: (String) -> Unit = {},
     onOpenCron: (String) -> Unit = {},
     onCreateCron: () -> Unit = {},
-    appsCount: Int = 0,
     /**
      * Create a local app and land the conversation in it. The drawer only
      * announces the intent; the create is asynchronous and the hand-off arrives
@@ -178,7 +177,7 @@ fun DrawerContent(
                         messageCount = row.messageCount,
                         mode = row.mode,
                         modifiedAtEpochSeconds = row.modifiedAtEpochSeconds,
-                        isInit = false,
+                        isInit = row.isInit,
                     )
                 },
             )
@@ -543,7 +542,7 @@ private fun DrawerAppQuickActions(onCreateApp: () -> Unit, onOpenApps: () -> Uni
                 .background(t.surfaceActive)
                 .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
                 .clickable(onClick = onCreateApp)
-                .testTag("tag.drawerCreateApp")
+                .testTag(UiTags.DRAWER_CREATE_APP)
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
@@ -563,7 +562,7 @@ private fun DrawerAppQuickActions(onCreateApp: () -> Unit, onOpenApps: () -> Uni
                 .heightIn(min = DrawerRowTapTarget)
                 .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onOpenApps)
-                .testTag("tag.drawerOpenAppsLibrary")
+                .testTag(UiTags.DRAWER_OPEN_APPS_LIBRARY)
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         ) {
             LXIcon(name = LXIconName.Book, size = 13.dp, color = t.text3, stroke = 1.8f)

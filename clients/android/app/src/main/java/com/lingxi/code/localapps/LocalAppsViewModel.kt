@@ -99,6 +99,17 @@ class LocalAppsViewModel(
     private var source: ConversationSource? = null
 
     /**
+     * Bumped every time [source] is rebound. Callbacks that outlive their own
+     * submit capture this and refuse to touch UI state once it has moved on:
+     * `submit` reports its failure asynchronously, so a failure lambda can
+     * fire long after the source that raised the request is gone. Comparing
+     * the ConversationSource instances instead would not be enough — the same
+     * instance can legitimately be re-emitted, and a rebind still invalidates
+     * everything that was in flight against it.
+     */
+    private var sourceGeneration = 0
+
+    /**
      * Where a freshly created app hands the user off: into the app's OWN
      * conversation, whose cwd is the app workspace.
      *
@@ -165,6 +176,23 @@ class LocalAppsViewModel(
     val createdAppLandings = createdAppLandingChannel.receiveAsFlow()
 
     /**
+     * Puts a landing BACK on the channel after its collector was cancelled
+     * mid-body rather than having actually finished with it.
+     *
+     * `receiveAsFlow()` hands the element to the collector body before that
+     * body runs, so a `repeatOnLifecycle(RESUMED)` cancellation partway
+     * through (the retry loop's `delay`, or either `withTimeoutOrNull` wait —
+     * all normal to hit if the user backgrounds mid hand-off, which can take
+     * several seconds) drops the element for good: nothing re-delivers it,
+     * and the app the user just created is stranded with no landing and no
+     * retry. The collector's `catch (c: CancellationException)` calls this
+     * before rethrowing, so the NEXT `RESUMED` re-collects the same landing.
+     */
+    fun rearmCreatedAppLanding(landing: CreatedAppLanding) {
+        createdAppLandingChannel.trySend(landing)
+    }
+
+    /**
      * A created app whose init-session pin has not arrived yet.
      *
      * `AppCreated` is emitted inside the create transaction and the pin is
@@ -196,6 +224,11 @@ class LocalAppsViewModel(
 
     /** Where to take the user when a draft card is tapped; see [DraftSessionLanding]. */
     val draftSessionLandings = draftSessionLandingChannel.receiveAsFlow()
+
+    /** As [rearmCreatedAppLanding], for the draft-card hand-off's own channel. */
+    fun rearmDraftSessionLanding(landing: DraftSessionLanding) {
+        draftSessionLandingChannel.trySend(landing)
+    }
 
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
@@ -303,17 +336,35 @@ class LocalAppsViewModel(
                 // the honest outcome is "the result is unknown, check the app
                 // library" — the app usually IS there, which is why the copy
                 // says to look rather than to retry.
+                sourceGeneration += 1
                 val abandonedCreate = pendingCreateRequestId != null
+                // A sheet discarded below is just as much an unfinished
+                // promise as an abandoned create: the user answered (or was
+                // about to answer) a prompt whose engine is gone, and the
+                // outcome is genuinely unknown. Captured BEFORE the clears.
+                val abandonedSheet = _uiState.value.pendingApprovalSheet != null ||
+                    queuedApprovalSheets.isNotEmpty()
                 clearPendingCreate()
                 landingAwaitingPin = null
+                // A pending (or queued) approval sheet is a promise to resolve
+                // ITS request against the source that raised it. That source is
+                // gone the instant `collectLatest` moves past this point — a
+                // resolve from here on would submit into `bound`, the NEW
+                // source, using an old requestId it never issued (the same class
+                // of bug `rejectSupersededApprovalSheet` would commit if called
+                // here, which is why this does not route through it). Drop the
+                // sheet and its queue outright rather than resolve into the
+                // wrong engine.
+                queuedApprovalSheets.clear()
                 _uiState.update {
                     it.copy(
                         loading = true,
+                        pendingApprovalSheet = null,
                         // Set INSIDE this update, not via `error(...)` after it:
                         // this same update clears `error`, so a message raised
                         // before it would be wiped and one raised after it would
                         // race the snapshot reply.
-                        error = if (abandonedCreate) {
+                        error = if (abandonedCreate || abandonedSheet) {
                             strings.resolve(
                                 R.string.local_apps_creation_result_unknown,
                                 "创建结果未知，请在应用库确认。",
@@ -372,7 +423,7 @@ class LocalAppsViewModel(
             }
             is LocalAppsAction.ResolveAuthorization -> resolveAuthorization(action.decision)
             is LocalAppsAction.ResolveDependencyChangeConfirmation -> resolveDependencyChangeConfirmation(action.approved)
-            is LocalAppsAction.ResolveApprovalSheet -> resolveApprovalSheet(action.approved)
+            is LocalAppsAction.ResolveApprovalSheet -> resolveApprovalSheet(action.requestId, action.approved)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
             is LocalAppsAction.UpdateMcpGoal -> _uiState.update { state ->
                 state.copy(
@@ -493,7 +544,13 @@ class LocalAppsViewModel(
             // The command never reached the engine, so no event will ever carry
             // this key. Releasing here (rather than waiting out the timeout)
             // keeps the button usable; `submit` raises the failure itself.
-            clearPendingCreate()
+            //
+            // Keyed release: `submit`'s failure lambda runs asynchronously
+            // (after the coroutine it launched fails), so by the time it fires
+            // a NEWER create may already own `pendingCreateRequestId`. An
+            // unkeyed `clearPendingCreate()` here would drop that newer claim
+            // instead of this failed one.
+            clearPendingCreateIfMatches(requestId)
         }
     }
 
@@ -611,6 +668,23 @@ class LocalAppsViewModel(
         pendingCreateArmsLibraryFallback = false
         pendingCreateTimeout?.cancel()
         pendingCreateTimeout = null
+    }
+
+    /**
+     * As [clearPendingCreate], but only when [requestId] still owns the
+     * claim. A `submit` failure callback can fire after the claim has already
+     * moved on — the command errors out asynchronously, and by the time that
+     * lands a NEWER create may have armed its own [pendingCreateRequestId].
+     * An unkeyed release there would drop the newer claim instead of the
+     * failed one, leaving that create's own timeout as the only thing left to
+     * eventually free it. Every other release site is already keyed by its
+     * own enclosing check (the event handlers compare `event.requestId`
+     * before calling [clearPendingCreate]); this is the one release that
+     * previously was not.
+     */
+    private fun clearPendingCreateIfMatches(requestId: String) {
+        if (pendingCreateRequestId != requestId) return
+        clearPendingCreate()
     }
 
     /**
@@ -1458,8 +1532,35 @@ class LocalAppsViewModel(
         }
     }
 
-    private fun resolveApprovalSheet(approved: Boolean) {
+    private fun resolveApprovalSheet(requestId: String, approved: Boolean) {
         val sheet = _uiState.value.pendingApprovalSheet ?: return
+        // Refuse a stale resolution. A tap's action carries the id of the
+        // sheet it was rendered against; if an in-place supersede or a queue
+        // shift already swapped in a different sheet by the time the action
+        // arrives, resolving `approved` into `sheet` (now unrelated to what
+        // the user tapped) would approve/reject a request the user never saw.
+        if (sheet.requestId != requestId) return
+        // Restore the sheet on a failed submit rather than losing the user's
+        // decision: if nothing has taken its place, resurface it immediately;
+        // otherwise put it back at the head of the queue so it surfaces right
+        // after whatever is now current, instead of clobbering it.
+        val generationAtResolve = sourceGeneration
+        val restoreOnFailure = {
+            // Never resurrect a sheet the rebind handler deliberately dropped.
+            // `submit` fails asynchronously, so the most likely reason this
+            // runs at all is that the source went away — which is exactly when
+            // the rebind handler has already cleared this sheet (and its
+            // queue) because its requestId belongs to an engine that no longer
+            // exists. Restoring here would re-prompt the user with a dead
+            // request and submit an unknown id into the NEW source.
+            if (sourceGeneration != generationAtResolve) {
+                Unit
+            } else if (_uiState.value.pendingApprovalSheet == null) {
+                _uiState.update { it.copy(pendingApprovalSheet = sheet) }
+            } else {
+                queuedApprovalSheets.addFirst(sheet)
+            }
+        }
         when (sheet) {
             is LocalAppProfileApprovalSheet -> submit(
                 ClientCommand.ResolveAppProfileProposal(
@@ -1467,6 +1568,7 @@ class LocalAppsViewModel(
                     approvalToken = sheet.receiptId,
                     approved = approved,
                 ),
+                onFailure = restoreOnFailure,
             )
             is LocalAppCreateApprovalSheet -> submit(
                 ClientCommand.PluginCommand(
@@ -1475,6 +1577,7 @@ class LocalAppsViewModel(
                         approved = approved,
                     ),
                 ),
+                onFailure = restoreOnFailure,
             )
             is LocalAppMcpProposalApprovalSheet -> submit(
                 ClientCommand.PluginCommand(
@@ -1483,6 +1586,7 @@ class LocalAppsViewModel(
                         approved = approved,
                     ),
                 ),
+                onFailure = restoreOnFailure,
             )
         }
         shiftToNextApprovalSheet()
@@ -1642,7 +1746,6 @@ class LocalAppsViewModel(
     }
 
     private fun reduceApps(event: ClientEvent.AppsChanged) {
-        val oldIds = _uiState.value.apps.mapTo(hashSetOf()) { it.id }
         val apps = event.apps.map { record ->
             val prior = _uiState.value.apps.firstOrNull { it.id == record.id }
             record.toUiApp(
@@ -2242,10 +2345,13 @@ private fun LocalAppCreateConfirmationRequestDto.toUiCreateApprovalSheet(): Loca
             LocalAppApprovalDependency(
                 packageName = pkg.name,
                 version = pkg.version,
-                downloadStatus = listOf(
-                    runtimeProfileOption.cacheStatus.localizedTokenOrSelf(),
-                    runtimeProfileOption.downloadStatus.localizedTokenOrSelf(),
-                ).joinToString(" · "),
+                // A single raw token (`bundled` / `cached` / `download_required` /
+                // `unavailable` / `gated`) so the sheet can localize it. Joining
+                // cacheStatus + downloadStatus here used to defeat that: the
+                // combined "x · y" string could never match any one-token arm
+                // downstream, and `localizedTokenOrSelf` "localized" nothing
+                // anyway — every one of its arms returned its own input.
+                downloadStatus = runtimeProfileOption.downloadStatus,
             )
         },
         initialTools = initialTools,
@@ -2294,15 +2400,6 @@ private fun LocalAppPluginErrorCodeDto.localizedPluginError(
         strings.resolve(R.string.local_apps_error_repair_budget_exhausted, fallback)
     LocalAppPluginErrorCodeDto.EXPOSURE_CAPACITY_REACHED ->
         strings.resolve(R.string.local_apps_error_exposure_capacity_reached, fallback)
-}
-
-private fun String.localizedTokenOrSelf(): String = when (this) {
-    "bundled" -> "bundled"
-    "cached" -> "cached"
-    "download_required" -> "download_required"
-    "unavailable" -> "unavailable"
-    "gated" -> "gated"
-    else -> this
 }
 
 private fun AppDependencyChangeKindDto.toUiDependencyChangeKind(): LocalAppDependencyChangeKind = when (this) {
